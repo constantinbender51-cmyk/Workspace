@@ -1,4 +1,0 @@
-{
-  "entry_point": "fetch_candles.py",
-  "requirements": ["requests", "pandas"]
-}
