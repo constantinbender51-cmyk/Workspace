@@ -1,0 +1,9 @@
+{
+  "build": {
+    "type": "python",
+    "command": "pip install -r requirements.txt"
+  },
+  "run": {
+    "command": "bash start.sh"
+  }
+}
