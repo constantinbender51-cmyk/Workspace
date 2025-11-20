@@ -1,4 +1,4 @@
 {
-  "entry_point": "fetch_binance_data.py",
+  "entry_point": "fetch_weather.py",
   "requirements": ["requests", "pandas"]
 }
