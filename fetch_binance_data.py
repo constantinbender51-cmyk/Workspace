@@ -23,21 +23,19 @@ def fetch_binance_ohlcv(symbol='BTCUSDT', interval='1d', limit=2000):
     }
     
     try:
-        response = requests.get(base_url, params=params)
-        response.raise_for_status()
-        
         response = requests.get(base_url, params=params, timeout=30)
-        data = response.json()
         response.raise_for_status()
         
+        data = response.json()
         
-        # Convert to DataFrame
         # Check if we got valid data
-        df = pd.DataFrame(data, columns=[
         if not data or not isinstance(data, list):
-            'timestamp', 'open', 'high', 'low', 'close', 'volume',
             print(f"Error: Invalid response data from Binance API")
             return None
+        
+        # Convert to DataFrame
+        df = pd.DataFrame(data, columns=[
+            'timestamp', 'open', 'high', 'low', 'close', 'volume',
             'close_time', 'quote_asset_volume', 'number_of_trades',
             'taker_buy_base_asset_volume', 'taker_buy_quote_asset_volume', 'ignore'
         ])
