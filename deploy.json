@@ -1,0 +1,4 @@
+{
+  "entry_point": "fetch_binance_data.py",
+  "requirements": ["requests", "pandas"]
+}
