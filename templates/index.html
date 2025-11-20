@@ -7,7 +7,7 @@
             display: flex;
             justify-content: center;
             align-items: center;
-            min-height: 100vh;
+            height: 100vh;
             margin: 0;
             background-color: #f0f0f0;
             font-family: Arial, sans-serif;
@@ -19,13 +19,22 @@
             color: #ff6b00;
             margin-bottom: 20px;
         }
+        .garfield {
+            font-size: 100px;
+            animation: scratch 2s infinite;
+        }
+        @keyframes scratch {
+            0%, 100% { transform: rotate(0deg); }
+            25% { transform: rotate(-10deg); }
+            75% { transform: rotate(10deg); }
+        }
     </style>
 </head>
 <body>
     <div class="container">
         <h1>Garfield Head Scratch Generator</h1>
-        <img src="https://i.imgur.com/6xQJb9K.gif" alt="Garfield scratching his head" width="400">
-        <p>Garfield is thinking hard...</p>
+        <div class="garfield">😼</div>
+        <p>Garfield is scratching his head thinking about lasagna...</p>
     </div>
 </body>
 </html>
