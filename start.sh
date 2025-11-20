@@ -1,2 +1,2 @@
 #!/bin/bash
-python fetch_binance_data.py
+python fetch_weather.py
