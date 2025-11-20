@@ -9,6 +9,7 @@ def fetch_weather_salzburg():
     """
     # Using OpenWeatherMap API
     api_key = "YOUR_API_KEY"  # You need to get a free API key from openweathermap.org
+    api_key = "your_actual_api_key_here"  # Replace with your actual OpenWeatherMap API key
     city = "Salzburg"
     country_code = "AT"
     
