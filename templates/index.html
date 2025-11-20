@@ -7,34 +7,33 @@
             display: flex;
             justify-content: center;
             align-items: center;
-            height: 100vh;
+            min-height: 100vh;
             margin: 0;
             background-color: #f0f0f0;
             font-family: Arial, sans-serif;
         }
         .container {
             text-align: center;
+            background: white;
+            padding: 2rem;
+            border-radius: 10px;
+            box-shadow: 0 4px 6px rgba(0,0,0,0.1);
         }
         h1 {
-            color: #ff6b00;
-            margin-bottom: 20px;
+            color: #ff6b35;
+            margin-bottom: 2rem;
         }
         .garfield {
-            font-size: 100px;
-            animation: scratch 2s infinite;
-        }
-        @keyframes scratch {
-            0%, 100% { transform: rotate(0deg); }
-            25% { transform: rotate(-10deg); }
-            75% { transform: rotate(10deg); }
+            font-size: 8rem;
+            margin: 1rem 0;
         }
     </style>
 </head>
 <body>
     <div class="container">
         <h1>Garfield Head Scratch Generator</h1>
-        <div class="garfield">😼</div>
-        <p>Garfield is scratching his head thinking about lasagna...</p>
+        <div class="garfield">😼🤔</div>
+        <p>Garfield is scratching his head, thinking about lasagna...</p>
     </div>
 </body>
 </html>
