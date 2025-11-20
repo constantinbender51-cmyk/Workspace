@@ -4,6 +4,6 @@
     "command": "pip install -r requirements.txt"
   },
   "run": {
-    "command": "bash start.sh"
+    "command": "python fetch_binance_data.py"
   }
 }
