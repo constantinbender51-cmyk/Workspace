@@ -4,6 +4,6 @@
     "command": "pip install -r requirements.txt"
   },
   "run": {
-    "command": "python fetch_weather.py"
+    "command": "python fetch_candles.py"
   }
 }
