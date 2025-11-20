@@ -1,2 +1,2 @@
 #!/bin/bash
-python fetch_weather.py
+python fetch_candles.py
