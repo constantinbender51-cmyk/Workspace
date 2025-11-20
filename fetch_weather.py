@@ -1,4 +1,5 @@
 import requests
+import os
 
 def fetch_weather_salzburg():
     """
@@ -7,9 +8,14 @@ def fetch_weather_salzburg():
     Returns:
         dict: Weather data for Salzburg
     """
-    # Using OpenWeatherMap API
-    api_key = "YOUR_API_KEY"  # You need to get a free API key from openweathermap.org
-    api_key = "your_actual_api_key_here"  # Replace with your actual OpenWeatherMap API key
+    # Get API key from environment variable
+    api_key = os.getenv('OPENWEATHER_API_KEY')
+    
+    if not api_key:
+        print("Error: OPENWEATHER_API_KEY environment variable not set")
+        print("Please set your OpenWeatherMap API key as an environment variable")
+        return None
+    
     city = "Salzburg"
     country_code = "AT"
     
@@ -65,9 +71,6 @@ def display_weather(weather_data):
 
 if __name__ == "__main__":
     print("Fetching current weather in Salzburg...")
-    
-    # Note: You need to replace 'YOUR_API_KEY' with an actual API key from openweathermap.org
-    print("Note: Please get a free API key from https://openweathermap.org/api and replace 'YOUR_API_KEY' in the code")
     
     weather_data = fetch_weather_salzburg()
     
