@@ -1,3 +1,4 @@
+import logging
 #!/usr/bin/env python3
 
 import pandas as pd
@@ -6,6 +7,9 @@ import requests
 from datetime import datetime, timedelta
 from flask import Flask, jsonify, render_template
 import os
+# Configure logging
+logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
+logger = logging.getLogger(__name__)
 
 app = Flask(__name__)
 
@@ -14,41 +18,48 @@ BINANCE_API_URL = "https://api.binance.com/api/v3"
 YAHOO_FINANCE_URL = "https://query1.finance.yahoo.com/v8/finance/chart/SPY"
 
 @app.route('/')
+    logger.info('Index page requested')
 def index():
     """Main page with BTC-S&P500 covariance analysis"""
     return render_template('index.html')
 
 @app.route('/covariance')
 def covariance():
+        logger.info('Covariance calculation requested')
     """Calculate and return BTC-S&P500 covariance"""
     try:
         # Define date range (last 30 days)
         end_date = datetime.now()
         start_date = end_date - timedelta(days=30)
         
+            logger.info(f'Fetched {len(btc_data)} BTC data points')
         # Fetch BTC data
         btc_data = fetch_btc_data(start_date, end_date)
         
         if len(btc_data) == 0:
             return jsonify({'error': 'No BTC data available'})
+            logger.info(f'Fetched {len(sp500_data)} S&P 500 data points')
         
         # Fetch S&P 500 data
         sp500_data = fetch_sp500_data(start_date, end_date)
         
         if sp500_data is None or len(sp500_data) == 0:
             return jsonify({'error': 'No S&P 500 data available'})
+            logger.info(f'Covariance calculation completed: {results}')
         
         # Calculate covariance
         results = calculate_covariance(btc_data, sp500_data)
         
         if results:
             return jsonify(results)
+        logger.error(f'Error in covariance endpoint: {str(e)}')
         else:
             return jsonify({'error': 'Could not calculate covariance'})
             
     except Exception as e:
         return jsonify({'error': str(e)})
 
+        logger.info('Current prices requested')
 @app.route('/current-prices')
 def current_prices():
     """Get current BTC and S&P 500 prices"""
@@ -62,6 +73,7 @@ def current_prices():
         sp500_response = requests.get(f"{YAHOO_FINANCE_URL}?range=1d&interval=1d")
         sp500_data = sp500_response.json()
         sp500_price = sp500_data['chart']['result'][0]['meta']['regularMarketPrice']
+        logger.error(f'Error in current-prices endpoint: {str(e)}')
         
         return jsonify({
             'btc_price': btc_price,
@@ -119,6 +131,7 @@ def fetch_sp500_data(start_date, end_date):
         # Convert dates to timestamps
         period1 = int(start_date.timestamp())
         period2 = int(end_date.timestamp())
+        logger.error(f'Error fetching S&P 500 data: {e}')
         
         # Fetch data
         url = f"{YAHOO_FINANCE_URL}"
@@ -150,6 +163,7 @@ def fetch_sp500_data(start_date, end_date):
         df['sp500_return'] = df['close'].pct_change()
         df = df.dropna()
         
+        logger.info(f'Calculated covariance with {len(merged_data)} data points')
         return df
         
     except Exception as e:
@@ -171,6 +185,7 @@ def calculate_covariance(btc_data, sp500_data):
     
     # Calculate correlation for additional insight
     correlation = np.corrcoef(merged_data['btc_return'], merged_data['sp500_return'])[0, 1]
+    logger.info(f'Starting Flask application on port {port}')
     
     # Calculate descriptive statistics
     btc_mean_return = merged_data['btc_return'].mean()
