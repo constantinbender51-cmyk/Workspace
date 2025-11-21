@@ -195,6 +195,10 @@ def index():
         volume = latest_data['volume'].iloc[-1]
     else:
         current_price = 0
+@app.route('/health')
+def health_check():
+    """Health check endpoint for deployment monitoring"""
+    return jsonify({'status': 'healthy', 'timestamp': datetime.now().isoformat()})
         price_change = 0
         volume = 0
     
