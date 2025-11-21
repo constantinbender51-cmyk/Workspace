@@ -1,12 +1,12 @@
 #!/usr/bin/env python3
 
-from flask import Flask, render_template, jsonify
 import pandas as pd
 import numpy as np
 from binance.client import Client
 import yfinance as yf
 from datetime import datetime, timedelta
 import warnings
+from flask import Flask, render_template, jsonify
 import io
 import base64
 import matplotlib
@@ -21,109 +21,96 @@ app = Flask(__name__)
 
 def fetch_btc_data():
     """Fetch recent BTC data from Binance"""
-    try:
-        client = Client()
-        
-        # Fetch last 2000 1-hour candles
-        klines = client.get_historical_klines(
-            symbol='BTCUSDT',
-            interval=Client.KLINE_INTERVAL_1HOUR,
-            limit=2000
-        )
-        
-        # Convert to DataFrame
-        columns = ['timestamp', 'open', 'high', 'low', 'close', 'volume', 
-                   'close_time', 'quote_asset_volume', 'number_of_trades',
-                   'taker_buy_base_asset_volume', 'taker_buy_quote_asset_volume', 'ignore']
-        
-        df = pd.DataFrame(klines, columns=columns)
-        
-        # Convert types
-        df['timestamp'] = pd.to_datetime(df['timestamp'], unit='ms')
-        numeric_cols = ['open', 'high', 'low', 'close', 'volume']
-        
-        for col in numeric_cols:
-            df[col] = pd.to_numeric(df[col])
-        
-        return df[['timestamp', 'open', 'high', 'low', 'close', 'volume']]
-        
-    except Exception as e:
-        print(f"Error fetching BTC data: {e}")
-        return None
-
-def prepare_features(df):
-    """Prepare features for machine learning model"""
-    # Calculate technical indicators
+    print("Fetching BTC data...")
+    
+    client = Client()
+    
+    # Fetch last 2000 1-hour candles
+    klines = client.get_historical_klines(
+        symbol='BTCUSDT',
+        interval=Client.KLINE_INTERVAL_1HOUR,
+        limit=2000
+    )
+    
+    # Convert to DataFrame
+    columns = ['timestamp', 'open', 'high', 'low', 'close', 'volume', 
+               'close_time', 'quote_asset_volume', 'number_of_trades',
+               'taker_buy_base_asset_volume', 'taker_buy_quote_asset_volume', 'ignore']
+    
+    df = pd.DataFrame(klines, columns=columns)
+    
+    # Convert types
+    df['timestamp'] = pd.to_datetime(df['timestamp'], unit='ms')
+    numeric_cols = ['open', 'high', 'low', 'close', 'volume']
+    
+    for col in numeric_cols:
+        df[col] = pd.to_numeric(df[col])
+    
+    # Calculate features
     df['price_change'] = df['close'].pct_change()
     df['volume_change'] = df['volume'].pct_change()
-    df['high_low_ratio'] = df['high'] / df['low']
     df['ma_5'] = df['close'].rolling(5).mean()
     df['ma_10'] = df['close'].rolling(10).mean()
-    df['ma_20'] = df['close'].rolling(20).mean()
     
-    # Drop NaN values
     df = df.dropna()
     
-    # Feature columns
-    feature_cols = ['open', 'high', 'low', 'close', 'volume', 'price_change', 
-                    'volume_change', 'high_low_ratio', 'ma_5', 'ma_10', 'ma_20']
-    
-    return df, feature_cols
+    return df
 
-def train_model(df, feature_cols):
-    """Train linear regression model"""
-    # Prepare features and target
-    X = df[feature_cols]
-    y = df['close'].shift(-1)  # Predict next period's close price
+def prepare_features(df):
+    """Prepare features for prediction"""
+    features = ['open', 'high', 'low', 'close', 'volume', 'price_change', 'volume_change', 'ma_5', 'ma_10']
     
-    # Remove last row (no target)
+    X = df[features].values
+    y = df['close'].shift(-1).dropna().values
+    
+    # Align X and y
     X = X[:-1]
-    y = y[:-1]
     
-    # Scale features
+    return X, y
+
+def train_model(X, y):
+    """Train linear regression model"""
     scaler = StandardScaler()
     X_scaled = scaler.fit_transform(X)
     
-    # Train model
     model = LinearRegression()
     model.fit(X_scaled, y)
     
     return model, scaler
 
-def make_predictions(model, scaler, df, feature_cols, periods=10):
-    """Make future predictions"""
+def predict_future(model, scaler, last_data, periods=10):
+    """Predict future prices"""
     predictions = []
-    current_data = df[feature_cols].iloc[-1:].copy()
+    current_data = last_data.copy()
     
-    for i in range(periods):
+    for _ in range(periods):
         # Scale current data
-        current_scaled = scaler.transform(current_data)
+        current_scaled = scaler.transform([current_data])
         
-        # Make prediction
-        pred = model.predict(current_scaled)[0]
-        predictions.append(pred)
+        # Predict next price
+        next_price = model.predict(current_scaled)[0]
+        predictions.append(next_price)
         
         # Update current data for next prediction
-        # (This is a simplified approach - in practice you'd need more sophisticated feature engineering)
-        current_data['close'] = pred
-        current_data['open'] = pred * 0.999  # Small random variation
-        current_data['high'] = pred * 1.001
-        current_data['low'] = pred * 0.998
-        
+        current_data[3] = next_price  # update close price
+        current_data[5] = (next_price - current_data[3]) / current_data[3]  # update price_change
+        current_data[7] = np.mean([current_data[3], current_data[0], current_data[1], current_data[2]])  # rough ma_5
+        current_data[8] = np.mean([current_data[3], current_data[0], current_data[1], current_data[2]])  # rough ma_10
+    
     return predictions
 
 def create_plot(df, predictions):
-    """Create price prediction chart"""
+    """Create price prediction plot"""
     plt.figure(figsize=(12, 6))
     
     # Plot historical data
-    plt.plot(df['timestamp'], df['close'], label='Historical Price', linewidth=2)
+    plt.plot(df['timestamp'].iloc[-100:], df['close'].iloc[-100:], label='Historical Price', linewidth=2)
     
     # Plot predictions
     future_times = [df['timestamp'].iloc[-1] + timedelta(hours=i+1) for i in range(len(predictions))]
     plt.plot(future_times, predictions, 'r--', label='Predictions', linewidth=2, marker='o')
     
-    plt.title('BTC Price Prediction', fontsize=16, fontweight='bold')
+    plt.title('BTC Price Prediction')
     plt.xlabel('Time')
     plt.ylabel('Price (USD)')
     plt.legend()
@@ -131,9 +118,9 @@ def create_plot(df, predictions):
     plt.xticks(rotation=45)
     plt.tight_layout()
     
-    # Convert plot to base64 for HTML embedding
+    # Convert plot to base64
     img = io.BytesIO()
-    plt.savefig(img, format='png', dpi=100)
+    plt.savefig(img, format='png')
     img.seek(0)
     plot_url = base64.b64encode(img.getvalue()).decode()
     plt.close()
@@ -142,12 +129,12 @@ def create_plot(df, predictions):
 
 @app.route('/')
 def index():
-    """Main page with BTC price predictions"""
+    """Main page"""
     try:
-        # Fetch BTC data
+        # Fetch data
         df = fetch_btc_data()
         
-        if df is None or len(df) == 0:
+        if len(df) < 100:
             return render_template('index.html', 
                                  current_price=0,
                                  price_change=0,
@@ -157,33 +144,32 @@ def index():
                                  plot_url=None)
         
         # Prepare features and train model
-        df, feature_cols = prepare_features(df)
-        model, scaler = train_model(df, feature_cols)
+        X, y = prepare_features(df)
+        model, scaler = train_model(X, y)
         
         # Make predictions
-        predictions = make_predictions(model, scaler, df, feature_cols, periods=10)
+        last_data = df.iloc[-1][['open', 'high', 'low', 'close', 'volume', 'price_change', 'volume_change', 'ma_5', 'ma_10']].values
+        predictions = predict_future(model, scaler, last_data)
         
         # Create plot
         plot_url = create_plot(df, predictions)
         
         # Calculate current metrics
         current_price = df['close'].iloc[-1]
-        prev_price = df['close'].iloc[-2]
-        price_change = ((current_price - prev_price) / prev_price) * 100
+        price_change = ((current_price - df['close'].iloc[-2]) / df['close'].iloc[-2]) * 100
         volume = df['volume'].iloc[-1]
-        data_count = len(df)
         
         return render_template('index.html',
                              current_price=current_price,
                              price_change=price_change,
                              volume=volume,
-                             data_count=data_count,
+                             data_count=len(df),
                              predictions=predictions,
                              plot_url=plot_url)
-        
+    
     except Exception as e:
-        print(f"Error in main route: {e}")
-        return render_template('index.html', 
+        print(f"Error: {e}")
+        return render_template('index.html',
                              current_price=0,
                              price_change=0,
                              volume=0,
@@ -193,10 +179,10 @@ def index():
 
 @app.route('/retrain')
 def retrain():
-    """Endpoint to retrain the model"""
+    """Retrain model endpoint"""
     try:
         # This would trigger a fresh data fetch and model training
-        return jsonify({'status': 'success', 'message': 'Model retrained successfully'})
+        return jsonify({'status': 'success', 'message': 'Model retrained'})
     except Exception as e:
         return jsonify({'status': 'error', 'message': str(e)})
 
