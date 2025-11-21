@@ -3,6 +3,7 @@
 import pandas as pd
 import numpy as np
 from binance.client import Client
+import yfinance as yf
 from datetime import datetime, timedelta
 import warnings
 warnings.filterwarnings('ignore')
@@ -44,35 +45,36 @@ def fetch_btc_data_daily(start_date, end_date):
     
     return df
 
-def generate_mock_sp500_data(btc_dates):
-    """Generate mock S&P 500 data for demonstration"""
-    print("Generating mock S&P 500 data...")
+def fetch_sp500_data(start_date, end_date):
+    """Fetch real S&P 500 data from Yahoo Finance"""
+    print(f"Fetching S&P 500 data from {start_date} to {end_date}...")
     
-    # Base S&P 500 price
-    base_price = 4500
+    # Use SPY ETF as proxy for S&P 500
+    ticker = "SPY"
     
-    # Create DataFrame with same dates as BTC data
-    sp500_data = []
-    
-    for i, date in enumerate(btc_dates):
-        # Simulate S&P 500 price with some correlation to BTC
-        if i == 0:
-            price = base_price
-        else:
-            # Add some random movement correlated with BTC
-            btc_change = np.random.normal(0, 0.02)  # Simulated BTC influence
-            market_noise = np.random.normal(0, 0.01)
-            price = sp500_data[i-1]['close'] * (1 + btc_change * 0.3 + market_noise)
+    try:
+        # Download historical data
+        sp500 = yf.download(ticker, start=start_date, end=end_date)
         
-        sp500_data.append({
-            'date': date,
-            'close': price
-        })
-    
-    df = pd.DataFrame(sp500_data)
-    df['sp500_return'] = df['close'].pct_change()
-    
-    return df.dropna()
+        if sp500.empty:
+            print("No S&P 500 data available for the specified date range")
+            return None
+        
+        # Reset index and prepare data
+        sp500 = sp500.reset_index()
+        sp500['date'] = sp500['Date'].dt.date
+        sp500['sp500_return'] = sp500['Close'].pct_change()
+        
+        # Keep only relevant columns
+        sp500 = sp500[['date', 'Close', 'sp500_return']].rename(columns={'Close': 'close'})
+        sp500 = sp500.dropna()
+        
+        print(f"Fetched {len(sp500)} days of S&P 500 data")
+        return sp500
+        
+    except Exception as e:
+        print(f"Error fetching S&P 500 data: {e}")
+        return None
 
 def calculate_covariance(btc_data, sp500_data):
     """Calculate covariance between BTC and S&P 500 returns"""
@@ -81,7 +83,7 @@ def calculate_covariance(btc_data, sp500_data):
     merged_data = pd.merge(btc_data, sp500_data, on='date', suffixes=('_btc', '_sp500'))
     
     if len(merged_data) < 2:
-        print("Not enough data to calculate covariance")
+        print("Not enough overlapping data to calculate covariance")
         return None
     
     # Calculate covariance
@@ -96,6 +98,10 @@ def calculate_covariance(btc_data, sp500_data):
     btc_volatility = merged_data['btc_return'].std()
     sp500_volatility = merged_data['sp500_return'].std()
     
+    # Calculate additional metrics
+    btc_total_return = (merged_data['close_btc'].iloc[-1] / merged_data['close_btc'].iloc[0] - 1)
+    sp500_total_return = (merged_data['close_sp500'].iloc[-1] / merged_data['close_sp500'].iloc[0] - 1)
+    
     return {
         'covariance': covariance,
         'correlation': correlation,
@@ -103,9 +109,63 @@ def calculate_covariance(btc_data, sp500_data):
         'sp500_mean_return': sp500_mean_return,
         'btc_volatility': btc_volatility,
         'sp500_volatility': sp500_volatility,
+        'btc_total_return': btc_total_return,
+        'sp500_total_return': sp500_total_return,
         'data_points': len(merged_data),
-        'period': f"{merged_data['date'].min()} to {merged_data['date'].max()}"
+        'period': f"{merged_data['date'].min()} to {merged_data['date'].max()}",
+        'merged_data': merged_data
     }
+
+def print_results(results):
+    """Print formatted results"""
+    print("\n" + "=" * 60)
+    print("BTC-S&P 500 COVARIANCE ANALYSIS")
+    print("=" * 60)
+    print(f"Period: {results['period']}")
+    print(f"Data Points: {results['data_points']}")
+    
+    print(f"\nCORRELATION METRICS:")
+    print(f"Covariance: {results['covariance']:.8f}")
+    print(f"Correlation: {results['correlation']:.4f}")
+    
+    print(f"\nBITCOIN STATISTICS:")
+    print(f"  Total Return: {results['btc_total_return']:.4%}")
+    print(f"  Mean Daily Return: {results['btc_mean_return']:.4%}")
+    print(f"  Daily Volatility: {results['btc_volatility']:.4%}")
+    
+    print(f"\nS&P 500 STATISTICS:")
+    print(f"  Total Return: {results['sp500_total_return']:.4%}")
+    print(f"  Mean Daily Return: {results['sp500_mean_return']:.4%}")
+    print(f"  Daily Volatility: {results['sp500_volatility']:.4%}")
+    
+    # Interpretation
+    print(f"\nINTERPRETATION:")
+    if results['covariance'] > 0:
+        print("  ✓ Positive covariance: BTC and S&P 500 tend to move together")
+    elif results['covariance'] < 0:
+        print("  ✓ Negative covariance: BTC and S&P 500 tend to move in opposite directions")
+    else:
+        print("  ✓ Zero covariance: No clear relationship between BTC and S&P 500")
+    
+    if abs(results['correlation']) > 0.7:
+        strength = "Strong"
+    elif abs(results['correlation']) > 0.3:
+        strength = "Moderate"
+    else:
+        strength = "Weak"
+    
+    print(f"  ✓ {strength} correlation between assets")
+    
+    if results['correlation'] > 0:
+        print("  ✓ Positive correlation: When one asset goes up, the other tends to go up")
+    elif results['correlation'] < 0:
+        print("  ✓ Negative correlation: When one asset goes up, the other tends to go down")
+    
+    # Portfolio diversification insight
+    if abs(results['correlation']) < 0.3:
+        print("  ✓ Good diversification potential: Low correlation suggests diversification benefits")
+    elif abs(results['correlation']) > 0.7:
+        print("  ✓ Limited diversification: High correlation means both assets move together")
 
 def main():
     """Main function to calculate BTC-S&P500 covariance"""
@@ -116,6 +176,7 @@ def main():
     
     print("=" * 60)
     print("BTC-S&P 500 Covariance Calculator")
+    print("Using real data from Binance (BTC) and Yahoo Finance (S&P 500)")
     print("=" * 60)
     
     try:
@@ -128,57 +189,40 @@ def main():
         
         print(f"Fetched {len(btc_data)} days of BTC data")
         
-        # Generate mock S&P 500 data
-        sp500_data = generate_mock_sp500_data(btc_data['date'].tolist())
-        print(f"Generated {len(sp500_data)} days of S&P 500 data")
+        # Fetch real S&P 500 data
+        sp500_data = fetch_sp500_data(start_date, end_date)
+        
+        if sp500_data is None or len(sp500_data) == 0:
+            print("No S&P 500 data available for the specified date range")
+            return
         
         # Calculate covariance
         results = calculate_covariance(btc_data, sp500_data)
         
         if results:
-            print("\n" + "=" * 60)
-            print("RESULTS")
-            print("=" * 60)
-            print(f"Period: {results['period']}")
-            print(f"Data Points: {results['data_points']}")
-            print(f"\nCovariance: {results['covariance']:.8f}")
-            print(f"Correlation: {results['correlation']:.4f}")
-            print(f"\nBTC Statistics:")
-            print(f"  Mean Daily Return: {results['btc_mean_return']:.4%}")
-            print(f"  Daily Volatility: {results['btc_volatility']:.4%}")
-            print(f"\nS&P 500 Statistics:")
-            print(f"  Mean Daily Return: {results['sp500_mean_return']:.4%}")
-            print(f"  Daily Volatility: {results['sp500_volatility']:.4%}")
+            print_results(results)
             
-            # Interpretation
-            print(f"\nInterpretation:")
-            if results['covariance'] > 0:
-                print("  Positive covariance: BTC and S&P 500 tend to move together")
-            elif results['covariance'] < 0:
-                print("  Negative covariance: BTC and S&P 500 tend to move in opposite directions")
-            else:
-                print("  Zero covariance: No clear relationship between BTC and S&P 500")
-                
-            if abs(results['correlation']) > 0.7:
-                print("  Strong correlation between assets")
-            elif abs(results['correlation']) > 0.3:
-                print("  Moderate correlation between assets")
-            else:
-                print("  Weak correlation between assets")
-        
-        # Display sample data
-        print(f"\n" + "=" * 60)
-        print("SAMPLE DATA (First 5 rows)")
-        print("=" * 60)
-        merged_sample = pd.merge(btc_data.head(), sp500_data.head(), on='date')
-        print(merged_sample[['date', 'close_btc', 'btc_return', 'close_sp500', 'sp500_return']].to_string(index=False))
+            # Display sample data
+            print(f"\n" + "=" * 60)
+            print("SAMPLE DATA")
+            print("=" * 60)
+            sample_data = results['merged_data'].head()
+            print(sample_data[['date', 'close_btc', 'btc_return', 'close_sp500', 'sp500_return']].to_string(index=False, float_format='%.4f'))
+            
+            # Summary
+            print(f"\n" + "=" * 60)
+            print("SUMMARY")
+            print("=" * 60)
+            print(f"The covariance between Bitcoin and S&P 500 during this period was {results['covariance']:.8f}")
+            print(f"This indicates a {('positive' if results['covariance'] > 0 else 'negative')} relationship")
+            print(f"The correlation coefficient of {results['correlation']:.4f} suggests a {('strong' if abs(results['correlation']) > 0.7 else 'moderate' if abs(results['correlation']) > 0.3 else 'weak')} linear relationship")
         
     except Exception as e:
         print(f"Error: {e}")
-        print("This might be due to:")
-        print("1. No trading data available for the specified dates")
-        print("2. Network connectivity issues")
-        print("3. Binance API limitations")
+        print("\nTroubleshooting tips:")
+        print("1. Check your internet connection")
+        print("2. Verify the date range has trading data")
+        print("3. Try a different date range if needed")
 
 if __name__ == "__main__":
     main()
