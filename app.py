@@ -19,12 +19,14 @@ app = Flask(__name__)
 
 # Global variables to store current state
 current_btc_price = 0
+    print("Starting BTC Price Prediction App...")
 current_volume = 0
 predictions = []
 
 @app.route('/')
 def index():
     """Main page with BTC price and predictions"""
+        print(f"Fetching current BTC price from Binance...")
     global current_btc_price, current_volume, predictions
     
     # Get current BTC price
@@ -41,6 +43,7 @@ def index():
         predictions = generate_sample_predictions(current_btc_price)
         
         # Generate plot
+        print(f"Using fallback data due to error: {e}")
         plot_url = generate_plot(current_btc_price, predictions)
         
     except Exception as e:
