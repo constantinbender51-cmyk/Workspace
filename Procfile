@@ -1,1 +1,1 @@
-web: gunicorn app:app
+web: gunicorn covariance_calculator:app
