@@ -2,6 +2,7 @@ from binance.client import Client
 import pandas as pd
 import os
 import logging
+import time
 
 def fetch_price_data(symbol='BTCUSDT', start_date='2022-01-01', end_date='2023-09-30'):
     """
@@ -67,6 +68,63 @@ def fetch_price_data(symbol='BTCUSDT', start_date='2022-01-01', end_date='2023-0
         return data
     except Exception as e:
         logging.error(f"An error occurred fetching price data: {e}")
+        return None
+
+def fetch_multiple_cryptos():
+    """
+    Fetch historical price data for multiple cryptocurrencies with rate limiting.
+    
+    Returns:
+    pandas.DataFrame: Combined historical price data for all cryptocurrencies.
+    """
+    try:
+        logging.debug("Starting multi-cryptocurrency data fetch")
+        
+        # Define the cryptocurrencies to fetch
+        cryptocurrencies = {
+            'BTCUSDT': 'Bitcoin',
+            'ETHUSDT': 'Ethereum', 
+            'XRPUSDT': 'Ripple',
+            'ADAUSDT': 'Cardano',
+            'BNBUSDT': 'Binance Coin'
+        }
+        
+        combined_data = pd.DataFrame()
+        
+        for symbol, name in cryptocurrencies.items():
+            logging.debug(f"Fetching data for {symbol} ({name})")
+            
+            # Fetch data for current cryptocurrency
+            data = fetch_price_data(symbol=symbol)
+            
+            if data is not None:
+                # Rename the column to the cryptocurrency name
+                data.rename(columns={'Close': name}, inplace=True)
+                
+                if combined_data.empty:
+                    combined_data = data
+                else:
+                    combined_data = combined_data.join(data, how='outer')
+                
+                logging.debug(f"Successfully added {name} data to combined dataset")
+            else:
+                logging.warning(f"Failed to fetch data for {symbol}")
+            
+            # Add delay to avoid rate limiting (2 seconds between requests)
+            logging.debug("Adding delay to avoid rate limiting")
+            time.sleep(2)
+        
+        if combined_data.empty:
+            logging.error("No cryptocurrency data was successfully fetched")
+            return None
+        
+        logging.info(f"Successfully fetched data for {len(combined_data.columns)} cryptocurrencies")
+        logging.debug(f"Combined dataset shape: {combined_data.shape}")
+        
+        return combined_data
+        
+    except Exception as e:
+        logging.error(f"An error occurred in multi-cryptocurrency fetch: {e}")
         return None
 
 if __name__ == "__main__":
