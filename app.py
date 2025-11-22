@@ -93,6 +93,7 @@ def create_plot(df, y_test, predictions, test_indices):
     # Calculate trading returns
     positions = np.where(sorted_y_test > sorted_predictions, 1, -1)  # Long if actual > predicted, short otherwise
     # Calculate returns: for long positions, profit when price increases; for short positions, profit when price decreases
+    # Use the position at time t to determine the trade for period t to t+1
     returns = positions[:-1] * (sorted_y_test[1:] - sorted_y_test[:-1]) / sorted_y_test[:-1]
     cumulative_returns = np.cumprod(1 + returns) - 1
     
