@@ -16,10 +16,13 @@ def fetch_price_data(symbol='BTCUSDT', start_date='2022-01-01', end_date='2023-0
     pandas.DataFrame: Historical price data.
     """
     try:
+        logging.debug(f"Starting data fetch for {symbol} from {start_date} to {end_date}")
         # Initialize Binance client (no API key needed for public data)
         client = Client()
+        logging.debug("Binance client initialized successfully")
         
         # Fetch historical klines data
+        logging.debug(f"Fetching klines data for {symbol} with daily interval")
         klines = client.get_historical_klines(
             symbol=symbol,
             interval=Client.KLINE_INTERVAL_1DAY,
@@ -31,27 +34,35 @@ def fetch_price_data(symbol='BTCUSDT', start_date='2022-01-01', end_date='2023-0
             logging.warning(f"No data found for symbol {symbol} in the specified date range.")
             return None
         
+        logging.debug(f"Retrieved {len(klines)} klines records")
+        
         # Convert to DataFrame
+        logging.debug("Converting klines data to DataFrame")
         columns = ['Open time', 'Open', 'High', 'Low', 'Close', 'Volume', 
                   'Close time', 'Quote asset volume', 'Number of trades',
                   'Taker buy base asset volume', 'Taker buy quote asset volume', 'Ignore']
         
         data = pd.DataFrame(klines, columns=columns)
+        logging.debug(f"Created DataFrame with shape {data.shape}")
         
         # Convert timestamp to datetime and set as index
+        logging.debug("Processing datetime and price data")
         data['Open time'] = pd.to_datetime(data['Open time'], unit='ms')
         data.set_index('Open time', inplace=True)
         
         # Convert price columns to float
         data['Close'] = data['Close'].astype(float)
+        logging.debug(f"Price range: {data['Close'].min():.2f} - {data['Close'].max():.2f}")
         
         # Keep only the Close column for simplicity
         data = data[['Close']]
+        logging.debug("Filtered DataFrame to keep only Close column")
         
         # Save to CSV file
         filename = f"{symbol}_price_data_{start_date}_to_{end_date}.csv"
         data.to_csv(filename)
         logging.info(f"Data saved to {filename}")
+        logging.debug("Data fetch completed successfully")
         
         return data
     except Exception as e:
