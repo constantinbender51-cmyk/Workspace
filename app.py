@@ -12,8 +12,8 @@ def index():
     top_assets = fetch_top_assets_by_volume(10)
     if not top_assets:
         return "Error: Could not fetch top assets"
-    # Return simple list of top assets without market cap data
-    return f"Top 10 assets by volume: {', '.join(top_assets)}"
+    # Render template with top assets list
+    return render_template('index.html', top_assets=top_assets)
 
 if __name__ == '__main__':
     app.run(host='0.0.0.0', port=5000, debug=True)
