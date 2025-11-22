@@ -26,11 +26,16 @@ def load_data():
 
 # Prepare features and target
 def prepare_data(df):
-    # Calculate SMAs
+    # Calculate price SMAs
     df['sma_20'] = df['close'].rolling(window=20).mean()
     df['sma_50'] = df['close'].rolling(window=50).mean()
     df['sma_100'] = df['close'].rolling(window=100).mean()
     df['sma_200'] = df['close'].rolling(window=200).mean()
+    
+    # Calculate volume SMAs
+    df['volume_sma_10'] = df['volume'].rolling(window=10).mean()
+    df['volume_sma_20'] = df['volume'].rolling(window=20).mean()
+    df['volume_sma_50'] = df['volume'].rolling(window=50).mean()
     
     # Remove rows with NaN values from SMA calculations
     df_clean = df.dropna()
@@ -38,12 +43,16 @@ def prepare_data(df):
     features = []
     targets = []
     for i in range(len(df_clean)):
-        # Features: 20, 50, 100, and 200-day SMAs
+        # Features: 20, 50, 100, and 200-day price SMAs + volume and 10, 20, 50-day volume SMAs
         feature = [
             df_clean['sma_20'].iloc[i],
             df_clean['sma_50'].iloc[i],
             df_clean['sma_100'].iloc[i],
-            df_clean['sma_200'].iloc[i]
+            df_clean['sma_200'].iloc[i],
+            df_clean['volume'].iloc[i],
+            df_clean['volume_sma_10'].iloc[i],
+            df_clean['volume_sma_20'].iloc[i],
+            df_clean['volume_sma_50'].iloc[i]
         ]
         features.append(feature)
         # Target: next day's closing price
