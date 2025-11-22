@@ -1,12 +1,24 @@
 <!DOCTYPE html>
 <html>
 <head>
-    <title>Cryptocurrency Prices</title>
+    <title>Cryptocurrency Prices & Market Caps</title>
 </head>
 <body>
     <h1>Cryptocurrency Prices Over Time</h1>
     <div>
-        {{ graph_html | safe }}
+        {{ prices_graph_html | safe }}
+    </div>
+    
+    <h1>Cryptocurrency Market Capitalization</h1>
+    <div>
+        {{ market_cap_graph_html | safe }}
+    </div>
+    
+    <div style="margin-top: 20px; padding: 15px; background-color: #f8f9fa; border-radius: 5px;">
+        <h3>Market Cap Information</h3>
+        <p><strong>Bitcoin Market Cap:</strong> Price × 19.5 million BTC</p>
+        <p><strong>Total Market Cap:</strong> Sum of (Price × Supply) for all tracked cryptocurrencies</p>
+        <p><em>Note: Market caps are calculated in billions of USD using static circulating supply values</em></p>
     </div>
 </body>
 </html>
