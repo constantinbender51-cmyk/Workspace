@@ -26,18 +26,33 @@ def load_data():
 
 # Prepare features and target
 def prepare_data(df):
-    lookback = 5
+    # Calculate SMAs
+    df['sma_20'] = df['close'].rolling(window=20).mean()
+    df['sma_50'] = df['close'].rolling(window=50).mean()
+    df['sma_100'] = df['close'].rolling(window=100).mean()
+    df['sma_200'] = df['close'].rolling(window=200).mean()
+    
+    # Remove rows with NaN values from SMA calculations
+    df_clean = df.dropna()
+    
     features = []
     targets = []
-    for i in range(lookback, len(df)):
-        # Features: price and volume for the last 5 days
-        price_window = df['close'].iloc[i-lookback:i].values
-        volume_window = df['volume'].iloc[i-lookback:i].values
-        feature = np.concatenate([price_window, volume_window])
+    for i in range(len(df_clean)):
+        # Features: 20, 50, 100, and 200-day SMAs
+        feature = [
+            df_clean['sma_20'].iloc[i],
+            df_clean['sma_50'].iloc[i],
+            df_clean['sma_100'].iloc[i],
+            df_clean['sma_200'].iloc[i]
+        ]
         features.append(feature)
         # Target: next day's closing price
-        target = df['close'].iloc[i]
-        targets.append(target)
+        if i < len(df_clean) - 1:
+            target = df_clean['close'].iloc[i + 1]
+            targets.append(target)
+    
+    # Remove the last feature since it has no corresponding target
+    features = features[:-1]
     return np.array(features), np.array(targets)
 
 # Train model
@@ -48,8 +63,8 @@ def train_model(features, targets):
     X_test = features[split_idx:]
     y_train = targets[:split_idx]
     y_test = targets[split_idx:]
-    # Test indices start from split_idx + lookback (since features start at index 5)
-    test_indices = list(range(split_idx + 5, split_idx + 5 + len(y_test)))
+    # Test indices start from split_idx + 200 (since we lost first 200 rows to SMA calculation)
+    test_indices = list(range(split_idx + 200, split_idx + 200 + len(y_test)))
     model = LinearRegression()
     model.fit(X_train, y_train)
     predictions = model.predict(X_test)
