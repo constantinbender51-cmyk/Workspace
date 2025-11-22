@@ -57,48 +57,19 @@ def prepare_data(df):
 
 # Train model
 def train_model(features, targets):
-    df = load_data()
-    df_clean = df.dropna()  # Cleaned data used for features/targets
-    # Define date ranges
-    start_date = pd.Timestamp('2022-01-01')
-    end_date = pd.Timestamp('2023-09-23')
-    # Mask for the range from January 2022 to September 23, 2023
-    mask_range = (df_clean.index >= start_date) & (df_clean.index <= end_date)
-    df_range = df_clean.loc[mask_range]
-    total_in_range = len(df_range)
-    split_idx = total_in_range // 2  # 50% split
-    # Find start index in df_clean for the range
-    start_idx = df_clean.index.get_loc(df_range.index[0])
-    # Training set: first 50% of the range
-    X_train = features[start_idx:start_idx + split_idx]
-    y_train = targets[start_idx:start_idx + split_idx]
-    # First test set: second 50% of the range
-    X_test1 = features[start_idx + split_idx:start_idx + total_in_range]
-    y_test1 = targets[start_idx + split_idx:start_idx + total_in_range]
-    test1_indices = list(range(start_idx + split_idx, start_idx + total_in_range))
-    # Second test set: from September 23, 2023 onward
-    mask_after = df_clean.index > end_date
-    df_after = df_clean.loc[mask_after]
-    if len(df_after) > 0:
-        after_start_idx = df_clean.index.get_loc(df_after.index[0])
-        X_test2 = features[after_start_idx:after_start_idx + len(df_after)]
-        y_test2 = targets[after_start_idx:after_start_idx + len(df_after)]
-        test2_indices = list(range(after_start_idx, after_start_idx + len(y_test2)))
-    else:
-        X_test2 = np.array([])
-        y_test2 = np.array([])
-        test2_indices = []
-    # Train model on training set
+    # Use time series split: first 50% for training, last 50% for testing
+    split_idx = int(len(features) * 0.5)
+    X_train = features[:split_idx]
+    X_test = features[split_idx:]
+    y_train = targets[:split_idx]
+    y_test = targets[split_idx:]
+    # Test indices start from split_idx + 200 (since we lost first 200 rows to SMA calculation)
+    test_indices = list(range(split_idx + 200, split_idx + 200 + len(y_test)))
     model = LinearRegression()
     model.fit(X_train, y_train)
-    # Predictions for first test set
-    predictions1 = model.predict(X_test1)
-    mse1 = mean_squared_error(y_test1, predictions1) if len(y_test1) > 0 else None
-    # Predictions for second test set
-    predictions2 = model.predict(X_test2) if len(X_test2) > 0 else np.array([])
-    mse2 = mean_squared_error(y_test2, predictions2) if len(y_test2) > 0 else None
-    # Return model, test sets, predictions, and MSEs
-    return model, X_test1, y_test1, predictions1, mse1, test1_indices, X_test2, y_test2, predictions2, mse2, test2_indices
+    predictions = model.predict(X_test)
+    mse = mean_squared_error(y_test, predictions)
+    return model, X_test, y_test, predictions, mse, test_indices
 
 # Generate plot
 def create_plot(df, y_test, predictions, test_indices):
@@ -179,10 +150,9 @@ def create_plot(df, y_test, predictions, test_indices):
 def index():
     df = load_data()
     features, targets = prepare_data(df)
-    model, X_test1, y_test1, predictions1, mse1, test1_indices, X_test2, y_test2, predictions2, mse2, test2_indices = train_model(features, targets)
-    # For simplicity, plot only the first test set; adjust if needed for second test set
-    plot_url = create_plot(df, y_test1, predictions1, test1_indices)
-    return render_template('index.html', plot_url=plot_url, mse=mse1)
+    model, X_test, y_test, predictions, mse, test_indices = train_model(features, targets)
+    plot_url = create_plot(df, y_test, predictions, test_indices)
+    return render_template('index.html', plot_url=plot_url, mse=mse)
 
 if __name__ == '__main__':
     app.run(host='0.0.0.0', port=8080, debug=False)
