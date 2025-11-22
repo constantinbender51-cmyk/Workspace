@@ -28,8 +28,6 @@ def index():
             # Get 24h volume for circulating supply estimation
             # Get circulating supply from Binance (if available) or use volume-based estimation
             from binance.client import Client
-            from binance.client import Client
-            client = Client()
             client = Client()
             ticker = client.get_ticker(symbol=symbol)
             # Try to get coin info for circulating supply
