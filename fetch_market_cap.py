@@ -82,6 +82,15 @@ def fetch_market_cap(start_date='2022-01-01', end_date='2023-09-30'):
                     # Calculate daily market cap (price * volume as approximation)
                     # Note: This is a simplified calculation. For more accuracy, you'd need circulating supply data
                     market_cap_data[symbol] = data['Close'] * data['Volume']
+                    # Calculate actual market cap: price * circulating supply
+                    base_symbol = symbol.replace('USDT', '')
+                    if base_symbol in ['BTC', 'ETH', 'BNB', 'XRP', 'ADA', 'DOGE', 'MATIC', 'DOT', 'LTC', 'BCH', 
+                                      'LINK', 'ATOM', 'XLM', 'FIL', 'ETC', 'XTZ', 'EOS', 'AAVE', 'ALGO', 'NEO']:
+                        supply = symbol_supplies[symbol]
+                        market_cap_data[symbol] = data['Close'] * supply
+                    else:
+                        # Fallback: use price * volume for symbols without supply data
+                        market_cap_data[symbol] = data['Close'] * data['Volume']
                     
             except Exception as e:
                 print(f"Warning: Could not fetch data for {symbol}: {e}")
