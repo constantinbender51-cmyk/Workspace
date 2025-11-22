@@ -77,6 +77,36 @@ def predict():
     """
     try:
         logging.debug("Starting prediction route")
+        
+        # First fetch the regular cryptocurrency data for the other graphs
+        crypto_data = fetch_multiple_cryptos()
+        if crypto_data is None:
+            return "Error: Could not fetch cryptocurrency data."
+        
+        # Calculate market caps for the regular display
+        btc_market_cap = crypto_data['Bitcoin'] * CIRCULATING_SUPPLY['Bitcoin']
+        total_market_cap = pd.Series(0, index=crypto_data.index)
+        for crypto_name in crypto_data.columns:
+            if crypto_name in CIRCULATING_SUPPLY:
+                total_market_cap += crypto_data[crypto_name] * CIRCULATING_SUPPLY[crypto_name]
+        
+        market_cap_data = pd.DataFrame({
+            'Bitcoin Market Cap (Billion USD)': btc_market_cap,
+            'Total Market Cap (Billion USD)': total_market_cap
+        })
+        
+        # Generate regular price and market cap graphs
+        fig_prices = px.line(crypto_data, x=crypto_data.index, y=crypto_data.columns, 
+                     title='Cryptocurrency Prices Over Time',
+                     labels={'value': 'Price (USDT)', 'variable': 'Cryptocurrency'})
+        prices_graph_html = fig_prices.to_html(full_html=False)
+        
+        fig_market_cap = px.line(market_cap_data, x=market_cap_data.index, y=market_cap_data.columns,
+                     title='Cryptocurrency Market Capitalization Over Time',
+                     labels={'value': 'Market Cap (Billion USD)', 'variable': 'Market Cap'})
+        market_cap_graph_html = fig_market_cap.to_html(full_html=False)
+        
+        # Now prepare data for linear regression prediction
         features, target, scaler, dates = prepare_data_for_prediction()
         if features is None or target is None:
             return "Error: Could not prepare data for prediction."
@@ -102,10 +132,13 @@ def predict():
         fig = px.line(plot_data, x=plot_data.index, y=['Actual', 'Predicted'],
                      title='Linear Regression: Predicted vs Actual 7-Day BTC Price Movement',
                      labels={'value': 'Price Movement (Fraction)', 'variable': 'Type'})
-        graph_html = fig.to_html(full_html=False)
+        prediction_graph_html = fig.to_html(full_html=False)
         
-        logging.debug("Prediction graph generated successfully")
-        return render_template('index.html', prediction_graph_html=graph_html, prices_graph_html="", market_cap_graph_html="")
+        logging.debug("All graphs generated successfully")
+        return render_template('index.html', 
+                             prediction_graph_html=prediction_graph_html,
+                             prices_graph_html=prices_graph_html, 
+                             market_cap_graph_html=market_cap_graph_html)
     except Exception as e:
         logging.error(f"Error in prediction route: {str(e)}")
         return "An error occurred during prediction. Please try again later."
