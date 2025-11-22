@@ -8,17 +8,14 @@ def fetch_btc_candles():
     symbol = 'BTCUSDT'
     interval = '1d'
     start_date = datetime(2022, 1, 1)
-    end_date = datetime(2025, 12, 31)
+    end_date = datetime(2023, 9, 30)
     
     all_data = []
     current_date = start_date
     
     while current_date <= end_date:
         start_time = int(current_date.timestamp() * 1000)
-        # Fetch data in larger chunks to reduce API calls
-        end_time = int((current_date + timedelta(days=365)).timestamp() * 1000)  # Fetch up to 1 year of data per call
-        if end_time > int(end_date.timestamp() * 1000):
-            end_time = int(end_date.timestamp() * 1000)
+        end_time = int((current_date + timedelta(days=1)).timestamp() * 1000)
         
         params = {
             'symbol': symbol,
@@ -41,7 +38,7 @@ def fetch_btc_candles():
                     volume = float(candle[5])
                     date = datetime.fromtimestamp(timestamp / 1000).strftime('%Y-%m-%d')
                     all_data.append([date, open_price, high, low, close, volume])
-                current_date = datetime.fromtimestamp(candle[6] / 1000)  # Use the end time of the last candle
+                current_date += timedelta(days=len(data))
             else:
                 current_date += timedelta(days=1)
         else:
