@@ -13,6 +13,9 @@ def fetch_top_assets_by_volume(limit=10):
     """
     try:
         client = Client()
+        if not client.ping():
+            print("Error: Unable to connect to Binance API")
+            return []
         # Get 24h ticker data for all symbols
         tickers = client.get_ticker()
         # Filter for USDT pairs and sort by quoteVolume (trading volume in quote asset)
