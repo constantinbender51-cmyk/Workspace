@@ -56,15 +56,20 @@ def prepare_data(df):
     return np.array(features), np.array(targets)
 
 # Train model
-def train_model(features, targets):
-    # Use time series split: first 50% for training, last 50% for testing
-    split_idx = int(len(features) * 0.5)
-    X_train = features[:split_idx]
-    X_test = features[split_idx:]
-    y_train = targets[:split_idx]
-    y_test = targets[split_idx:]
-    # Test indices start from split_idx + 200 (since we lost first 200 rows to SMA calculation)
-    test_indices = list(range(split_idx + 200, split_idx + 200 + len(y_test)))
+def train_model(features, targets, df):
+    # Define training period end (September 30, 2023)
+    train_end_date = pd.Timestamp('2023-09-30')
+    # Find the index in df_clean corresponding to the training end
+    df_clean = df.dropna()  # Replicate the cleaning from prepare_data
+    train_end_idx = df_clean.index.get_indexer([train_end_date], method='pad')[0]
+    # Use all data up to train_end_idx for training
+    X_train = features[:train_end_idx + 1]  # +1 to include the end date
+    y_train = targets[:train_end_idx + 1]
+    # Use all data after train_end_idx for testing (including 2025)
+    X_test = features[train_end_idx + 1:]
+    y_test = targets[train_end_idx + 1:]
+    # Test indices start from train_end_idx + 1 + 200 (adjusting for SMA lag)
+    test_indices = list(range(train_end_idx + 1 + 200, train_end_idx + 1 + 200 + len(y_test)))
     model = LinearRegression()
     model.fit(X_train, y_train)
     predictions = model.predict(X_test)
@@ -150,7 +155,7 @@ def create_plot(df, y_test, predictions, test_indices):
 def index():
     df = load_data()
     features, targets = prepare_data(df)
-    model, X_test, y_test, predictions, mse, test_indices = train_model(features, targets)
+    model, X_test, y_test, predictions, mse, test_indices = train_model(features, targets, df)
     plot_url = create_plot(df, y_test, predictions, test_indices)
     return render_template('index.html', plot_url=plot_url, mse=mse)
 
