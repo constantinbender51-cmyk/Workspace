@@ -90,11 +90,33 @@ def create_plot(df, y_test, predictions, test_indices):
     sorted_y_test = y_test[sorted_indices]
     sorted_predictions = predictions[sorted_indices]
     
-    # Calculate trading returns
+    # Calculate trading returns by holding positions until signal changes
     positions = np.where(sorted_y_test > sorted_predictions, 1, -1)  # Long if actual > predicted, short otherwise
-    # Calculate returns: for long positions, profit when price increases; for short positions, profit when price decreases
-    # Use the position at time t to determine the trade for period t to t+1
-    returns = positions[:-1] * (sorted_y_test[1:] - sorted_y_test[:-1]) / sorted_y_test[:-1]
+    returns = []
+    i = 0
+    while i < len(positions):
+        current_position = positions[i]
+        entry_price = sorted_y_test[i]
+        j = i + 1
+        while j < len(positions) and positions[j] == current_position:
+            j += 1
+        if j < len(sorted_y_test):
+            current_price = sorted_y_test[j]
+            if current_position == 1:  # Long position
+                ret = (current_price / entry_price) - 1
+            else:  # Short position
+                ret = (entry_price / current_price) - 1
+            returns.extend([ret] * (j - i))
+        else:
+            # If no signal change until end, use last available price
+            current_price = sorted_y_test[-1]
+            if current_position == 1:
+                ret = (current_price / entry_price) - 1
+            else:
+                ret = (entry_price / current_price) - 1
+            returns.extend([ret] * (len(positions) - i))
+        i = j
+    returns = np.array(returns[:len(sorted_dates) - 1])  # Ensure length matches for plotting
     cumulative_returns = np.cumprod(1 + returns) - 1
     
     # Plot price and predictions
