@@ -12,7 +12,7 @@ def btc_price():
         # Fetch historical BTC price data
         btc_data = fetch_price_data(symbol='BTCUSDT', start_date='2022-01-01', end_date='2023-09-30')
         if btc_data is None:
-            return "Error: Could not fetch BTC price data"
+            return "Error: Could not fetch BTC price data. Please check the API connection."
         # Generate a plotly graph
         fig = px.line(btc_data, x=btc_data.index, y='Close', title='BTC Price Over Time')
         graph_html = fig.to_html(full_html=False)
@@ -26,7 +26,7 @@ def index():
     from fetch_top_assets import fetch_top_assets_by_volume
     top_assets = fetch_top_assets_by_volume(10)
     if not top_assets:
-        return "Error: Could not fetch top assets"
+        return "Error: Could not fetch top assets. Please check the API connection."
     # Render template with top assets list
     return render_template('index.html', top_assets=top_assets)
 
