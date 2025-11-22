@@ -15,7 +15,8 @@ def fetch_btc_candles():
     
     while current_date <= end_date:
         start_time = int(current_date.timestamp() * 1000)
-        end_time = int((current_date + timedelta(days=1)).timestamp() * 1000)
+        # Fetch up to 1000 days at once
+        end_time = int((current_date + timedelta(days=1000)).timestamp() * 1000)
         
         params = {
             'symbol': symbol,
@@ -38,7 +39,9 @@ def fetch_btc_candles():
                     volume = float(candle[5])
                     date = datetime.fromtimestamp(timestamp / 1000).strftime('%Y-%m-%d')
                     all_data.append([date, open_price, high, low, close, volume])
-                current_date += timedelta(days=len(data))
+                # Move to the day after the last fetched date
+                last_timestamp = data[-1][0]
+                current_date = datetime.fromtimestamp(last_timestamp / 1000) + timedelta(days=1)
             else:
                 current_date += timedelta(days=1)
         else:
