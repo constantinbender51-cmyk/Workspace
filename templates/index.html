@@ -1,26 +1,31 @@
 <!DOCTYPE html>
 <html>
 <head>
-    <title>Cryptocurrency Price Chart</title>
+    <title>Top Crypto Assets Price Change vs BTC</title>
     <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
 </head>
 <body>
-    <h1>Bitcoin Price Chart</h1>
+    <h1>Top 10 Liquid Crypto Assets Price Change vs Bitcoin</h1>
     <div style="width: 800px; height: 400px;">
-        <canvas id="priceChart"></canvas>
+        <canvas id="changeChart"></canvas>
     </div>
     
     <script>
-        const ctx = document.getElementById('priceChart').getContext('2d');
+        const ctx = document.getElementById('changeChart').getContext('2d');
+        const assetChanges = {{ asset_changes | tojson }};
+        const symbols = assetChanges.map(asset => asset.symbol);
+        const changes = assetChanges.map(asset => asset.change_percent);
+        
         const chart = new Chart(ctx, {
-            type: 'line',
+            type: 'bar',
             data: {
-                labels: {{ dates | tojson }},
+                labels: symbols,
                 datasets: [{
-                    label: 'BTC Price (USD)',
-                    data: {{ prices | tojson }},
-                    borderColor: 'rgb(75, 192, 192)',
-                    tension: 0.1
+                    label: 'Price Change vs BTC (%)',
+                    data: changes,
+                    backgroundColor: 'rgba(75, 192, 192, 0.2)',
+                    borderColor: 'rgba(75, 192, 192, 1)',
+                    borderWidth: 1
                 }]
             },
             options: {
@@ -29,13 +34,13 @@
                     x: {
                         title: {
                             display: true,
-                            text: 'Date'
+                            text: 'Cryptocurrency Symbol'
                         }
                     },
                     y: {
                         title: {
                             display: true,
-                            text: 'Bitcoin Price (USD)'
+                            text: 'Price Change vs BTC (%)'
                         }
                     }
                 }
