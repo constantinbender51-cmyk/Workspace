@@ -46,7 +46,7 @@ def index():
             # This is a simplified approach since Binance doesn't provide circulating supply via API
     
             market_cap = latest_price * float(ticker['quoteVolume']) * 0.1  # Rough estimation factor
-        return render_template('index.html', total_market_cap=total_market_cap, market_caps=market_caps)
+    return render_template('index.html', total_market_cap=total_market_cap, market_caps=market_caps)
         except Exception as e:
     
             print(f"Error fetching data for {symbol}: {e}")
