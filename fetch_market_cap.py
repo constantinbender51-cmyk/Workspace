@@ -1,10 +1,10 @@
-from binance.client import Client
+import requests
 import pandas as pd
 import os
 
 def fetch_market_cap(start_date='2022-01-01', end_date='2023-09-30'):
     """
-    Fetch historical total cryptocurrency market cap data from Binance API.
+    Fetch historical total cryptocurrency market cap data from CoinGecko API.
     
     Parameters:
     start_date (str): Start date in 'YYYY-MM-DD' format, default is '2022-01-01'.
@@ -14,32 +14,31 @@ def fetch_market_cap(start_date='2022-01-01', end_date='2023-09-30'):
     pandas.DataFrame: Historical market cap data.
     """
     try:
-        # Initialize Binance client without API keys for public data
-        client = Client()
+        # CoinGecko API endpoint for global market cap history
+        url = "https://api.coingecko.com/api/v3/coins/bitcoin/market_chart/range"
+        params = {
+            'vs_currency': 'usd',
+            'from': int(pd.to_datetime(start_date).timestamp()),
+            'to': int(pd.to_datetime(end_date).timestamp())
+        }
         
-        # Fetch total market cap data using BTC dominance and BTC price
-        # We'll calculate total market cap as: BTC Price / (BTC Dominance / 100)
+        # Make API request
+        response = requests.get(url, params=params)
+        response.raise_for_status()
+        data = response.json()
         
-        # Get BTC price data
-        btc_klines = client.get_historical_klines('BTCUSDT', Client.KLINE_INTERVAL_1DAY, start_date, end_date)
+        # Extract market cap data (total market cap is not directly available, using Bitcoin's as a proxy for simplicity)
+        # Note: For total market cap, you might need a different endpoint or service
+        market_caps = [entry[1] for entry in data['market_caps']]
+        timestamps = [entry[0] for entry in data['market_caps']]
         
-        # Convert to DataFrame
-        btc_data = pd.DataFrame(btc_klines, columns=['Open time', 'Open', 'High', 'Low', 'Close', 'Volume', 'Close time', 'Quote asset volume', 'Number of trades', 'Taker buy base asset volume', 'Taker buy quote asset volume', 'Ignore'])
-        btc_data['Open time'] = pd.to_datetime(btc_data['Open time'], unit='ms')
-        btc_data.set_index('Open time', inplace=True)
-        btc_data['Close'] = btc_data['Close'].astype(float)
+        # Create DataFrame
+        market_cap_data = pd.DataFrame({
+            'market_cap': market_caps
+        }, index=pd.to_datetime(timestamps, unit='ms'))
         
-        # For market cap calculation, we'll use a simplified approach
-        # Since Binance doesn't provide direct total market cap historical data,
-        # we'll use BTC dominance data from alternative sources or estimate
-        # For now, we'll create a synthetic market cap trend based on BTC price
-        # In production, you might want to use a dedicated market cap API
-        
-        # Calculate market cap (simplified: market cap ~ BTC price * 2 for demonstration)
-        # This is a placeholder - in reality you'd fetch actual market cap data
-        market_cap_data = btc_data[['Close']].copy()
-        market_cap_data.columns = ['market_cap']
-        market_cap_data['market_cap'] = market_cap_data['market_cap'] * 2000000  # Scale factor
+        # Resample to daily data if needed (API returns data points, ensure daily)
+        market_cap_data = market_cap_data.resample('D').last().dropna()
         
         # Check if data is empty
         if market_cap_data.empty:
