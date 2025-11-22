@@ -46,6 +46,38 @@ def fetch_market_cap(start_date='2022-01-01', end_date='2023-09-30'):
                     # Convert price to float
                     data['Close'] = data['Close'].astype(float)
                     data['Volume'] = data['Volume'].astype(float)
+                    # Get circulating supply for accurate market cap calculation
+                    # For Binance, we'll use the price and estimate supply from known data
+                    # This prevents the inflated 'price * volume' calculation
+                    symbol_supplies = {
+                        'BTCUSDT': 19400000,   # Approx BTC circulating supply
+                        'ETHUSDT': 120000000,  # Approx ETH circulating supply
+                        'BNBUSDT': 151000000,  # Approx BNB circulating supply
+                        'XRPUSDT': 53000000000, # Approx XRP circulating supply
+                        'ADAUSDT': 34000000000, # Approx ADA circulating supply
+                        'DOGEUSDT': 132000000000, # Approx DOGE circulating supply
+                        'MATICUSDT': 9300000000, # Approx MATIC circulating supply
+                        'DOTUSDT': 1200000000,  # Approx DOT circulating supply
+                        'LTCUSDT': 72000000,    # Approx LTC circulating supply
+                        'BCHUSDT': 19000000,    # Approx BCH circulating supply
+                        'LINKUSDT': 510000000,  # Approx LINK circulating supply
+                        'ATOMUSDT': 290000000,  # Approx ATOM circulating supply
+                        'XLMUSDT': 26000000000, # Approx XLM circulating supply
+                        'FILUSDT': 390000000,   # Approx FIL circulating supply
+                        'ETCUSDT': 140000000,   # Approx ETC circulating supply
+                        'XTZUSDT': 900000000,   # Approx XTZ circulating supply
+                        'EOSUSDT': 1100000000,  # Approx EOS circulating supply
+                        'AAVEUSDT': 14000000,   # Approx AAVE circulating supply
+                        'ALGOUSDT': 7000000000, # Approx ALGO circulating supply
+                        'NEOUSDT': 70000000     # Approx NEO circulating supply
+                    }
+                    
+                    # Calculate actual market cap: price * circulating supply
+                    base_symbol = symbol.replace('USDT', '')
+                    if base_symbol in ['BTC', 'ETH', 'BNB', 'XRP', 'ADA', 'DOGE', 'MATIC', 'DOT', 'LTC', 'BCH', 
+                                      'LINK', 'ATOM', 'XLM', 'FIL', 'ETC', 'XTZ', 'EOS', 'AAVE', 'ALGO', 'NEO']:
+                        supply = symbol_supplies[symbol]
+                        market_cap_data[symbol] = data['Close'] * supply
                     
                     # Calculate daily market cap (price * volume as approximation)
                     # Note: This is a simplified calculation. For more accuracy, you'd need circulating supply data
@@ -66,6 +98,8 @@ def fetch_market_cap(start_date='2022-01-01', end_date='2023-09-30'):
         combined_df['total_market_cap'] = combined_df.sum(axis=1)
         
         # Create final DataFrame with just the total market cap
+        print(f"Total market cap range: ${final_data['market_cap'].min():,.2f} - ${final_data['market_cap'].max():,.2f}")
+        print(f"Sample market cap values (first 5): {final_data['market_cap'].head().tolist()}")
         final_data = pd.DataFrame({
             'market_cap': combined_df['total_market_cap']
         })
