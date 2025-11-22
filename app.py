@@ -81,13 +81,19 @@ def create_plot(df, y_test, predictions, test_indices):
     sorted_y_test = y_test[sorted_indices]
     sorted_predictions = predictions[sorted_indices]
     
-    # Calculate capital with daily accumulation based on prediction vs actual
+    # Calculate capital with daily accumulation based on prediction vs actual and actual Bitcoin returns
     capital = [1000]  # Start with $1000
     for i in range(len(sorted_y_test)):
-        if sorted_predictions[i] > sorted_y_test[i]:  # Prediction above actual: negative return
-            ret = -0.01
-        else:  # Prediction below actual: positive return
-            ret = 0.01
+        if i == 0:
+            # For the first day, use the return from the previous actual price in the dataset
+            prev_price = df['close'].iloc[test_indices[sorted_indices[i]] - 1] if test_indices[sorted_indices[i]] > 0 else sorted_y_test[i]
+        else:
+            prev_price = sorted_y_test[i - 1]
+        actual_return = (sorted_y_test[i] - prev_price) / prev_price
+        if sorted_predictions[i] > sorted_y_test[i]:  # Prediction above actual: negative actual return
+            ret = -actual_return
+        else:  # Prediction below actual: positive actual return
+            ret = actual_return
         capital.append(capital[-1] * (1 + ret))
     capital = capital[1:]  # Remove the initial 1000 to match the number of dates
     
