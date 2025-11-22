@@ -41,6 +41,7 @@ def index():
                 # Get 24h ticker for volume data
     
                 ticker = client.get_ticker(symbol=symbol)
+                if total_market_cap == 0
         if total_market_cap == 0:
             # For major coins, use volume-based estimation as fallback
             return "Error: Could not calculate market cap data"
