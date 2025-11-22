@@ -105,7 +105,7 @@ def predict():
         graph_html = fig.to_html(full_html=False)
         
         logging.debug("Prediction graph generated successfully")
-        return render_template('index.html', prices_graph_html=graph_html, market_cap_graph_html="")
+        return render_template('index.html', prediction_graph_html=graph_html, prices_graph_html="", market_cap_graph_html="")
     except Exception as e:
         logging.error(f"Error in prediction route: {str(e)}")
         return "An error occurred during prediction. Please try again later."
