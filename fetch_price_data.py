@@ -17,6 +17,9 @@ def fetch_price_data(symbol='BTCUSDT', start_date='2022-01-01', end_date='2023-0
     try:
         # Initialize Binance client without API keys for public data
         client = Client()
+        if not client.ping():
+            print("Error: Unable to connect to Binance API")
+            return None
         
         # Fetch historical klines data from Binance
         klines = client.get_historical_klines(symbol, Client.KLINE_INTERVAL_1DAY, start_date, end_date)
