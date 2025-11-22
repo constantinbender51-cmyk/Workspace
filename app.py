@@ -81,36 +81,15 @@ def create_plot(df, y_test, predictions, test_indices):
     sorted_y_test = y_test[sorted_indices]
     sorted_predictions = predictions[sorted_indices]
     
-    # Calculate capital starting from 1000 by holding positions until signal changes
-    positions = np.where(sorted_y_test > sorted_predictions, 1, -1)  # Long if actual > predicted, short otherwise
+    # Calculate capital with daily accumulation based on prediction vs actual
     capital = [1000]  # Start with $1000
-    i = 0
-    while i < len(positions):
-        current_position = positions[i]
-        entry_price = sorted_y_test[i]
-        j = i + 1
-        while j < len(positions) and positions[j] == current_position:
-            j += 1
-        if j < len(sorted_y_test):
-            current_price = sorted_y_test[j]
-            if current_position == 1:  # Long position
-                ret = (current_price / entry_price) - 1
-            else:  # Short position
-                ret = (entry_price / current_price) - 1
-            # Update capital for each day in the position
-            for k in range(i, j):
-                capital.append(capital[-1] * (1 + ret))
-        else:
-            # If no signal change until end, use last available price
-            current_price = sorted_y_test[-1]
-            if current_position == 1:
-                ret = (current_price / entry_price) - 1
-            else:
-                ret = (entry_price / current_price) - 1
-            for k in range(i, len(positions)):
-                capital.append(capital[-1] * (1 + ret))
-        i = j
-    capital = capital[:len(sorted_dates)]  # Ensure length matches for plotting
+    for i in range(len(sorted_y_test)):
+        if sorted_predictions[i] > sorted_y_test[i]:  # Prediction above actual: negative return
+            ret = -0.01
+        else:  # Prediction below actual: positive return
+            ret = 0.01
+        capital.append(capital[-1] * (1 + ret))
+    capital = capital[1:]  # Remove the initial 1000 to match the number of dates
     
     # Plot price and predictions
     plt.subplot(2, 1, 1)
