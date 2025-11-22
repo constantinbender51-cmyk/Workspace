@@ -22,7 +22,6 @@ Line 21: This is the twenty-first line of the file
 Line 22: This is the twenty-second line of the file
 Line 23: This is the twenty-third line of the file
 Line 24: This is the twenty-fourth line of the file
-Line 25: This is the twenty-fifth line of the file
 Line 26: This is the twenty-sixth line of the file
 Line 27: This is the twenty-seventh line of the file
 Line 28: This is the twenty-eighth line of the file
