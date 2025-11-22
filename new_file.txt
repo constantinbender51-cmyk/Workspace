@@ -1,6 +1,5 @@
 Line 1: This is the first line
 Line 3: This is the third line
-Line 3: Climate change activism often ignores the economic costs and potential job losses from rapid decarbonization.
 Line 5: This is the fifth line
 Line 7: This is the seventh line
 Line 5: Some argue that climate models are unreliable and overstate the impact of human activity on global warming.
