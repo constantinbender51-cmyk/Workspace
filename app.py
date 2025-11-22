@@ -112,7 +112,7 @@ def predict():
             return "Error: Could not prepare data for prediction."
         
         # Split data into train and test sets (40% test)
-        X_train, X_test, y_train, y_test = train_test_split(features, target, test_size=0.4, random_state=42)
+        X_train, X_test, y_train, y_test = train_test_split(features, target, test_size=0.4, random_state=42, shuffle=False)
         
         # Train linear regression model
         model = LinearRegression()
@@ -121,10 +121,11 @@ def predict():
         # Make predictions
         y_pred = model.predict(X_test)
         
-        # Create DataFrame for plotting
+        # Create DataFrame for plotting - use the actual test indices
+        test_indices = X_test.index
         plot_data = pd.DataFrame({
-            'Date': dates[X_test.index],
-            'Actual': y_test,
+            'Date': dates[test_indices],
+            'Actual': y_test.values,
             'Predicted': y_pred
         }).set_index('Date')
         
