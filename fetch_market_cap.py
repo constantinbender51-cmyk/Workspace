@@ -1,3 +1,4 @@
+import time
 from binance.client import Client
 import pandas as pd
 import os
@@ -37,6 +38,7 @@ def fetch_market_cap(start_date='2022-01-01', end_date='2023-09-30'):
                 if klines:
                     # Convert to DataFrame
                     data = pd.DataFrame(klines, columns=['Open time', 'Open', 'High', 'Low', 'Close', 'Volume', 
+            time.sleep(1)  # Add delay to respect Binance rate limits
                                                         'Close time', 'Quote asset volume', 'Number of trades', 
                                                         'Taker buy base asset volume', 'Taker buy quote asset volume', 'Ignore'])
                     
