@@ -135,6 +135,7 @@ def predict():
         prediction_graph_html = fig.to_html(full_html=False)
         
         logging.debug("All graphs generated successfully")
+        logging.debug(f"Prediction graph HTML length: {len(prediction_graph_html) if prediction_graph_html else 0}")
         return render_template('index.html', 
                              prediction_graph_html=prediction_graph_html,
                              prices_graph_html=prices_graph_html, 
