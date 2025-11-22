@@ -57,14 +57,27 @@ def prepare_data(df):
 
 # Train model
 def train_model(features, targets):
-    # Use time series split: first 50% for training, last 50% for testing
-    split_idx = int(len(features) * 0.5)
-    X_train = features[:split_idx]
-    X_test = features[split_idx:]
-    y_train = targets[:split_idx]
-    y_test = targets[split_idx:]
-    # Test indices start from split_idx + 200 (since we lost first 200 rows to SMA calculation)
-    test_indices = list(range(split_idx + 200, split_idx + 200 + len(y_test)))
+    # Use time series split: 50% of data from January 2022 to September 23, 2023 for training, 50% for testing
+    df = load_data()
+    df_clean = df.dropna()  # Cleaned data used for features/targets
+    # Find indices for the date range from January 2022 to September 23, 2023
+    start_date = pd.Timestamp('2022-01-01')
+    end_date = pd.Timestamp('2023-09-23')
+    mask = (df_clean.index >= start_date) & (df_clean.index <= end_date)
+    df_range = df_clean.loc[mask]
+    total_in_range = len(df_range)
+    split_idx = total_in_range // 2  # 50% split
+    # Adjust features and targets for the range
+    # Features and targets are aligned with df_clean, so find the start index in df_clean for the range
+    start_idx = df_clean.index.get_loc(df_range.index[0])
+    X_range = features[start_idx:start_idx + total_in_range]
+    y_range = targets[start_idx:start_idx + total_in_range]
+    X_train = X_range[:split_idx]
+    X_test = X_range[split_idx:]
+    y_train = y_range[:split_idx]
+    y_test = y_range[split_idx:]
+    # Test indices start from the beginning of the test set in df_clean
+    test_indices = list(range(start_idx + split_idx, start_idx + split_idx + len(y_test)))
     model = LinearRegression()
     model.fit(X_train, y_train)
     predictions = model.predict(X_test)
