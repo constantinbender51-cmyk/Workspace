@@ -15,12 +15,8 @@ def fetch_price_data(symbol='BTCUSDT', start_date='2022-01-01', end_date='2023-0
     pandas.DataFrame: Historical price data.
     """
     try:
-        # Initialize Binance client with API keys from environment variables
         # Initialize Binance client without API keys for public data
         client = Client()
-        api_key = os.environ.get('BINANCE_API_KEY', 'your_api_key_here')
-        api_secret = os.environ.get('BINANCE_API_SECRET', 'your_api_secret_here')
-        client = Client(api_key, api_secret)
         
         # Fetch historical klines data from Binance
         klines = client.get_historical_klines(symbol, Client.KLINE_INTERVAL_1DAY, start_date, end_date)
