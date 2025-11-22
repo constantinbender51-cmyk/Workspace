@@ -15,8 +15,8 @@ def index():
         return "Error: Could not fetch price or market cap data"
     
     if data is None:
+    return render_template('index.html', dates=dates, prices=prices, market_caps=market_caps)
         return "Error: Could not fetch price data"
-    # Prepare data for chart
     dates = price_data.index.strftime('%Y-%m-%d').tolist()
     prices = price_data['Close'].tolist()
     market_caps = market_cap_data['market_cap'].tolist()
