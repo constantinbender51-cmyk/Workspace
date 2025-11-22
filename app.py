@@ -42,8 +42,14 @@ def prepare_data(df):
 
 # Train model
 def train_model(features, targets):
-    X_train, X_test, y_train, y_test, train_indices, test_indices = train_test_split(
-        features, targets, range(len(targets)), test_size=0.2, random_state=42)
+    # Use time series split: first 80% for training, last 20% for testing
+    split_idx = int(len(features) * 0.8)
+    X_train = features[:split_idx]
+    X_test = features[split_idx:]
+    y_train = targets[:split_idx]
+    y_test = targets[split_idx:]
+    # Test indices start from split_idx + lookback (since features start at index 5)
+    test_indices = list(range(split_idx + 5, split_idx + 5 + len(y_test)))
     model = LinearRegression()
     model.fit(X_train, y_train)
     predictions = model.predict(X_test)
