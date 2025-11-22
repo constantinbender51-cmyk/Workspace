@@ -9,6 +9,13 @@
         {{ prices_graph_html | safe }}
     </div>
     
+    {% if prediction_graph_html %}
+    <h1>Linear Regression: Predicted vs Actual 7-Day BTC Price Movement</h1>
+    <div>
+        {{ prediction_graph_html | safe }}
+    </div>
+    {% endif %}
+    
     <h1>Cryptocurrency Market Capitalization</h1>
     <div>
         {{ market_cap_graph_html | safe }}
