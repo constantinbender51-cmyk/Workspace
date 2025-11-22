@@ -34,12 +34,19 @@ def fetch_market_cap(start_date='2022-01-01', end_date='2023-09-30'):
             try:
                 # Fetch historical klines
                 klines = client.get_historical_klines(symbol, Client.KLINE_INTERVAL_1DAY, start_date, end_date)
+                    data['Open time'] = pd.to_datetime(data['Open time'], unit='ms')
                 
+                    data.set_index('Open time', inplace=True)
                 if klines:
+                    
                     # Convert to DataFrame
+                    # Convert price to float
                     data = pd.DataFrame(klines, columns=['Open time', 'Open', 'High', 'Low', 'Close', 'Volume', 
+                    data['Close'] = data['Close'].astype(float)
             time.sleep(1)  # Add delay to respect Binance rate limits
+                    data['Volume'] = data['Volume'].astype(float)
                                                         'Close time', 'Quote asset volume', 'Number of trades', 
+                    time.sleep(1)  # Add delay to respect Binance rate limits
                                                         'Taker buy base asset volume', 'Taker buy quote asset volume', 'Ignore'])
                     
                     data['Open time'] = pd.to_datetime(data['Open time'], unit='ms')
