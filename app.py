@@ -1,9 +1,22 @@
 from flask import Flask, render_template
+import plotly.express as px
 import pandas as pd
 import os
 from fetch_price_data import fetch_price_data
 
 app = Flask(__name__)
+
+@app.route('/btc-price')
+def btc_price():
+    # Fetch historical BTC price data
+    btc_data = fetch_price_data(symbol='BTCUSDT', start_date='2022-01-01', end_date='2023-09-30')
+    if btc_data is None:
+        return "Error: Could not fetch BTC price data"
+    # Generate a plotly graph
+    import plotly.express as px
+    fig = px.line(btc_data, x=btc_data.index, y='Close', title='BTC Price Over Time')
+    graph_html = fig.to_html(full_html=False)
+    return render_template('btc_price.html', graph_html=graph_html)
 
 @app.route('/')
 def index():
