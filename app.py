@@ -9,7 +9,6 @@ app = Flask(__name__)
 def index():
     # Fetch top 10 liquid assets and calculate total market cap
     from fetch_top_assets import fetch_top_assets_by_volume
-    from fetch_price_data import fetch_price_data
     
     # Fetch top 10 assets by volume
     top_assets = fetch_top_assets_by_volume(10)
