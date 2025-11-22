@@ -42,22 +42,26 @@ def prepare_data(df):
 
 # Train model
 def train_model(features, targets):
-    X_train, X_test, y_train, y_test = train_test_split(features, targets, test_size=0.2, random_state=42)
+    X_train, X_test, y_train, y_test, train_indices, test_indices = train_test_split(
+        features, targets, range(len(targets)), test_size=0.2, random_state=42)
     model = LinearRegression()
     model.fit(X_train, y_train)
     predictions = model.predict(X_test)
     mse = mean_squared_error(y_test, predictions)
-    return model, X_test, y_test, predictions, mse
+    return model, X_test, y_test, predictions, mse, test_indices
 
 # Generate plot
-def create_plot(y_test, predictions):
+def create_plot(df, y_test, predictions, test_indices):
     plt.figure(figsize=(10, 6))
-    plt.plot(y_test, label='Actual Price', color='blue')
-    plt.plot(predictions, label='Predicted Price', color='red')
-    plt.xlabel('Sample Index')
+    dates = df.index[test_indices]
+    plt.plot(dates, y_test, label='Actual Price', color='blue')
+    plt.plot(dates, predictions, label='Predicted Price', color='red')
+    plt.xlabel('Date')
     plt.ylabel('Price (USD)')
     plt.title('BTC Price Prediction vs Actual')
     plt.legend()
+    plt.xticks(rotation=45)
+    plt.tight_layout()
     img = io.BytesIO()
     plt.savefig(img, format='png')
     img.seek(0)
@@ -69,8 +73,8 @@ def create_plot(y_test, predictions):
 def index():
     df = load_data()
     features, targets = prepare_data(df)
-    model, X_test, y_test, predictions, mse = train_model(features, targets)
-    plot_url = create_plot(y_test, predictions)
+    model, X_test, y_test, predictions, mse, test_indices = train_model(features, targets)
+    plot_url = create_plot(df, y_test, predictions, test_indices)
     return render_template('index.html', plot_url=plot_url, mse=mse)
 
 if __name__ == '__main__':
