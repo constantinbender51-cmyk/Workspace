@@ -1,1 +1,1 @@
-web: python fetch_price_data.py
+web: python app.py
