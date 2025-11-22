@@ -57,8 +57,15 @@ def prepare_data(df):
 
 # Train model
 def train_model(features, targets):
-    # Use time series split: first 50% for training, last 50% for testing
-    split_idx = int(len(features) * 0.5)
+    # Use time series split: training set from January 2022 to September 23, 2023
+    # Assuming data starts from January 2022, find split index for September 23, 2023
+    # Since features are derived from cleaned data, estimate split based on date range
+    # For simplicity, use a fixed split index assuming daily data; adjust if needed
+    split_date = pd.Timestamp('2023-09-23')
+    df = load_data()
+    df_clean = df.dropna()  # Cleaned data used for features/targets
+    # Find the index in df_clean corresponding to split_date
+    split_idx = df_clean.index.get_loc(split_date) + 1  # +1 to include up to September 23
     X_train = features[:split_idx]
     X_test = features[split_idx:]
     y_train = targets[:split_idx]
