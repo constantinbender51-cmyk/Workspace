@@ -125,11 +125,14 @@ def predict():
         test_indices = X_test.index
         # Get the integer positions of test indices in the dates array
         date_positions = [i for i, date in enumerate(dates) if date in test_indices]
+        # Shift predicted values forward by 7 days to align with when predictions would materialize
         plot_data = pd.DataFrame({
             'Date': dates[date_positions],
             'Actual': y_test.values,
             'Predicted': y_pred * 100  # Scale predicted values by 100 for better visibility
         }).set_index('Date')
+        # Shift the predicted line forward by 7 days for accuracy evaluation
+        plot_data['Predicted'] = plot_data['Predicted'].shift(7)
         
         # Generate prediction graph
         fig = px.line(plot_data, x=plot_data.index, y=['Actual', 'Predicted'],
