@@ -2,7 +2,6 @@ Line 1: This is the first line
 Line 3: This is the third line
 Line 5: This is the fifth line
 Line 7: This is the seventh line
-Line 5: Some argue that climate models are unreliable and overstate the impact of human activity on global warming.
 Line 9: This is the ninth line
 Line 11: This is the eleventh line
 Line 7: Climate policies can infringe on individual freedoms and lead to excessive government control.
