@@ -35,29 +35,36 @@ def prepare_data(df):
     # Remove rows with NaN values from SMA calculations
     df_clean = df.dropna()
     
-    # Use vectorized operations for features and targets
-    features = df_clean[['sma_7', 'sma_365', 'volume_sma_5', 'volume_sma_10']].values
-    targets = df_clean['close'].shift(-3).dropna().values  # Target is 3 days ahead
+    features = []
+    targets = []
+    for i in range(len(df_clean)):
+        # Features: 7-day and 365-day price SMAs, 5-day and 10-day volume SMAs
+        feature = [
+            df_clean['sma_7'].iloc[i],
+            df_clean['sma_365'].iloc[i],
+            df_clean['volume_sma_5'].iloc[i],
+            df_clean['volume_sma_10'].iloc[i]
+        ]
+        features.append(feature)
+        # Target: next day's closing price
+        if i < len(df_clean) - 3:  # Reduced lookback to 3 days
+            target = df_clean['close'].iloc[i + 3]
+            targets.append(target)
     
-    # Align features and targets by removing last 3 rows from features
+    # Remove the last 3 features since they have no corresponding target
     features = features[:-3]
-    return features, targets
+    return np.array(features), np.array(targets)
 
 # Train model
-def train_model(features, targets, df):
-    # Define training period end (September 30, 2023)
-    train_end_date = pd.Timestamp('2023-09-30')
-    # Use the same df_clean as in prepare_data to avoid recalculation
-    df_clean = df.dropna()
-    train_end_idx = df_clean.index.get_indexer([train_end_date], method='pad')[0]
-    # Use all data up to train_end_idx for training
-    X_train = features[:train_end_idx + 1]  # +1 to include the end date
-    y_train = targets[:train_end_idx + 1]
-    # Use all data after train_end_idx for testing (including 2025)
-    X_test = features[train_end_idx + 1:]
-    y_test = targets[train_end_idx + 1:]
-    # Test indices start from train_end_idx + 1 + 200 (adjusting for SMA lag)
-    test_indices = list(range(train_end_idx + 1 + 200, train_end_idx + 1 + 200 + len(y_test)))
+def train_model(features, targets):
+    # Use time series split: first 50% for training, last 50% for testing
+    split_idx = int(len(features) * 0.5)
+    X_train = features[:split_idx]
+    X_test = features[split_idx:]
+    y_train = targets[:split_idx]
+    y_test = targets[split_idx:]
+    # Test indices start from split_idx + 200 (since we lost first 200 rows to SMA calculation)
+    test_indices = list(range(split_idx + 200, split_idx + 200 + len(y_test)))
     model = LinearRegression()
     model.fit(X_train, y_train)
     predictions = model.predict(X_test)
@@ -143,7 +150,7 @@ def create_plot(df, y_test, predictions, test_indices):
 def index():
     df = load_data()
     features, targets = prepare_data(df)
-    model, X_test, y_test, predictions, mse, test_indices = train_model(features, targets, df)
+    model, X_test, y_test, predictions, mse, test_indices = train_model(features, targets)
     plot_url = create_plot(df, y_test, predictions, test_indices)
     return render_template('index.html', plot_url=plot_url, mse=mse)
 
