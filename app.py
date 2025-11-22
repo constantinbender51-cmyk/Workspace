@@ -2,7 +2,11 @@ from flask import Flask, render_template
 import plotly.express as px
 import pandas as pd
 import os
+import logging
 from fetch_price_data import fetch_price_data
+
+# Configure logging
+logging.basicConfig(level=logging.ERROR, format='%(asctime)s - %(levelname)s - %(message)s')
 
 app = Flask(__name__)
 
@@ -18,7 +22,8 @@ def index():
         graph_html = fig.to_html(full_html=False)
         return render_template('index.html', graph_html=graph_html)
     except Exception as e:
-        return f"Error generating BTC price graph: {str(e)}"
+        logging.error(f"Error generating BTC price graph: {str(e)}")
+        return "An error occurred while generating the graph. Please try again later."
 
 if __name__ == '__main__':
     app.run(host='0.0.0.0', port=5000, debug=True)
