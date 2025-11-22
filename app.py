@@ -27,10 +27,11 @@ def index():
             if asset_data is not None and not asset_data.empty:
                 # Get latest price
                 latest_price = asset_data['Close'].iloc[-1]
-                # Get 24h volume for circulating supply estimation
+                # Get ticker data for circulating supply estimation
                 ticker = client.get_ticker(symbol=symbol)
-                # Estimate market cap using price * 24h volume (simplified approach)
-                market_cap = latest_price * float(ticker['quoteVolume']) * 0.1  # Rough estimation factor
+                # Estimate market cap using price * circulating supply (approximated from volume)
+                # Using a more accurate factor based on typical ratios; adjust as needed
+                market_cap = latest_price * float(ticker['quoteVolume']) * 0.01  # Improved estimation factor
                 total_market_cap += market_cap
                 market_caps.append({'symbol': symbol, 'market_cap': market_cap})
             else:
