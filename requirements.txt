@@ -2,4 +2,3 @@ flask
 pandas
 python-binance
 requests
-requests
