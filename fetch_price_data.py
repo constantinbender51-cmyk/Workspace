@@ -43,7 +43,7 @@ def fetch_price_data(symbol='BTCUSDT', start_date='2022-01-01', end_date='2023-0
         
         return data
     except Exception as e:
-        print(f"An error occurred: {e}")
+        print(f"An error occurred fetching price data: {e}")
         return None
 
 if __name__ == "__main__":
