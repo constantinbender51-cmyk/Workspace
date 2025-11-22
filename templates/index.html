@@ -1,18 +1,12 @@
 <!DOCTYPE html>
 <html>
 <head>
-    <title>Crypto Assets</title>
+    <title>BTC Price</title>
 </head>
 <body>
-    <h1>Top 10 Crypto Assets by Trading Volume</h1>
-    
-    <div style="margin: 20px 0;">
-        <h2>Assets:</h2>
-        <ul>
-            {% for asset in top_assets %}
-            <li>{{ asset }}</li>
-            {% endfor %}
-        </ul>
+    <h1>BTC Price Over Time</h1>
+    <div>
+        {{ graph_html | safe }}
     </div>
 </body>
 </html>
