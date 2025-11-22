@@ -82,13 +82,21 @@ def train_model(features, targets):
 
 # Generate plot
 def create_plot(df, y_test, predictions, test_indices):
-    plt.figure(figsize=(10, 6))
+    plt.figure(figsize=(10, 8))
     dates = df.index[test_indices]
     # Sort by date to ensure chronological plotting
     sorted_indices = np.argsort(dates)
     sorted_dates = dates[sorted_indices]
     sorted_y_test = y_test[sorted_indices]
     sorted_predictions = predictions[sorted_indices]
+    
+    # Calculate trading returns
+    positions = np.where(sorted_y_test > sorted_predictions, 1, -1)  # Long if actual > predicted, short otherwise
+    returns = positions[:-1] * (sorted_y_test[1:] - sorted_y_test[:-1]) / sorted_y_test[:-1]
+    cumulative_returns = np.cumprod(1 + returns) - 1
+    
+    # Plot price and predictions
+    plt.subplot(2, 1, 1)
     plt.plot(sorted_dates, sorted_y_test, label='Actual Price', color='blue')
     plt.plot(sorted_dates, sorted_predictions, label='Predicted Price', color='red')
     plt.xlabel('Date')
@@ -96,6 +104,16 @@ def create_plot(df, y_test, predictions, test_indices):
     plt.title('BTC Price Prediction vs Actual')
     plt.legend()
     plt.xticks(rotation=45)
+    
+    # Plot cumulative returns
+    plt.subplot(2, 1, 2)
+    plt.plot(sorted_dates[1:], cumulative_returns, label='Cumulative Returns', color='green')
+    plt.xlabel('Date')
+    plt.ylabel('Cumulative Returns')
+    plt.title('Trading Strategy Cumulative Returns')
+    plt.legend()
+    plt.xticks(rotation=45)
+    
     plt.tight_layout()
     img = io.BytesIO()
     plt.savefig(img, format='png')
