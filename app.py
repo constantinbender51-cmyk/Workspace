@@ -7,7 +7,7 @@ app = Flask(__name__)
 
 @app.route('/')
 def index():
-    # Fetch top 10 liquid assets and their price changes relative to BTC
+    # Fetch top 10 liquid assets and calculate total market cap
     from fetch_top_assets import fetch_top_assets_by_volume
     from fetch_price_data import fetch_price_data
     
@@ -16,25 +16,29 @@ def index():
     if not top_assets:
         return "Error: Could not fetch top assets"
     
-    # Fetch BTC price data for comparison
-    btc_data = fetch_price_data('BTCUSDT')
-    if btc_data is None:
-        return "Error: Could not fetch BTC price data"
+    # Calculate total market cap for all top assets
+    total_market_cap = 0
+    market_caps = []
     
-    # Calculate price change percentages for each asset relative to BTC
-    asset_changes = []
     for symbol in top_assets:
         asset_data = fetch_price_data(symbol)
         if asset_data is not None and not asset_data.empty:
-            # Calculate percentage change: ((asset_price - btc_price) / btc_price) * 100
-            asset_price = asset_data['Close'].iloc[-1]  # Latest price
-            btc_price = btc_data['Close'].iloc[-1]  # Latest BTC price
-            change_percent = ((asset_price - btc_price) / btc_price) * 100
-            asset_changes.append({'symbol': symbol, 'change_percent': change_percent})
+            # Get latest price
+            latest_price = asset_data['Close'].iloc[-1]
+            # Get 24h volume for circulating supply estimation
+            from binance.client import Client
+            client = Client()
+            ticker = client.get_ticker(symbol=symbol)
+            # Estimate market cap using price * 24h volume (simplified approach)
+            market_cap = latest_price * float(ticker['quoteVolume'])
+            total_market_cap += market_cap
+            market_caps.append({'symbol': symbol, 'market_cap': market_cap})
     
-    if not asset_changes:
-        return "Error: No valid price data for top assets"
-    return render_template('index.html', asset_changes=asset_changes)
+    if total_market_cap == 0:
+        return "Error: Could not calculate market cap data"
+    
+    return render_template('index.html', total_market_cap=total_market_cap, market_caps=market_caps)
+    
 
 if __name__ == '__main__':
     app.run(host='0.0.0.0', port=5000, debug=True)
