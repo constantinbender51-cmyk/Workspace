@@ -85,10 +85,12 @@ def create_plot(df, y_test, predictions, test_indices):
     capital = [1000]  # Start with $1000
     for i in range(len(sorted_y_test)):
         if i == 0:
-            # For the first day, use the return from the previous actual price in the dataset
-            prev_price = df['close'].iloc[test_indices[sorted_indices[i]] - 1] if test_indices[sorted_indices[i]] > 0 else sorted_y_test[i]
+            # For the first day, use the price from the day before the test period starts
+            prev_index = test_indices[sorted_indices[i]] - 1
+            prev_price = df['close'].iloc[prev_index] if prev_index >= 0 else sorted_y_test[i]
         else:
             prev_price = sorted_y_test[i - 1]
+        
         actual_return = (sorted_y_test[i] - prev_price) / prev_price
         if sorted_predictions[i] > sorted_y_test[i]:  # Prediction above actual: negative actual return
             ret = -actual_return
