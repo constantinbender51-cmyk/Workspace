@@ -1,60 +1,95 @@
-import requests
+from binance.client import Client
 import pandas as pd
 import os
 
 def fetch_market_cap(start_date='2022-01-01', end_date='2023-09-30'):
     """
-    Fetch historical total cryptocurrency market cap data from CoinGecko API.
+    Fetch historical total cryptocurrency market cap data using Binance API.
+    Calculates total market cap by summing market caps of top cryptocurrencies.
     
     Parameters:
     start_date (str): Start date in 'YYYY-MM-DD' format, default is '2022-01-01'.
     end_date (str): End date in 'YYYY-MM-DD' format, default is '2023-09-30'.
     
     Returns:
-    pandas.DataFrame: Historical market cap data.
+    pandas.DataFrame: Historical total cryptocurrency market cap data.
     """
     try:
-        # CoinGecko API endpoint for global market cap history
-        url = "https://api.coingecko.com/api/v3/coins/bitcoin/market_chart/range"
-        params = {
-            'vs_currency': 'usd',
-            'from': int(pd.to_datetime(start_date).timestamp()),
-            'to': int(pd.to_datetime(end_date).timestamp())
-        }
+        # Initialize Binance client
+        client = Client()
         
-        # Make API request
-        response = requests.get(url, params=params)
-        response.raise_for_status()
-        data = response.json()
+        # Get top cryptocurrencies by market cap (symbols available on Binance)
+        top_symbols = [
+            'BTCUSDT', 'ETHUSDT', 'BNBUSDT', 'XRPUSDT', 'ADAUSDT',
+            'DOGEUSDT', 'MATICUSDT', 'DOTUSDT', 'LTCUSDT', 'BCHUSDT',
+            'LINKUSDT', 'ATOMUSDT', 'XLMUSDT', 'FILUSDT', 'ETCUSDT',
+            'XTZUSDT', 'EOSUSDT', 'AAVEUSDT', 'ALGOUSDT', 'NEOUSDT'
+        ]
         
-        # Extract market cap data (total market cap is not directly available, using Bitcoin's as a proxy for simplicity)
-        # Note: For total market cap, you might need a different endpoint or service
-        market_caps = [entry[1] for entry in data['market_caps']]
-        timestamps = [entry[0] for entry in data['market_caps']]
+        # Fetch daily market cap data for each symbol
+        market_cap_data = {}
         
-        # Create DataFrame
-        market_cap_data = pd.DataFrame({
-            'market_cap': market_caps
-        }, index=pd.to_datetime(timestamps, unit='ms'))
+        for symbol in top_symbols:
+            try:
+                # Fetch historical klines
+                klines = client.get_historical_klines(symbol, Client.KLINE_INTERVAL_1DAY, start_date, end_date)
+                
+                if klines:
+                    # Convert to DataFrame
+                    data = pd.DataFrame(klines, columns=['Open time', 'Open', 'High', 'Low', 'Close', 'Volume', 
+                                                        'Close time', 'Quote asset volume', 'Number of trades', 
+                                                        'Taker buy base asset volume', 'Taker buy quote asset volume', 'Ignore'])
+                    
+                    data['Open time'] = pd.to_datetime(data['Open time'], unit='ms')
+                    data.set_index('Open time', inplace=True)
+                    
+                    # Convert price to float
+                    data['Close'] = data['Close'].astype(float)
+                    data['Volume'] = data['Volume'].astype(float)
+                    
+                    # Calculate daily market cap (price * volume as approximation)
+                    # Note: This is a simplified calculation. For more accuracy, you'd need circulating supply data
+                    market_cap_data[symbol] = data['Close'] * data['Volume']
+                    
+            except Exception as e:
+                print(f"Warning: Could not fetch data for {symbol}: {e}")
+                continue
         
-        # Resample to daily data if needed (API returns data points, ensure daily)
-        market_cap_data = market_cap_data.resample('D').last().dropna()
+        if not market_cap_data:
+            print("No market cap data could be fetched for any symbol")
+            return None
+        
+        # Combine all market caps into a single DataFrame
+        combined_df = pd.DataFrame(market_cap_data)
+        
+        # Calculate total market cap by summing all individual market caps
+        combined_df['total_market_cap'] = combined_df.sum(axis=1)
+        
+        # Create final DataFrame with just the total market cap
+        final_data = pd.DataFrame({
+            'market_cap': combined_df['total_market_cap']
+        })
+        
+        # Resample to ensure daily data
+        final_data = final_data.resample('D').last().dropna()
         
         # Check if data is empty
-        if market_cap_data.empty:
+        if final_data.empty:
             print("No market cap data found for the specified date range.")
             return None
         
         # Save to CSV file
-        filename = f"market_cap_data_{start_date}_to_{end_date}.csv"
-        market_cap_data.to_csv(filename)
-        print(f"Market cap data saved to {filename}")
+        filename = f"total_market_cap_data_{start_date}_to_{end_date}.csv"
+        final_data.to_csv(filename)
+        print(f"Total market cap data saved to {filename}")
+        print(f"Total market cap range: ${final_data['market_cap'].min():,.0f} - ${final_data['market_cap'].max():,.0f}")
         
-        return market_cap_data
+        return final_data
+        
     except Exception as e:
         print(f"An error occurred while fetching market cap data: {e}")
         return None
 
 if __name__ == "__main__":
-    # Example usage: Fetch market cap data from Jan 2022 to Sep 2023
+    # Example usage: Fetch total market cap data from Jan 2022 to Sep 2023
     fetch_market_cap()
