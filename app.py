@@ -57,8 +57,8 @@ def prepare_data(df):
 
 # Train model
 def train_model(features, targets):
-    # Use time series split: first 80% for training, last 20% for testing
-    split_idx = int(len(features) * 0.8)
+    # Use time series split: first 50% for training, last 50% for testing
+    split_idx = int(len(features) * 0.5)
     X_train = features[:split_idx]
     X_test = features[split_idx:]
     y_train = targets[:split_idx]
