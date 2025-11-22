@@ -9,6 +9,7 @@ Line 6: This is the sixth line of the file
 Line 7: This is the seventh line of the file
 Line 8: This is the eighth line of the file
 Line 9: This is the ninth line of the file
+01000010 01101001 01101110 01100001 01110010 01111001 00100000 01100011 01101111 01100100 01100101
 Line 10: This is the tenth line of the file
 Line 11: This is the eleventh line of the file
 Line 12: This is the twelfth line of the file
