@@ -83,6 +83,8 @@ def create_plot(df, y_test, predictions, test_indices):
     
     # Calculate capital with daily accumulation based on prediction vs actual and actual Bitcoin returns
     capital = [1000]  # Start with $1000
+    sma_capital = [1000]  # Start with $1000 for SMA strategy
+    
     for i in range(len(sorted_y_test)):
         if i == 0:
             # For the first day, use the price from the day before the test period starts
@@ -92,12 +94,29 @@ def create_plot(df, y_test, predictions, test_indices):
             prev_price = sorted_y_test[i - 1]
         
         actual_return = (sorted_y_test[i] - prev_price) / prev_price
+        
+        # ML Strategy
         if sorted_predictions[i] > sorted_y_test[i]:  # Prediction above actual: negative actual return
             ret = -actual_return
         else:  # Prediction below actual: positive actual return
             ret = actual_return
         capital.append(capital[-1] * (1 + ret))
+        
+        # 365-day SMA Strategy
+        current_date = sorted_dates[i]
+        sma_365 = df.loc[current_date, 'sma_365']
+        current_price = sorted_y_test[i]
+        
+        if current_price > sma_365:
+            # Go long: positive actual return
+            sma_ret = actual_return
+        else:
+            # Go short: negative actual return
+            sma_ret = -actual_return
+        sma_capital.append(sma_capital[-1] * (1 + sma_ret))
+    
     capital = capital[1:]  # Remove the initial 1000 to match the number of dates
+    sma_capital = sma_capital[1:]  # Remove the initial 1000 to match the number of dates
     
     # Plot price and predictions
     plt.subplot(2, 1, 1)
@@ -111,10 +130,11 @@ def create_plot(df, y_test, predictions, test_indices):
     
     # Plot capital
     plt.subplot(2, 1, 2)
-    plt.plot(sorted_dates, capital, label='Capital', color='green')
+    plt.plot(sorted_dates, capital, label='ML Strategy Capital', color='green')
+    plt.plot(sorted_dates, sma_capital, label='365-day SMA Strategy Capital', color='orange')
     plt.xlabel('Date')
     plt.ylabel('Capital (USD)')
-    plt.title('Trading Strategy Capital')
+    plt.title('Trading Strategy Capital Comparison')
     plt.legend()
     plt.xticks(rotation=45)
     
