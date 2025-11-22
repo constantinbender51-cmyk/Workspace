@@ -54,8 +54,13 @@ def train_model(features, targets):
 def create_plot(df, y_test, predictions, test_indices):
     plt.figure(figsize=(10, 6))
     dates = df.index[test_indices]
-    plt.plot(dates, y_test, label='Actual Price', color='blue')
-    plt.plot(dates, predictions, label='Predicted Price', color='red')
+    # Sort by date to ensure chronological plotting
+    sorted_indices = np.argsort(dates)
+    sorted_dates = dates[sorted_indices]
+    sorted_y_test = y_test[sorted_indices]
+    sorted_predictions = predictions[sorted_indices]
+    plt.plot(sorted_dates, sorted_y_test, label='Actual Price', color='blue')
+    plt.plot(sorted_dates, sorted_predictions, label='Predicted Price', color='red')
     plt.xlabel('Date')
     plt.ylabel('Price (USD)')
     plt.title('BTC Price Prediction vs Actual')
