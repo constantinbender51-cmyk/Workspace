@@ -4,15 +4,18 @@
     <title>Cryptocurrency Price Chart</title>
     <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
 </head>
-    <h1>Bitcoin Price vs Total Crypto Market Cap</h1>
 <body>
-    <h1>Bitcoin Price Chart</h1>
+    <h1>Bitcoin Price vs Total Crypto Market Cap</h1>
     <div style="width: 800px; height: 400px;">
         <canvas id="priceChart"></canvas>
     </div>
     
     <script>
         const ctx = document.getElementById('priceChart').getContext('2d');
+        const chart = new Chart(ctx, {
+            type: 'line',
+            data: {
+                labels: {{ dates | tojson }},
                 datasets: [{
                     label: 'BTC Price (USD)',
                     data: {{ prices | tojson }},
@@ -27,16 +30,9 @@
                     tension: 0.1,
                     yAxisID: 'y1'
                 }]
-        const chart = new Chart(ctx, {
-            type: 'line',
-            data: {
-                labels: {{ dates | tojson }},
-                datasets: [{
-                    label: 'BTC Price (USD)',
-                    data: {{ prices | tojson }},
-                    borderColor: 'rgb(75, 192, 192)',
-                    tension: 0.1
-                }]
+            },
+            options: {
+                responsive: true,
                 scales: {
                     x: {
                         title: {
@@ -63,23 +59,6 @@
                         },
                         grid: {
                             drawOnChartArea: false
-                        }
-                    }
-                }
-            },
-            options: {
-                responsive: true,
-                scales: {
-                    x: {
-                        title: {
-                            display: true,
-                            text: 'Date'
-                        }
-                    },
-                    y: {
-                        title: {
-                            display: true,
-                            text: 'Price (USD)'
                         }
                     }
                 }
