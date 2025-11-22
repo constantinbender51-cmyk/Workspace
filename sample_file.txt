@@ -2,9 +2,6 @@ Line 1: Fresh content for line 1
 Line 2: Fresh content for line 2
 Line 3: Fresh content for line 3
 Line 4: Fresh content for line 4
-Line 5: Fresh content for line 5
-Line 6: Fresh content for line 6
-Line 7: Fresh content for line 7
 Line 8: Fresh content for line 8
 Line 9: Fresh content for line 9
 Line 10: Fresh content for line 10
