@@ -1,6 +1,7 @@
 from binance.client import Client
 import pandas as pd
 import os
+import logging
 
 def fetch_price_data(symbol='BTCUSDT', start_date='2022-01-01', end_date='2023-09-30'):
     """
@@ -18,7 +19,7 @@ def fetch_price_data(symbol='BTCUSDT', start_date='2022-01-01', end_date='2023-0
         # Initialize Binance client without API keys for public data
         client = Client()
         if not client.ping():
-            print("Error: Unable to connect to Binance API")
+            logging.error("Unable to connect to Binance API")
             return None
         
         # Fetch historical klines data from Binance
@@ -36,17 +37,17 @@ def fetch_price_data(symbol='BTCUSDT', start_date='2022-01-01', end_date='2023-0
         
         # Check if data is empty
         if data.empty:
-            print(f"No data found for symbol {symbol} in the specified date range.")
+            logging.warning(f"No data found for symbol {symbol} in the specified date range.")
             return None
         
         # Save to CSV file
         filename = f"{symbol}_price_data_{start_date}_to_{end_date}.csv"
         data.to_csv(filename)
-        print(f"Data saved to {filename}")
+        logging.info(f"Data saved to {filename}")
         
         return data
     except Exception as e:
-        print(f"An error occurred fetching price data: {e}")
+        logging.error(f"An error occurred fetching price data: {e}")
         return None
 
 if __name__ == "__main__":
