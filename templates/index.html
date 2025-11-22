@@ -1,70 +1,18 @@
 <!DOCTYPE html>
 <html>
 <head>
-    <title>Total Crypto Market Cap</title>
-    <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+    <title>Crypto Assets</title>
 </head>
 <body>
-    <h1>Total Market Cap of Top 10 Liquid Crypto Assets</h1>
+    <h1>Top 10 Crypto Assets by Trading Volume</h1>
     
-    <div style="margin: 20px 0; font-size: 24px; font-weight: bold;">
-        Total Market Cap: ${{ "{:,.0f}".format(total_market_cap) }}
+    <div style="margin: 20px 0;">
+        <h2>Assets:</h2>
+        <ul>
+            {% for asset in top_assets %}
+            <li>{{ asset }}</li>
+            {% endfor %}
+        </ul>
     </div>
-    
-    <div style="width: 800px; height: 400px;">
-        <canvas id="marketCapChart"></canvas>
-    </div>
-    
-    <script>
-        const ctx = document.getElementById('marketCapChart').getContext('2d');
-        const marketCaps = {{ market_caps | tojson }};
-        const symbols = marketCaps.map(asset => asset.symbol);
-        const caps = marketCaps.map(asset => asset.market_cap);
-        
-        const chart = new Chart(ctx, {
-            type: 'bar',
-            data: {
-                labels: symbols,
-                datasets: [{
-                    label: 'Market Cap ($)',
-                    data: caps,
-                    backgroundColor: 'rgba(54, 162, 235, 0.2)',
-                    borderColor: 'rgba(54, 162, 235, 1)',
-                    borderWidth: 1
-                }]
-            },
-            options: {
-                responsive: true,
-                scales: {
-                    x: {
-                        title: {
-                            display: true,
-                            text: 'Cryptocurrency Symbol'
-                        }
-                    },
-                    y: {
-                        title: {
-                            display: true,
-                            text: 'Market Cap ($)'
-                        },
-                        ticks: {
-                            callback: function(value) {
-                                return '$' + value.toLocaleString();
-                            }
-                        }
-                    }
-                },
-                plugins: {
-                    tooltip: {
-                        callbacks: {
-                            label: function(context) {
-                                return 'Market Cap: $' + context.parsed.y.toLocaleString();
-                            }
-                        }
-                    }
-                }
-            }
-        });
-    </script>
 </body>
 </html>
