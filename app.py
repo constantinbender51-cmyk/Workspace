@@ -6,8 +6,8 @@ from fetch_price_data import fetch_price_data
 
 app = Flask(__name__)
 
-@app.route('/btc-price')
-def btc_price():
+@app.route('/')
+def index():
     try:
         # Fetch historical BTC price data
         btc_data = fetch_price_data(symbol='BTCUSDT', start_date='2022-01-01', end_date='2023-09-30')
@@ -16,19 +16,9 @@ def btc_price():
         # Generate a plotly graph
         fig = px.line(btc_data, x=btc_data.index, y='Close', title='BTC Price Over Time')
         graph_html = fig.to_html(full_html=False)
-        return render_template('btc_price.html', graph_html=graph_html)
+        return render_template('index.html', graph_html=graph_html)
     except Exception as e:
         return f"Error generating BTC price graph: {str(e)}"
-
-@app.route('/')
-def index():
-    # Fetch top 10 assets by volume
-    from fetch_top_assets import fetch_top_assets_by_volume
-    top_assets = fetch_top_assets_by_volume(10)
-    if not top_assets:
-        return "Error: Could not fetch top assets. Please check the API connection."
-    # Render template with top assets list
-    return render_template('index.html', top_assets=top_assets)
 
 if __name__ == '__main__':
     app.run(host='0.0.0.0', port=5000, debug=True)
