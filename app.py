@@ -10,11 +10,15 @@ import matplotlib.pyplot as plt
 import io
 import base64
 import os
+import subprocess
 
 app = Flask(__name__)
 
 # Load and preprocess data
 def load_data():
+    if not os.path.exists('btc_data.csv'):
+        # Run the data fetching script if file doesn't exist
+        subprocess.run(['python', 'fetch_price_data.py'], check=True)
     df = pd.read_csv('btc_data.csv')
     df['date'] = pd.to_datetime(df['date'])
     df.set_index('date', inplace=True)
