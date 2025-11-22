@@ -5,7 +5,7 @@
     <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
 </head>
 <body>
-    <h1>Bitcoin Price vs Total Crypto Market Cap</h1>
+    <h1>Bitcoin Price Chart</h1>
     <div style="width: 800px; height: 400px;">
         <canvas id="priceChart"></canvas>
     </div>
@@ -20,15 +20,7 @@
                     label: 'BTC Price (USD)',
                     data: {{ prices | tojson }},
                     borderColor: 'rgb(75, 192, 192)',
-                    tension: 0.1,
-                    yAxisID: 'y'
-                },
-                {
-                    label: 'Total Market Cap (USD)',
-                    data: {{ market_caps | tojson }},
-                    borderColor: 'rgb(255, 99, 132)',
-                    tension: 0.1,
-                    yAxisID: 'y1'
+                    tension: 0.1
                 }]
             },
             options: {
@@ -41,24 +33,9 @@
                         }
                     },
                     y: {
-                        type: 'linear',
-                        display: true,
-                        position: 'left',
                         title: {
                             display: true,
                             text: 'Bitcoin Price (USD)'
-                        }
-                    },
-                    y1: {
-                        type: 'linear',
-                        display: true,
-                        position: 'right',
-                        title: {
-                            display: true,
-                            text: 'Total Market Cap (USD)'
-                        },
-                        grid: {
-                            drawOnChartArea: false
                         }
                     }
                 }
