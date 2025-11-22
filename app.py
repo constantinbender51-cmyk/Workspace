@@ -128,7 +128,7 @@ def predict():
         plot_data = pd.DataFrame({
             'Date': dates[date_positions],
             'Actual': y_test.values,
-            'Predicted': y_pred
+            'Predicted': y_pred * 10000  # Scale predicted values by 10,000 for better visibility
         }).set_index('Date')
         
         # Generate prediction graph
