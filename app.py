@@ -35,32 +35,20 @@ def prepare_data(df):
     # Remove rows with NaN values from SMA calculations
     df_clean = df.dropna()
     
-    features = []
-    targets = []
-    for i in range(len(df_clean)):
-        # Features: 7-day and 365-day price SMAs, 5-day and 10-day volume SMAs
-        feature = [
-            df_clean['sma_7'].iloc[i],
-            df_clean['sma_365'].iloc[i],
-            df_clean['volume_sma_5'].iloc[i],
-            df_clean['volume_sma_10'].iloc[i]
-        ]
-        features.append(feature)
-        # Target: next day's closing price
-        if i < len(df_clean) - 3:  # Reduced lookback to 3 days
-            target = df_clean['close'].iloc[i + 3]
-            targets.append(target)
+    # Use vectorized operations for features and targets
+    features = df_clean[['sma_7', 'sma_365', 'volume_sma_5', 'volume_sma_10']].values
+    targets = df_clean['close'].shift(-3).dropna().values  # Target is 3 days ahead
     
-    # Remove the last 3 features since they have no corresponding target
+    # Align features and targets by removing last 3 rows from features
     features = features[:-3]
-    return np.array(features), np.array(targets)
+    return features, targets
 
 # Train model
 def train_model(features, targets, df):
     # Define training period end (September 30, 2023)
     train_end_date = pd.Timestamp('2023-09-30')
-    # Find the index in df_clean corresponding to the training end
-    df_clean = df.dropna()  # Replicate the cleaning from prepare_data
+    # Use the same df_clean as in prepare_data to avoid recalculation
+    df_clean = df.dropna()
     train_end_idx = df_clean.index.get_indexer([train_end_date], method='pad')[0]
     # Use all data up to train_end_idx for training
     X_train = features[:train_end_idx + 1]  # +1 to include the end date
