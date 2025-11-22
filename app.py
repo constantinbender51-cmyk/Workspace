@@ -4,6 +4,10 @@ import pandas as pd
 import os
 import logging
 import time
+import numpy as np
+from sklearn.model_selection import train_test_split
+from sklearn.linear_model import LinearRegression
+from sklearn.preprocessing import StandardScaler
 from fetch_price_data import fetch_multiple_cryptos
 
 # Configure logging
@@ -19,6 +23,92 @@ CIRCULATING_SUPPLY = {
     'Cardano': 35500.0,  # ~35.5 billion ADA
     'Binance Coin': 153.4  # ~153.4 million BNB
 }
+
+def prepare_data_for_prediction():
+    """
+    Prepare data for linear regression model to predict 7-day BTC price movement.
+    Uses BTC price, volume, and total crypto market cap as features.
+    """
+    try:
+        logging.debug("Preparing data for linear regression prediction")
+        crypto_data = fetch_multiple_cryptos()
+        if crypto_data is None:
+            logging.error("Failed to fetch data for prediction")
+            return None, None, None, None
+        
+        # Calculate features: BTC price, volume (not available, using placeholder), and total market cap
+        btc_price = crypto_data['Bitcoin']
+        # Note: Volume data is not fetched in current implementation; using BTC price as placeholder for volume
+        volume = btc_price  # Placeholder; in practice, fetch actual volume from Binance
+        total_market_cap = pd.Series(0, index=crypto_data.index)
+        for crypto_name in crypto_data.columns:
+            if crypto_name in CIRCULATING_SUPPLY:
+                total_market_cap += crypto_data[crypto_name] * CIRCULATING_SUPPLY[crypto_name]
+        
+        # Create feature DataFrame and normalize
+        features = pd.DataFrame({
+            'BTC_Price': btc_price,
+            'Volume': volume,
+            'Total_Market_Cap': total_market_cap
+        })
+        scaler = StandardScaler()
+        features_scaled = scaler.fit_transform(features)
+        features_scaled = pd.DataFrame(features_scaled, index=features.index, columns=features.columns)
+        
+        # Calculate target: 7-day price movement (percentage change in BTC price)
+        target = btc_price.pct_change(periods=7).shift(-7)  # Shift to align with current features
+        
+        # Drop NaN values from target and align features
+        valid_indices = target.notna()
+        features_clean = features_scaled[valid_indices]
+        target_clean = target[valid_indices]
+        
+        logging.debug(f"Prepared data with {len(features_clean)} samples")
+        return features_clean, target_clean, scaler, crypto_data.index[valid_indices]
+    except Exception as e:
+        logging.error(f"Error preparing data for prediction: {str(e)}")
+        return None, None, None, None
+
+
+@app.route('/predict')
+def predict():
+    """
+    Route to train linear regression model and display predictions vs actual.
+    """
+    try:
+        logging.debug("Starting prediction route")
+        features, target, scaler, dates = prepare_data_for_prediction()
+        if features is None or target is None:
+            return "Error: Could not prepare data for prediction."
+        
+        # Split data into train and test sets (40% test)
+        X_train, X_test, y_train, y_test = train_test_split(features, target, test_size=0.4, random_state=42)
+        
+        # Train linear regression model
+        model = LinearRegression()
+        model.fit(X_train, y_train)
+        
+        # Make predictions
+        y_pred = model.predict(X_test)
+        
+        # Create DataFrame for plotting
+        plot_data = pd.DataFrame({
+            'Date': dates[X_test.index],
+            'Actual': y_test,
+            'Predicted': y_pred
+        }).set_index('Date')
+        
+        # Generate prediction graph
+        fig = px.line(plot_data, x=plot_data.index, y=['Actual', 'Predicted'],
+                     title='Linear Regression: Predicted vs Actual 7-Day BTC Price Movement',
+                     labels={'value': 'Price Movement (Fraction)', 'variable': 'Type'})
+        graph_html = fig.to_html(full_html=False)
+        
+        logging.debug("Prediction graph generated successfully")
+        return render_template('index.html', prices_graph_html=graph_html, market_cap_graph_html="")
+    except Exception as e:
+        logging.error(f"Error in prediction route: {str(e)}")
+        return "An error occurred during prediction. Please try again later."
 
 @app.route('/')
 def index():
