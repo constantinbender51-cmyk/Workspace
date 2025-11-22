@@ -4,7 +4,6 @@ Line 5: This is the fifth line
 Line 7: This is the seventh line
 Line 9: This is the ninth line
 Line 11: This is the eleventh line
-Line 7: Climate policies can infringe on individual freedoms and lead to excessive government control.
 Line 13: This is the thirteenth line
 Line 15: This is the fifteenth line
 Line 9: Focusing solely on climate change diverts resources from more immediate issues like poverty and disease.
