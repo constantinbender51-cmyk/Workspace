@@ -1,30 +1,35 @@
 <!DOCTYPE html>
 <html>
 <head>
-    <title>Top Crypto Assets Price Change vs BTC</title>
+    <title>Total Crypto Market Cap</title>
     <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
 </head>
 <body>
-    <h1>Top 10 Liquid Crypto Assets Price Change vs Bitcoin</h1>
+    <h1>Total Market Cap of Top 10 Liquid Crypto Assets</h1>
+    
+    <div style="margin: 20px 0; font-size: 24px; font-weight: bold;">
+        Total Market Cap: ${{ "{:,.0f}".format(total_market_cap) }}
+    </div>
+    
     <div style="width: 800px; height: 400px;">
-        <canvas id="changeChart"></canvas>
+        <canvas id="marketCapChart"></canvas>
     </div>
     
     <script>
-        const ctx = document.getElementById('changeChart').getContext('2d');
-        const assetChanges = {{ asset_changes | tojson }};
-        const symbols = assetChanges.map(asset => asset.symbol);
-        const changes = assetChanges.map(asset => asset.change_percent);
+        const ctx = document.getElementById('marketCapChart').getContext('2d');
+        const marketCaps = {{ market_caps | tojson }};
+        const symbols = marketCaps.map(asset => asset.symbol);
+        const caps = marketCaps.map(asset => asset.market_cap);
         
         const chart = new Chart(ctx, {
             type: 'bar',
             data: {
                 labels: symbols,
                 datasets: [{
-                    label: 'Price Change vs BTC (%)',
-                    data: changes,
-                    backgroundColor: 'rgba(75, 192, 192, 0.2)',
-                    borderColor: 'rgba(75, 192, 192, 1)',
+                    label: 'Market Cap ($)',
+                    data: caps,
+                    backgroundColor: 'rgba(54, 162, 235, 0.2)',
+                    borderColor: 'rgba(54, 162, 235, 1)',
                     borderWidth: 1
                 }]
             },
@@ -40,7 +45,21 @@
                     y: {
                         title: {
                             display: true,
-                            text: 'Price Change vs BTC (%)'
+                            text: 'Market Cap ($)'
+                        },
+                        ticks: {
+                            callback: function(value) {
+                                return '$' + value.toLocaleString();
+                            }
+                        }
+                    }
+                },
+                plugins: {
+                    tooltip: {
+                        callbacks: {
+                            label: function(context) {
+                                return 'Market Cap: $' + context.parsed.y.toLocaleString();
+                            }
                         }
                     }
                 }
