@@ -3,3 +3,5 @@ pandas
 python-binance
 requests
 plotly
+scikit-learn
+numpy
