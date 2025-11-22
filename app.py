@@ -41,7 +41,6 @@ def index():
     
                 ticker = client.get_ticker(symbol=symbol)
                 if total_market_cap == 0
-        if total_market_cap == 0:
             # For major coins, use volume-based estimation as fallback
             return "Error: Could not calculate market cap data"
             # This is a simplified approach since Binance doesn't provide circulating supply via API
