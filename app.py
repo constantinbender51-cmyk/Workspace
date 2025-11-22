@@ -12,7 +12,8 @@ def index():
     top_assets = fetch_top_assets_by_volume(10)
     if not top_assets:
         return "Error: Could not fetch top assets"
-    return "Top assets fetched successfully. Market cap logic has been removed."
+    # Render a basic template without market cap data to avoid errors
+    return render_template('index.html', total_market_cap=None, market_caps=[])
 
 if __name__ == '__main__':
     app.run(host='0.0.0.0', port=5000, debug=True)
