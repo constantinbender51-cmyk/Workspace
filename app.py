@@ -4,10 +4,11 @@ import numpy as np
 from sklearn.metrics import mean_squared_error
 from sklearn.preprocessing import StandardScaler
 from tensorflow.keras.models import Sequential
-from tensorflow.keras.layers import LSTM, Dense
+from tensorflow.keras.layers import LSTM, Dense, Dropout # Import Dropout
 from tensorflow.keras.optimizers import Adam
 from tensorflow.keras.callbacks import Callback
 from tensorflow.keras import backend as K
+from tensorflow.keras.regularizers import l2 # Import L2 Regularizer
 import matplotlib
 matplotlib.use('Agg')
 import matplotlib.pyplot as plt
@@ -234,14 +235,16 @@ def create_plot(df, y_train, predictions, train_indices, history_loss, history_v
     plt.xticks(rotation=45)
 
     capital = [1000]
+    # Simple Trading Strategy: Long if predicted price is higher than actual (momentum-based)
     for i in range(1, len(sorted_y_train)):
         ret = (sorted_y_train[i] - sorted_y_train[i-1]) / sorted_y_train[i-1]
-        pos = 1 if sorted_predictions[i-1] > sorted_y_train[i-1] else -1
+        # Position: 1 (Long, expects price to go up) if prediction > actual (momentum) else -1 (Short)
+        pos = 1 if sorted_predictions[i-1] > sorted_y_train[i-1] else -1 
         capital.append(capital[-1] * (1 + (ret * pos * 5)))
     
     plt.subplot(3, 1, 2)
     plt.plot(sorted_dates, capital, color='purple')
-    plt.title('Strategy Capital')
+    plt.title('Strategy Capital (Long/Short based on Predicted vs Actual)')
     plt.xticks(rotation=45)
 
     plt.subplot(3, 1, 3)
@@ -255,6 +258,7 @@ def create_plot(df, y_train, predictions, train_indices, history_loss, history_v
     plt.tight_layout()
     img = io.BytesIO()
     plt.savefig(img, format='png')
+    plt.close() # Important to close plot after saving
     img.seek(0)
     return base64.b64encode(img.getvalue()).decode()
 
@@ -270,7 +274,6 @@ def run_training_task():
             training_state['val_loss'] = []
         
         df = load_data()
-        # Unpack the new scaler_target
         features, targets_scaled, _, scaler_target = prepare_data(df)
         
         split_idx = int(len(features) * 0.8)
@@ -283,23 +286,33 @@ def run_training_task():
         X_train_reshaped = X_train.reshape(X_train.shape[0], 20, 10)
         X_test_reshaped = X_test.reshape(X_test.shape[0], 20, 10)
         
-        # INCREASED EPOCHS to find the Second Descent
+        # INCREASED EPOCHS AND ADDED REGULARIZATION
         EPOCHS = 3000
         UNITS = 128
+        REG_RATE = 1e-4 # L2 Regularization rate
         
         with state_lock:
             training_state['total_epochs'] = EPOCHS
         
-        logger.info(f"Building Model (Units: {UNITS}, Epochs: {EPOCHS})...")
+        logger.info(f"Building Model (Units: {UNITS}, Epochs: {EPOCHS}, L2: {REG_RATE})...")
         model = Sequential()
-        model.add(LSTM(UNITS, activation='relu', return_sequences=True, input_shape=(20, 10)))
-        model.add(LSTM(UNITS, activation='relu', return_sequences=True))
-        model.add(LSTM(UNITS, activation='relu'))
+        
+        # LSTM 1: L2 regularization added to the kernel weights
+        model.add(LSTM(UNITS, activation='relu', return_sequences=True, 
+                       input_shape=(20, 10), kernel_regularizer=l2(REG_RATE)))
+        model.add(Dropout(0.2)) # Dropout to force redundancy
+        
+        # LSTM 2: L2 regularization added
+        model.add(LSTM(UNITS, activation='relu', return_sequences=True, 
+                       kernel_regularizer=l2(REG_RATE)))
+        model.add(Dropout(0.2)) # Dropout to force redundancy
+        
+        # LSTM 3: L2 regularization added
+        model.add(LSTM(UNITS, activation='relu', kernel_regularizer=l2(REG_RATE)))
+        
         model.add(Dense(1))
         
-        # Stability: 
-        # - LR: 0.0001 (Safe)
-        # - clipnorm: 1.0 (Essential for preventing NaNs)
+        # Use low learning rate and clipnorm for stability
         optimizer = Adam(learning_rate=0.0001, clipnorm=1.0)
         model.compile(optimizer=optimizer, loss='mse')
         
@@ -317,7 +330,7 @@ def run_training_task():
         # Get predictions in Scaled format
         train_predictions_scaled = model.predict(X_train_reshaped, verbose=0)
         
-        # INVERSE TRANSFORM: Convert scaled 0.0-1.0 outputs back to $20,000 prices
+        # INVERSE TRANSFORM: Convert scaled outputs back to real dollar prices
         train_predictions_real = scaler_target.inverse_transform(train_predictions_scaled).flatten()
         y_train_real = scaler_target.inverse_transform(y_train).flatten()
         
@@ -328,6 +341,7 @@ def run_training_task():
         
         with state_lock:
             training_state['plot_url'] = plot_url
+            # Note: The 'loss' here now includes the L2 penalty, which is why it might not approach 0 as closely as before.
             training_state['train_mse'] = sanitize_float(history.history['loss'][-1])
             training_state['status'] = 'completed'
         
