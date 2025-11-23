@@ -27,7 +27,7 @@ def load_data():
 # Prepare features and target
 def prepare_data(df):
     # Calculate specified SMA
-    df['sma_1'] = df['close'].rolling(window=1).mean()
+    df['sma_1'] = df['close'].rolling(window=0).mean()
     
     # Remove rows with NaN values from SMA calculation
     df_clean = df.dropna()
