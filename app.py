@@ -94,23 +94,20 @@ def prepare_data(df):
     df['sma_14_volume_sma_14_price'] = df['sma_14_volume'] * df['sma_14']
     df['sma_14_squared'] = df['sma_14'] ** 2
     
+    # Calculate 7-day SMA for Net_Transaction_Count if available
+    if 'Net_Transaction_Count' in df.columns:
+        df['sma_7_net_transaction_count'] = df['Net_Transaction_Count'].rolling(window=7).mean()
+    
     # Remove rows with NaN values from SMA and on-chain metric calculations
     df_clean = df.dropna()
     
     features = []
     targets = []
-    # Use a rolling window of 7 days for net transaction count features
-    window_size = 7
     for i in range(len(df_clean)):
-        # Feature: net transaction count for the previous 7 days (t-7 through t-1)
+        # Feature: 7-day SMA of net transaction count (available at start of day)
         feature = []
-        if 'Net_Transaction_Count' in df_clean.columns:
-            if i >= window_size:
-                # Include the previous 7 days (excluding current day)
-                feature = df_clean['Net_Transaction_Count'].iloc[i - window_size:i].tolist()
-            else:
-                # For early days, pad with NaN (will be removed later)
-                feature = [np.nan] * window_size
+        if 'sma_7_net_transaction_count' in df_clean.columns:
+            feature = [df_clean['sma_7_net_transaction_count'].iloc[i]]
         features.append(feature)
         # Target: closing price 3 days ahead
         if i < len(df_clean) - 3:
