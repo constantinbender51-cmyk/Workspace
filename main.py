@@ -182,8 +182,7 @@ def build_dashboard(y_test, preds, model, feats, X_test):
     # stats banner
     mae = mean_absolute_error(y_test, preds)
     r2  = r2_score(y_test, preds)
-    ret_ser = pd.Series(returns, index=y_test.index[1:])   # already done above
-    ...
+   
     final_ret = ret_ser.iloc[-1] if len(ret_ser) else 0.0
     stats = Div(text=f"<b>MAE :</b> {mae:,.2f} USDT &nbsp;|&nbsp; <b>R² :</b> {r2:.3f} &nbsp;|&nbsp; <b>Final return :</b> {final_ret:+.2%}")
 
