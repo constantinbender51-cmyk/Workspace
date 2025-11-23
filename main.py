@@ -12,13 +12,9 @@ from datetime import datetime, timedelta
 app = Flask(__name__)
 
 def fetch_btc_data():
-    # Fetch BTC daily price data from Binance starting from 2025-01-01, extend start if needed for sufficient data
+    # Fetch BTC daily price data from Binance starting from 2024-12-01 to ensure enough data for 365-day SMA
     end_time = int(datetime.now().timestamp() * 1000)
-    start_time = int(datetime(2025, 1, 1).timestamp() * 1000)
-    # If current date is too close to start, adjust start to ensure at least 40 days of data for rolling windows
-    required_days = 40  # To accommodate rolling windows and lookback
-    if (datetime.now() - datetime(2025, 1, 1)).days < required_days:
-        start_time = int((datetime.now() - timedelta(days=required_days)).timestamp() * 1000)
+    start_time = int(datetime(2024, 12, 1).timestamp() * 1000)
     url = f"https://api.binance.com/api/v3/klines?symbol=BTCUSDT&interval=1d&startTime={start_time}&endTime={end_time}"
     response = requests.get(url)
     data = response.json()
@@ -33,7 +29,7 @@ def fetch_btc_data():
 
 def calculate_features(df):
     df['sma_7'] = df['close'].rolling(window=7).mean()
-    df['sma_365'] = df['close'].rolling(window=30).mean()  # Reduced from 365 to 30 for feasibility with current data
+    df['sma_365'] = df['close'].rolling(window=365).mean()  # Use full 365-day SMA as specified
     df['sma_volume_5'] = df['volume'].rolling(window=5).mean()
     df['sma_volume_10'] = df['volume'].rolling(window=10).mean()
     return df
