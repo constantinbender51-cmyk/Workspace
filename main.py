@@ -45,16 +45,32 @@ def prepare_data(df):
     # Create features with 5-day lookback for predicting the next day's close
     features = []
     targets = []
-    for i in range(5, len(df) - 1):  # Stop at len(df)-1 to have a target for next day
-        # Use only technical indicators (no current price) to predict close on day i (next day relative to lookback)
+    for i in range(5, len(df) - 1):  # Start from index 5 to have 5 days of lookback, stop at len(df)-1 to have a target
+        # Use technical indicators from the past 5 days (i-5 to i-1) to predict close on day i
         feature_row = [
-            df.iloc[i-1]['sma_7'],       # Use lagged SMA values for day i-1
-            df.iloc[i-1]['sma_365'],
-            df.iloc[i-1]['sma_volume_5'],
-            df.iloc[i-1]['sma_volume_10']
+            df.iloc[i-5]['sma_7'],       # SMA 7 from 5 days ago
+            df.iloc[i-4]['sma_7'],       # SMA 7 from 4 days ago
+            df.iloc[i-3]['sma_7'],       # SMA 7 from 3 days ago
+            df.iloc[i-2]['sma_7'],       # SMA 7 from 2 days ago
+            df.iloc[i-1]['sma_7'],       # SMA 7 from 1 day ago
+            df.iloc[i-5]['sma_365'],     # SMA 365 from 5 days ago
+            df.iloc[i-4]['sma_365'],     # SMA 365 from 4 days ago
+            df.iloc[i-3]['sma_365'],     # SMA 365 from 3 days ago
+            df.iloc[i-2]['sma_365'],     # SMA 365 from 2 days ago
+            df.iloc[i-1]['sma_365'],     # SMA 365 from 1 day ago
+            df.iloc[i-5]['sma_volume_5'], # SMA volume 5 from 5 days ago
+            df.iloc[i-4]['sma_volume_5'], # SMA volume 5 from 4 days ago
+            df.iloc[i-3]['sma_volume_5'], # SMA volume 5 from 3 days ago
+            df.iloc[i-2]['sma_volume_5'], # SMA volume 5 from 2 days ago
+            df.iloc[i-1]['sma_volume_5'], # SMA volume 5 from 1 day ago
+            df.iloc[i-5]['sma_volume_10'], # SMA volume 10 from 5 days ago
+            df.iloc[i-4]['sma_volume_10'], # SMA volume 10 from 4 days ago
+            df.iloc[i-3]['sma_volume_10'], # SMA volume 10 from 3 days ago
+            df.iloc[i-2]['sma_volume_10'], # SMA volume 10 from 2 days ago
+            df.iloc[i-1]['sma_volume_10']  # SMA volume 10 from 1 day ago
         ]
         features.append(feature_row)
-        targets.append(df.iloc[i]['close'])  # Target is close on day i (next day after lookback)
+        targets.append(df.iloc[i]['close'])  # Target is close on day i (next day after the 5-day lookback)
     
     return np.array(features), np.array(targets), df
 
