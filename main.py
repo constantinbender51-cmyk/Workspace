@@ -140,24 +140,38 @@ def build_dashboard(y_test, preds, model, feats, X_test):
     p3.vbar(x='feature', top='coef', width=0.7, source=ColumnDataSource(coef_df))
     p3.xaxis.major_label_orientation = 0.8
 
-        # 4. DAILY-CO    # 4. DAILY RETURN VERSION – fixed 1000 € exposure, no compounding
+        # 4. DAILY RETURN + coloured background for long/short
     returns = []
+    position_log = []          # 1 = long, -1 = short
+
     for i in range(1, len(y_test)):
         prev_price = y_test.iloc[i-1]
         curr_price = y_test.iloc[i]
         pred       = preds[i-1]
-        signal = 1.0 if prev_price > pred else -1.0   # mean-revert direction
-
+        pos = 1 if prev_price > pred else -1
+        position_log.append(pos)
         r = (curr_price / prev_price - 1.0)
-        returns.append(r if signal > 0 else -r)       # flip sign for short
+        returns.append(r if pos > 0 else -r)
 
-    # cumulative value of 1000 € exposed to those returns
     equity_curve = 1000.0 * (1.0 + pd.Series(returns).cumsum())
-    cap_src = ColumnDataSource({'date': y_test.index[1:], 'capital': equity_curve})
-    p4 = figure(title="Capital evolution (€) – daily return * 1000 (long actual>pred, short actual<pred)",
+
+    # build coloured bands
+    long_days  = [(y_test.index[i], y_test.index[i+1]) for i, p in enumerate(position_log) if p == 1]
+    short_days = [(y_test.index[i], y_test.index[i+1]) for i, p in enumerate(position_log) if p == -1]
+
+    p4 = figure(title="Capital evolution (€) – red=long, blue=short",
                 x_axis_type='datetime', y_axis_label='Euro',
                 sizing_mode="stretch_width", height=350,
                 toolbar_location='above', tools='pan,xwheel_zoom,reset')
+
+    # background rectangles
+    for start, end in long_days:
+        p4.vbar(x=start, width=(end-start), top=1e6, bottom=-1e6, color='red', alpha=0.08)
+    for start, end in short_days:
+        p4.vbar(x=start, width=(end-start), top=1e6, bottom=-1e6, color='blue', alpha=0.08)
+
+    # capital line
+    cap_src = ColumnDataSource({'date': y_test.index[1:], 'capital': equity_curve})
     p4.line('date', 'capital', source=cap_src, color='green', line_width=2)
     p4.add_tools(HoverTool(tooltips=[('date', '@date{%F}'), ('€', '@capital{0,0.00}')],
                            formatters={'@date': 'datetime'}))
