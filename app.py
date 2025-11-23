@@ -194,15 +194,10 @@ def create_plot(df, y_train, predictions, train_indices):
     
     capital = capital[1:]  # Remove the initial 1000 to match the number of dates
     
-    # Calculate 5-day moving average for actual and predicted prices to smooth the graph
-    window_size = 5
-    sorted_y_train_smooth = pd.Series(sorted_y_train).rolling(window=window_size, center=True).mean()
-    sorted_predictions_smooth = pd.Series(sorted_predictions).rolling(window=window_size, center=True).mean()
-    
-    # Plot smoothed price and predictions with colored line segments for positions
+    # Plot actual and predicted prices with daily granularity and colored line segments for positions
     plt.subplot(2, 1, 1)
-    plt.plot(sorted_dates, sorted_y_train_smooth, label='Actual Price (5-day MA)', color='blue')
-    # Plot smoothed prediction line with color based on positions
+    plt.plot(sorted_dates, sorted_y_train, label='Actual Price', color='blue')
+    # Plot prediction line with color based on positions
     prev_idx = 0
     for j in range(1, len(sorted_dates)):
         if positions[j-1] == 'long':
@@ -211,13 +206,13 @@ def create_plot(df, y_train, predictions, train_indices):
             color = 'red'
         else:
             color = 'gray'  # Neutral in gray
-        plt.plot(sorted_dates[prev_idx:j+1], sorted_predictions_smooth[prev_idx:j+1], color=color, linewidth=2)
+        plt.plot(sorted_dates[prev_idx:j+1], sorted_predictions[prev_idx:j+1], color=color, linewidth=2)
         prev_idx = j
-    plt.plot([], [], color='green', label='Predicted Price (Long, 5-day MA)')
-    plt.plot([], [], color='red', label='Predicted Price (Short, 5-day MA)')
+    plt.plot([], [], color='green', label='Predicted Price (Long)')
+    plt.plot([], [], color='red', label='Predicted Price (Short)')
     plt.xlabel('Date')
     plt.ylabel('Price (USD)')
-    plt.title('BTC Price Prediction vs Actual (Training Period, 5-day Moving Average)')
+    plt.title('BTC Price Prediction vs Actual (Training Period, Daily)')
     plt.legend()
     plt.xticks(rotation=45)
     
