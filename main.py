@@ -107,7 +107,7 @@ def train_model(df):
     return model, X_test, y_test, preds, feats
 
 # ------------------------------------------------------------------
-# 4. Mobile-first dashboard
+# 4. Mobile-first dashboard  +  capital curve
 # ------------------------------------------------------------------
 def build_dashboard(y_test, preds, model, feats, X_test):
     from bokeh.models import Div
@@ -115,13 +115,9 @@ def build_dashboard(y_test, preds, model, feats, X_test):
     # 1. True vs Predicted
     p1 = figure(
         title="BTCUSDT – True vs Predicted (2022 test split)",
-        x_axis_label='Date',
-        y_axis_label='Price (USDT)',
-        x_axis_type='datetime',
-        sizing_mode="stretch_width",   # full width
-        height=350,                    # only height fixed
-        toolbar_location='above',
-        tools='pan,xwheel_zoom,reset'
+        x_axis_label='Date', y_axis_label='Price (USDT)',
+        x_axis_type='datetime', sizing_mode="stretch_width",
+        height=350, toolbar_location='above', tools='pan,xwheel_zoom,reset'
     )
     src = ColumnDataSource(data={'date': y_test.index,
                                  'true': y_test.values,
@@ -134,32 +130,53 @@ def build_dashboard(y_test, preds, model, feats, X_test):
 
     # 2. Cumulative absolute error
     cumerr = np.cumsum(np.abs(y_test.values - preds))
-    p2 = figure(title="Cumulative Absolute Error",
-                x_axis_type='datetime',
-                sizing_mode="stretch_width",
-                height=250,
-                toolbar_location='above',
-                tools='pan,xwheel_zoom,reset')
+    p2 = figure(title="Cumulative Absolute Error", x_axis_type='datetime',
+                sizing_mode="stretch_width", height=250,
+                toolbar_location='above', tools='pan,xwheel_zoom,reset')
     p2.line(y_test.index, cumerr, color='orange', line_width=2)
 
-    # 3. Feature importance (coefficients)
+    # 3. Feature importance
     coef_df = pd.DataFrame({'feature': feats, 'coef': model.coef_})
-    p3 = figure(x_range=feats,
-                title="Linear-Regression Coefficients",
-                sizing_mode="stretch_width",
-                height=250,
-                toolbar_location='above',
-                tools='pan,xwheel_zoom,reset')
+    p3 = figure(x_range=feats, title="Linear-Regression Coefficients",
+                sizing_mode="stretch_width", height=250,
+                toolbar_location='above', tools='pan,xwheel_zoom,reset')
     p3.vbar(x='feature', top='coef', width=0.7, source=ColumnDataSource(coef_df))
     p3.xaxis.major_label_orientation = 0.8
 
-    # Stats banner
+    # 4. CAPITAL EVOLUTION  =========================================
+    capital = 1000.0
+    capital_curve = [capital]
+    position = 0.0          # BTC units held (positive long, negative short)
+
+    for i in range(1, len(y_test)):
+        price_today   = y_test.iloc[i-1]      # known close
+        price_tomorrow_pred = preds[i]        # our forecast
+        signal = 1 if price_tomorrow_pred > price_today else -1
+
+        # close previous position
+        capital += position * price_today
+        # open new position (100 % of cash)
+        position = signal * capital / price_today
+        capital -= position * price_today
+        capital_curve.append(capital + position * price_today)  # mark-to-market
+
+    cap_src = ColumnDataSource(data={'date': y_test.index,
+                                     'capital': capital_curve})
+    p4 = figure(title="Capital evolution (€) – long/short on prediction",
+                x_axis_type='datetime', y_axis_label='Euro',
+                sizing_mode="stretch_width", height=350,
+                toolbar_location='above', tools='pan,xwheel_zoom,reset')
+    p4.line('date', 'capital', source=cap_src, color='green', line_width=2)
+    p4.add_tools(HoverTool(tooltips=[('date', '@date{%F}'), ('€', '@capital{0,0.00}')],
+                           formatters={'@date': 'datetime'}))
+
+    # stats banner
     mae = mean_absolute_error(y_test, preds)
     r2  = r2_score(y_test, preds)
-    stats = Div(text=f"<b>MAE :</b> {mae:,.2f} USDT &nbsp;&nbsp;|&nbsp;&nbsp; <b>R² :</b> {r2:.3f}")
+    final_cap = capital_curve[-1]
+    stats = Div(text=f"<b>MAE :</b> {mae:,.2f} USDT &nbsp;|&nbsp; <b>R² :</b> {r2:.3f} &nbsp;|&nbsp; <b>Final capital :</b> {final_cap:,.2f} €")
 
-    # stack everything vertically
-    return column(stats, p1, p2, p3, sizing_mode="stretch_width")
+    return column(stats, p1, p2, p3, p4, sizing_mode="stretch_width")
 
 # --------------------------------------------------
 # 5. Flask glue
