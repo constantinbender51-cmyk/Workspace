@@ -12,9 +12,9 @@ from datetime import datetime, timedelta
 app = Flask(__name__)
 
 def fetch_btc_data():
-    # Fetch BTC daily price data from Binance starting from 2024-01-01 to ensure enough data for 365-day SMA
+    # Fetch BTC daily price data from Binance starting from 2022-01-01 to ensure enough data for proper train/test split
     end_time = int(datetime.now().timestamp() * 1000)
-    start_time = int(datetime(2024, 1, 1).timestamp() * 1000)
+    start_time = int(datetime(2022, 1, 1).timestamp() * 1000)
     url = f"https://api.binance.com/api/v3/klines?symbol=BTCUSDT&interval=1d&startTime={start_time}&endTime={end_time}"
     response = requests.get(url)
     data = response.json()
@@ -62,10 +62,10 @@ def train_model(features, targets):
     # Check if features and targets are not empty
     if len(features) == 0 or len(targets) == 0:
         raise ValueError("No features or targets available for training. Ensure sufficient data.")
-    # Split data 50% for training, 50% for testing
-    split_index = len(features) // 2
+    # Split data 70% for training, 30% for testing to get longer testing period
+    split_index = int(len(features) * 0.7)
     if split_index == 0:
-        raise ValueError("Insufficient data for 50% train-test split. Need at least 2 samples.")
+        raise ValueError("Insufficient data for 70/30 train-test split. Need at least 2 samples.")
     X_train, X_test = features[:split_index], features[split_index:]
     y_train, y_test = targets[:split_index], targets[split_index:]
     model = LinearRegression()
@@ -78,8 +78,8 @@ def trading_strategy(df, model, X_test, start_capital=1000, transaction_cost=0.0
     positions = []  # Track positions for plotting
     
     # X_test corresponds to features for the test set; indices in df need adjustment
-    # Features were built for indices 5 to len(df)-2, so test set starts after split
-    test_start_idx = len(X_test) // 2  # Actually, X_test is already the second half due to shuffle=False
+    # Features were built for indices 5 to len(df)-2, so test set starts after train split
+    # With 70/30 split, test_start_idx in features array is at 70% of features
     total_features_start = 5  # Features start from index 5 in df
     for i in range(len(X_test)):
         prediction = model.predict([X_test[i]])[0]
@@ -175,7 +175,7 @@ def index():
         capital_history, positions = trading_strategy(df, model, X_test, start_capital, transaction_cost)
         
         # Create plot; adjust test_start_idx for plotting
-        test_start_idx = len(features) // 2  # Start of test set in features array
+        test_start_idx = int(len(features) * 0.7)  # Start of test set in features array (70% split)
         plot_url = create_plot(capital_history, df, predictions, test_start_idx)
         
         return render_template('index.html', plot_url=plot_url)
