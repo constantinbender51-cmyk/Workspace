@@ -16,14 +16,18 @@ import os
 import subprocess
 import threading
 import time
-import json
+import logging
+import traceback
+
+# --- Setup Logging ---
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
 
 app = Flask(__name__)
 
-# --- Global State for Training Progress ---
-# In a production app with multiple workers, use Redis or a database.
+# --- Global State ---
 training_state = {
-    'status': 'idle', # idle, training, completed, error
+    'status': 'idle',
     'progress': 0,
     'epoch': 0,
     'total_epochs': 0,
@@ -42,23 +46,35 @@ class ProgressCallback(Callback):
 
     def on_epoch_end(self, epoch, logs=None):
         logs = logs or {}
+        # Update global state
         training_state['epoch'] = epoch + 1
         training_state['progress'] = int(((epoch + 1) / self.total_epochs) * 100)
         training_state['current_train_loss'] = logs.get('loss')
         training_state['current_val_loss'] = logs.get('val_loss')
         training_state['train_loss'].append(logs.get('loss'))
         training_state['val_loss'].append(logs.get('val_loss'))
+        
+        # Log every 10% or 100 epochs to avoid spamming console
+        if (epoch + 1) % 100 == 0:
+            logger.info(f"Epoch {epoch+1}/{self.total_epochs} - Loss: {logs.get('loss'):.4f}")
 
-# Load and preprocess data (Same logic as before)
 def load_data():
+    logger.info("Step 1: Loading Data...")
     if not os.path.exists('btc_data.csv'):
-        subprocess.run(['python', 'fetch_price_data.py'], check=True)
+        logger.info("btc_data.csv not found. Running fetch script...")
+        try:
+            subprocess.run(['python', 'fetch_price_data.py'], check=True)
+            logger.info("Fetch script completed.")
+        except subprocess.CalledProcessError as e:
+            logger.error(f"Fetch script failed: {e}")
+            raise e
+
     df_price = pd.read_csv('btc_data.csv')
     df_price['date'] = pd.to_datetime(df_price['date'])
     df_price.set_index('date', inplace=True)
+    logger.info(f"Loaded price data: {len(df_price)} rows")
     
-    # Simple On-chain fetch (Simplified for stability in threading)
-    # Using existing logic but handling potential API failures gracefully
+    # On-chain fetch
     try:
         import requests
         BASE_URL = "https://api.blockchain.info/charts/"
@@ -75,6 +91,7 @@ def load_data():
             time.sleep(1)
             try:
                 params = {'format': 'json', 'start': START_DATE, 'timespan': '1year', 'rollingAverage': '1d'}
+                logger.info(f"Fetching {metric_name}...")
                 response = requests.get(f"{BASE_URL}{chart_endpoint}", params=params, timeout=10)
                 if response.status_code == 200:
                     data = response.json()
@@ -83,18 +100,21 @@ def load_data():
                         df['Date'] = pd.to_datetime(df['x'], unit='s', utc=True).dt.tz_localize(None)
                         df = df.set_index('Date')['y'].rename(metric_name)
                         all_data.append(df)
+                        logger.info(f"Fetched {metric_name}: {len(df)} rows")
             except Exception as e:
-                print(f"Skipping {metric_name}: {e}")
+                logger.warning(f"Skipping {metric_name}: {e}")
                 
         df_combined = pd.concat(all_data, axis=1, join='inner')
         df_final = df_combined.loc[START_DATE:END_DATE].ffill()
         df_final = df_final[~df_final.index.duplicated(keep='first')]
+        logger.info(f"Final dataset shape: {df_final.shape}")
         return df_final
     except Exception as e:
-        print(f"Data fetch error: {e}")
-        return df_price # Fallback to just price data
+        logger.error(f"Data merge error: {e}")
+        return df_price 
 
 def prepare_data(df):
+    logger.info("Step 2: Preparing Features...")
     df['sma_3_close'] = df['close'].rolling(window=3).mean()
     df['sma_9_close'] = df['close'].rolling(window=9).mean()
     df['ema_3_volume'] = df['volume'].ewm(span=3).mean()
@@ -144,12 +164,14 @@ def prepare_data(df):
     targets = np.array(targets)
     targets = targets[valid_indices[:len(targets)]]
     min_len = min(len(features), len(targets))
+    
+    logger.info(f"Features prepared. Shape: {features.shape}")
     return features[:min_len], targets[:min_len], StandardScaler().fit_transform(features[:min_len])
 
 def create_plot(df, y_train, predictions, train_indices, history_loss, history_val_loss):
+    logger.info("Step 4: Generating Plots...")
     plt.figure(figsize=(10, 12))
     
-    # 1. Price Plot
     dates = df.index[train_indices]
     sorted_indices = np.argsort(dates)
     sorted_dates = dates[sorted_indices]
@@ -159,23 +181,21 @@ def create_plot(df, y_train, predictions, train_indices, history_loss, history_v
     plt.subplot(3, 1, 1)
     plt.plot(sorted_dates, sorted_y_train, label='Actual Price', color='blue')
     plt.plot(sorted_dates, sorted_predictions, label='Predicted', color='green', alpha=0.7)
-    plt.title('BTC Price Prediction (Fit)')
+    plt.title('BTC Price Prediction')
     plt.legend()
     plt.xticks(rotation=45)
 
-    # 2. Capital Plot (Simplified for brevity)
     capital = [1000]
     for i in range(1, len(sorted_y_train)):
         ret = (sorted_y_train[i] - sorted_y_train[i-1]) / sorted_y_train[i-1]
         pos = 1 if sorted_predictions[i-1] > sorted_y_train[i-1] else -1
-        capital.append(capital[-1] * (1 + (ret * pos * 5))) # 5x leverage
+        capital.append(capital[-1] * (1 + (ret * pos * 5)))
     
     plt.subplot(3, 1, 2)
     plt.plot(sorted_dates, capital, color='purple')
-    plt.title('Strategy Capital (5x Leverage)')
+    plt.title('Strategy Capital')
     plt.xticks(rotation=45)
 
-    # 3. Double Descent Loss Curve
     plt.subplot(3, 1, 3)
     plt.semilogy(history_loss, label='Train Loss', color='blue')
     plt.semilogy(history_val_loss, label='Test Loss (Val)', color='orange')
@@ -188,10 +208,12 @@ def create_plot(df, y_train, predictions, train_indices, history_loss, history_v
     img = io.BytesIO()
     plt.savefig(img, format='png')
     img.seek(0)
+    logger.info("Plots generated successfully.")
     return base64.b64encode(img.getvalue()).decode()
 
 def run_training_task():
     global training_state
+    logger.info("Background thread started.")
     try:
         training_state['status'] = 'training'
         training_state['train_loss'] = []
@@ -200,7 +222,6 @@ def run_training_task():
         df = load_data()
         features, targets, _ = prepare_data(df)
         
-        # Split
         split_idx = int(len(features) * 0.8)
         X_train = features[:split_idx]
         X_test = features[split_idx:]
@@ -211,12 +232,11 @@ def run_training_task():
         X_train_reshaped = X_train.reshape(X_train.shape[0], 20, 10)
         X_test_reshaped = X_test.reshape(X_test.shape[0], 20, 10)
         
-        # --- DOUBLE DESCENT CONFIGURATION ---
-        EPOCHS = 1500  # Increased from 50
-        UNITS = 512    # Increased from 100
-        
+        EPOCHS = 1500
+        UNITS = 512
         training_state['total_epochs'] = EPOCHS
         
+        logger.info(f"Building Model (Units: {UNITS}, Epochs: {EPOCHS})...")
         model = Sequential()
         model.add(LSTM(UNITS, activation='relu', return_sequences=True, input_shape=(20, 10)))
         model.add(LSTM(UNITS, activation='relu', return_sequences=True))
@@ -225,7 +245,7 @@ def run_training_task():
         
         model.compile(optimizer=Adam(learning_rate=0.0001), loss='mse')
         
-        # Train with callback
+        logger.info("Starting model.fit() ...")
         history = model.fit(
             X_train_reshaped, y_train,
             epochs=EPOCHS,
@@ -234,8 +254,8 @@ def run_training_task():
             validation_data=(X_test_reshaped, y_test),
             callbacks=[ProgressCallback(EPOCHS)]
         )
+        logger.info("Training completed.")
         
-        # Generate Results
         train_predictions = model.predict(X_train_reshaped, verbose=0).flatten()
         
         plot_url = create_plot(
@@ -246,9 +266,11 @@ def run_training_task():
         training_state['plot_url'] = plot_url
         training_state['train_mse'] = history.history['loss'][-1]
         training_state['status'] = 'completed'
+        logger.info("Task finished successfully.")
         
     except Exception as e:
-        print(f"Training failed: {e}")
+        logger.error(f"CRITICAL TRAINING FAILURE: {e}")
+        logger.error(traceback.format_exc())
         training_state['status'] = 'error'
         training_state['error'] = str(e)
 
@@ -258,20 +280,22 @@ def index():
 
 @app.route('/start_training', methods=['POST'])
 def start_training():
+    logger.info("Received request: /start_training")
     if training_state['status'] == 'training':
+        logger.info("Training already in progress.")
         return jsonify({'status': 'already_running'})
     
-    # Reset state
     training_state['status'] = 'starting'
     training_state['progress'] = 0
     training_state['epoch'] = 0
     training_state['plot_url'] = None
+    training_state['error'] = None
     
-    # Start background thread
     thread = threading.Thread(target=run_training_task)
     thread.daemon = True
     thread.start()
     
+    logger.info("Thread spawned.")
     return jsonify({'status': 'started'})
 
 @app.route('/status')
@@ -279,4 +303,6 @@ def status():
     return jsonify(training_state)
 
 if __name__ == '__main__':
+    # Important: Set debug=False to avoid reloader spawning double processes
+    logger.info("Starting Flask server...")
     app.run(host='0.0.0.0', port=8080, debug=False)
