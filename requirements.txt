@@ -1,6 +1,6 @@
-pandas
-numpy
-requests
+pandas 
+numpy 
 scikit-learn
-matplotlib
+requests 
+bokeh 
 flask
