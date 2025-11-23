@@ -57,9 +57,9 @@ def prepare_data(df):
 
 # Train model
 def train_model(features, targets, df):
-    # Filter data for training set: 2022 to 2024
+    # Filter data for training set: 2022 to 2023
     train_start_date = pd.to_datetime('2022-01-01')
-    train_end_date = pd.to_datetime('2024-12-31')
+    train_end_date = pd.to_datetime('2023-12-31')
     train_mask = (df.index >= train_start_date) & (df.index <= train_end_date)
     train_df = df[train_mask]
     # Filter data for test set: 2024 to 2025
@@ -70,7 +70,7 @@ def train_model(features, targets, df):
     # Map filtered indices to original features and targets
     train_indices = df.index[train_mask].tolist()
     test_indices = df.index[test_mask].tolist()
-    # Assuming features and targets are aligned with df after dropping NaN in prepare_data
+    # Align features and targets with filtered indices
     # Since features and targets are derived from df_clean, we need to align with filtered DataFrames
     # This is a simplification; in practice, ensure indices match
     X_train = features[:len(train_indices)]
