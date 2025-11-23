@@ -75,7 +75,9 @@ def fetch_binance_price_data(start_date: str, end_date: str) -> pd.DataFrame:
         return pd.DataFrame()
     except Exception as e:
         print(f"   An unexpected error occurred with Binance API: {e}")
-        return pd.DataFrame()def fetch_chart_data(chart_name: str, start_date: str) -> pd.DataFrame:
+        return pd.DataFrame()
+
+def fetch_chart_data(chart_name: str, start_date: str) -> pd.DataFrame:
     """
     Fetches historical data for a single chart from the Blockchain.com API.
 
