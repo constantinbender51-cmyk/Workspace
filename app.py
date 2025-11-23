@@ -142,9 +142,6 @@ def load_data():
         df_final = df_combined.loc[START_DATE:END_DATE].ffill()
         df_final = df_final[~df_final.index.duplicated(keep='first')]
         
-        # --- CRITICAL CHANGE FOR DOUBLE DESCENT ---
-        # Reduce dataset size to 200 samples. 
-        # This increases the (Parameters / Data) ratio significantly.
         logger.info("Reducing dataset size to last 200 days to force high P/N ratio.")
         df_final = df_final.tail(200)
         
@@ -205,7 +202,17 @@ def prepare_data(df):
     targets = targets[valid_indices[:len(targets)]]
     min_len = min(len(features), len(targets))
     
-    return features[:min_len], targets[:min_len], StandardScaler().fit_transform(features[:min_len])
+    # Scale Features
+    scaler_features = StandardScaler()
+    features_scaled = scaler_features.fit_transform(features[:min_len])
+    
+    # Scale Targets (CRITICAL FIX FOR EXPLODING LOSS)
+    scaler_target = StandardScaler()
+    # Reshape for scaler (samples, 1)
+    targets_reshaped = targets[:min_len].reshape(-1, 1)
+    targets_scaled = scaler_target.fit_transform(targets_reshaped)
+    
+    return features_scaled, targets_scaled, scaler_features, scaler_target
 
 def create_plot(df, y_train, predictions, train_indices, history_loss, history_val_loss):
     logger.info("Step 4: Generating Plots...")
@@ -223,7 +230,7 @@ def create_plot(df, y_train, predictions, train_indices, history_loss, history_v
     plt.subplot(3, 1, 1)
     plt.plot(sorted_dates, sorted_y_train, label='Actual Price', color='blue')
     plt.plot(sorted_dates, sorted_predictions, label='Predicted', color='green', alpha=0.7)
-    plt.title('BTC Price Prediction (Small Data Regime)')
+    plt.title('BTC Price Prediction (Scaled Training)')
     plt.legend()
     plt.xticks(rotation=45)
 
@@ -264,13 +271,14 @@ def run_training_task():
             training_state['val_loss'] = []
         
         df = load_data()
-        features, targets, _ = prepare_data(df)
+        # Unpack the new scaler_target
+        features, targets_scaled, _, scaler_target = prepare_data(df)
         
         split_idx = int(len(features) * 0.8)
         X_train = features[:split_idx]
         X_test = features[split_idx:]
-        y_train = targets[:split_idx]
-        y_test = targets[split_idx:]
+        y_train = targets_scaled[:split_idx]
+        y_test = targets_scaled[split_idx:]
         train_indices = list(range(40, 40 + split_idx))
         
         X_train_reshaped = X_train.reshape(X_train.shape[0], 20, 10)
@@ -289,10 +297,10 @@ def run_training_task():
         model.add(LSTM(UNITS, activation='relu'))
         model.add(Dense(1))
         
-        # --- EXPERIMENTAL CONFIGURATION ---
-        # 1. Removed clipnorm to allow full interpolation (risky but needed)
-        # 2. Increased LR to 0.001 to ensure memorization happens quickly
-        optimizer = Adam(learning_rate=0.001)
+        # Stability: 
+        # - LR: 0.0001 (Safe)
+        # - clipnorm: 1.0 (Essential for preventing NaNs)
+        optimizer = Adam(learning_rate=0.0001, clipnorm=1.0)
         model.compile(optimizer=optimizer, loss='mse')
         
         logger.info("Starting model.fit() ...")
@@ -306,10 +314,15 @@ def run_training_task():
         )
         logger.info("Training completed.")
         
-        train_predictions = model.predict(X_train_reshaped, verbose=0).flatten()
+        # Get predictions in Scaled format
+        train_predictions_scaled = model.predict(X_train_reshaped, verbose=0)
+        
+        # INVERSE TRANSFORM: Convert scaled 0.0-1.0 outputs back to $20,000 prices
+        train_predictions_real = scaler_target.inverse_transform(train_predictions_scaled).flatten()
+        y_train_real = scaler_target.inverse_transform(y_train).flatten()
         
         plot_url = create_plot(
-            df, y_train, train_predictions, train_indices, 
+            df, y_train_real, train_predictions_real, train_indices, 
             history.history['loss'], history.history['val_loss']
         )
         
