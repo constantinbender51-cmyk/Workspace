@@ -57,24 +57,26 @@ def prepare_data(df):
 
 # Train model
 def train_model(features, targets, df):
-    # Filter data to the date range January 2022 to September 2023
-    start_date = pd.to_datetime('2022-01-01')
-    end_date = pd.to_datetime('2023-09-30')
-    mask = (df.index >= start_date) & (df.index <= end_date)
-    filtered_df = df[mask]
-    # Calculate split index for 50% training and 50% testing based on time
-    split_idx = int(len(filtered_df) * 0.5)
+    # Filter data for training set: 2022 to 2024
+    train_start_date = pd.to_datetime('2022-01-01')
+    train_end_date = pd.to_datetime('2024-12-31')
+    train_mask = (df.index >= train_start_date) & (df.index <= train_end_date)
+    train_df = df[train_mask]
+    # Filter data for test set: 2024 to 2025
+    test_start_date = pd.to_datetime('2024-01-01')
+    test_end_date = pd.to_datetime('2025-12-31')
+    test_mask = (df.index >= test_start_date) & (df.index <= test_end_date)
+    test_df = df[test_mask]
     # Map filtered indices to original features and targets
-    filtered_indices = df.index[mask].tolist()
+    train_indices = df.index[train_mask].tolist()
+    test_indices = df.index[test_mask].tolist()
     # Assuming features and targets are aligned with df after dropping NaN in prepare_data
-    # Since features and targets are derived from df_clean, we need to align with filtered_df
+    # Since features and targets are derived from df_clean, we need to align with filtered DataFrames
     # This is a simplification; in practice, ensure indices match
-    X_train = features[:split_idx]
-    X_test = features[split_idx:]
-    y_train = targets[:split_idx]
-    y_test = targets[split_idx:]
-    # Adjust test_indices to reflect the filtered range
-    test_indices = list(range(split_idx + 200, split_idx + 200 + len(y_test)))
+    X_train = features[:len(train_indices)]
+    X_test = features[len(train_indices):len(train_indices) + len(test_indices)]
+    y_train = targets[:len(train_indices)]
+    y_test = targets[len(train_indices):len(train_indices) + len(test_indices)]
     model = LinearRegression()
     model.fit(X_train, y_train)
     predictions = model.predict(X_test)
