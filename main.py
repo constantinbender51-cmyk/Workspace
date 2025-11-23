@@ -39,33 +39,25 @@ def prepare_data(df):
     df = calculate_features(df)
     df = df.dropna()  # Remove rows with NaN values from rolling averages
     
-    # Check if we have enough data after dropping NaN; minimum 6 days for 5-day lookback + target
-    if len(df) < 6:
-        raise ValueError(f"Insufficient data after processing. Have {len(df)} days, need at least 6. Try fetching more data.")
+    # Check if we have enough data after dropping NaN; minimum 4 days for 3-day lookback + target
+    if len(df) < 4:
+        raise ValueError(f"Insufficient data after processing. Have {len(df)} days, need at least 4. Try fetching more data.")
     
-    # Create features with 5-day lookback for predicting the next day's close
+    # Create features with 3-day lookback for predicting the next day's close
     features = []
     targets = []
-    for i in range(5, len(df) - 1):  # Start from index 5 to have 5 days of lookback, stop at len(df)-1 to have a target
-        # Use technical indicators from the past 5 days (i-5 to i-1) to predict close on day i
+    for i in range(3, len(df) - 1):  # Start from index 3 to have 3 days of lookback, stop at len(df)-1 to have a target
+        # Use technical indicators from the past 3 days (i-3 to i-1) to predict close on day i
         feature_row = [
-            df.iloc[i-5]['sma_7'],       # SMA 7 from 5 days ago
-            df.iloc[i-4]['sma_7'],       # SMA 7 from 4 days ago
             df.iloc[i-3]['sma_7'],       # SMA 7 from 3 days ago
             df.iloc[i-2]['sma_7'],       # SMA 7 from 2 days ago
             df.iloc[i-1]['sma_7'],       # SMA 7 from 1 day ago
-            df.iloc[i-5]['sma_365'],     # SMA 365 from 5 days ago
-            df.iloc[i-4]['sma_365'],     # SMA 365 from 4 days ago
             df.iloc[i-3]['sma_365'],     # SMA 365 from 3 days ago
             df.iloc[i-2]['sma_365'],     # SMA 365 from 2 days ago
             df.iloc[i-1]['sma_365'],     # SMA 365 from 1 day ago
-            df.iloc[i-5]['sma_volume_5'], # SMA volume 5 from 5 days ago
-            df.iloc[i-4]['sma_volume_5'], # SMA volume 5 from 4 days ago
             df.iloc[i-3]['sma_volume_5'], # SMA volume 5 from 3 days ago
             df.iloc[i-2]['sma_volume_5'], # SMA volume 5 from 2 days ago
             df.iloc[i-1]['sma_volume_5'], # SMA volume 5 from 1 day ago
-            df.iloc[i-5]['sma_volume_10'], # SMA volume 10 from 5 days ago
-            df.iloc[i-4]['sma_volume_10'], # SMA volume 10 from 4 days ago
             df.iloc[i-3]['sma_volume_10'], # SMA volume 10 from 3 days ago
             df.iloc[i-2]['sma_volume_10'], # SMA volume 10 from 2 days ago
             df.iloc[i-1]['sma_volume_10']  # SMA volume 10 from 1 day ago
@@ -95,9 +87,9 @@ def trading_strategy(df, model, X_test, start_capital=1000, transaction_cost=0.0
     positions = []  # Track positions for plotting
     
     # X_test corresponds to features for the test set; indices in df need adjustment
-    # Features were built for indices 5 to len(df)-2, so test set starts after train split
+    # Features were built for indices 3 to len(df)-2, so test set starts after train split
     # With 70/30 split, test_start_idx in features array is at 70% of features
-    total_features_start = 5  # Features start from index 5 in df
+    total_features_start = 3  # Features start from index 3 in df
     for i in range(len(X_test)):
         prediction = model.predict([X_test[i]])[0]
         # Map test index back to df index: features index i corresponds to df index i + total_features_start
@@ -139,8 +131,8 @@ def create_plot(capital_history, df, predictions, test_start_idx):
     ax1.grid(True)
     
     # Plot price over time for the test period
-    # test_start_idx in features corresponds to df index: test_start_idx + 5 (since features start from index 5)
-    start_df_idx = test_start_idx + 5
+    # test_start_idx in features corresponds to df index: test_start_idx + 3 (since features start from index 3)
+    start_df_idx = test_start_idx + 3
     end_df_idx = start_df_idx + len(capital_history) - 1  # -1 because capital_history includes start
     if end_df_idx > len(df):
         end_df_idx = len(df)
