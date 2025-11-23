@@ -3,11 +3,116 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>BTC Price Prediction</title>
+    <title>BTC Double Descent Experiment</title>
+    <style>
+        body { font-family: sans-serif; max-width: 800px; margin: 0 auto; padding: 20px; }
+        .container { text-align: center; }
+        #progress-container { display: none; margin: 20px 0; }
+        progress { width: 100%; height: 30px; }
+        .stats { display: flex; justify-content: space-around; margin-top: 10px; font-size: 0.9em; color: #555; }
+        button { padding: 10px 20px; font-size: 16px; cursor: pointer; background-color: #007bff; color: white; border: none; border-radius: 5px; }
+        button:disabled { background-color: #ccc; }
+        #result-container { margin-top: 30px; display: none; }
+        img { max-width: 100%; height: auto; border: 1px solid #ddd; }
+        .error { color: red; }
+    </style>
 </head>
 <body>
-    <h1>BTC Price Prediction vs Actual</h1>
-    <p>Training Set Mean Squared Error: {{ train_mse }}</p>
-    <img src="data:image/png;base64,{{ plot_url }}" alt="BTC Price Prediction Chart">
+    <div class="container">
+        <h1>Double Descent: BTC Price Prediction</h1>
+        <p>
+            Training a massive LSTM (512 units) for 1500 epochs to observe the Double Descent phenomenon.
+            <br><em>Warning: This may take 5-10 minutes.</em>
+        </p>
+
+        <button id="startBtn" onclick="startTraining()">Start Training Experiment</button>
+
+        <div id="progress-container">
+            <h3>Training in Progress...</h3>
+            <progress id="progressBar" value="0" max="100"></progress>
+            <div class="stats">
+                <span id="epochStatus">Epoch: 0 / 1500</span>
+                <span id="lossStatus">Train Loss: --</span>
+                <span id="valLossStatus">Test Loss: --</span>
+            </div>
+        </div>
+
+        <div id="result-container">
+            <h2>Experiment Results</h2>
+            <p>Final Training MSE: <span id="finalMse"></span></p>
+            <img id="resultPlot" src="" alt="Results">
+        </div>
+        
+        <p id="errorMsg" class="error"></p>
+    </div>
+
+    <script>
+        let pollInterval;
+
+        async function startTraining() {
+            const btn = document.getElementById('startBtn');
+            const progressContainer = document.getElementById('progress-container');
+            const resultContainer = document.getElementById('result-container');
+            const errorMsg = document.getElementById('errorMsg');
+            
+            btn.disabled = true;
+            btn.innerText = "Initializing...";
+            resultContainer.style.display = 'none';
+            errorMsg.innerText = "";
+
+            try {
+                const response = await fetch('/start_training', { method: 'POST' });
+                const data = await response.json();
+                
+                if (data.status === 'started' || data.status === 'already_running') {
+                    progressContainer.style.display = 'block';
+                    pollInterval = setInterval(checkStatus, 1000);
+                } else {
+                    errorMsg.innerText = "Failed to start training.";
+                    btn.disabled = false;
+                }
+            } catch (e) {
+                errorMsg.innerText = "Error: " + e.message;
+                btn.disabled = false;
+            }
+        }
+
+        async function checkStatus() {
+            try {
+                const response = await fetch('/status');
+                const data = await response.json();
+
+                if (data.status === 'training') {
+                    document.getElementById('progressBar').value = data.progress;
+                    document.getElementById('epochStatus').innerText = `Epoch: ${data.epoch} / ${data.total_epochs}`;
+                    
+                    if (data.current_train_loss) {
+                        document.getElementById('lossStatus').innerText = `Train Loss: ${data.current_train_loss.toExponential(4)}`;
+                    }
+                    if (data.current_val_loss) {
+                        document.getElementById('valLossStatus').innerText = `Test Loss: ${data.current_val_loss.toExponential(4)}`;
+                    }
+
+                } else if (data.status === 'completed') {
+                    clearInterval(pollInterval);
+                    document.getElementById('progress-container').style.display = 'none';
+                    document.getElementById('startBtn').innerText = "Run Again";
+                    document.getElementById('startBtn').disabled = false;
+                    
+                    document.getElementById('resultPlot').src = "data:image/png;base64," + data.plot_url;
+                    document.getElementById('finalMse').innerText = data.train_mse.toExponential(4);
+                    document.getElementById('result-container').style.display = 'block';
+
+                } else if (data.status === 'error') {
+                    clearInterval(pollInterval);
+                    document.getElementById('startBtn').disabled = false;
+                    document.getElementById('errorMsg').innerText = "Error: " + data.error;
+                }
+            } catch (e) {
+                console.error("Polling error", e);
+            }
+        }
+    </script>
 </body>
 </html>
+
