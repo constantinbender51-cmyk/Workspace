@@ -47,29 +47,56 @@ def load_data():
         }
         url = f"{BASE_URL}{chart_name}"
         print(f"DEBUG: Fetching {chart_name} from {url}")
-        try:
-            response = requests.get(url, params=params, timeout=30)
-            print(f"DEBUG: Response status for {chart_name}: {response.status_code}")
-            response.raise_for_status()
-            data = response.json()
-            print(f"DEBUG: Data keys for {chart_name}: {list(data.keys()) if data else 'No data'}")
-            if 'values' not in data or not data['values']:
-                print(f"DEBUG: No values found for {chart_name}")
+        
+        # Add headers for rate limiting awareness
+        headers = {
+            'User-Agent': 'BTC-Prediction-App/1.0'
+        }
+        
+        max_retries = 3
+        retry_delay = 5  # seconds
+        
+        for attempt in range(max_retries):
+            try:
+                response = requests.get(url, params=params, headers=headers, timeout=30)
+                print(f"DEBUG: Response status for {chart_name}: {response.status_code}")
+                
+                # Handle rate limiting (429 status code)
+                if response.status_code == 429:
+                    wait_time = retry_delay * (2 ** attempt)  # Exponential backoff
+                    print(f"WARNING: Rate limit hit for {chart_name}. Waiting {wait_time} seconds before retry {attempt + 1}/{max_retries}")
+                    time.sleep(wait_time)
+                    continue
+                    
+                response.raise_for_status()
+                data = response.json()
+                print(f"DEBUG: Data keys for {chart_name}: {list(data.keys()) if data else 'No data'}")
+                if 'values' not in data or not data['values']:
+                    print(f"DEBUG: No values found for {chart_name}")
+                    return pd.DataFrame()
+                df = pd.DataFrame(data['values'])
+                print(f"DEBUG: Fetched {len(df)} rows for {chart_name}")
+                df['Date'] = pd.to_datetime(df['x'], unit='s', utc=True).dt.tz_localize(None)
+                df = df.set_index('Date')['y'].rename(chart_name)
+                print(f"DEBUG: Successfully processed {chart_name}, date range: {df.index.min()} to {df.index.max()}")
+                return df
+            except requests.exceptions.RequestException as e:
+                print(f"ERROR: Request failed for {chart_name} (attempt {attempt + 1}/{max_retries}): {str(e)}")
+                if attempt < max_retries - 1:
+                    wait_time = retry_delay * (2 ** attempt)
+                    print(f"Waiting {wait_time} seconds before retry")
+                    time.sleep(wait_time)
+                else:
+                    print(f"ERROR: All retries failed for {chart_name}")
+                    return pd.DataFrame()
+            except Exception as e:
+                print(f"ERROR: Failed to fetch {chart_name}: {str(e)}")
                 return pd.DataFrame()
-            df = pd.DataFrame(data['values'])
-            print(f"DEBUG: Fetched {len(df)} rows for {chart_name}")
-            df['Date'] = pd.to_datetime(df['x'], unit='s', utc=True).dt.tz_localize(None)
-            df = df.set_index('Date')['y'].rename(chart_name)
-            print(f"DEBUG: Successfully processed {chart_name}, date range: {df.index.min()} to {df.index.max()}")
-            return df
-        except Exception as e:
-            print(f"ERROR: Failed to fetch {chart_name}: {str(e)}")
-            return pd.DataFrame()
     
     all_data = [df_price]
     for metric_name, chart_endpoint in METRICS.items():
         print(f"\nDEBUG: Processing {metric_name} ({chart_endpoint})")
-        time.sleep(2)  # Rate limiting
+        time.sleep(3)  # Rate limiting - increased from 2 to 3 seconds
         df_metric = fetch_chart_data(chart_endpoint, START_DATE)
         if not df_metric.empty:
             df_metric = df_metric.rename(metric_name)
