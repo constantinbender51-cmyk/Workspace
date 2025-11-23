@@ -140,37 +140,21 @@ def build_dashboard(y_test, preds, model, feats, X_test):
     p3.vbar(x='feature', top='coef', width=0.7, source=ColumnDataSource(coef_df))
     p3.xaxis.major_label_orientation = 0.8
 
-        # 4. DAILY-COMPOUNDING CAPITAL – mean-reversion strategy
-    equity = 1000.0
-    equity_curve = [equity]
-    btc_pos = 0.0
-    MIN_EQUITY = 0.01          # floor to avoid div-by-zero
+        # 4. DAILY-CO    # 4. DAILY RETURN VERSION – fixed 1000 € exposure, no compounding
+    returns = []
+    for i in range(1, len(y_test)):
+        prev_price = y_test.iloc[i-1]
+        curr_price = y_test.iloc[i]
+        pred       = preds[i-1]
+        signal = 1.0 if prev_price > pred else -1.0   # mean-revert direction
 
-    for i in range(0, len(y_test)-1):
-        price_today = y_test.iloc[i]
-        pred_today  = preds[i]
-        signal = 1.0 if price_today > pred_today else -1.0
+        r = (curr_price / prev_price - 1.0)
+        returns.append(r if signal > 0 else -r)       # flip sign for short
 
-        # 1. close previous position
-        equity += btc_pos * price_today
-        equity = max(equity, MIN_EQUITY)   # never <= 0
-
-        # 2. size new position (0 if bankrupt)
-        if equity <= MIN_EQUITY:
-            btc_pos = 0.0
-        else:
-            btc_pos = signal * equity / price_today
-
-        # 3. mark at next close
-        equity = btc_pos * y_test.iloc[i+1]
-        equity_curve.append(equity)
-
-    # final close
-    equity += btc_pos * y_test.iloc[-1]
-    equity_curve.append(equity)
-
-    cap_src = ColumnDataSource({'date': y_test.index, 'capital': equity_curve})
-    p4 = figure(title="Daily-compounding capital (€) – long actual>pred, short actual<pred",
+    # cumulative value of 1000 € exposed to those returns
+    equity_curve = 1000.0 * (1.0 + pd.Series(returns).cumsum())
+    cap_src = ColumnDataSource({'date': y_test.index[1:], 'capital': equity_curve})
+    p4 = figure(title="Capital evolution (€) – daily return * 1000 (long actual>pred, short actual<pred)",
                 x_axis_type='datetime', y_axis_label='Euro',
                 sizing_mode="stretch_width", height=350,
                 toolbar_location='above', tools='pan,xwheel_zoom,reset')
