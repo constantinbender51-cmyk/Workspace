@@ -104,8 +104,6 @@ def prepare_data(df):
             df_clean['sma_14_squared'].iloc[i]
         ]
         # Add on-chain metrics only if they exist in the DataFrame
-        if 'Net_Transaction_Count' in df_clean.columns:
-            feature.append(df_clean['Net_Transaction_Count'].iloc[i])
         features.append(feature)
         # Target: next day's closing price
         if i < len(df_clean) - 3:  # Reduced lookback to 3 days
