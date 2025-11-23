@@ -34,11 +34,16 @@ import time
 # --------------------------------------------------
 # 1. Grab 2022 daily klines from Binance REST
 # --------------------------------------------------
-START_TS = int(dt.datetime(2022, 1, 1).timestamp() * 1000)
-END_TS   = int(dt.datetime(2023, 1, 1).timestamp() * 1000)
-URL      = "https://api.binance.com/api/v3/klines"
+# -----------  time range : 1 Dec 2021  –  1 Jan 2023  -------------
+START_TS = int(dt.datetime(2021, 12, 1).timestamp() * 1000)
+END_TS   = int(dt.datetime(2025, 1, 1).timestamp() * 1000)
+# -------------------------------------------------------------------
 
-def fetch_2022_daily():
+def fetch_2022_daily() -> pd.DataFrame:
+    """
+    Télécharge les chandeliers journaliers BTCUSDT sur Binance
+    période : 1 déc 2021 → 31 déc 2022
+    """
     params = dict(
         symbol='BTCUSDT',
         interval='1d',
@@ -48,16 +53,16 @@ def fetch_2022_daily():
     )
     all_rows = []
     while True:
-        r = requests.get(URL, params=params)
+        r = requests.get(URL, params=params, timeout=30)
         r.raise_for_status()
         js = r.json()
         if not js:
             break
         all_rows.extend(js)
-        # next start = last close-time + 1 ms
-        params['startTime'] = js[-1][6] + 1
+        params['startTime'] = js[-1][6] + 1          # dernier close_time + 1 ms
         if len(js) < 1000:
             break
+
     df = pd.DataFrame(all_rows,
                       columns=['open_time', 'open', 'high', 'low', 'close',
                                'volume', 'close_time', 'quote_vol', 'trades',
@@ -66,8 +71,8 @@ def fetch_2022_daily():
     for col in ['open', 'high', 'low', 'close', 'volume']:
         df[col] = pd.to_numeric(df[col])
     df = df[['open_time', 'close', 'volume']].rename(columns={'open_time': 'date'})
-    df = df.set_index('date').sort_index()
-    return df
+    return df.set_index('date').sort_index()
+
 
 # --------------------------------------------------
 # 2. Feature engineering & train/test split
