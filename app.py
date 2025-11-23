@@ -75,24 +75,39 @@ def create_plot(df, y_test, predictions, test_indices):
     sorted_y_test = y_test[sorted_indices]
     sorted_predictions = predictions[sorted_indices]
     
-    # Calculate capital with daily accumulation based on prediction vs actual and actual Bitcoin returns
+    # Calculate capital with daily accumulation based on prediction from 4 days ago vs actual price yesterday
     capital = [1000]  # Start with $1000
     
     for i in range(len(sorted_y_test)):
-        if i == 0:
-            # For the first day, use the price from the day before the test period starts
-            prev_index = test_indices[sorted_indices[i]] - 1
-            prev_price = df['close'].iloc[prev_index] if prev_index >= 0 else sorted_y_test[i]
+        # Calculate return using yesterday's price and the day before's price
+        if i >= 1:  # Ensure there are at least two previous days
+            price_yesterday = sorted_y_test[i - 1]
+            price_day_before = sorted_y_test[i - 2] if i >= 2 else df['close'].iloc[test_indices[sorted_indices[i]] - 2]  # Fallback if not in test set
+            return_calc = (sorted_y_test[i] - price_yesterday) / price_yesterday
         else:
-            prev_price = sorted_y_test[i - 1]
+            # For the first day in test set, use available data; skip if not enough history
+            if i == 0 and test_indices[sorted_indices[i]] >= 2:
+                price_yesterday = df['close'].iloc[test_indices[sorted_indices[i]] - 1]
+                price_day_before = df['close'].iloc[test_indices[sorted_indices[i]] - 2]
+                return_calc = (sorted_y_test[i] - price_yesterday) / price_yesterday
+            else:
+                return_calc = 0  # Default to no return if insufficient data
         
-        actual_return = (sorted_y_test[i] - prev_price) / prev_price
+        # ML Strategy: Use predicted price from 4 days ago vs actual price yesterday
+        if i >= 1:  # Ensure prediction from 4 days ago is available
+            pred_index = test_indices[sorted_indices[i]] - 4  # Prediction from 4 days ago
+            if pred_index >= 0 and pred_index < len(sorted_predictions):
+                pred_price_4_days_ago = sorted_predictions[np.where(test_indices == pred_index)[0][0]] if pred_index in test_indices else df['close'].iloc[pred_index]
+                actual_price_yesterday = sorted_y_test[i - 1] if i >= 1 else df['close'].iloc[test_indices[sorted_indices[i]] - 1]
+                if pred_price_4_days_ago < actual_price_yesterday:
+                    ret = return_calc  # Positive signal: apply positive return
+                else:
+                    ret = -return_calc  # Negative signal: apply negative return
+            else:
+                ret = 0  # Default if prediction not available
+        else:
+            ret = 0  # Default for first day
         
-        # ML Strategy
-        if sorted_predictions[i] > sorted_y_test[i]:  # Prediction above actual: negative actual return
-            ret = -actual_return
-        else:  # Prediction below actual: positive actual return
-            ret = actual_return
         capital.append(capital[-1] * (1 + ret))
     
     capital = capital[1:]  # Remove the initial 1000 to match the number of dates
