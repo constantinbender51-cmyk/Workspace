@@ -48,7 +48,6 @@ training_state = {
 
 # --- Helper to prevent JSON crashes ---
 def sanitize_float(val):
-    """Converts NaN/Inf to None so JSON doesn't crash."""
     try:
         if val is None: return None
         if isinstance(val, (float, np.floating)):
@@ -142,6 +141,13 @@ def load_data():
         df_combined = pd.concat(all_data, axis=1, join='inner')
         df_final = df_combined.loc[START_DATE:END_DATE].ffill()
         df_final = df_final[~df_final.index.duplicated(keep='first')]
+        
+        # --- CRITICAL CHANGE FOR DOUBLE DESCENT ---
+        # Reduce dataset size to 200 samples. 
+        # This increases the (Parameters / Data) ratio significantly.
+        logger.info("Reducing dataset size to last 200 days to force high P/N ratio.")
+        df_final = df_final.tail(200)
+        
         return df_final
     except Exception as e:
         logger.error(f"Data merge error: {e}")
@@ -203,7 +209,6 @@ def prepare_data(df):
 
 def create_plot(df, y_train, predictions, train_indices, history_loss, history_val_loss):
     logger.info("Step 4: Generating Plots...")
-    # Sanitize plot data to avoid crashes in matplotlib
     history_loss = [x if x is not None else 0 for x in history_loss]
     history_val_loss = [x if x is not None else 0 for x in history_val_loss]
 
@@ -218,7 +223,7 @@ def create_plot(df, y_train, predictions, train_indices, history_loss, history_v
     plt.subplot(3, 1, 1)
     plt.plot(sorted_dates, sorted_y_train, label='Actual Price', color='blue')
     plt.plot(sorted_dates, sorted_predictions, label='Predicted', color='green', alpha=0.7)
-    plt.title('BTC Price Prediction')
+    plt.title('BTC Price Prediction (Small Data Regime)')
     plt.legend()
     plt.xticks(rotation=45)
 
@@ -284,10 +289,10 @@ def run_training_task():
         model.add(LSTM(UNITS, activation='relu'))
         model.add(Dense(1))
         
-        # CRITICAL FIXES FOR STABILITY:
-        # 1. Lower learning rate (0.00005)
-        # 2. clipnorm=1.0 (Prevents gradients from exploding to Infinity)
-        optimizer = Adam(learning_rate=0.00005, clipnorm=1.0)
+        # --- EXPERIMENTAL CONFIGURATION ---
+        # 1. Removed clipnorm to allow full interpolation (risky but needed)
+        # 2. Increased LR to 0.001 to ensure memorization happens quickly
+        optimizer = Adam(learning_rate=0.001)
         model.compile(optimizer=optimizer, loss='mse')
         
         logger.info("Starting model.fit() ...")
@@ -345,7 +350,6 @@ def start_training():
 @app.route('/status')
 def status():
     with state_lock:
-        # Explicitly sanitize before sending to JSON
         return jsonify(training_state)
 
 if __name__ == '__main__':
