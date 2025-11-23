@@ -35,8 +35,8 @@ def load_data():
         'Net_Transaction_Count': 'n-transactions',
         'Transaction_Volume_USD': 'estimated-transaction-volume-usd',
     }
-    START_DATE = '2022-08-10'
-    END_DATE = '2023-09-30'
+    START_DATE = '2018-01-01'
+    END_DATE = pd.Timestamp.now().strftime('%Y-%m-%d')
     
     def fetch_chart_data(chart_name, start_date):
         params = {
@@ -204,9 +204,8 @@ def train_model(features, targets):
     
     # Build LSTM model
     model = Sequential()
-    model.add(LSTM(100, activation='relu', return_sequences=True, input_shape=(20, 10)))
-    model.add(LSTM(100, activation='relu', return_sequences=True))
-    model.add(LSTM(100, activation='relu'))
+    model.add(LSTM(75, activation='relu', return_sequences=True, input_shape=(20, 10)))
+    model.add(LSTM(75, activation='relu'))
     model.add(Dense(1))
     model.compile(optimizer=Adam(learning_rate=0.001), loss='mse')
     
@@ -261,10 +260,10 @@ def create_plot(df, y_train, train_predictions, train_indices, y_test, test_pred
             pred_price_yesterday = sorted_predictions[i - 1]
             actual_price_yesterday = sorted_y_actual[i - 1]
             if pred_price_yesterday > actual_price_yesterday:
-                ret = return_calc * 5  # Positive signal: long position with 5x leverage
+                ret = return_calc * 1  # Positive signal: long position with 1x leverage
                 positions.append('long')  # Mark as long
             else:
-                ret = -return_calc * 5  # Negative signal: short position with 5x leverage
+                ret = -return_calc * 1  # Negative signal: short position with 1x leverage
                 positions.append('short')  # Mark as short
         else:
             ret = 0  # Default for first day
