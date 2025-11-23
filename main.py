@@ -101,19 +101,15 @@ def trading_strategy(df, model, X_test, start_capital=1000, transaction_cost=0.0
         # Decision: long if prediction > actual_close_next, short if <= (expect price to increase for long, decrease for short)
         if prediction > actual_close_next:
             # Long position: expect price to increase
-            investment = capital
-            capital_after_trade = investment * (1 - transaction_cost)  # Apply transaction cost on entry
-            # Return: (actual_close_next / prediction) - 1 for long
-            return_rate = (actual_close_next / prediction) - 1
-            capital = capital_after_trade * (1 + return_rate)
+            capital_after_trade = capital * (1 - transaction_cost)  # Apply transaction cost on entry
+            # For long, capital grows if actual > prediction, else shrinks; use multiplicative factor
+            capital = capital_after_trade * (actual_close_next / prediction)
             positions.append('long')
         else:
             # Short position: expect price to decrease
-            investment = capital
-            capital_after_trade = investment * (1 - transaction_cost)  # Apply transaction cost on entry
-            # Return: (prediction / actual_close_next) - 1 for short
-            return_rate = (prediction / actual_close_next) - 1
-            capital = capital_after_trade * (1 + return_rate)
+            capital_after_trade = capital * (1 - transaction_cost)  # Apply transaction cost on entry
+            # For short, capital grows if actual < prediction, else shrinks; use multiplicative factor
+            capital = capital_after_trade * (prediction / actual_close_next)
             positions.append('short')
         
         capital_history.append(capital)
