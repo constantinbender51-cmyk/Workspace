@@ -3,6 +3,41 @@ import pandas as pd
 from datetime import datetime, timedelta
 import time
 
+# Configuration for on-chain metrics
+BASE_URL = "https://api.blockchain.info/charts/"
+METRICS = {
+    'Active_Addresses': 'unique-addresses-used',
+    'Net_Transaction_Count': 'n-transactions',
+    'Transaction_Volume_USD': 'estimated-transaction-volume-usd',
+}
+START_DATE = '2022-01-01'
+END_DATE = '2023-09-30'
+
+def fetch_chart_data(chart_name, start_date):
+    """
+    Fetches historical data for a single chart from the Blockchain.com API.
+    """
+    params = {
+        'format': 'json',
+        'start': start_date,
+        'timespan': 'all',
+        'sampled': 'false'
+    }
+    url = f"{BASE_URL}{chart_name}"
+    try:
+        response = requests.get(url, params=params, timeout=15)
+        response.raise_for_status()
+        data = response.json()
+        if 'values' not in data or not data['values']:
+            return pd.DataFrame()
+        df = pd.DataFrame(data['values'])
+        df['Date'] = pd.to_datetime(df['x'], unit='s', utc=True).dt.tz_localize(None)
+        df = df.set_index('Date')['y'].rename(chart_name)
+        return df
+    except Exception as e:
+        print(f"Error fetching {chart_name}: {e}")
+        return pd.DataFrame()
+
 def fetch_btc_candles():
     base_url = 'https://api.binance.com/api/v3/klines'
     symbol = 'BTCUSDT'
@@ -15,7 +50,6 @@ def fetch_btc_candles():
     
     while current_start <= end_date:
         start_time = int(current_start.timestamp() * 1000)
-        # Calculate end time for 1000 candles (1000 days for daily interval)
         end_time = int((current_start + timedelta(days=1000)).timestamp() * 1000)
         if end_time > int(end_date.timestamp() * 1000):
             end_time = int(end_date.timestamp() * 1000)
@@ -41,18 +75,32 @@ def fetch_btc_candles():
                     volume = float(candle[5])
                     date = datetime.fromtimestamp(timestamp / 1000).strftime('%Y-%m-%d')
                     all_data.append([date, open_price, high, low, close, volume])
-                # Move to the next start date after the fetched candles
                 current_start = datetime.fromtimestamp(data[-1][0] / 1000) + timedelta(days=1)
             else:
                 current_start += timedelta(days=1000)
         else:
-            print(f"Error fetching data: {response.status_code}")
+            print(f"Error fetching price data: {response.status_code}")
             break
         
-        time.sleep(0.1)  # Rate limiting
+        time.sleep(0.1)
     
-    df = pd.DataFrame(all_data, columns=['date', 'open', 'high', 'low', 'close', 'volume'])
-    df.to_csv('btc_data.csv', index=False)
+    df_price = pd.DataFrame(all_data, columns=['date', 'open', 'high', 'low', 'close', 'volume'])
+    
+    # Fetch on-chain metrics
+    all_metrics = []
+    for metric_name, chart_endpoint in METRICS.items():
+        time.sleep(1.5)
+        df_metric = fetch_chart_data(chart_endpoint, START_DATE)
+        if not df_metric.empty:
+            df_metric = df_metric.rename(metric_name)
+            all_metrics.append(df_metric)
+    
+    # Combine price and on-chain data
+    df_combined = pd.concat([df_price.set_index('date')] + all_metrics, axis=1)
+    df_combined = df_combined.loc[START_DATE:END_DATE].ffill().dropna()
+    df_combined.reset_index(inplace=True)
+    df_combined.rename(columns={'index': 'date'}, inplace=True)
+    df_combined.to_csv('btc_data.csv', index=False)
     print("Data fetched and saved to btc_data.csv")
 
 if __name__ == '__main__':
