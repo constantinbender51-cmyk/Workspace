@@ -26,7 +26,8 @@ logger = logging.getLogger(__name__)
 
 app = Flask(__name__)
 
-# --- Global State ---
+# --- Global State & Lock ---
+state_lock = threading.Lock()
 training_state = {
     'status': 'idle',
     'progress': 0,
@@ -44,37 +45,44 @@ training_state = {
     'last_update': 0
 }
 
-class DetailedProgressCallback(Callback):
-    def __init__(self, total_epochs):
+class ThrottledProgressCallback(Callback):
+    def __init__(self, total_epochs, update_frequency=5):
         self.total_epochs = total_epochs
+        self.update_frequency = update_frequency # Only update every N batches
 
     def on_epoch_begin(self, epoch, logs=None):
-        training_state['epoch'] = epoch + 1
+        with state_lock:
+            training_state['epoch'] = epoch + 1
 
     def on_train_batch_end(self, batch, logs=None):
-        # Update state every batch so user sees movement
-        logs = logs or {}
-        training_state['batch'] = batch + 1
-        training_state['current_train_loss'] = logs.get('loss')
-        training_state['last_update'] = time.time()
-        
-        # Calculate granular progress: (current_epoch_fraction + batch_fraction) / total_epochs
-        # This gives a smooth progress bar from 0% to 100%
-        if self.params and 'steps' in self.params:
-            total_steps = self.params['steps']
-            training_state['total_batches'] = total_steps
-            
-            current_epoch_progress = (training_state['epoch'] - 1) / self.total_epochs
-            current_batch_progress = (batch + 1) / total_steps
-            total_progress = current_epoch_progress + (current_batch_progress / self.total_epochs)
-            training_state['progress'] = int(total_progress * 100)
+        # OPTIMIZATION: Only update global state every N batches
+        # This prevents the "GIL" from locking up the Flask server
+        if batch % self.update_frequency == 0:
+            logs = logs or {}
+            with state_lock:
+                training_state['batch'] = batch + 1
+                training_state['current_train_loss'] = logs.get('loss')
+                training_state['last_update'] = time.time()
+                
+                if self.params and 'steps' in self.params:
+                    total_steps = self.params['steps']
+                    training_state['total_batches'] = total_steps
+                    
+                    current_epoch_progress = (training_state['epoch'] - 1) / self.total_epochs
+                    current_batch_progress = (batch + 1) / total_steps
+                    total_progress = current_epoch_progress + (current_batch_progress / self.total_epochs)
+                    training_state['progress'] = int(total_progress * 100)
 
     def on_epoch_end(self, epoch, logs=None):
         logs = logs or {}
-        training_state['current_val_loss'] = logs.get('val_loss')
-        training_state['train_loss'].append(logs.get('loss'))
-        training_state['val_loss'].append(logs.get('val_loss'))
-        logger.info(f"Epoch {epoch+1}/{self.total_epochs} completed. Loss: {logs.get('loss'):.4f}")
+        with state_lock:
+            training_state['current_val_loss'] = logs.get('val_loss')
+            training_state['train_loss'].append(logs.get('loss'))
+            training_state['val_loss'].append(logs.get('val_loss'))
+        
+        # Log less frequently to keep console clean
+        if (epoch + 1) % 50 == 0:
+            logger.info(f"Epoch {epoch+1}/{self.total_epochs} - Loss: {logs.get('loss'):.4f}")
 
 def load_data():
     logger.info("Step 1: Loading Data...")
@@ -225,12 +233,13 @@ def create_plot(df, y_train, predictions, train_indices, history_loss, history_v
 def run_training_task():
     global training_state
     logger.info("Background thread started.")
-    K.clear_session() # Clear memory from previous runs
+    K.clear_session()
     
     try:
-        training_state['status'] = 'training'
-        training_state['train_loss'] = []
-        training_state['val_loss'] = []
+        with state_lock:
+            training_state['status'] = 'training'
+            training_state['train_loss'] = []
+            training_state['val_loss'] = []
         
         df = load_data()
         features, targets, _ = prepare_data(df)
@@ -246,11 +255,13 @@ def run_training_task():
         X_test_reshaped = X_test.reshape(X_test.shape[0], 20, 10)
         
         # --- OPTIMIZED CONFIGURATION ---
-        # Reduced to 256 units (still highly overparameterized for <1000 samples)
-        # Reduced epochs to 1000
+        # Reduced to 128 units to prevent CPU freezing/timeout
+        # This is still enough parameters to overfit ~300 data points
         EPOCHS = 1000
-        UNITS = 256
-        training_state['total_epochs'] = EPOCHS
+        UNITS = 128
+        
+        with state_lock:
+            training_state['total_epochs'] = EPOCHS
         
         logger.info(f"Building Model (Units: {UNITS}, Epochs: {EPOCHS})...")
         model = Sequential()
@@ -268,7 +279,8 @@ def run_training_task():
             batch_size=32,
             verbose=0,
             validation_data=(X_test_reshaped, y_test),
-            callbacks=[DetailedProgressCallback(EPOCHS)]
+            # Update frequency = 5 batches to reduce GIL contention
+            callbacks=[ThrottledProgressCallback(EPOCHS, update_frequency=5)]
         )
         logger.info("Training completed.")
         
@@ -279,15 +291,17 @@ def run_training_task():
             history.history['loss'], history.history['val_loss']
         )
         
-        training_state['plot_url'] = plot_url
-        training_state['train_mse'] = history.history['loss'][-1]
-        training_state['status'] = 'completed'
+        with state_lock:
+            training_state['plot_url'] = plot_url
+            training_state['train_mse'] = history.history['loss'][-1]
+            training_state['status'] = 'completed'
         
     except Exception as e:
         logger.error(f"CRITICAL TRAINING FAILURE: {e}")
         logger.error(traceback.format_exc())
-        training_state['status'] = 'error'
-        training_state['error'] = str(e)
+        with state_lock:
+            training_state['status'] = 'error'
+            training_state['error'] = str(e)
 
 @app.route('/')
 def index():
@@ -295,14 +309,15 @@ def index():
 
 @app.route('/start_training', methods=['POST'])
 def start_training():
-    if training_state['status'] == 'training':
-        return jsonify({'status': 'already_running'})
-    
-    training_state['status'] = 'starting'
-    training_state['progress'] = 0
-    training_state['epoch'] = 0
-    training_state['plot_url'] = None
-    training_state['error'] = None
+    with state_lock:
+        if training_state['status'] == 'training':
+            return jsonify({'status': 'already_running'})
+        
+        training_state['status'] = 'starting'
+        training_state['progress'] = 0
+        training_state['epoch'] = 0
+        training_state['plot_url'] = None
+        training_state['error'] = None
     
     thread = threading.Thread(target=run_training_task)
     thread.daemon = True
@@ -312,7 +327,9 @@ def start_training():
 
 @app.route('/status')
 def status():
-    return jsonify(training_state)
+    # Use lock to read state safely
+    with state_lock:
+        return jsonify(training_state)
 
 if __name__ == '__main__':
     app.run(host='0.0.0.0', port=8080, debug=False)
