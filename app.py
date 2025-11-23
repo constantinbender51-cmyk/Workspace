@@ -30,16 +30,19 @@ def prepare_data(df):
     df['sma_14'] = df['close'].rolling(window=14).mean()
     df['sma_14_squared'] = df['sma_14'] ** 2
     
-    # Remove rows with NaN values from SMA calculation
+    # Remove rows with NaN values from SMA calculation and on-chain metrics
     df_clean = df.dropna()
     
     features = []
     targets = []
     for i in range(len(df_clean)):
-        # Features: 14-day SMA and squared 14-day SMA
+        # Features: 14-day SMA, squared 14-day SMA, and on-chain metrics
         feature = [
             df_clean['sma_14'].iloc[i],
-            df_clean['sma_14_squared'].iloc[i]
+            df_clean['sma_14_squared'].iloc[i],
+            df_clean['Active_Addresses'].iloc[i],
+            df_clean['Net_Transaction_Count'].iloc[i],
+            df_clean['Transaction_Volume_USD'].iloc[i]
         ]
         features.append(feature)
         # Target: next day's closing price
@@ -171,7 +174,12 @@ def index():
     features, targets = prepare_data(df)
     model, X_train, y_train, predictions, train_mse, test_mse, train_indices = train_model(features, targets)
     plot_url = create_plot(df, y_train, predictions, train_indices)
-    return render_template('index.html', plot_url=plot_url, train_mse=train_mse)
+    # Calculate additional metrics for visualization
+    period_start = df.index.min().strftime('%Y-%m-%d')
+    period_end = df.index.max().strftime('%Y-%m-%d')
+    data_points = len(df)
+    metrics = ', '.join(['close', 'sma_14', 'sma_14_squared', 'Active_Addresses', 'Net_Transaction_Count', 'Transaction_Volume_USD'])
+    return render_template('index.html', plot_url=plot_url, train_mse=train_mse, period_start=period_start, period_end=period_end, data_points=data_points, metrics=metrics)
 
 if __name__ == '__main__':
     app.run(host='0.0.0.0', port=8080, debug=False)
