@@ -40,8 +40,8 @@ URL = "https://api.binance.com/api/v3/klines"
 # 1. Grab 2022 daily klines from Binance REST
 # --------------------------------------------------
 # -----------  time range : 1 Dec 2021  –  1 Jan 2023  -------------
-START_TS = int(dt.datetime(2021, 12, 1).timestamp() * 1000)
-END_TS   = int(dt.datetime(2025, 1, 1).timestamp() * 1000)
+START_TS = int(dt.datetime(2022, 1, 1).timestamp() * 1000)
+END_TS   = int(dt.datetime(2024, 1, 1).timestamp() * 1000)
 # -------------------------------------------------------------------
 
 def fetch_2022_daily() -> pd.DataFrame:
