@@ -5,23 +5,22 @@ from sklearn.linear_model import LinearRegression
 from sklearn.model_selection import train_test_split
 from sklearn.metrics import mean_squared_error
 import matplotlib
-matplotlib.use('Agg') # Non-interactive backend for server
+matplotlib.use('Agg')
 import matplotlib.pyplot as plt
 import io
 import base64
-from flask import Flask, render_template_string
+from flask import Flask
 
 app = Flask(__name__)
 
 # --- Configuration ---
 SYMBOL = 'BTCUSDT'
 INTERVAL = '1d'
-START_TIME = 1640995200000 # Jan 1 2022
-END_TIME = 1696032000000   # Sep 30 2023
+START_TIME = 1640995200000 
+END_TIME = 1696032000000 
 INITIAL_CAPITAL = 1000
 
 def fetch_binance_data():
-    """Fetches daily candles from Binance."""
     url = "https://api.binance.com/api/v3/klines"
     data = []
     current_start = START_TIME
@@ -38,8 +37,7 @@ def fetch_binance_data():
             if not candles: break
             data.extend(candles)
             current_start = candles[-1][6] + 1
-        except Exception as e:
-            print(f"Error: {e}")
+        except:
             break
             
     df = pd.DataFrame(data, columns=[
@@ -53,7 +51,6 @@ def fetch_binance_data():
     return df[['Open Time', 'Close', 'Volume']]
 
 def prepare_data(df):
-    """Calculates SMAs and sets targets."""
     df = df.copy()
     df['SMA_7'] = df['Close'].rolling(window=7).mean()
     df['SMA_365'] = df['Close'].rolling(window=365).mean()
@@ -62,18 +59,20 @@ def prepare_data(df):
     df.dropna(inplace=True)
     
     # Target: The Close price of the NEXT day
+    # When we are at index `t`, we want to predict Close at `t+1`
     df['Target_Next_Close'] = df['Close'].shift(-1)
     df.dropna(inplace=True)
     return df
 
-def run_backtest():
+def run_strategy():
     raw_df = fetch_binance_data()
     if raw_df.empty: return None, "No Data"
     
     df = prepare_data(raw_df)
     
-    # Features (X) and Target (y)
+    # X (Features) at time t
     X = df[['Close', 'Volume', 'SMA_7', 'SMA_365', 'Volume_SMA_5', 'Volume_SMA_10']]
+    # y (Target) is Close at time t+1
     y = df['Target_Next_Close']
     
     # Split
@@ -82,33 +81,44 @@ def run_backtest():
     # Train
     model = LinearRegression()
     model.fit(X_train, y_train)
+    
+    # Predictions
+    # These are predictions generated using X_test (data at t)
+    # So these predict the price at t+1
     predictions = model.predict(X_test)
     
-    # Backtest Logic
+    # --- ALIGNMENT ---
+    # We construct the results dataframe to represent "The Next Day" (t+1)
     results = pd.DataFrame(index=X_test.index)
-    results['Date'] = df['Open Time'].loc[X_test.index]
-    results['Actual_Price'] = X_test['Close']        # Today's Price
-    results['Next_Actual_Price'] = y_test            # Tomorrow's Price
-    results['Predicted_Next_Price'] = predictions    # Prediction for Tomorrow
+    results['Date'] = df['Open Time'].loc[X_test.index] # This is date t
+    # To make it clear, let's shift the date for plotting so it shows the "Result Day"
+    # But for calculation, we just need the prices aligned.
     
-    # Calculate Market Return (Tomorrow - Today) / Today
-    results['Market_Return'] = (results['Next_Actual_Price'] - results['Actual_Price']) / results['Actual_Price']
+    results['Yesterday_Close'] = X_test['Close']   # Price at t (Basis for return)
+    results['Today_Close'] = y_test                # Price at t+1 (The Target)
+    results['Today_Predicted'] = predictions       # Prediction for t+1 (The Forecast)
     
-    strategy_returns = []
+    # Market Return for "Today" (t+1)
+    results['Daily_Return'] = (results['Today_Close'] - results['Yesterday_Close']) / results['Yesterday_Close']
+    
     positions = []
+    strategy_returns = []
     
     for i, row in results.iterrows():
-        current_price = row['Actual_Price']
-        predicted_price = row['Predicted_Next_Price']
-        market_ret = row['Market_Return']
+        actual = row['Today_Close']
+        predicted = row['Today_Predicted']
+        market_ret = row['Daily_Return']
         
-        # --- USER SPECIFIED LOGIC ---
-        if current_price < predicted_price:
-            # "If price is below predicted value -> Negative return (Short)"
+        # --- YOUR SPECIFIED LOGIC ---
+        # "If the price [Today_Close] is below the predicted value [Today_Predicted]"
+        if actual < predicted:
+            # "...calculate the return of today the negative return of Bitcoin" (Short)
             positions.append('Short')
             strategy_returns.append(-1 * market_ret)
-        elif current_price > predicted_price:
-            # "If price is above predicted value -> Positive return (Long)"
+            
+        # "If the price [Today_Close] is above the predicted value [Today_Predicted]"
+        elif actual > predicted:
+            # "...calculate the return is the positive return of Bitcoin" (Long)
             positions.append('Long')
             strategy_returns.append(1 * market_ret)
         else:
@@ -116,28 +126,31 @@ def run_backtest():
             strategy_returns.append(0)
             
     results['Strategy_Return'] = strategy_returns
-    results['Position'] = positions
     
-    # Equity Curve
+    # Capital Accumulation
     results['Equity'] = INITIAL_CAPITAL * (1 + results['Strategy_Return']).cumprod()
-    results['Benchmark'] = INITIAL_CAPITAL * (1 + results['Market_Return']).cumprod()
+    results['Benchmark'] = INITIAL_CAPITAL * (1 + results['Daily_Return']).cumprod()
     
     # Plotting
     plt.figure(figsize=(10, 8))
     
+    # Equity Curve
     plt.subplot(2, 1, 1)
-    plt.plot(results['Date'], results['Equity'], 'g-', label='Your Strategy')
+    plt.plot(results['Date'], results['Equity'], 'g-', linewidth=2, label='Strategy Equity')
     plt.plot(results['Date'], results['Benchmark'], 'k--', alpha=0.5, label='Buy & Hold')
     plt.title(f'Strategy Performance (Initial: ${INITIAL_CAPITAL})')
+    plt.ylabel('Capital ($)')
     plt.legend()
-    plt.grid(alpha=0.3)
+    plt.grid(True, alpha=0.3)
     
+    # Price vs Prediction
     plt.subplot(2, 1, 2)
-    plt.plot(results['Date'], results['Next_Actual_Price'], label='Actual Price', color='blue', alpha=0.6)
-    plt.plot(results['Date'], results['Predicted_Next_Price'], label='Predicted', color='orange', alpha=0.6, linestyle='--')
-    plt.title('Price vs Prediction')
+    plt.plot(results['Date'], results['Today_Close'], label='Actual Price (Today)', color='blue')
+    plt.plot(results['Date'], results['Today_Predicted'], label='Predicted Price (For Today)', color='orange', linestyle='--')
+    plt.title('Actual Close vs Predicted Close')
+    plt.ylabel('Price')
     plt.legend()
-    plt.grid(alpha=0.3)
+    plt.grid(True, alpha=0.3)
     
     plt.tight_layout()
     img = io.BytesIO()
@@ -147,27 +160,42 @@ def run_backtest():
     plt.close()
     
     final_cap = results['Equity'].iloc[-1]
-    rmse = np.sqrt(mean_squared_error(y_test, predictions)) # Fixed syntax
+    rmse = np.sqrt(mean_squared_error(y_test, predictions))
     
     return plot_url, round(final_cap, 2), round(rmse, 2)
 
 @app.route('/')
 def index():
     try:
-        plot, cap, error = run_backtest()
+        plot, cap, error = run_strategy()
         return f"""
         <html>
-            <body style="font-family: sans-serif; text-align: center; padding: 20px;">
-                <h1>Trading Bot Dashboard</h1>
-                <div style="display: flex; justify-content: center; gap: 40px; margin-bottom: 20px;">
-                    <div><h2>${cap}</h2><p>Final Capital</p></div>
-                    <div><h2>{error}</h2><p>RMSE Score</p></div>
-                </div>
-                <img src="data:image/png;base64,{plot}" style="max-width: 100%; border: 1px solid #ccc;" />
-                <div style="margin-top: 20px; padding: 10px; background: #f0f0f0; display: inline-block; text-align: left;">
-                    <strong>Logic Applied:</strong><br>
-                    - If Current Price < Predicted: <b>SHORT</b> (Negative Return)<br>
-                    - If Current Price > Predicted: <b>LONG</b> (Positive Return)
+            <head><title>Algo Dashboard</title></head>
+            <body style="font-family: sans-serif; text-align: center; padding: 20px; background-color: #f4f4f9;">
+                <div style="background: white; max-width: 900px; margin: auto; padding: 20px; border-radius: 10px; box-shadow: 0 4px 6px rgba(0,0,0,0.1);">
+                    <h1 style="color: #333;">Strategy Results</h1>
+                    
+                    <div style="display: flex; justify-content: space-around; margin-bottom: 20px;">
+                        <div style="background: #e0f7fa; padding: 15px; border-radius: 8px; width: 40%;">
+                            <h2 style="margin: 0; color: #006064;">${cap}</h2>
+                            <p style="margin: 5px 0 0;">Final Capital</p>
+                        </div>
+                        <div style="background: #fff3e0; padding: 15px; border-radius: 8px; width: 40%;">
+                            <h2 style="margin: 0; color: #e65100;">{error}</h2>
+                            <p style="margin: 5px 0 0;">RMSE Score</p>
+                        </div>
+                    </div>
+
+                    <img src="data:image/png;base64,{plot}" style="width: 100%; border: 1px solid #ddd; border-radius: 4px;" />
+                    
+                    <div style="margin-top: 20px; text-align: left; background: #f9f9f9; padding: 15px; border-radius: 5px;">
+                        <strong>Logic Used:</strong>
+                        <ul style="margin-top: 5px;">
+                            <li>Compares <b>Today's Actual Close</b> vs <b>Today's Predicted Close</b> (made yesterday).</li>
+                            <li>If Actual < Predicted: <b>SHORT</b> (Return = Negative of Daily Move)</li>
+                            <li>If Actual > Predicted: <b>LONG</b> (Return = Positive of Daily Move)</li>
+                        </ul>
+                    </div>
                 </div>
             </body>
         </html>
