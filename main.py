@@ -18,6 +18,8 @@ def fetch_btc_data():
     url = f"https://api.binance.com/api/v3/klines?symbol=BTCUSDT&interval=1d&startTime={start_time}&endTime={end_time}"
     response = requests.get(url)
     data = response.json()
+    if not data:
+        raise ValueError("No data fetched from Binance. Check the date range or API availability.")
     df = pd.DataFrame(data, columns=['open_time', 'open', 'high', 'low', 'close', 'volume', 'close_time', 'quote_asset_volume', 'number_of_trades', 'taker_buy_base_asset_volume', 'taker_buy_quote_asset_volume', 'ignore'])
     df['close'] = df['close'].astype(float)
     df['volume'] = df['volume'].astype(float)
@@ -35,6 +37,10 @@ def calculate_features(df):
 def prepare_data(df):
     df = calculate_features(df)
     df = df.dropna()  # Remove rows with NaN values from rolling averages
+    
+    # Check if we have enough data after dropping NaN
+    if len(df) < 6:  # Need at least 6 rows for features and targets (5-day lookback + 1 target)
+        raise ValueError("Insufficient data after processing. Need at least 6 days of data after calculating rolling averages.")
     
     # Create features with 5-day lookback for predicting the next day's close
     features = []
@@ -55,8 +61,15 @@ def prepare_data(df):
     return np.array(features), np.array(targets), df
 
 def train_model(features, targets):
+    # Check if features and targets are not empty
+    if len(features) == 0 or len(targets) == 0:
+        raise ValueError("No features or targets available for training. Ensure sufficient data.")
     # Split data 50% for training, 50% for testing
-    X_train, X_test, y_train, y_test = train_test_split(features, targets, test_size=0.5, shuffle=False)
+    split_index = len(features) // 2
+    if split_index == 0:
+        raise ValueError("Insufficient data for 50% train-test split. Need at least 2 samples.")
+    X_train, X_test = features[:split_index], features[split_index:]
+    y_train, y_test = targets[:split_index], targets[split_index:]
     model = LinearRegression()
     model.fit(X_train, y_train)
     return model, X_test, y_test
@@ -147,26 +160,29 @@ def create_plot(capital_history, df, predictions, test_start_idx):
 
 @app.route('/')
 def index():
-    # Fetch and prepare data
-    df = fetch_btc_data()
-    features, targets, df = prepare_data(df)
-    
-    # Train model once with 50% split
-    model, X_test, y_test = train_model(features, targets)
-    
-    # Generate predictions for test set
-    predictions = model.predict(X_test)
-    
-    # Apply trading strategy on test set
-    start_capital = 1000
-    transaction_cost = 0.001
-    capital_history, positions = trading_strategy(df, model, X_test, start_capital, transaction_cost)
-    
-    # Create plot; adjust test_start_idx for plotting
-    test_start_idx = len(features) // 2  # Start of test set in features array
-    plot_url = create_plot(capital_history, df, predictions, test_start_idx)
-    
-    return render_template('index.html', plot_url=plot_url)
+    try:
+        # Fetch and prepare data
+        df = fetch_btc_data()
+        features, targets, df = prepare_data(df)
+        
+        # Train model once with 50% split
+        model, X_test, y_test = train_model(features, targets)
+        
+        # Generate predictions for test set
+        predictions = model.predict(X_test)
+        
+        # Apply trading strategy on test set
+        start_capital = 1000
+        transaction_cost = 0.001
+        capital_history, positions = trading_strategy(df, model, X_test, start_capital, transaction_cost)
+        
+        # Create plot; adjust test_start_idx for plotting
+        test_start_idx = len(features) // 2  # Start of test set in features array
+        plot_url = create_plot(capital_history, df, predictions, test_start_idx)
+        
+        return render_template('index.html', plot_url=plot_url)
+    except Exception as e:
+        return f"Error: {str(e)}"
 
 if __name__ == '__main__':
     app.run(host='0.0.0.0', port=8080, debug=False)
