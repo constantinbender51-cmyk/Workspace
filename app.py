@@ -3,6 +3,7 @@ import pandas as pd
 import numpy as np
 from sklearn.model_selection import train_test_split
 from sklearn.metrics import mean_squared_error
+from sklearn.preprocessing import StandardScaler
 from tensorflow.keras.models import Sequential
 from tensorflow.keras.layers import LSTM, Dense
 from tensorflow.keras.optimizers import Adam
@@ -177,7 +178,12 @@ def prepare_data(df):
     min_len = min(len(features), len(targets))
     features = features[:min_len]
     targets = targets[:min_len]
-    return np.array(features), np.array(targets)
+    
+    # Normalize features using StandardScaler
+    scaler = StandardScaler()
+    features_normalized = scaler.fit_transform(features)
+    
+    return features_normalized, np.array(targets), scaler
 
 # Train model
 def train_model(features, targets):
@@ -309,7 +315,7 @@ def create_plot(df, y_train, predictions, train_indices):
 @app.route('/')
 def index():
     df = load_data()
-    features, targets = prepare_data(df)
+    features, targets, scaler = prepare_data(df)
     model, X_train, y_train, predictions, train_mse, test_mse, train_indices = train_model(features, targets)
     plot_url = create_plot(df, y_train, predictions, train_indices)
     return render_template('index.html', plot_url=plot_url, train_mse=train_mse)
