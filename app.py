@@ -90,19 +90,24 @@ def load_data():
 def prepare_data(df):
     # Calculate 7-day SMA for close price
     df['sma_7_close'] = df['close'].rolling(window=7).mean()
+    # Calculate 14-day EMA for close price
+    df['ema_14_close'] = df['close'].ewm(span=14, adjust=False).mean()
     
-    # Remove rows with NaN values from SMA calculations
+    # Remove rows with NaN values from SMA and EMA calculations
     df_clean = df.dropna()
     
     features = []
     targets = []
     for i in range(len(df_clean)):
-        # Features: 7-day SMA values for previous 7 days (days t-7 to t-1), excluding today
-        if i >= 14:  # Ensure enough history for 7-day lookback of 7-day SMA
+        # Features: 7-day SMA and 14-day EMA values for previous 7 days (days t-7 to t-1), excluding today
+        if i >= 14:  # Ensure enough history for 7-day lookback
             feature = []
             # Get SMA values for days t-7 through t-1
             for j in range(1, 8):
                 feature.append(df_clean['sma_7_close'].iloc[i - j])
+            # Get EMA values for days t-7 through t-1
+            for j in range(1, 8):
+                feature.append(df_clean['ema_14_close'].iloc[i - j])
             features.append(feature)
             # Target: closing price 3 days ahead
             if i < len(df_clean) - 3:
