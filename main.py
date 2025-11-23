@@ -121,13 +121,18 @@ def trading_strategy(df, model, X_test, start_capital=1000, transaction_cost=0.0
     
     return capital_history, positions
 
-def create_plot(capital_history, df, predictions, test_start_idx):
+def create_plot(capital_history, df, predictions, test_start_idx, positions):
     # Create a figure with subplots
     fig, (ax1, ax2, ax3) = plt.subplots(3, 1, figsize=(10, 12))
     
-    # Plot capital development
-    ax1.plot(range(len(capital_history)), capital_history)
-    ax1.set_title('Capital Development Over Time')
+    # Plot capital development with colors for long (green) and short (red) periods
+    ax1.plot(range(len(capital_history)), capital_history, color='black', linewidth=1)
+    for i in range(len(positions)):
+        if positions[i] == 'long':
+            ax1.axvspan(i, i+1, color='green', alpha=0.3)
+        elif positions[i] == 'short':
+            ax1.axvspan(i, i+1, color='red', alpha=0.3)
+    ax1.set_title('Capital Development Over Time (Green: Long, Red: Short)')
     ax1.set_xlabel('Trading Day in Test Set')
     ax1.set_ylabel('Capital ($)')
     ax1.grid(True)
@@ -187,7 +192,7 @@ def index():
         
         # Create plot; adjust test_start_idx for plotting
         test_start_idx = int(len(features) * 0.7)  # Start of test set in features array (70% split)
-        plot_url = create_plot(capital_history, df, predictions, test_start_idx)
+        plot_url = create_plot(capital_history, df, predictions, test_start_idx, positions)
         
         return render_template('index.html', plot_url=plot_url)
     except Exception as e:
