@@ -99,14 +99,14 @@ def prepare_data(df):
     features = []
     targets = []
     for i in range(len(df_clean)):
-        # Features: 7-day SMA and 14-day EMA values for previous 7 days (days t-7 to t-1), excluding today
-        if i >= 14:  # Ensure enough history for 7-day lookback
+        # Features: 7-day SMA and 14-day EMA values for previous 3 days (days t-3 to t-1), excluding today
+        if i >= 14:  # Ensure enough history for 3-day lookback
             feature = []
-            # Get SMA values for days t-7 through t-1
-            for j in range(1, 8):
+            # Get SMA values for days t-3 through t-1
+            for j in range(1, 4):
                 feature.append(df_clean['sma_7_close'].iloc[i - j])
-            # Get EMA values for days t-7 through t-1
-            for j in range(1, 8):
+            # Get EMA values for days t-3 through t-1
+            for j in range(1, 4):
                 feature.append(df_clean['ema_14_close'].iloc[i - j])
             features.append(feature)
             # Target: closing price 3 days ahead
