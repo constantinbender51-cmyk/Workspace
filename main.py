@@ -12,7 +12,7 @@ from datetime import datetime, timedelta
 app = Flask(__name__)
 
 def fetch_btc_data():
-    # Fetch BTC daily price data from Binance starting from 2022-01-01 to ensure enough data for proper train/test split
+    # Fetch BTC daily price data from Binance starting from 2022-01-01 to ensure enough data for proper train/test split    print("DEBUG: Starting to fetch BTC data from Binance")
     end_time = int(datetime(2025, 11, 30).timestamp() * 1000)
     start_time = int(datetime(2022, 1, 1).timestamp() * 1000)
     url = f"https://api.binance.com/api/v3/klines?symbol=BTCUSDT&interval=1d&startTime={start_time}&endTime={end_time}"
@@ -25,10 +25,10 @@ def fetch_btc_data():
     df['volume'] = df['volume'].astype(float)
     df['date'] = pd.to_datetime(df['open_time'], unit='ms')
     df = df[['date', 'close', 'volume']]
-    return df
+    return df    print(f"DEBUG: Fetched {len(df)} rows of BTC data")
 
 def calculate_features(df):
-    # Calculate features without lookahead bias - use shift to ensure no future data
+    # Calculate features without lookahead bias - use shift to ensure no future data    print("DEBUG: Calculating features for the dataset")
     df['sma_7'] = df['close'].rolling(window=7).mean().shift(1)
     df['sma_365'] = df['close'].rolling(window=365).mean().shift(1)
     df['sma_volume_5'] = df['volume'].rolling(window=5).mean().shift(1)
@@ -39,13 +39,13 @@ def prepare_data(df):
     df = calculate_features(df)
     df = df.dropna()  # Remove rows with NaN values from rolling averages
     
-    # Check if we have enough data after dropping NaN; minimum 4 days for 3-day lookback + target
+    # Check if we have enough data after dropping NaN; minimum 4 days for 3-day lookback + target    print(f"DEBUG: Data after dropping NaN has {len(df)} rows")
     if len(df) < 4:
         raise ValueError(f"Insufficient data after processing. Have {len(df)} days, need at least 4. Try fetching more data.")
     
     # Create features with 3-day lookback for predicting the next day's close
     features = []
-    targets = []
+    targets = []    print("DEBUG: Preparing features and targets with 3-day lookback")
     for i in range(3, len(df) - 1):  # Start from index 3 to have 3 days of lookback, stop at len(df)-1 to have a target
         # Use technical indicators from the past 3 days (i-3 to i-1) to predict close on day i
         feature_row = [
@@ -65,10 +65,10 @@ def prepare_data(df):
         features.append(feature_row)
         targets.append(df.iloc[i+1]['close'])  # Target is close on day i+1 (true next day prediction)
     
-    return np.array(features), np.array(targets), df
+    return np.array(features), np.array(targets), df    print(f"DEBUG: Prepared {len(features)} feature samples and {len(targets)} target samples")
 
 def train_model(features, targets):
-    # Check if features and targets are not empty
+    # Check if features and targets are not empty    print("DEBUG: Starting model training with 50/50 train-test split")
     if len(features) == 0 or len(targets) == 0:
         raise ValueError("No features or targets available for training. Ensure sufficient data.")
     # Split data 50% for training, 50% for testing
@@ -79,12 +79,12 @@ def train_model(features, targets):
     y_train, y_test = targets[:split_index], targets[split_index:]
     model = LinearRegression()
     model.fit(X_train, y_train)
-    return model, X_test, y_test
+    return model, X_test, y_test    print(f"DEBUG: Model trained. Train samples: {len(X_train)}, Test samples: {len(X_test)}")
 
 def trading_strategy(df, model, X_test, start_capital=1000, transaction_cost=0.001):
     capital = start_capital
     capital_history = [capital]
-    positions = []  # Track positions for plotting
+    positions = []  # Track positions for plotting    print("DEBUG: Executing trading strategy on test set")
     
     # X_test corresponds to features for the test set; indices in df need adjustment
     # Features were built for indices 3 to len(df)-2, so test set starts after train split
@@ -106,10 +106,10 @@ def trading_strategy(df, model, X_test, start_capital=1000, transaction_cost=0.0
         
         capital_history.append(capital)
     
-    return capital_history, positions
+    return capital_history, positions    print(f"DEBUG: Trading strategy completed. Final capital: {capital}")
 
 def create_plot(capital_history, df, predictions, test_start_idx, positions):
-    # Create a figure with subplots
+    # Create a figure with subplots    print("DEBUG: Generating plot for visualization")
     fig, (ax1, ax2, ax3) = plt.subplots(3, 1, figsize=(10, 12))
     
     # Plot capital development with colors for long (green) and short (red) periods
@@ -157,12 +157,12 @@ def create_plot(capital_history, df, predictions, test_start_idx, positions):
     img.seek(0)
     plot_url = base64.b64encode(img.getvalue()).decode()
     plt.close()
-    return plot_url
+    return plot_url    print("DEBUG: Plot created and converted to base64")
 
 @app.route('/')
 def index():
     try:
-        # Fetch and prepare data
+        # Fetch and prepare data        print("DEBUG: Starting index route execution")
         df = fetch_btc_data()
         features, targets, df = prepare_data(df)
         
@@ -182,7 +182,7 @@ def index():
         plot_url = create_plot(capital_history, df, predictions, test_start_idx, positions)
         
         return render_template('index.html', plot_url=plot_url)
-    except Exception as e:
+    except Exception as e:        print("DEBUG: Successfully generated and rendered plot")
         return f"Error: {str(e)}"
 
 if __name__ == '__main__':
