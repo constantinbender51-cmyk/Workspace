@@ -204,7 +204,9 @@ def train_model(features, targets):
     
     # Build LSTM model
     model = Sequential()
-    model.add(LSTM(50, activation='relu', input_shape=(20, 10)))
+    model.add(LSTM(50, activation='relu', return_sequences=True, input_shape=(20, 10)))
+    model.add(LSTM(50, activation='relu', return_sequences=True))
+    model.add(LSTM(50, activation='relu'))
     model.add(Dense(1))
     model.compile(optimizer=Adam(learning_rate=0.001), loss='mse')
     
