@@ -253,10 +253,10 @@ def create_plot(df, y_train, predictions, train_indices):
             pred_price_yesterday = sorted_predictions[i - 1]
             actual_price_yesterday = sorted_y_train[i - 1]
             if pred_price_yesterday > actual_price_yesterday:
-                ret = return_calc  # Positive signal: long position
+                ret = return_calc * 5  # Positive signal: long position with 5x leverage
                 positions.append('long')  # Mark as long
             else:
-                ret = -return_calc  # Negative signal: short position
+                ret = -return_calc * 5  # Negative signal: short position with 5x leverage
                 positions.append('short')  # Mark as short
         else:
             ret = 0  # Default for first day
