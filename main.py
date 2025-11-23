@@ -29,7 +29,7 @@ def fetch_btc_data():
 
 def calculate_features(df):
     df['sma_7'] = df['close'].rolling(window=7).mean()
-    df['sma_365'] = df['close'].rolling(window=365).mean()
+    df['sma_365'] = df['close'].rolling(window=30).mean()  # Reduced from 365 to 30 for feasibility with current data
     df['sma_volume_5'] = df['volume'].rolling(window=5).mean()
     df['sma_volume_10'] = df['volume'].rolling(window=10).mean()
     return df
