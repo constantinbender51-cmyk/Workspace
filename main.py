@@ -143,15 +143,15 @@ def build_dashboard(y_test, preds, model, feats, X_test):
     p3.vbar(x='feature', top='coef', width=0.7, source=ColumnDataSource(coef_df))
     p3.xaxis.major_label_orientation = 0.8
 
-    # 4. CAPITAL EVOLUTION  =========================================
+        # 4. CAPITAL EVOLUTION – mean-reverting strategy  =================
     capital = 1000.0
     capital_curve = [capital]
-    position = 0.0          # BTC units held (positive long, negative short)
+    position = 0.0          # BTC units (positive long, negative short)
 
     for i in range(1, len(y_test)):
-        price_today   = y_test.iloc[i-1]      # known close
-        price_tomorrow_pred = preds[i]        # our forecast
-        signal = 1 if price_tomorrow_pred > price_today else -1
+        price_today = y_test.iloc[i-1]      # last known close
+        pred_today  = preds[i-1]            # model prediction for that day
+        signal = 1 if price_today > pred_today else -1   # ↑ long  ↓ short
 
         # close previous position
         capital += position * price_today
@@ -162,7 +162,7 @@ def build_dashboard(y_test, preds, model, feats, X_test):
 
     cap_src = ColumnDataSource(data={'date': y_test.index,
                                      'capital': capital_curve})
-    p4 = figure(title="Capital evolution (€) – long/short on prediction",
+    p4 = figure(title="Capital evolution (€) – long when actual > pred, short when actual < pred",
                 x_axis_type='datetime', y_axis_label='Euro',
                 sizing_mode="stretch_width", height=350,
                 toolbar_location='above', tools='pan,xwheel_zoom,reset')
