@@ -88,23 +88,70 @@ def load_data():
 
 # Prepare features and target
 def prepare_data(df):
-    # Calculate 24-day SMA for close price
-    df['sma_24_close'] = df['close'].rolling(window=24).mean()
-    # Calculate 48-day SMA for close price
-    df['sma_48_close'] = df['close'].rolling(window=48).mean()
+    # Calculate technical indicators
+    # 3-day SMA for close price
+    df['sma_3_close'] = df['close'].rolling(window=3).mean()
+    # 9-day SMA for close price
+    df['sma_9_close'] = df['close'].rolling(window=9).mean()
+    # 3-day EMA for volume
+    df['ema_3_volume'] = df['volume'].ewm(span=3).mean()
     
-    # Remove rows with NaN values from SMA calculation
+    # MACD (12,26,9)
+    ema_12 = df['close'].ewm(span=12).mean()
+    ema_26 = df['close'].ewm(span=26).mean()
+    df['macd_line'] = ema_12 - ema_26
+    df['signal_line'] = df['macd_line'].ewm(span=9).mean()
+    
+    # Stochastic RSI (14,3,3)
+    rsi_period = 14
+    delta = df['close'].diff()
+    gain = (delta.where(delta > 0, 0)).rolling(window=rsi_period).mean()
+    loss = (-delta.where(delta < 0, 0)).rolling(window=rsi_period).mean()
+    rs = gain / loss
+    rsi = 100 - (100 / (1 + rs))
+    
+    # Stochastic RSI calculation
+    rsi_min = rsi.rolling(window=14).min()
+    rsi_max = rsi.rolling(window=14).max()
+    df['stoch_rsi'] = 100 * (rsi - rsi_min) / (rsi_max - rsi_min)
+    
+    # Day of week (1-7)
+    df['day_of_week'] = df.index.dayofweek + 1
+    
+    # Remove rows with NaN values from indicator calculations
     df_clean = df.dropna()
     
     features = []
     targets = []
     for i in range(len(df_clean)):
-        # Features: 24-day SMA and 48-day SMA values for previous day (day t-1)
-        if i >= 48:  # Ensure enough history for 1-day lookback and 48-day SMA
+        # Features: technical indicators and on-chain metrics for previous day (day t-1)
+        if i >= 26:  # Ensure enough history for MACD calculation
             feature = []
-            # Get SMA values for day t-1
-            feature.append(df_clean['sma_24_close'].iloc[i - 1])
-            feature.append(df_clean['sma_48_close'].iloc[i - 1])
+            # Technical indicators from day t-1
+            feature.append(df_clean['sma_3_close'].iloc[i - 1])
+            feature.append(df_clean['sma_9_close'].iloc[i - 1])
+            feature.append(df_clean['ema_3_volume'].iloc[i - 1])
+            feature.append(df_clean['macd_line'].iloc[i - 1])
+            feature.append(df_clean['signal_line'].iloc[i - 1])
+            feature.append(df_clean['stoch_rsi'].iloc[i - 1])
+            feature.append(df_clean['day_of_week'].iloc[i - 1])
+            
+            # On-chain metrics from day t-1
+            if 'Net_Transaction_Count' in df_clean.columns:
+                feature.append(df_clean['Net_Transaction_Count'].iloc[i - 1])
+            else:
+                feature.append(0)
+                
+            if 'Transaction_Volume_USD' in df_clean.columns:
+                feature.append(df_clean['Transaction_Volume_USD'].iloc[i - 1])
+            else:
+                feature.append(0)
+                
+            if 'Active_Addresses' in df_clean.columns:
+                feature.append(df_clean['Active_Addresses'].iloc[i - 1])
+            else:
+                feature.append(0)
+                
             features.append(feature)
             # Target: today's closing price
             target = df_clean['close'].iloc[i]
@@ -133,8 +180,8 @@ def train_model(features, targets):
     y_train = targets[:split_idx]
     y_test = targets[split_idx:]
     # Training indices correspond to the indices in the cleaned DataFrame for the training set
-    # Start from index 48 (due to 48-day SMA requirement) and use the first split_idx rows after that
-    train_indices = list(range(48, 48 + split_idx))
+    # Start from index 26 (due to MACD calculation requirement) and use the first split_idx rows after that
+    train_indices = list(range(26, 26 + split_idx))
     model = LinearRegression()
     model.fit(X_train, y_train)
     
