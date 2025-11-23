@@ -105,8 +105,8 @@ def calculate_features(df):
     df['volume_sma_5'] = df['volume'].rolling(window=5).mean()
     df['volume_sma_10'] = df['volume'].rolling(window=10).mean()
     
-    # Create target (next day price)
-    df['next_day_price'] = df['price'].shift(-1)
+    # Create target (3 days ahead price)
+    df['target_3day'] = df['price'].shift(-3)
     
     # Drop rows with NaN values
     df = df.dropna()
@@ -125,7 +125,7 @@ def train_model(df):
     
     # Prepare training data
     X_train = train_df[features]
-    y_train = train_df['next_day_price']
+    y_train = train_df['target_3day']
     
     # Train model
     model = LinearRegression()
@@ -145,23 +145,28 @@ def train_model(df):
     for i in range(1, len(df)):
         if i >= split_index:  # Only trade in test period
             # Use only information available at time of decision
-            # Today's prediction is based on yesterday's features
-            today_pred = df['prediction'].iloc[i]
-            yesterday_close = df['price'].iloc[i-1]
-            today_close = df['price'].iloc[i]
-            
-            if today_pred < yesterday_close:
-                # Go long: profit = (today_close - yesterday_close) / yesterday_close
-                returns = (today_close - yesterday_close) / yesterday_close
-                position = 'long'
+            # Today's prediction is for 3 days ahead, based on features from 3 days ago
+            if i >= 3:  # Ensure we have enough history
+                three_day_pred = df['prediction'].iloc[i]
+                yesterday_close = df['price'].iloc[i-1]
+                today_close = df['price'].iloc[i]
+                
+                if three_day_pred < yesterday_close:
+                    # Go long: profit = (today_close - yesterday_close) / yesterday_close
+                    returns = (today_close - yesterday_close) / yesterday_close
+                    position = 'long'
+                else:
+                    # Go short: profit = (yesterday_close - today_close) / yesterday_close
+                    returns = (yesterday_close - today_close) / yesterday_close
+                    position = 'short'
+                
+                new_capital = capital_history[-1] * (1 + returns)
+                capital_history.append(new_capital)
+                positions.append(position)
             else:
-                # Go short: profit = (yesterday_close - today_close) / yesterday_close
-                returns = (yesterday_close - today_close) / yesterday_close
-                position = 'short'
-            
-            new_capital = capital_history[-1] * (1 + returns)
-            capital_history.append(new_capital)
-            positions.append(position)
+                # Not enough history for 3-day prediction
+                capital_history.append(capital_history[-1])
+                positions.append('hold')
         else:
             # In training period, capital doesn't change
             capital_history.append(capital_history[-1])
@@ -293,9 +298,10 @@ def index():
             <div class="metrics">
                 <h3>Strategy Rules</h3>
                 <ul>
-                    <li>If yesterday's prediction < yesterday's close: GO LONG today</li>
-                    <li>If yesterday's prediction > yesterday's close: GO SHORT today</li>
+                    <li>If 3-day ahead prediction < yesterday's close: GO LONG today</li>
+                    <li>If 3-day ahead prediction > yesterday's close: GO SHORT today</li>
                     <li>Features used: 7-day SMA price, 365-day SMA price, 5-day SMA volume, 10-day SMA volume</li>
+                    <li>Target: Price 3 days ahead</li>
                     <li>Model: Linear Regression</li>
                     <li>Data split: 50% train, 50% test (chronological)</li>
                 </ul>
