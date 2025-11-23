@@ -77,6 +77,7 @@ def create_plot(df, y_test, predictions, test_indices):
     
     # Calculate capital with daily accumulation based on prediction from 4 days ago vs actual price yesterday
     capital = [1000]  # Start with $1000
+    positions = []  # Store position type for coloring
     
     for i in range(len(sorted_y_test)):
         # Calculate return using the previous two days' prices: yesterday and the day before
@@ -109,35 +110,54 @@ def create_plot(df, y_test, predictions, test_indices):
                     pred_price_4_days_ago = df['close'].iloc[pred_index]
                 actual_price_yesterday = sorted_y_test[i - 1]
                 if pred_price_4_days_ago < actual_price_yesterday:
-                    ret = return_calc  # Positive signal: apply positive return
+                    ret = return_calc  # Positive signal: long position
+                    positions.append('long')  # Mark as long
                 else:
-                    ret = -return_calc  # Negative signal: apply negative return
+                    ret = -return_calc  # Negative signal: short position
+                    positions.append('short')  # Mark as short
             else:
                 ret = 0  # Default if prediction not available
+                positions.append('neutral')  # Mark as neutral
         else:
             ret = 0  # Default for first day
+            positions.append('neutral')  # Mark as neutral
         
         capital.append(capital[-1] * (1 + ret))
     
     capital = capital[1:]  # Remove the initial 1000 to match the number of dates
     
-    # Plot price and predictions
+    # Plot price and predictions with position markers
     plt.subplot(2, 1, 1)
     plt.plot(sorted_dates, sorted_y_test, label='Actual Price', color='blue')
     plt.plot(sorted_dates, sorted_predictions, label='Predicted Price', color='red')
+    # Add markers for long and short positions on the prediction line
+    for j in range(len(sorted_dates)):
+        if positions[j] == 'long':
+            plt.scatter(sorted_dates[j], sorted_predictions[j], color='green', marker='^', s=50, zorder=5)
+        elif positions[j] == 'short':
+            plt.scatter(sorted_dates[j], sorted_predictions[j], color='red', marker='v', s=50, zorder=5)
     plt.xlabel('Date')
     plt.ylabel('Price (USD)')
     plt.title('BTC Price Prediction vs Actual')
     plt.legend()
     plt.xticks(rotation=45)
     
-    # Plot capital
+    # Plot capital with color based on position
     plt.subplot(2, 1, 2)
-    plt.plot(sorted_dates, capital, label='ML Strategy Capital', color='green')
+    # Create segments for coloring based on positions
+    prev_idx = 0
+    for k in range(1, len(capital)):
+        if positions[k-1] == 'long':
+            color = 'green'
+        elif positions[k-1] == 'short':
+            color = 'red'
+        else:
+            color = 'gray'  # Neutral in gray
+        plt.plot(sorted_dates[prev_idx:k+1], capital[prev_idx:k+1], color=color, linewidth=2)
+        prev_idx = k
     plt.xlabel('Date')
     plt.ylabel('Capital (USD)')
-    plt.title('Trading Strategy Capital')
-    plt.legend()
+    plt.title('Trading Strategy Capital (Green: Long, Red: Short)')
     plt.xticks(rotation=45)
     
     plt.tight_layout()
