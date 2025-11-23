@@ -21,6 +21,8 @@ import time
 import logging
 import traceback
 import math
+import requests # Needed for API calls
+from datetime import datetime, timedelta # Needed for price fetching logic
 
 # --- Setup Logging ---
 logging.basicConfig(level=logging.INFO)
@@ -98,24 +100,84 @@ class ThrottledProgressCallback(Callback):
         if (epoch + 1) % 50 == 0:
             logger.info(f"Epoch {epoch+1}/{self.total_epochs} - Loss: {loss}")
 
+# --- New Function to Fetch Price Data (Integrated from fetch_price_data.py) ---
+def fetch_btc_candles():
+    logger.info("Fetching price data from Binance API...")
+    base_url = 'https://api.binance.com/api/v3/klines'
+    symbol = 'BTCUSDT'
+    interval = '1d'
+    start_date = datetime(2022, 1, 1)
+    end_date = datetime(2023, 9, 30)
+    
+    all_data = []
+    current_start = start_date
+    
+    while current_start <= end_date:
+        start_time = int(current_start.timestamp() * 1000)
+        # Calculate end time for 1000 candles (1000 days for daily interval)
+        end_time_limit = current_start + timedelta(days=999)
+        end_time_effective = min(end_time_limit, end_date)
+        end_time = int(end_time_effective.timestamp() * 1000)
+        
+        params = {
+            'symbol': symbol,
+            'interval': interval,
+            'startTime': start_time,
+            'endTime': end_time,
+            'limit': 1000
+        }
+        
+        try:
+            response = requests.get(base_url, params=params, timeout=10)
+            response.raise_for_status() # Raise an exception for bad status codes
+            data = response.json()
+            
+            if data:
+                for candle in data:
+                    timestamp = candle[0]
+                    # Data structure: [open_time, open, high, low, close, volume, ...]
+                    open_price = float(candle[1])
+                    high = float(candle[2])
+                    low = float(candle[3])
+                    close = float(candle[4])
+                    volume = float(candle[5])
+                    date = datetime.fromtimestamp(timestamp / 1000).strftime('%Y-%m-%d')
+                    all_data.append([date, open_price, high, low, close, volume])
+                
+                # Update current_start to the day after the last fetched candle
+                current_start = datetime.fromtimestamp(data[-1][0] / 1000) + timedelta(days=1)
+            else:
+                # If no data is returned, skip forward one day
+                current_start += timedelta(days=1) 
+
+        except requests.exceptions.RequestException as req_err:
+            logger.error(f"Network error during price fetch: {req_err}")
+            break
+        except Exception as e:
+            logger.error(f"Error processing price data: {e}")
+            break
+        
+        time.sleep(0.1) # Rate limiting
+    
+    df = pd.DataFrame(all_data, columns=['date', 'open', 'high', 'low', 'close', 'volume'])
+    df.drop_duplicates(subset=['date'], inplace=True)
+    df.to_csv('btc_data.csv', index=False)
+    logger.info(f"Price data fetched and saved to btc_data.csv. Rows: {len(df)}")
+    return df
+# -----------------------------------------------------------------------------
+
 def load_data():
     logger.info("Step 1: Loading Data...")
+    
+    # Check for file and generate it if missing
     if not os.path.exists('btc_data.csv'):
-        logger.info("btc_data.csv not found. Running fetch script...")
-        try:
-            # We don't have access to the file system to run fetch_price_data.py, so we assume the data is there or mock it.
-            logger.info("Assuming btc_data.csv exists from environment, skipping fetch subprocess.")
-            pass 
-        except Exception as e:
-            logger.error(f"Error during data fetch assumption: {e}")
-            raise e
+        fetch_btc_candles()
 
     df_price = pd.read_csv('btc_data.csv')
     df_price['date'] = pd.to_datetime(df_price['date'])
     df_price.set_index('date', inplace=True)
     
     try:
-        import requests
         BASE_URL = "https://api.blockchain.info/charts/"
         METRICS = {
             'Active_Addresses': 'n-unique-addresses',
