@@ -1,7 +1,9 @@
 <!DOCTYPE html>
-<html>
+<html lang="en">
 <head>
-    <title>Bitcoin On-Chain Data Dashboard</title>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>BTC Price Prediction and On-Chain Metrics</title>
     <style>
         body { font-family: Arial, sans-serif; margin: 20px; }
         .chart { margin-bottom: 40px; }
@@ -10,12 +12,13 @@
     </style>
 </head>
 <body>
-    <h1>Bitcoin On-Chain Data Dashboard</h1>
+    <h1>BTC Price Prediction and On-Chain Metrics</h1>
     <div class="info">
         <p><strong>Period:</strong> {{ period_start }} to {{ period_end }}</p>
         <p><strong>Data Points:</strong> {{ data_points }}</p>
         <p><strong>Metrics:</strong> {{ metrics }}</p>
+        <p><strong>Training Set Mean Squared Error:</strong> {{ train_mse }}</p>
     </div>
-    {{ charts_html | safe }}
+    <img src="data:image/png;base64,{{ plot_url }}" alt="BTC Price Prediction Chart">
 </body>
 </html>
