@@ -7,7 +7,8 @@
 </head>
 <body>
     <h1>BTC Price Prediction vs Actual</h1>
-    <p>Mean Squared Error: {{ mse }}</p>
+    <p>Training Set Mean Squared Error: {{ train_mse }}</p>
+    <p>Test Set Mean Squared Error: {{ test_mse }}</p>
     <img src="data:image/png;base64,{{ plot_url }}" alt="BTC Price Prediction Chart">
 </body>
 </html>
