@@ -19,6 +19,7 @@ import threading
 import time
 import logging
 import traceback
+import math
 
 # --- Setup Logging ---
 logging.basicConfig(level=logging.INFO)
@@ -45,29 +46,40 @@ training_state = {
     'last_update': 0
 }
 
+# --- Helper to prevent JSON crashes ---
+def sanitize_float(val):
+    """Converts NaN/Inf to None so JSON doesn't crash."""
+    try:
+        if val is None: return None
+        if isinstance(val, (float, np.floating)):
+            if np.isnan(val) or np.isinf(val):
+                return None
+        return float(val)
+    except:
+        return None
+
 class ThrottledProgressCallback(Callback):
     def __init__(self, total_epochs, update_frequency=5):
         self.total_epochs = total_epochs
-        self.update_frequency = update_frequency # Only update every N batches
+        self.update_frequency = update_frequency
 
     def on_epoch_begin(self, epoch, logs=None):
         with state_lock:
             training_state['epoch'] = epoch + 1
 
     def on_train_batch_end(self, batch, logs=None):
-        # OPTIMIZATION: Only update global state every N batches
-        # This prevents the "GIL" from locking up the Flask server
         if batch % self.update_frequency == 0:
             logs = logs or {}
+            loss = sanitize_float(logs.get('loss'))
+            
             with state_lock:
                 training_state['batch'] = batch + 1
-                training_state['current_train_loss'] = logs.get('loss')
+                training_state['current_train_loss'] = loss
                 training_state['last_update'] = time.time()
                 
                 if self.params and 'steps' in self.params:
                     total_steps = self.params['steps']
                     training_state['total_batches'] = total_steps
-                    
                     current_epoch_progress = (training_state['epoch'] - 1) / self.total_epochs
                     current_batch_progress = (batch + 1) / total_steps
                     total_progress = current_epoch_progress + (current_batch_progress / self.total_epochs)
@@ -75,14 +87,16 @@ class ThrottledProgressCallback(Callback):
 
     def on_epoch_end(self, epoch, logs=None):
         logs = logs or {}
-        with state_lock:
-            training_state['current_val_loss'] = logs.get('val_loss')
-            training_state['train_loss'].append(logs.get('loss'))
-            training_state['val_loss'].append(logs.get('val_loss'))
+        val_loss = sanitize_float(logs.get('val_loss'))
+        loss = sanitize_float(logs.get('loss'))
         
-        # Log less frequently to keep console clean
+        with state_lock:
+            training_state['current_val_loss'] = val_loss
+            training_state['train_loss'].append(loss)
+            training_state['val_loss'].append(val_loss)
+        
         if (epoch + 1) % 50 == 0:
-            logger.info(f"Epoch {epoch+1}/{self.total_epochs} - Loss: {logs.get('loss'):.4f}")
+            logger.info(f"Epoch {epoch+1}/{self.total_epochs} - Loss: {loss}")
 
 def load_data():
     logger.info("Step 1: Loading Data...")
@@ -98,7 +112,6 @@ def load_data():
     df_price['date'] = pd.to_datetime(df_price['date'])
     df_price.set_index('date', inplace=True)
     
-    # On-chain fetch
     try:
         import requests
         BASE_URL = "https://api.blockchain.info/charts/"
@@ -190,6 +203,10 @@ def prepare_data(df):
 
 def create_plot(df, y_train, predictions, train_indices, history_loss, history_val_loss):
     logger.info("Step 4: Generating Plots...")
+    # Sanitize plot data to avoid crashes in matplotlib
+    history_loss = [x if x is not None else 0 for x in history_loss]
+    history_val_loss = [x if x is not None else 0 for x in history_val_loss]
+
     plt.figure(figsize=(10, 12))
     
     dates = df.index[train_indices]
@@ -254,9 +271,6 @@ def run_training_task():
         X_train_reshaped = X_train.reshape(X_train.shape[0], 20, 10)
         X_test_reshaped = X_test.reshape(X_test.shape[0], 20, 10)
         
-        # --- OPTIMIZED CONFIGURATION ---
-        # Reduced to 128 units to prevent CPU freezing/timeout
-        # This is still enough parameters to overfit ~300 data points
         EPOCHS = 1000
         UNITS = 128
         
@@ -270,7 +284,11 @@ def run_training_task():
         model.add(LSTM(UNITS, activation='relu'))
         model.add(Dense(1))
         
-        model.compile(optimizer=Adam(learning_rate=0.0001), loss='mse')
+        # CRITICAL FIXES FOR STABILITY:
+        # 1. Lower learning rate (0.00005)
+        # 2. clipnorm=1.0 (Prevents gradients from exploding to Infinity)
+        optimizer = Adam(learning_rate=0.00005, clipnorm=1.0)
+        model.compile(optimizer=optimizer, loss='mse')
         
         logger.info("Starting model.fit() ...")
         history = model.fit(
@@ -279,7 +297,6 @@ def run_training_task():
             batch_size=32,
             verbose=0,
             validation_data=(X_test_reshaped, y_test),
-            # Update frequency = 5 batches to reduce GIL contention
             callbacks=[ThrottledProgressCallback(EPOCHS, update_frequency=5)]
         )
         logger.info("Training completed.")
@@ -293,7 +310,7 @@ def run_training_task():
         
         with state_lock:
             training_state['plot_url'] = plot_url
-            training_state['train_mse'] = history.history['loss'][-1]
+            training_state['train_mse'] = sanitize_float(history.history['loss'][-1])
             training_state['status'] = 'completed'
         
     except Exception as e:
@@ -327,8 +344,8 @@ def start_training():
 
 @app.route('/status')
 def status():
-    # Use lock to read state safely
     with state_lock:
+        # Explicitly sanitize before sending to JSON
         return jsonify(training_state)
 
 if __name__ == '__main__':
