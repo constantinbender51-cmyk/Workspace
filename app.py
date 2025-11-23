@@ -67,16 +67,15 @@ def train_model(features, targets, df):
     test_end_date = pd.to_datetime('2025-12-31')
     test_mask = (df.index >= test_start_date) & (df.index <= test_end_date)
     test_df = df[test_mask]
-    # Map filtered indices to original features and targets
-    train_indices = df.index[train_mask].tolist()
-    test_indices = df.index[test_mask].tolist()
     # Align features and targets with filtered indices
-    # Since features and targets are derived from df_clean, we need to align with filtered DataFrames
-    # This is a simplification; in practice, ensure indices match
-    X_train = features[:len(train_indices)]
-    X_test = features[len(train_indices):len(train_indices) + len(test_indices)]
-    y_train = targets[:len(train_indices)]
-    y_test = targets[len(train_indices):len(train_indices) + len(test_indices)]
+    # Since features and targets are derived from df_clean, align using the cleaned DataFrame indices
+    df_clean = df.dropna()  # Recreate df_clean to get consistent indices
+    train_indices_clean = df_clean.index.isin(train_df.index)
+    test_indices_clean = df_clean.index.isin(test_df.index)
+    X_train = features[train_indices_clean]
+    X_test = features[test_indices_clean]
+    y_train = targets[train_indices_clean]
+    y_test = targets[test_indices_clean]
     model = LinearRegression()
     model.fit(X_train, y_train)
     predictions = model.predict(X_test)
