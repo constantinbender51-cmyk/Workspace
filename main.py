@@ -1,258 +1,179 @@
+#!/usr/bin/env python3
+"""
+Railway Portrait – Binance-Bitcoin Daily 2022 → Linear-Regression Server
+------------------------------------------------------------------------
+A single, self-contained Python script that
+
+1. Pulls daily BTCUSDT candles from Binance for the whole of 2022
+2. Builds a tiny feature set:
+   - 7-day  SMA of close price
+   - 365-day SMA of close price
+   - 5-day  SMA of volume (USDT)
+   - 10-day SMA of volume (USDT)
+3. Trains a plain-vanilla Linear-Regression model to predict *next-day* close
+4. Spins up a web server on 0.0.0.0:8080 and plots
+   - true vs. predicted prices
+   - cumulative absolute error
+   - feature importance (coefs)
+   All served at the root route “/” as an interactive Bokeh page
+"""
+
+import datetime as dt
 import pandas as pd
 import numpy as np
-import requests
 from sklearn.linear_model import LinearRegression
-import matplotlib.pyplot as plt
-import io
-import base64
-from flask import Flask, render_template
-from datetime import datetime
+from sklearn.metrics import mean_absolute_error, r2_score
+from bokeh.plotting import figure, ColumnDataSource
+from bokeh.layouts import column
+from bokeh.models import HoverTool, Div
+from flask import Flask, render_template_string
+import requests
+import threading
+import time
 
-app = Flask(__name__)
+# --------------------------------------------------
+# 1. Grab 2022 daily klines from Binance REST
+# --------------------------------------------------
+START_TS = int(dt.datetime(2022, 1, 1).timestamp() * 1000)
+END_TS   = int(dt.datetime(2023, 1, 1).timestamp() * 1000)
+URL      = "https://api.binance.com/api/v3/klines"
 
-def fetch_btc_data():
-    """Fetch Bitcoin price data from Binance API"""
-    print("DEBUG: Fetching BTC data from Binance")
-    end_time = int(datetime(2025, 11, 30).timestamp() * 1000)
-    start_time = int(datetime(2022, 1, 1).timestamp() * 1000)
-    url = f"https://api.binance.com/api/v3/klines?symbol=BTCUSDT&interval=1d&startTime={start_time}&endTime={end_time}"
-    
-    response = requests.get(url)
-    data = response.json()
-    
-    if not data:
-        raise ValueError("No data fetched from Binance")
-    
-    df = pd.DataFrame(data, columns=[
-        'open_time', 'open', 'high', 'low', 'close', 'volume', 
-        'close_time', 'quote_asset_volume', 'number_of_trades', 
-        'taker_buy_base_asset_volume', 'taker_buy_quote_asset_volume', 'ignore'
-    ])
-    
-    df['close'] = df['close'].astype(float)
-    df['volume'] = df['volume'].astype(float)
-    df['date'] = pd.to_datetime(df['open_time'], unit='ms')
-    df = df[['date', 'close', 'volume']].reset_index(drop=True)
-    
-    print(f"DEBUG: Fetched {len(df)} days of data")
+def fetch_2022_daily():
+    params = dict(
+        symbol='BTCUSDT',
+        interval='1d',
+        startTime=START_TS,
+        endTime=END_TS,
+        limit=1000
+    )
+    all_rows = []
+    while True:
+        r = requests.get(URL, params=params)
+        r.raise_for_status()
+        js = r.json()
+        if not js:
+            break
+        all_rows.extend(js)
+        # next start = last close-time + 1 ms
+        params['startTime'] = js[-1][6] + 1
+        if len(js) < 1000:
+            break
+    df = pd.DataFrame(all_rows,
+                      columns=['open_time', 'open', 'high', 'low', 'close',
+                               'volume', 'close_time', 'quote_vol', 'trades',
+                               'taker_base', 'taker_quote', 'ignore'])
+    df['open_time'] = pd.to_datetime(df['open_time'], unit='ms')
+    for col in ['open', 'high', 'low', 'close', 'volume']:
+        df[col] = pd.to_numeric(df[col])
+    df = df[['open_time', 'close', 'volume']].rename(columns={'open_time': 'date'})
+    df = df.set_index('date').sort_index()
     return df
 
-def create_features_and_targets(df):
-    """
-    Create features and targets for prediction.
-    
-    For each day, we use:
-    - Last 3 days of SMA_7 (price moving average)
-    - Last 3 days of SMA_365 (price moving average)
-    - Last 3 days of SMA_volume_5 (volume moving average)
-    - Last 3 days of SMA_volume_10 (volume moving average)
-    
-    To predict: Next day's close price
-    """
-    print("DEBUG: Creating features and targets")
-    
-    # Calculate moving averages
-    df['sma_7'] = df['close'].rolling(window=7).mean()
-    df['sma_365'] = df['close'].rolling(window=365).mean()
-    df['sma_volume_5'] = df['volume'].rolling(window=5).mean()
-    df['sma_volume_10'] = df['volume'].rolling(window=10).mean()
-    
-    # Drop rows where we don't have all the moving averages yet
-    df = df.dropna().reset_index(drop=True)
-    print(f"DEBUG: After calculating moving averages, have {len(df)} days")
-    
-    # Now create our feature matrix and target vector
-    X = []  # Features
-    y = []  # Targets (next day close price)
-    dates = []  # Keep track of dates for plotting
-    
-    # We need 3 days of history for features, plus 1 day ahead for target
-    # So we start at index 3 and go until len(df)-1
-    for i in range(3, len(df)):
-        # Features: last 3 days of each indicator
-        features = [
-            # Day i-3 indicators
-            df.loc[i-3, 'sma_7'],
-            df.loc[i-3, 'sma_365'],
-            df.loc[i-3, 'sma_volume_5'],
-            df.loc[i-3, 'sma_volume_10'],
-            # Day i-2 indicators
-            df.loc[i-2, 'sma_7'],
-            df.loc[i-2, 'sma_365'],
-            df.loc[i-2, 'sma_volume_5'],
-            df.loc[i-2, 'sma_volume_10'],
-            # Day i-1 indicators
-            df.loc[i-1, 'sma_7'],
-            df.loc[i-1, 'sma_365'],
-            df.loc[i-1, 'sma_volume_5'],
-            df.loc[i-1, 'sma_volume_10'],
-        ]
-        
-        # Target: next day's close price (day i)
-        target = df.loc[i, 'close']
-        
-        X.append(features)
-        y.append(target)
-        dates.append(df.loc[i, 'date'])
-    
-    X = np.array(X)
-    y = np.array(y)
-    
-    print(f"DEBUG: Created {len(X)} samples")
-    print(f"DEBUG: Feature shape: {X.shape}, Target shape: {y.shape}")
-    
-    return X, y, dates, df
+# --------------------------------------------------
+# 2. Feature engineering & train/test split
+# --------------------------------------------------
+def add_features(df):
+    df = df.copy()
+    df['sma7_price']   = df['close'].rolling(7).mean()
+    df['sma365_price'] = df['close'].rolling(365).mean()
+    df['sma5_vol']     = df['volume'].rolling(5).mean()
+    df['sma10_vol']    = df['volume'].rolling(10).mean()
+    # target: next-day close
+    df['target'] = df['close'].shift(-1)
+    return df.dropna()
 
-def train_test_split_data(X, y, dates, train_ratio=0.5):
-    """Split data into train and test sets"""
-    split_idx = int(len(X) * train_ratio)
-    
-    X_train = X[:split_idx]
-    y_train = y[:split_idx]
-    
-    X_test = X[split_idx:]
-    y_test = y[split_idx:]
-    dates_test = dates[split_idx:]
-    
-    print(f"DEBUG: Train size: {len(X_train)}, Test size: {len(X_test)}")
-    
-    return X_train, y_train, X_test, y_test, dates_test
-
-def train_model(X_train, y_train):
-    """Train linear regression model"""
-    print("DEBUG: Training model")
+# --------------------------------------------------
+# 3. Model training
+# --------------------------------------------------
+def train_model(df):
+    feats = ['sma7_price', 'sma365_price', 'sma5_vol', 'sma10_vol']
+    X, y = df[feats], df['target']
+    split = int(len(df) * 0.8)
+    X_train, X_test = X.iloc[:split], X.iloc[split:]
+    y_train, y_test = y.iloc[:split], y.iloc[split:]
     model = LinearRegression()
     model.fit(X_train, y_train)
-    print("DEBUG: Model trained")
-    return model
+    preds = model.predict(X_test)
+    return model, X_test, y_test, preds, feats
 
-def backtest_strategy(model, X_test, y_test, start_capital=1000, transaction_cost=0.001):
-    """
-    Backtest trading strategy:
-    - If current price > predicted price: GO LONG (buy)
-    - If current price < predicted price: GO SHORT (sell)
-    """
-    print("DEBUG: Running backtest")
-    
-    capital = start_capital
-    capital_history = [capital]
-    positions = []
-    
-    predictions = model.predict(X_test)
-    
-    for i in range(len(predictions)):
-        predicted_price = predictions[i]
-        actual_current_price = y_test[i]
-        
-        # Get next day's price for calculating return
-        if i < len(y_test) - 1:
-            next_day_price = y_test[i + 1]
-        else:
-            # Last day, use same price (no return)
-            next_day_price = actual_current_price
-        
-        # Trading decision
-        if actual_current_price > predicted_price:
-            # GO LONG: we think price will rise
-            return_pct = (next_day_price / actual_current_price) - 1
-            positions.append('long')
-        else:
-            # GO SHORT: we think price will fall
-            return_pct = (actual_current_price / next_day_price) - 1
-            positions.append('short')
-        
-        # Apply return and transaction cost
-        capital = capital * (1 + return_pct - transaction_cost)
-        capital_history.append(capital)
-    
-    print(f"DEBUG: Final capital: ${capital:.2f}")
-    print(f"DEBUG: Total return: {((capital/start_capital - 1) * 100):.2f}%")
-    
-    return capital_history, positions, predictions
+# --------------------------------------------------
+# 4. Build Bokeh plots
+# --------------------------------------------------
+def build_dashboard(y_test, preds, model, feats, X_test):
+    # 1. True vs. Predicted
+    p1 = figure(title="BTCUSDT – True vs. Predicted (2022 test split)",
+                x_axis_label='Date', y_axis_label='Price (USDT)',
+                x_axis_type='datetime', sizing_mode='stretch_width', height=350)
+    source = ColumnDataSource(data=dict(
+        date=y_test.index,
+        true=y_test.values,
+        pred=preds
+    ))
+    p1.line('date', 'true', legend_label='True', color='black', source=source)
+    p1.line('date', 'pred', legend_label='Pred', color='red',  source=source)
+    p1.add_tools(HoverTool(tooltips=[('date', '@date{%F}'), ('true', '@true{0,0.0}'), ('pred', '@pred{0,0.0}')],
+                           formatters={'@date': 'datetime'}))
 
-def create_plots(capital_history, positions, dates_test, y_test, predictions):
-    """Create visualization plots"""
-    print("DEBUG: Creating plots")
-    
-    fig, (ax1, ax2, ax3) = plt.subplots(3, 1, figsize=(12, 14))
-    
-    # Plot 1: Capital over time
-    ax1.plot(range(len(capital_history)), capital_history, color='black', linewidth=2)
-    
-    # Color background based on position
-    for i in range(len(positions)):
-        if positions[i] == 'long':
-            ax1.axvspan(i, i+1, color='green', alpha=0.2)
-        else:
-            ax1.axvspan(i, i+1, color='red', alpha=0.2)
-    
-    ax1.set_title('Portfolio Value Over Time', fontsize=14, fontweight='bold')
-    ax1.set_xlabel('Trading Day')
-    ax1.set_ylabel('Capital ($)')
-    ax1.grid(True, alpha=0.3)
-    ax1.legend(['Portfolio Value', 'Long Position', 'Short Position'])
-    
-    # Plot 2: Bitcoin price over time
-    ax2.plot(dates_test, y_test, color='blue', linewidth=1.5)
-    ax2.set_title('Bitcoin Price (Test Period)', fontsize=14, fontweight='bold')
-    ax2.set_xlabel('Date')
-    ax2.set_ylabel('Price (USDT)')
-    ax2.grid(True, alpha=0.3)
-    plt.setp(ax2.xaxis.get_majorticklabels(), rotation=45)
-    
-    # Plot 3: Predicted vs Actual
-    ax3.plot(dates_test, y_test, label='Actual Price', color='blue', linewidth=1.5, alpha=0.7)
-    ax3.plot(dates_test, predictions, label='Predicted Price', color='red', linewidth=1.5, alpha=0.7)
-    ax3.set_title('Model Predictions vs Actual Price', fontsize=14, fontweight='bold')
-    ax3.set_xlabel('Date')
-    ax3.set_ylabel('Price (USDT)')
-    ax3.legend()
-    ax3.grid(True, alpha=0.3)
-    plt.setp(ax3.xaxis.get_majorticklabels(), rotation=45)
-    
-    plt.tight_layout()
-    
-    # Convert to base64
-    img = io.BytesIO()
-    plt.savefig(img, format='png', dpi=100, bbox_inches='tight')
-    img.seek(0)
-    plot_url = base64.b64encode(img.getvalue()).decode()
-    plt.close()
-    
-    return plot_url
+    # 2. Cumulative absolute error
+    err = np.abs(y_test.values - preds)
+    cumerr = np.cumsum(err)
+    p2 = figure(title="Cumulative Absolute Error", x_axis_label='Date',
+                y_axis_label='Cum. Error (USDT)',
+                x_axis_type='datetime', sizing_mode='stretch_width', height=250)
+    p2.line(y_test.index, cumerr, color='orange')
 
-@app.route('/')
+    # 3. Feature importance (coefficients)
+    coef_df = pd.DataFrame({'feature': feats, 'coef': model.coef_})
+    p3 = figure(x_range=feats, title="Linear-Regression Coefficients",
+                sizing_mode='stretch_width', height=250)
+    p3.vbar(x=feats, top=model.coef_, width=0.8)
+    p3.xaxis.major_label_orientation = 0.8
+
+    mae  = mean_absolute_error(y_test, preds)
+    r2   = r2_score(y_test, preds)
+    stats = Div(text=f"<b>MAE:</b> {mae:,.2f} USDT  |  <b>R²:</b> {r2:.3f}")
+
+    return column(stats, p1, p2, p3)
+
+# --------------------------------------------------
+# 5. Flask glue
+# --------------------------------------------------
+app = Flask(__name__)
+HTML_PAGE = """
+<!DOCTYPE html>
+<html>
+<head>
+  <title>Railway Portrait – BTC 2022 LR</title>
+  {{ bokeh_resources | safe }}
+</head>
+<body>
+  <h2>Railway Portrait – Binance BTCUSDT Daily 2022 → Linear-Regression</h2>
+  {{ bokeh_plot | safe }}
+</body>
+</html>
+"""
+
+@app.route("/")
 def index():
-    try:
-        # Step 1: Fetch data
-        df = fetch_btc_data()
-        
-        # Step 2: Create features and targets
-        X, y, dates, df_with_features = create_features_and_targets(df)
-        
-        # Step 3: Split into train and test
-        X_train, y_train, X_test, y_test, dates_test = train_test_split_data(X, y, dates, train_ratio=0.5)
-        
-        # Step 4: Train model
-        model = train_model(X_train, y_train)
-        
-        # Step 5: Backtest strategy
-        capital_history, positions, predictions = backtest_strategy(
-            model, X_test, y_test, start_capital=1000, transaction_cost=0.001
-        )
-        
-        # Step 6: Create plots
-        plot_url = create_plots(capital_history, positions, dates_test, y_test, predictions)
-        
-        print("DEBUG: Successfully completed all steps")
-        
-        return render_template('index.html', plot_url=plot_url)
-        
-    except Exception as e:
-        print(f"ERROR: {str(e)}")
-        import traceback
-        traceback.print_exc()
-        return f"Error: {str(e)}"
+    from bokeh.embed import components
+    from bokeh.resources import CDN
+    script, div = components(layout)
+    return render_template_string(HTML_PAGE,
+                                  bokeh_resources=CDN.render(),
+                                  bokeh_plot=div + script)
 
-if __name__ == '__main__':
-    app.run(host='0.0.0.0', port=8080, debug=True)
+# --------------------------------------------------
+# 6. Main
+# --------------------------------------------------
+if __name__ == "__main__":
+    print("Fetching 2022 daily candles …")
+    raw = fetch_2022_daily()
+    print("Engineering features …")
+    feat_df = add_features(raw)
+    print("Training model …")
+    model, X_test, y_test, preds, feats = train_model(feat_df)
+    print("Building dashboard …")
+    layout = build_dashboard(y_test, preds, model, feats, X_test)
+    print("Starting web server on 0.0.0.0:8080 …")
+    # Bokeh/Flask is single-threaded; let the dev-server suffice
+    app.run(host="0.0.0.0", port=8080, debug=False)
