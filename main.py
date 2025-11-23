@@ -98,11 +98,10 @@ def trading_strategy(df, model, X_test, start_capital=1000, transaction_cost=0.0
         actual_close_next = df.iloc[df_idx + 1]['close']  # Actual close on the next day (target of prediction)
         
         # Always take a long position
-        capital_after_trade = capital * (1 - transaction_cost)  # Apply transaction cost on entry
         # Simple long return: capital grows based on current price divided by previous day's price
         current_price = df.iloc[df_idx]['close']
         previous_price = df.iloc[df_idx - 1]['close']
-        capital = capital_after_trade * (current_price / previous_price)
+        capital = capital * (current_price / previous_price)
         positions.append('long')
         
         capital_history.append(capital)
