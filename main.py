@@ -50,6 +50,7 @@ def prepare_data(df):
     # Create features with 3-day lookback for predicting the next day's close
     features = []
     targets = []
+    
     print("DEBUG: Preparing features and targets with 3-day lookback")
     for i in range(3, len(df) - 1):  # Start from index 3 to have 3 days of lookback, stop at len(df)-1 to have a target
         # Use technical indicators from the past 3 days (i-3 to i-1) to predict close on day i
