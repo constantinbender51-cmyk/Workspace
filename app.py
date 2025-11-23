@@ -28,7 +28,7 @@ def load_data():
     import time
     BASE_URL = "https://api.blockchain.info/charts/"
     METRICS = {
-        'Active_Addresses': 'unique-addresses-used',
+        'Active_Addresses': 'n-unique-addresses',
         'Net_Transaction_Count': 'n-transactions',
         'Transaction_Volume_USD': 'estimated-transaction-volume-usd',
     }
@@ -39,34 +39,50 @@ def load_data():
         params = {
             'format': 'json',
             'start': start_date,
-            'timespan': 'all',
-            'sampled': 'false'
+            'timespan': '1year',
+            'rollingAverage': '1d'
         }
         url = f"{BASE_URL}{chart_name}"
+        print(f"DEBUG: Fetching {chart_name} from {url}")
         try:
-            response = requests.get(url, params=params, timeout=15)
+            response = requests.get(url, params=params, timeout=30)
+            print(f"DEBUG: Response status for {chart_name}: {response.status_code}")
             response.raise_for_status()
             data = response.json()
+            print(f"DEBUG: Data keys for {chart_name}: {list(data.keys()) if data else 'No data'}")
             if 'values' not in data or not data['values']:
+                print(f"DEBUG: No values found for {chart_name}")
                 return pd.DataFrame()
             df = pd.DataFrame(data['values'])
+            print(f"DEBUG: Fetched {len(df)} rows for {chart_name}")
             df['Date'] = pd.to_datetime(df['x'], unit='s', utc=True).dt.tz_localize(None)
             df = df.set_index('Date')['y'].rename(chart_name)
+            print(f"DEBUG: Successfully processed {chart_name}, date range: {df.index.min()} to {df.index.max()}")
             return df
-        except Exception:
+        except Exception as e:
+            print(f"ERROR: Failed to fetch {chart_name}: {str(e)}")
             return pd.DataFrame()
     
     all_data = [df_price]
     for metric_name, chart_endpoint in METRICS.items():
-        time.sleep(1.5)
+        print(f"\nDEBUG: Processing {metric_name} ({chart_endpoint})")
+        time.sleep(2)  # Rate limiting
         df_metric = fetch_chart_data(chart_endpoint, START_DATE)
         if not df_metric.empty:
             df_metric = df_metric.rename(metric_name)
             all_data.append(df_metric)
+            print(f"DEBUG: Successfully added {metric_name} to dataset")
+        else:
+            print(f"WARNING: No data for {metric_name}")
     
-    df_combined = pd.concat(all_data, axis=1)
+    print(f"DEBUG: Combining {len(all_data)} datasets")
+    df_combined = pd.concat(all_data, axis=1, join='inner')
+    print(f"DEBUG: Combined dataset shape: {df_combined.shape}")
+    print(f"DEBUG: Combined dataset columns: {list(df_combined.columns)}")
     df_final = df_combined.loc[START_DATE:END_DATE].ffill()
     df_final = df_final[~df_final.index.duplicated(keep='first')]
+    print(f"DEBUG: Final dataset shape: {df_final.shape}")
+    print(f"DEBUG: Final dataset columns: {list(df_final.columns)}")
     
     return df_final
 
