@@ -71,10 +71,10 @@ def train_model(features, targets):
     # Check if features and targets are not empty
     if len(features) == 0 or len(targets) == 0:
         raise ValueError("No features or targets available for training. Ensure sufficient data.")
-    # Split data 70% for training, 30% for testing to get longer testing period
-    split_index = int(len(features) * 0.7)
+    # Split data 50% for training, 50% for testing
+    split_index = int(len(features) * 0.5)
     if split_index == 0:
-        raise ValueError("Insufficient data for 70/30 train-test split. Need at least 2 samples.")
+        raise ValueError("Insufficient data for 50/50 train-test split. Need at least 2 samples.")
     X_train, X_test = features[:split_index], features[split_index:]
     y_train, y_test = targets[:split_index], targets[split_index:]
     model = LinearRegression()
@@ -186,7 +186,7 @@ def index():
         capital_history, positions = trading_strategy(df, model, X_test, start_capital, transaction_cost)
         
         # Create plot; adjust test_start_idx for plotting
-        test_start_idx = int(len(features) * 0.7)  # Start of test set in features array (70% split)
+        test_start_idx = int(len(features) * 0.5)  # Start of test set in features array (50% split)
         plot_url = create_plot(capital_history, df, predictions, test_start_idx, positions)
         
         return render_template('index.html', plot_url=plot_url)
