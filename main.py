@@ -88,7 +88,6 @@ def trading_strategy(df, model, X_test, start_capital=1000, transaction_cost=0.0
     
     # X_test corresponds to features for the test set; indices in df need adjustment
     # Features were built for indices 3 to len(df)-2, so test set starts after train split
-    # With 70/30 split, test_start_idx in features array is at 70% of features
     total_features_start = 3  # Features start from index 3 in df
     for i in range(len(X_test)):
         prediction = model.predict([X_test[i]])[0]
@@ -98,19 +97,11 @@ def trading_strategy(df, model, X_test, start_capital=1000, transaction_cost=0.0
             break  # Avoid index out of bounds
         actual_close_next = df.iloc[df_idx + 1]['close']  # Actual close on the next day (target of prediction)
         
-        # Decision: long if prediction > actual_close_next, short if <= (expect price to increase for long, decrease for short)
-        if prediction > actual_close_next:
-            # Long position: expect price to increase
-            capital_after_trade = capital * (1 - transaction_cost)  # Apply transaction cost on entry
-            # For long, capital grows if actual > prediction, else shrinks; use multiplicative factor
-            capital = capital_after_trade * (actual_close_next / prediction)
-            positions.append('long')
-        else:
-            # Short position: expect price to decrease
-            capital_after_trade = capital * (1 - transaction_cost)  # Apply transaction cost on entry
-            # For short, capital grows if actual < prediction, else shrinks; use multiplicative factor
-            capital = capital_after_trade * (prediction / actual_close_next)
-            positions.append('short')
+        # Always take a long position
+        capital_after_trade = capital * (1 - transaction_cost)  # Apply transaction cost on entry
+        # Simple long return: capital grows based on actual price relative to prediction
+        capital = capital_after_trade * (actual_close_next / prediction)
+        positions.append('long')
         
         capital_history.append(capital)
     
