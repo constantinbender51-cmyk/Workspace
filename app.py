@@ -24,7 +24,58 @@ START_DATE = '2022-01-01'
 END_DATE = '2023-09-30' # We will use this date to filter the final DataFrame
 
 
-def fetch_chart_data(chart_name: str, start_date: str) -> pd.DataFrame:
+
+
+def fetch_binance_price_data(start_date: str, end_date: str) -> pd.DataFrame:
+    """
+    Fetches daily Bitcoin price data from Binance API for the specified date range.
+    Returns a DataFrame with 'Date' as index and 'Price' column (closing price).
+    """
+    # Convert dates to milliseconds for Binance API
+    start_timestamp = int(pd.to_datetime(start_date).timestamp() * 1000)
+    end_timestamp = int(pd.to_datetime(end_date).timestamp() * 1000)
+    
+    url = "https://api.binance.com/api/v3/klines"
+    params = {
+        'symbol': 'BTCUSDT',
+        'interval': '1d',
+        'startTime': start_timestamp,
+        'endTime': end_timestamp,
+        'limit': 1000
+    }
+    
+    print("-> Fetching Bitcoin price data from Binance...")
+    
+    try:
+        response = requests.get(url, params=params, timeout=15)
+        response.raise_for_status()
+        
+        data = response.json()
+        
+        if not data:
+            print("   Warning: No price data found from Binance.")
+            return pd.DataFrame()
+        
+        # Convert to DataFrame
+        # Binance returns: [open_time, open, high, low, close, volume, close_time, ...]
+        df = pd.DataFrame(data, columns=['open_time', 'open', 'high', 'low', 'close', 'volume', 'close_time', 'quote_asset_volume', 'trades', 'taker_buy_base', 'taker_buy_quote', 'ignore'])
+        
+        # Convert timestamp to datetime and set as index
+        df['Date'] = pd.to_datetime(df['open_time'], unit='ms')
+        df = df.set_index('Date')
+        
+        # Use closing price and rename column
+        df_price = df['close'].astype(float).rename('Price_USD')
+        
+        print(f"   Success! Fetched {len(df_price)} price data points.")
+        return df_price
+        
+    except requests.exceptions.RequestException as e:
+        print(f"   Error fetching price data from Binance: {e}")
+        return pd.DataFrame()
+    except Exception as e:
+        print(f"   An unexpected error occurred with Binance API: {e}")
+        return pd.DataFrame()def fetch_chart_data(chart_name: str, start_date: str) -> pd.DataFrame:
     """
     Fetches historical data for a single chart from the Blockchain.com API.
 
@@ -75,12 +126,13 @@ def fetch_chart_data(chart_name: str, start_date: str) -> pd.DataFrame:
 
 def get_bitcoin_data():
     """
-    Fetch and process Bitcoin on-chain data.
+    Fetch and process Bitcoin on-chain data and price data.
     """
-    print("--- Starting Bitcoin On-Chain Data Fetcher ---")
+    print("--- Starting Bitcoin Data Fetcher ---")
     
     all_data = []
     
+    # Fetch on-chain metrics
     for metric_name, chart_endpoint in METRICS.items():
         # Use a short sleep to be polite to the public API
         time.sleep(1.5) 
@@ -92,6 +144,11 @@ def get_bitcoin_data():
             # Rename the column to the user-friendly metric name
             df_metric = df_metric.rename(metric_name)
             all_data.append(df_metric)
+
+    # Fetch price data from Binance
+    df_price = fetch_binance_price_data(START_DATE, END_DATE)
+    if not df_price.empty:
+        all_data.append(df_price)
 
     if not all_data:
         print("\n--- Failed to retrieve any data. Aborting. ---")
