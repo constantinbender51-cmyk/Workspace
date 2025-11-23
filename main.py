@@ -46,10 +46,8 @@ def prepare_data(df):
     features = []
     targets = []
     for i in range(5, len(df) - 1):  # Stop at len(df)-1 to have a target for next day
-        # Use features from day i-5 to i-1 to predict close on day i (next day relative to lookback)
-        lookback = df.iloc[i-5:i]
+        # Use only technical indicators (no current price) to predict close on day i (next day relative to lookback)
         feature_row = [
-            lookback['close'].iloc[-1],  # Close on day i-1 (yesterday in lookback)
             df.iloc[i-1]['sma_7'],       # Use lagged SMA values for day i-1
             df.iloc[i-1]['sma_365'],
             df.iloc[i-1]['sma_volume_5'],
