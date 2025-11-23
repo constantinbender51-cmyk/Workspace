@@ -90,7 +90,6 @@ def load_data():
 def prepare_data(df):
     # Calculate specified SMAs
     df['sma_14'] = df['close'].rolling(window=14).mean()
-    df['sma_14_squared'] = df['sma_14'] ** 2
     df['sma_14_volume'] = df['volume'].rolling(window=14).mean()
     df['sma_14_volume_sma_14_price'] = df['sma_14_volume'] * df['sma_14']
     
@@ -100,10 +99,9 @@ def prepare_data(df):
     features = []
     targets = []
     for i in range(len(df_clean)):
-        # Features: 14-day SMA, squared 14-day SMA, and on-chain metrics (if available)
+        # Features: 14-day SMA and on-chain metrics (if available)
         feature = [
             df_clean['sma_14'].iloc[i],
-            df_clean['sma_14_squared'].iloc[i],
             df_clean['sma_14_volume_sma_14_price'].iloc[i]
         ]
         # Add on-chain metrics only if they exist in the DataFrame
