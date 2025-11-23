@@ -28,10 +28,11 @@ def fetch_btc_data():
     return df
 
 def calculate_features(df):
-    df['sma_7'] = df['close'].rolling(window=7).mean()
-    df['sma_365'] = df['close'].rolling(window=365).mean()  # Use full 365-day SMA as specified
-    df['sma_volume_5'] = df['volume'].rolling(window=5).mean()
-    df['sma_volume_10'] = df['volume'].rolling(window=10).mean()
+    # Calculate features without lookahead bias - use shift to ensure no future data
+    df['sma_7'] = df['close'].rolling(window=7).mean().shift(1)
+    df['sma_365'] = df['close'].rolling(window=365).mean().shift(1)
+    df['sma_volume_5'] = df['volume'].rolling(window=5).mean().shift(1)
+    df['sma_volume_10'] = df['volume'].rolling(window=10).mean().shift(1)
     return df
 
 def prepare_data(df):
@@ -70,7 +71,7 @@ def prepare_data(df):
             df.iloc[i-1]['sma_volume_10']  # SMA volume 10 from 1 day ago
         ]
         features.append(feature_row)
-        targets.append(df.iloc[i]['close'])  # Target is close on day i (next day after the 5-day lookback)
+        targets.append(df.iloc[i+1]['close'])  # Target is close on day i+1 (true next day prediction)
     
     return np.array(features), np.array(targets), df
 
