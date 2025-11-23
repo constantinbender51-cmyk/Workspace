@@ -12,7 +12,7 @@ Natural Language Explanation of Training, Prediction, and Capital Development:
 
 3. Capital Development:
    - Start with an initial capital of $1000.
-   - For each day in the test period, calculate the actual return based on the change in Bitcoin price from the previous day.
-   - If the predicted price is higher than the actual price, interpret this as a negative signal and apply the negative of the actual return to the capital; otherwise, apply the positive actual return.
+   - For each day in the test period, calculate the return using the previous two days' prices: yesterday's price and the day before's price, specifically (today's price minus yesterday's price) divided by yesterday's price.
+   - If the predicted price from 4 days ago is lower than the actual price yesterday, interpret this as a positive signal and apply the positive return to the capital; otherwise, interpret it as a negative signal and apply the negative return.
    - Update the capital daily by multiplying the previous capital by (1 + return), tracking the growth or decline over time.
-   - This strategy simulates a trading approach where predictions guide position decisions, with results visualized in a plot alongside actual and predicted prices.
+   - This strategy simulates a trading approach where predictions from 4 days ago guide position decisions based on recent price changes, with results visualized in a plot alongside actual and predicted prices.
