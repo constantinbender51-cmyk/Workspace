@@ -12,9 +12,9 @@ from datetime import datetime, timedelta
 app = Flask(__name__)
 
 def fetch_btc_data():
-    # Fetch BTC daily price data from Binance starting from 2024-12-01 to ensure enough data for 365-day SMA
+    # Fetch BTC daily price data from Binance starting from 2024-01-01 to ensure enough data for 365-day SMA
     end_time = int(datetime.now().timestamp() * 1000)
-    start_time = int(datetime(2024, 12, 1).timestamp() * 1000)
+    start_time = int(datetime(2024, 1, 1).timestamp() * 1000)
     url = f"https://api.binance.com/api/v3/klines?symbol=BTCUSDT&interval=1d&startTime={start_time}&endTime={end_time}"
     response = requests.get(url)
     data = response.json()
