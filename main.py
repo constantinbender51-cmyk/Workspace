@@ -143,22 +143,29 @@ def build_dashboard(y_test, preds, model, feats, X_test):
         # 4. DAILY-COMPOUNDING CAPITAL – mean-reversion strategy
     equity = 1000.0
     equity_curve = [equity]
-    btc_pos = 0.0          # BTC units (positive long, negative short)
+    btc_pos = 0.0
+    MIN_EQUITY = 0.01          # floor to avoid div-by-zero
 
-    for i in range(0, len(y_test)-1):          # use i and i+1
-        price_today = y_test.iloc[i]           # close at which we trade
-        pred_today  = preds[i]                 # model prediction for that day
+    for i in range(0, len(y_test)-1):
+        price_today = y_test.iloc[i]
+        pred_today  = preds[i]
         signal = 1.0 if price_today > pred_today else -1.0
 
-        # 1. close previous position (if any) at today’s close
+        # 1. close previous position
         equity += btc_pos * price_today
-        # 2. resize to 100 % of current equity (no leverage)
-        btc_pos = signal * equity / price_today
-        # 3. mark-to-market at **next** day’s close (tomorrow)
+        equity = max(equity, MIN_EQUITY)   # never <= 0
+
+        # 2. size new position (0 if bankrupt)
+        if equity <= MIN_EQUITY:
+            btc_pos = 0.0
+        else:
+            btc_pos = signal * equity / price_today
+
+        # 3. mark at next close
         equity = btc_pos * y_test.iloc[i+1]
         equity_curve.append(equity)
 
-    # last day: no tomorrow, just close position
+    # final close
     equity += btc_pos * y_test.iloc[-1]
     equity_curve.append(equity)
 
