@@ -110,16 +110,22 @@ def create_plot(df, y_test, predictions, test_indices):
     
     capital = capital[1:]  # Remove the initial 1000 to match the number of dates
     
-    # Plot price and predictions with position markers
+    # Plot price and predictions with colored line segments for positions
     plt.subplot(2, 1, 1)
     plt.plot(sorted_dates, sorted_y_test, label='Actual Price', color='blue')
-    plt.plot(sorted_dates, sorted_predictions, label='Predicted Price', color='red')
-    # Add markers for long and short positions on the prediction line
-    for j in range(len(sorted_dates)):
-        if positions[j] == 'long':
-            plt.scatter(sorted_dates[j], sorted_predictions[j], color='green', marker='^', s=50, zorder=5)
-        elif positions[j] == 'short':
-            plt.scatter(sorted_dates[j], sorted_predictions[j], color='red', marker='v', s=50, zorder=5)
+    # Plot prediction line with color based on positions
+    prev_idx = 0
+    for j in range(1, len(sorted_dates)):
+        if positions[j-1] == 'long':
+            color = 'green'
+        elif positions[j-1] == 'short':
+            color = 'red'
+        else:
+            color = 'gray'  # Neutral in gray
+        plt.plot(sorted_dates[prev_idx:j+1], sorted_predictions[prev_idx:j+1], color=color, linewidth=2)
+        prev_idx = j
+    plt.plot([], [], color='green', label='Predicted Price (Long)')
+    plt.plot([], [], color='red', label='Predicted Price (Short)')
     plt.xlabel('Date')
     plt.ylabel('Price (USD)')
     plt.title('BTC Price Prediction vs Actual')
