@@ -97,9 +97,12 @@ def prepare_data(df):
     features = []
     targets = []
     for i in range(len(df_clean)):
-        # Feature: 7-day SMA of close price from previous 7 days (days t-7 to t-1), excluding today
-        if i >= 7:  # Ensure enough history for 7-day lookback
-            feature = [df_clean['sma_7_close'].iloc[i - 1]]  # Use yesterday's SMA value
+        # Features: 7-day SMA values for previous 7 days (days t-7 to t-1), excluding today
+        if i >= 14:  # Ensure enough history for 7-day lookback of 7-day SMA
+            feature = []
+            # Get SMA values for days t-7 through t-1
+            for j in range(1, 8):
+                feature.append(df_clean['sma_7_close'].iloc[i - j])
             features.append(feature)
             # Target: closing price 3 days ahead
             if i < len(df_clean) - 3:
