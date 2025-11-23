@@ -182,8 +182,8 @@ def build_dashboard(y_test, preds, model, feats, X_test):
     # stats banner
     mae = mean_absolute_error(y_test, preds)
     r2  = r2_score(y_test, preds)
-    final_cap = equity_curve.iloc[-1]
-    stats = Div(text=f"<b>MAE :</b> {mae:,.2f} USDT &nbsp;|&nbsp; <b>R² :</b> {r2:.3f} &nbsp;|&nbsp; <b>Final capital :</b> {final_cap:,.2f} €")
+    final_ret = returns.iloc[-1] if len(returns) else 0.0
+    stats = Div(text=f"<b>MAE :</b> {mae:,.2f} USDT &nbsp;|&nbsp; <b>R² :</b> {r2:.3f} &nbsp;|&nbsp; <b>Final return :</b> {final_ret:+.2%}")
 
     return column(stats, p1, p2, p3, p4, sizing_mode="stretch_width")
 
