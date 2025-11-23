@@ -145,18 +145,22 @@ def build_dashboard(y_test, preds, model, feats, X_test):
     equity_curve = [equity]
     btc_pos = 0.0          # BTC units (positive long, negative short)
 
-    for i in range(1, len(y_test)):
-        price = y_test.iloc[i-1]
-        pred  = preds[i-1]
-        signal = 1.0 if price > pred else -1.0   # long when actual > pred
+    for i in range(0, len(y_test)-1):          # use i and i+1
+        price_today = y_test.iloc[i]           # close at which we trade
+        pred_today  = preds[i]                 # model prediction for that day
+        signal = 1.0 if price_today > pred_today else -1.0
 
-        # 1. close previous position (mark-to-market already inside equity)
+        # 1. close previous position (if any) at today’s close
+        equity += btc_pos * price_today
         # 2. resize to 100 % of current equity (no leverage)
-        btc_pos = signal * equity / price
-        # 3. next-day equity is the new position size * next price
-        #    (we simulate a swap into the next bar at the same price)
-        equity = btc_pos * price          # unchanged today, but keeps value consistent
+        btc_pos = signal * equity / price_today
+        # 3. mark-to-market at **next** day’s close (tomorrow)
+        equity = btc_pos * y_test.iloc[i+1]
         equity_curve.append(equity)
+
+    # last day: no tomorrow, just close position
+    equity += btc_pos * y_test.iloc[-1]
+    equity_curve.append(equity)
 
     cap_src = ColumnDataSource({'date': y_test.index, 'capital': equity_curve})
     p4 = figure(title="Daily-compounding capital (€) – long actual>pred, short actual<pred",
