@@ -31,7 +31,6 @@ def fetch_btc_data():
 def calculate_features(df):
     # Calculate features without lookahead bias - use shift to ensure no future data
     print("DEBUG: Calculating features for the dataset")
-    df['sma_5'] = df['close'].rolling(window=5).mean().shift(1)
     df['sma_7'] = df['close'].rolling(window=7).mean().shift(1)
     df['sma_365'] = df['close'].rolling(window=365).mean().shift(1)
     df['sma_volume_5'] = df['volume'].rolling(window=5).mean().shift(1)
@@ -56,9 +55,6 @@ def prepare_data(df):
     for i in range(3, len(df) - 3):  # Start from index 3 to have 3 days of lookback, stop at len(df)-3 to have a 3-day future target
         # Use technical indicators from the past 3 days (i-3 to i-1) to predict close on day i+3
         feature_row = [
-            df.iloc[i-3]['sma_5'],       # SMA 5 from 3 days ago
-            df.iloc[i-2]['sma_5'],       # SMA 5 from 2 days ago
-            df.iloc[i-1]['sma_5'],       # SMA 5 from 1 day ago
             df.iloc[i-3]['sma_7'],       # SMA 7 from 3 days ago
             df.iloc[i-2]['sma_7'],       # SMA 7 from 2 days ago
             df.iloc[i-1]['sma_7'],       # SMA 7 from 1 day ago
