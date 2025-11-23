@@ -140,7 +140,7 @@ def build_dashboard(y_test, preds, model, feats, X_test):
     p3.vbar(x='feature', top='coef', width=0.7, source=ColumnDataSource(coef_df))
     p3.xaxis.major_label_orientation = 0.8
 
-        # 4. DAILY RETURN + coloured background for long/short
+    # 4. DAILY RETURNS (fraction) – red=long, blue=short
     returns = []
     position_log = []          # 1 = long, -1 = short
 
@@ -150,31 +150,34 @@ def build_dashboard(y_test, preds, model, feats, X_test):
         pred       = preds[i-1]
         pos = 1 if prev_price > pred else -1
         position_log.append(pos)
+
         r = (curr_price / prev_price - 1.0)
-        returns.append(r if pos > 0 else -r)
+        returns.append(r if pos > 0 else -r)      # flip sign for short
 
-    equity_curve = 1000.0 * (1.0 + pd.Series(returns).cumsum())
+    ret_ser = pd.Series(returns, index=y_test.index[1:])   # skip first day
 
-    # build coloured bands
+    # background bands
     long_days  = [(y_test.index[i], y_test.index[i+1]) for i, p in enumerate(position_log) if p == 1]
     short_days = [(y_test.index[i], y_test.index[i+1]) for i, p in enumerate(position_log) if p == -1]
 
-    p4 = figure(title="Capital evolution (€) – red=long, blue=short",
-                x_axis_type='datetime', y_axis_label='Euro',
+    p4 = figure(title="Daily strategy returns – red=long, blue=short",
+                x_axis_type='datetime', y_axis_label='Return (fraction)',
                 sizing_mode="stretch_width", height=350,
                 toolbar_location='above', tools='pan,xwheel_zoom,reset')
 
-    # background rectangles
     for start, end in long_days:
         p4.vbar(x=start, width=(end-start), top=1e6, bottom=-1e6, color='red', alpha=0.08)
     for start, end in short_days:
         p4.vbar(x=start, width=(end-start), top=1e6, bottom=-1e6, color='blue', alpha=0.08)
 
-    # capital line
-    cap_src = ColumnDataSource({'date': y_test.index[1:], 'capital': equity_curve})
-    p4.line('date', 'capital', source=cap_src, color='green', line_width=2)
-    p4.add_tools(HoverTool(tooltips=[('date', '@date{%F}'), ('€', '@capital{0,0.00}')],
-                           formatters={'@date': 'datetime'}))
+    # zero line
+    p4.line([ret_ser.index[0], ret_ser.index[-1]], [0, 0], color='black', line_width=1, line_dash='dashed')
+
+    # returns line
+    p4.line(ret_ser.index, ret_ser.values, color='green', line_width=2)
+
+    p4.add_tools(HoverTool(tooltips=[('date', '@x{%F}'), ('return', '@y{0.00 %}')],
+                           formatters={'@x': 'datetime'}))
 
     # stats banner
     mae = mean_absolute_error(y_test, preds)
