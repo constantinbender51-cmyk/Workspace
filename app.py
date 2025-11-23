@@ -102,12 +102,12 @@ def prepare_data(df):
     # Use a rolling window of 7 days for net transaction count features
     window_size = 7
     for i in range(len(df_clean)):
-        # Feature: net transaction count for the current day and previous 6 days (one week)
+        # Feature: net transaction count for the previous 7 days (t-7 through t-1)
         feature = []
         if 'Net_Transaction_Count' in df_clean.columns:
-            if i >= window_size - 1:
-                # Include the current day and previous 6 days
-                feature = df_clean['Net_Transaction_Count'].iloc[i - window_size + 1:i + 1].tolist()
+            if i >= window_size:
+                # Include the previous 7 days (excluding current day)
+                feature = df_clean['Net_Transaction_Count'].iloc[i - window_size:i].tolist()
             else:
                 # For early days, pad with NaN (will be removed later)
                 feature = [np.nan] * window_size
