@@ -3,7 +3,7 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>BTC Double Descent (Detailed Mode)</title>
+    <title>BTC Double Descent (Optimized)</title>
     <style>
         body { font-family: sans-serif; max-width: 800px; margin: 0 auto; padding: 20px; }
         .container { text-align: center; }
@@ -33,7 +33,7 @@
     <div class="container">
         <h1>Double Descent: BTC Price Prediction</h1>
         <p>
-            Training LSTM (256 units, 1000 epochs). 
+            Training LSTM (128 units, 1000 epochs). 
         </p>
 
         <button id="startBtn" onclick="startTraining()">Start Training Experiment</button>
@@ -46,7 +46,7 @@
                 <span id="lossStatus">Loss: --</span>
             </div>
             <div class="sub-stats">
-                <span id="batchStatus">Batch: 0 / --</span> | 
+                <span id="batchStatus">Batch: -- / --</span> | 
                 <span id="heartbeat">Last Update: --</span>
             </div>
         </div>
@@ -65,7 +65,7 @@
     </div>
 
     <script>
-        let pollInterval;
+        let isPolling = false;
         
         function log(msg) {
             console.log(msg);
@@ -100,8 +100,9 @@
                 
                 if (data.status === 'started' || data.status === 'already_running') {
                     progressContainer.style.display = 'block';
-                    log("Training started/resumed. Polling for status...");
-                    pollInterval = setInterval(checkStatus, 1000);
+                    log("Training started. Polling loop initiated.");
+                    isPolling = true;
+                    checkStatus(); // Start the loop
                 } else {
                     throw new Error("Server status: " + data.status);
                 }
@@ -115,16 +116,22 @@
         }
 
         async function checkStatus() {
+            if (!isPolling) return;
+
             try {
-                const response = await fetch('/status');
+                // Fetch with a timeout so we don't hang forever if server is busy
+                const controller = new AbortController();
+                const timeoutId = setTimeout(() => controller.abort(), 2000); // 2 second timeout
+
+                const response = await fetch('/status', { signal: controller.signal });
+                clearTimeout(timeoutId);
+
                 const data = await response.json();
 
                 if (data.status === 'training') {
-                    // Update main progress bar
                     document.getElementById('progressBar').value = data.progress;
                     document.getElementById('epochStatus').innerText = `Epoch: ${data.epoch} / ${data.total_epochs}`;
                     
-                    // Update granular stats
                     if (data.current_train_loss) {
                         document.getElementById('lossStatus').innerText = `Loss: ${data.current_train_loss.toExponential(4)}`;
                     }
@@ -132,13 +139,15 @@
                          document.getElementById('batchStatus').innerText = `Batch: ${data.batch} / ${data.total_batches}`;
                     }
                     
-                    // Update heartbeat
                     const now = new Date();
                     document.getElementById('heartbeat').innerText = `Last Update: ${now.toLocaleTimeString()}`;
 
+                    // Schedule next poll
+                    setTimeout(checkStatus, 1000);
+
                 } else if (data.status === 'completed') {
                     log("Training completed successfully.");
-                    clearInterval(pollInterval);
+                    isPolling = false;
                     document.getElementById('progress-container').style.display = 'none';
                     document.getElementById('startBtn').innerText = "Run Again";
                     document.getElementById('startBtn').disabled = false;
@@ -149,13 +158,15 @@
 
                 } else if (data.status === 'error') {
                     log("TRAINING FAILED: " + data.error);
-                    clearInterval(pollInterval);
+                    isPolling = false;
                     document.getElementById('startBtn').disabled = false;
                     document.getElementById('errorMsg').innerText = "Server Error: " + data.error;
                     document.getElementById('errorMsg').style.display = 'block';
                 }
             } catch (e) {
-                console.error("Polling error", e);
+                // If fetch fails (timeout or network error), just log and retry
+                log("Poll skipped (server busy): " + e.message);
+                if (isPolling) setTimeout(checkStatus, 2000); // Wait a bit longer before retrying
             }
         }
     </script>
