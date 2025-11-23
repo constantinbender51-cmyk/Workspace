@@ -206,9 +206,8 @@ def prepare_data(df):
     scaler_features = StandardScaler()
     features_scaled = scaler_features.fit_transform(features[:min_len])
     
-    # Scale Targets (CRITICAL FIX FOR EXPLODING LOSS)
+    # Scale Targets
     scaler_target = StandardScaler()
-    # Reshape for scaler (samples, 1)
     targets_reshaped = targets[:min_len].reshape(-1, 1)
     targets_scaled = scaler_target.fit_transform(targets_reshaped)
     
@@ -284,7 +283,8 @@ def run_training_task():
         X_train_reshaped = X_train.reshape(X_train.shape[0], 20, 10)
         X_test_reshaped = X_test.reshape(X_test.shape[0], 20, 10)
         
-        EPOCHS = 1000
+        # INCREASED EPOCHS to find the Second Descent
+        EPOCHS = 3000
         UNITS = 128
         
         with state_lock:
