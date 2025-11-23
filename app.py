@@ -53,10 +53,10 @@ def prepare_data(df):
     
     # Remove the last 3 features since they have no corresponding target
     features = features[:-3]
-    return np.array(features), np.array(targets)
+    return np.array(features), np.array(targets), df_clean
 
 # Train model
-def train_model(features, targets, df):
+def train_model(features, targets, df_clean, df):
     # Filter data for training set: 2022 to 2023
     train_start_date = pd.to_datetime('2022-01-01')
     train_end_date = pd.to_datetime('2023-12-31')
@@ -67,10 +67,7 @@ def train_model(features, targets, df):
     test_end_date = pd.to_datetime('2025-12-31')
     test_mask = (df.index >= test_start_date) & (df.index <= test_end_date)
     test_df = df[test_mask]
-    # Align features and targets with filtered indices
-    # Since features and targets are derived from df_clean, align using the cleaned DataFrame indices
-    df_clean = df.dropna()  # Recreate df_clean to get consistent indices
-    # Ensure the boolean masks are based on df_clean indices
+    # Align features and targets with filtered indices using the consistent df_clean
     train_indices_clean = df_clean.index.isin(train_df.index)
     test_indices_clean = df_clean.index.isin(test_df.index)
     # Check if dimensions match
@@ -164,8 +161,8 @@ def create_plot(df, y_test, predictions, test_indices):
 @app.route('/')
 def index():
     df = load_data()
-    features, targets = prepare_data(df)
-    model, X_test, y_test, predictions, mse, test_indices = train_model(features, targets, df)
+    features, targets, df_clean = prepare_data(df)
+    model, X_test, y_test, predictions, mse, test_indices = train_model(features, targets, df_clean, df)
     plot_url = create_plot(df, y_test, predictions, test_indices)
     return render_template('index.html', plot_url=plot_url, mse=mse)
 
