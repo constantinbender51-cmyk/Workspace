@@ -26,24 +26,18 @@ def load_data():
 
 # Prepare features and target
 def prepare_data(df):
-    # Calculate specified SMAs
+    # Calculate specified SMA
     df['sma_7'] = df['close'].rolling(window=7).mean()
-    df['sma_365'] = df['close'].rolling(window=365).mean()
-    df['volume_sma_5'] = df['volume'].rolling(window=5).mean()
-    df['volume_sma_10'] = df['volume'].rolling(window=10).mean()
     
-    # Remove rows with NaN values from SMA calculations
+    # Remove rows with NaN values from SMA calculation
     df_clean = df.dropna()
     
     features = []
     targets = []
     for i in range(len(df_clean)):
-        # Features: 7-day and 365-day price SMAs, 5-day and 10-day volume SMAs
+        # Features: 7-day price SMA
         feature = [
-            df_clean['sma_7'].iloc[i],
-            df_clean['sma_365'].iloc[i],
-            df_clean['volume_sma_5'].iloc[i],
-            df_clean['volume_sma_10'].iloc[i]
+            df_clean['sma_7'].iloc[i]
         ]
         features.append(feature)
         # Target: next day's closing price
@@ -83,7 +77,6 @@ def create_plot(df, y_test, predictions, test_indices):
     
     # Calculate capital with daily accumulation based on prediction vs actual and actual Bitcoin returns
     capital = [1000]  # Start with $1000
-    sma_capital = [1000]  # Start with $1000 for SMA strategy
     
     for i in range(len(sorted_y_test)):
         if i == 0:
@@ -101,22 +94,8 @@ def create_plot(df, y_test, predictions, test_indices):
         else:  # Prediction below actual: positive actual return
             ret = actual_return
         capital.append(capital[-1] * (1 + ret))
-        
-        # 365-day SMA Strategy
-        current_date = sorted_dates[i]
-        sma_365 = df.loc[current_date, 'sma_365']
-        current_price = sorted_y_test[i]
-        
-        if current_price > sma_365:
-            # Go long: positive actual return
-            sma_ret = actual_return
-        else:
-            # Go short: negative actual return
-            sma_ret = -actual_return
-        sma_capital.append(sma_capital[-1] * (1 + sma_ret))
     
     capital = capital[1:]  # Remove the initial 1000 to match the number of dates
-    sma_capital = sma_capital[1:]  # Remove the initial 1000 to match the number of dates
     
     # Plot price and predictions
     plt.subplot(2, 1, 1)
@@ -131,10 +110,9 @@ def create_plot(df, y_test, predictions, test_indices):
     # Plot capital
     plt.subplot(2, 1, 2)
     plt.plot(sorted_dates, capital, label='ML Strategy Capital', color='green')
-    plt.plot(sorted_dates, sma_capital, label='365-day SMA Strategy Capital', color='orange')
     plt.xlabel('Date')
     plt.ylabel('Capital (USD)')
-    plt.title('Trading Strategy Capital Comparison')
+    plt.title('Trading Strategy Capital')
     plt.legend()
     plt.xticks(rotation=45)
     
