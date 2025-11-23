@@ -79,26 +79,30 @@ def create_plot(df, y_test, predictions, test_indices):
     capital = [1000]  # Start with $1000
     
     for i in range(len(sorted_y_test)):
-        # Calculate return using yesterday's price and the day before's price
-        if i >= 1:  # Ensure there are at least two previous days
+        # Calculate return using the previous two days' prices: yesterday and the day before
+        if i >= 2:  # Ensure there are at least two previous days
             price_yesterday = sorted_y_test[i - 1]
-            price_day_before = sorted_y_test[i - 2] if i >= 2 else df['close'].iloc[test_indices[sorted_indices[i]] - 2]  # Fallback if not in test set
+            price_day_before = sorted_y_test[i - 2]
             return_calc = (sorted_y_test[i] - price_yesterday) / price_yesterday
         else:
-            # For the first day in test set, use available data; skip if not enough history
+            # For the first two days in test set, use available data; skip if not enough history
             if i == 0 and test_indices[sorted_indices[i]] >= 2:
                 price_yesterday = df['close'].iloc[test_indices[sorted_indices[i]] - 1]
+                price_day_before = df['close'].iloc[test_indices[sorted_indices[i]] - 2]
+                return_calc = (sorted_y_test[i] - price_yesterday) / price_yesterday
+            elif i == 1 and test_indices[sorted_indices[i]] >= 2:
+                price_yesterday = sorted_y_test[i - 1]
                 price_day_before = df['close'].iloc[test_indices[sorted_indices[i]] - 2]
                 return_calc = (sorted_y_test[i] - price_yesterday) / price_yesterday
             else:
                 return_calc = 0  # Default to no return if insufficient data
         
-        # ML Strategy: Use predicted price from 4 days ago vs actual price yesterday
+        # ML Strategy: If predicted price from 4 days ago is lower than actual price yesterday, apply positive return, else negative
         if i >= 1:  # Ensure prediction from 4 days ago is available
             pred_index = test_indices[sorted_indices[i]] - 4  # Prediction from 4 days ago
             if pred_index >= 0 and pred_index < len(sorted_predictions):
                 pred_price_4_days_ago = sorted_predictions[np.where(test_indices == pred_index)[0][0]] if pred_index in test_indices else df['close'].iloc[pred_index]
-                actual_price_yesterday = sorted_y_test[i - 1] if i >= 1 else df['close'].iloc[test_indices[sorted_indices[i]] - 1]
+                actual_price_yesterday = sorted_y_test[i - 1]
                 if pred_price_4_days_ago < actual_price_yesterday:
                     ret = return_calc  # Positive signal: apply positive return
                 else:
