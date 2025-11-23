@@ -6,7 +6,7 @@ import time
 # Configuration for on-chain metrics
 BASE_URL = "https://api.blockchain.info/charts/"
 METRICS = {
-    'Active_Addresses': 'unique-addresses-used',
+    'Active_Addresses': 'n-unique-addresses',
     'Net_Transaction_Count': 'n-transactions',
     'Transaction_Volume_USD': 'estimated-transaction-volume-usd',
 }
@@ -96,8 +96,12 @@ def fetch_btc_candles():
             all_metrics.append(df_metric)
     
     # Combine price and on-chain data
-    df_combined = pd.concat([df_price.set_index('date')] + all_metrics, axis=1)
-    df_combined = df_combined.loc[START_DATE:END_DATE].ffill().dropna()
+    if all_metrics:
+        df_combined = pd.concat([df_price.set_index('date')] + all_metrics, axis=1)
+        df_combined = df_combined.loc[START_DATE:END_DATE].ffill().dropna()
+    else:
+        df_combined = df_price.set_index('date')
+        df_combined = df_combined.loc[START_DATE:END_DATE].dropna()
     df_combined.reset_index(inplace=True)
     df_combined.rename(columns={'index': 'date'}, inplace=True)
     df_combined.to_csv('btc_data.csv', index=False)
