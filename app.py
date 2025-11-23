@@ -109,9 +109,9 @@ def prepare_data(df):
             for j in range(1, 4):
                 feature.append(df_clean['ema_14_close'].iloc[i - j])
             features.append(feature)
-            # Target: closing price 3 days ahead
-            if i < len(df_clean) - 3:
-                target = df_clean['close'].iloc[i + 3]
+            # Target: closing price 1 day ahead
+            if i < len(df_clean) - 1:
+                target = df_clean['close'].iloc[i + 1]
                 targets.append(target)
     
     # Convert to array and remove rows with NaN in features (due to window padding)
