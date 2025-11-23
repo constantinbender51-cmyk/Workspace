@@ -125,7 +125,7 @@ def prepare_data(df):
     targets = []
     for i in range(len(df_clean)):
         # Features: technical indicators and on-chain metrics for previous 20 days
-        if i >= 26:  # Ensure enough history for MACD calculation and 20-day lookback
+        if i >= 40:  # Ensure enough history for MACD and RSI calculations and 20-day lookback
             feature = []
             # Add features from the last 20 days (t-20 to t-1)
             for lookback in range(1, 21):
@@ -186,8 +186,8 @@ def train_model(features, targets):
     y_train = targets[:split_idx]
     y_test = targets[split_idx:]
     # Training indices correspond to the indices in the cleaned DataFrame for the training set
-    # Start from index 26 (due to MACD calculation and 20-day lookback requirement) and use the first split_idx rows after that
-    train_indices = list(range(26, 26 + split_idx))
+    # Start from index 40 (due to MACD and RSI calculations and 20-day lookback requirement) and use the first split_idx rows after that
+    train_indices = list(range(40, 40 + split_idx))
     model = LinearRegression()
     model.fit(X_train, y_train)
     
