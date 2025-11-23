@@ -53,35 +53,23 @@ def prepare_data(df):
     
     # Remove the last 3 features since they have no corresponding target
     features = features[:-3]
-    return np.array(features), np.array(targets), df_clean
+    return np.array(features), np.array(targets)
 
 # Train model
-def train_model(features, targets, df_clean, df):
-    # Filter data for training set: 2022 to 2023
-    train_start_date = pd.to_datetime('2022-01-01')
-    train_end_date = pd.to_datetime('2023-12-31')
-    train_mask = (df.index >= train_start_date) & (df.index <= train_end_date)
-    train_df = df[train_mask]
-    # Filter data for test set: 2024 to 2025
-    test_start_date = pd.to_datetime('2024-01-01')
-    test_end_date = pd.to_datetime('2025-12-31')
-    test_mask = (df.index >= test_start_date) & (df.index <= test_end_date)
-    test_df = df[test_mask]
-    # Align features and targets with filtered indices using the consistent df_clean
-    train_indices_clean = df_clean.index.isin(train_df.index)
-    test_indices_clean = df_clean.index.isin(test_df.index)
-    # Check if dimensions match
-    if len(features) != len(df_clean):
-        raise ValueError("Features array length does not match cleaned DataFrame length")
-    X_train = features[train_indices_clean]
-    X_test = features[test_indices_clean]
-    y_train = targets[train_indices_clean]
-    y_test = targets[test_indices_clean]
+def train_model(features, targets):
+    # Use time series split: first 50% for training, last 50% for testing
+    split_idx = int(len(features) * 0.5)
+    X_train = features[:split_idx]
+    X_test = features[split_idx:]
+    y_train = targets[:split_idx]
+    y_test = targets[split_idx:]
+    # Test indices start from split_idx + 200 (since we lost first 200 rows to SMA calculation)
+    test_indices = list(range(split_idx + 200, split_idx + 200 + len(y_test)))
     model = LinearRegression()
     model.fit(X_train, y_train)
     predictions = model.predict(X_test)
     mse = mean_squared_error(y_test, predictions)
-    return model, X_test, y_test, predictions, mse, test_indices_clean
+    return model, X_test, y_test, predictions, mse, test_indices
 
 # Generate plot
 def create_plot(df, y_test, predictions, test_indices):
@@ -161,8 +149,8 @@ def create_plot(df, y_test, predictions, test_indices):
 @app.route('/')
 def index():
     df = load_data()
-    features, targets, df_clean = prepare_data(df)
-    model, X_test, y_test, predictions, mse, test_indices = train_model(features, targets, df_clean, df)
+    features, targets = prepare_data(df)
+    model, X_test, y_test, predictions, mse, test_indices = train_model(features, targets)
     plot_url = create_plot(df, y_test, predictions, test_indices)
     return render_template('index.html', plot_url=plot_url, mse=mse)
 
