@@ -175,7 +175,7 @@ def index():
     features, targets = prepare_data(df)
     model, X_test, y_test, predictions, train_mse, test_mse, test_indices = train_model(features, targets)
     plot_url = create_plot(df, y_test, predictions, test_indices)
-    return render_template('index.html', plot_url=plot_url, train_mse=train_mse, test_mse=test_mse)
+    return render_template('index.html', plot_url=plot_url, train_mse=train_mse)
 
 if __name__ == '__main__':
     app.run(host='0.0.0.0', port=8080, debug=False)
