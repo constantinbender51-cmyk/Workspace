@@ -28,7 +28,12 @@ def fetch_btc_candles():
             'limit': 1000
         }
         
-        response = requests.get(base_url, params=params)
+        # Add headers for rate limiting awareness
+        headers = {
+            'User-Agent': 'BTC-Prediction-App/1.0'
+        }
+        
+        response = requests.get(base_url, params=params, headers=headers)
         if response.status_code == 200:
             data = response.json()
             if data:
@@ -49,7 +54,7 @@ def fetch_btc_candles():
             print(f"Error fetching data: {response.status_code}")
             break
         
-        time.sleep(0.1)  # Rate limiting
+        time.sleep(0.15)  # Rate limiting - increased from 0.1 to 0.15 seconds
     
     df = pd.DataFrame(all_data, columns=['date', 'open', 'high', 'low', 'close', 'volume'])
     df.to_csv('btc_data.csv', index=False)
