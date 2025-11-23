@@ -133,8 +133,8 @@ def train_model(features, targets):
     y_train = targets[:split_idx]
     y_test = targets[split_idx:]
     # Training indices correspond to the indices in the cleaned DataFrame for the training set
-    # Adjust indices to account for the shifted features (using days t-3 through t-1 to predict day t)
-    train_indices = list(range(split_idx + 14, split_idx + 14 + len(y_train)))
+    # Start from index 48 (due to 48-day SMA requirement) and use the first split_idx rows after that
+    train_indices = list(range(48, 48 + split_idx))
     model = LinearRegression()
     model.fit(X_train, y_train)
     
