@@ -57,8 +57,8 @@ def train_model(features, targets):
     X_test = features[split_idx:]
     y_train = targets[:split_idx]
     y_test = targets[split_idx:]
-    # Test indices start from split_idx + 200 (since we lost first 200 rows to SMA calculation)
-    test_indices = list(range(split_idx + 200, split_idx + 200 + len(y_test)))
+    # Test indices correspond to the indices in the cleaned DataFrame for the test set
+    test_indices = list(range(split_idx, split_idx + len(y_test)))
     model = LinearRegression()
     model.fit(X_train, y_train)
     predictions = model.predict(X_test)
