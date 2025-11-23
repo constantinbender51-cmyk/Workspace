@@ -88,10 +88,10 @@ def load_data():
 
 # Prepare features and target
 def prepare_data(df):
-    # Calculate 7-day SMA for close price
-    df['sma_7_close'] = df['close'].rolling(window=7).mean()
-    # Calculate 14-day EMA for close price
-    df['ema_14_close'] = df['close'].ewm(span=14, adjust=False).mean()
+    # Calculate 50-day SMA for close price
+    df['sma_50_close'] = df['close'].rolling(window=50).mean()
+    # Calculate 100-day EMA for close price
+    df['ema_100_close'] = df['close'].ewm(span=100, adjust=False).mean()
     
     # Remove rows with NaN values from SMA and EMA calculations
     df_clean = df.dropna()
@@ -99,15 +99,15 @@ def prepare_data(df):
     features = []
     targets = []
     for i in range(len(df_clean)):
-        # Features: 7-day SMA and 14-day EMA values for previous 3 days (days t-3 to t-1)
-        if i >= 14:  # Ensure enough history for 3-day lookback
+        # Features: 50-day SMA and 100-day EMA values for previous 3 days (days t-3 to t-1)
+        if i >= 100:  # Ensure enough history for 3-day lookback
             feature = []
             # Get SMA values for days t-3 through t-1
             for j in range(1, 4):
-                feature.append(df_clean['sma_7_close'].iloc[i - j])
+                feature.append(df_clean['sma_50_close'].iloc[i - j])
             # Get EMA values for days t-3 through t-1
             for j in range(1, 4):
-                feature.append(df_clean['ema_14_close'].iloc[i - j])
+                feature.append(df_clean['ema_100_close'].iloc[i - j])
             features.append(feature)
             # Target: today's closing price
             target = df_clean['close'].iloc[i]
