@@ -7,6 +7,7 @@ from tensorflow.keras.models import Sequential
 from tensorflow.keras.layers import LSTM, Dense
 from tensorflow.keras.optimizers import Adam
 from tensorflow.keras.callbacks import Callback
+from tensorflow.keras import backend as K
 import matplotlib
 matplotlib.use('Agg')
 import matplotlib.pyplot as plt
@@ -31,32 +32,49 @@ training_state = {
     'progress': 0,
     'epoch': 0,
     'total_epochs': 0,
+    'batch': 0,
+    'total_batches': 0,
     'train_loss': [],
     'val_loss': [],
     'current_train_loss': 0,
     'current_val_loss': 0,
     'plot_url': None,
     'train_mse': 0,
-    'error': None
+    'error': None,
+    'last_update': 0
 }
 
-class ProgressCallback(Callback):
+class DetailedProgressCallback(Callback):
     def __init__(self, total_epochs):
         self.total_epochs = total_epochs
 
+    def on_epoch_begin(self, epoch, logs=None):
+        training_state['epoch'] = epoch + 1
+
+    def on_train_batch_end(self, batch, logs=None):
+        # Update state every batch so user sees movement
+        logs = logs or {}
+        training_state['batch'] = batch + 1
+        training_state['current_train_loss'] = logs.get('loss')
+        training_state['last_update'] = time.time()
+        
+        # Calculate granular progress: (current_epoch_fraction + batch_fraction) / total_epochs
+        # This gives a smooth progress bar from 0% to 100%
+        if self.params and 'steps' in self.params:
+            total_steps = self.params['steps']
+            training_state['total_batches'] = total_steps
+            
+            current_epoch_progress = (training_state['epoch'] - 1) / self.total_epochs
+            current_batch_progress = (batch + 1) / total_steps
+            total_progress = current_epoch_progress + (current_batch_progress / self.total_epochs)
+            training_state['progress'] = int(total_progress * 100)
+
     def on_epoch_end(self, epoch, logs=None):
         logs = logs or {}
-        # Update global state
-        training_state['epoch'] = epoch + 1
-        training_state['progress'] = int(((epoch + 1) / self.total_epochs) * 100)
-        training_state['current_train_loss'] = logs.get('loss')
         training_state['current_val_loss'] = logs.get('val_loss')
         training_state['train_loss'].append(logs.get('loss'))
         training_state['val_loss'].append(logs.get('val_loss'))
-        
-        # Log every 10% or 100 epochs to avoid spamming console
-        if (epoch + 1) % 100 == 0:
-            logger.info(f"Epoch {epoch+1}/{self.total_epochs} - Loss: {logs.get('loss'):.4f}")
+        logger.info(f"Epoch {epoch+1}/{self.total_epochs} completed. Loss: {logs.get('loss'):.4f}")
 
 def load_data():
     logger.info("Step 1: Loading Data...")
@@ -64,7 +82,6 @@ def load_data():
         logger.info("btc_data.csv not found. Running fetch script...")
         try:
             subprocess.run(['python', 'fetch_price_data.py'], check=True)
-            logger.info("Fetch script completed.")
         except subprocess.CalledProcessError as e:
             logger.error(f"Fetch script failed: {e}")
             raise e
@@ -72,7 +89,6 @@ def load_data():
     df_price = pd.read_csv('btc_data.csv')
     df_price['date'] = pd.to_datetime(df_price['date'])
     df_price.set_index('date', inplace=True)
-    logger.info(f"Loaded price data: {len(df_price)} rows")
     
     # On-chain fetch
     try:
@@ -91,7 +107,6 @@ def load_data():
             time.sleep(1)
             try:
                 params = {'format': 'json', 'start': START_DATE, 'timespan': '1year', 'rollingAverage': '1d'}
-                logger.info(f"Fetching {metric_name}...")
                 response = requests.get(f"{BASE_URL}{chart_endpoint}", params=params, timeout=10)
                 if response.status_code == 200:
                     data = response.json()
@@ -100,14 +115,12 @@ def load_data():
                         df['Date'] = pd.to_datetime(df['x'], unit='s', utc=True).dt.tz_localize(None)
                         df = df.set_index('Date')['y'].rename(metric_name)
                         all_data.append(df)
-                        logger.info(f"Fetched {metric_name}: {len(df)} rows")
             except Exception as e:
                 logger.warning(f"Skipping {metric_name}: {e}")
                 
         df_combined = pd.concat(all_data, axis=1, join='inner')
         df_final = df_combined.loc[START_DATE:END_DATE].ffill()
         df_final = df_final[~df_final.index.duplicated(keep='first')]
-        logger.info(f"Final dataset shape: {df_final.shape}")
         return df_final
     except Exception as e:
         logger.error(f"Data merge error: {e}")
@@ -165,7 +178,6 @@ def prepare_data(df):
     targets = targets[valid_indices[:len(targets)]]
     min_len = min(len(features), len(targets))
     
-    logger.info(f"Features prepared. Shape: {features.shape}")
     return features[:min_len], targets[:min_len], StandardScaler().fit_transform(features[:min_len])
 
 def create_plot(df, y_train, predictions, train_indices, history_loss, history_val_loss):
@@ -208,12 +220,13 @@ def create_plot(df, y_train, predictions, train_indices, history_loss, history_v
     img = io.BytesIO()
     plt.savefig(img, format='png')
     img.seek(0)
-    logger.info("Plots generated successfully.")
     return base64.b64encode(img.getvalue()).decode()
 
 def run_training_task():
     global training_state
     logger.info("Background thread started.")
+    K.clear_session() # Clear memory from previous runs
+    
     try:
         training_state['status'] = 'training'
         training_state['train_loss'] = []
@@ -232,8 +245,11 @@ def run_training_task():
         X_train_reshaped = X_train.reshape(X_train.shape[0], 20, 10)
         X_test_reshaped = X_test.reshape(X_test.shape[0], 20, 10)
         
-        EPOCHS = 1500
-        UNITS = 512
+        # --- OPTIMIZED CONFIGURATION ---
+        # Reduced to 256 units (still highly overparameterized for <1000 samples)
+        # Reduced epochs to 1000
+        EPOCHS = 1000
+        UNITS = 256
         training_state['total_epochs'] = EPOCHS
         
         logger.info(f"Building Model (Units: {UNITS}, Epochs: {EPOCHS})...")
@@ -252,7 +268,7 @@ def run_training_task():
             batch_size=32,
             verbose=0,
             validation_data=(X_test_reshaped, y_test),
-            callbacks=[ProgressCallback(EPOCHS)]
+            callbacks=[DetailedProgressCallback(EPOCHS)]
         )
         logger.info("Training completed.")
         
@@ -266,7 +282,6 @@ def run_training_task():
         training_state['plot_url'] = plot_url
         training_state['train_mse'] = history.history['loss'][-1]
         training_state['status'] = 'completed'
-        logger.info("Task finished successfully.")
         
     except Exception as e:
         logger.error(f"CRITICAL TRAINING FAILURE: {e}")
@@ -280,9 +295,7 @@ def index():
 
 @app.route('/start_training', methods=['POST'])
 def start_training():
-    logger.info("Received request: /start_training")
     if training_state['status'] == 'training':
-        logger.info("Training already in progress.")
         return jsonify({'status': 'already_running'})
     
     training_state['status'] = 'starting'
@@ -295,7 +308,6 @@ def start_training():
     thread.daemon = True
     thread.start()
     
-    logger.info("Thread spawned.")
     return jsonify({'status': 'started'})
 
 @app.route('/status')
@@ -303,6 +315,4 @@ def status():
     return jsonify(training_state)
 
 if __name__ == '__main__':
-    # Important: Set debug=False to avoid reloader spawning double processes
-    logger.info("Starting Flask server...")
     app.run(host='0.0.0.0', port=8080, debug=False)
