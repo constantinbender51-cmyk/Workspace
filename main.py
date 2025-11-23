@@ -143,29 +143,27 @@ def build_dashboard(y_test, preds, model, feats, X_test):
     p3.vbar(x='feature', top='coef', width=0.7, source=ColumnDataSource(coef_df))
     p3.xaxis.major_label_orientation = 0.8
 
-        # 4. CAPITAL EVOLUTION – mean-reverting strategy  =================
-    capital = 1000.0
-    capital_curve = [capital]
-    position = 0.0          # BTC units (positive long, negative short)
+        # 4. DAILY-COMPOUNDING mean-reverting strategy  ===================
+    equity = 1000.0
+    equity_curve = [equity]
+    btc_pos = 0.0
 
     for i in range(1, len(y_test)):
-        price_today = y_test.iloc[i-1]      # last known close
-        pred_today  = preds[i-1]            # model prediction for that day
-        signal = 1 if price_today > pred_today else -1   # ↑ long  ↓ short
+        price = y_test.iloc[i-1]
+        pred  = preds[i-1]
+        signal = 1.0 if price > pred else -1.0   # mean-reversion direction
 
-        # close previous position
-        capital += position * price_today
-        # open new position (100 % of cash)
-        position = signal * capital / price_today
-        capital -= position * price_today
-        capital_curve.append(capital + position * price_today)  # mark-to-market
+        # mark-to-market previous position
+        equity = btc_pos * price
+        # resize to 100 % of current equity
+        btc_pos = signal * equity / price
 
-    cap_src = ColumnDataSource(data={'date': y_test.index,
-                                     'capital': capital_curve})
-    p4 = figure(title="Capital evolution (€) – long when actual > pred, short when actual < pred",
+        equity_curve.append(equity)
+
+    cap_src = ColumnDataSource({'date': y_test.index, 'capital': equity_curve})
+    p4 = figure(title="Daily-compounding capital (€) – long actual>pred, short actual<pred",
                 x_axis_type='datetime', y_axis_label='Euro',
-                sizing_mode="stretch_width", height=350,
-                toolbar_location='above', tools='pan,xwheel_zoom,reset')
+                sizing_mode="stretch_width", height=350)
     p4.line('date', 'capital', source=cap_src, color='green', line_width=2)
     p4.add_tools(HoverTool(tooltips=[('date', '@date{%F}'), ('€', '@capital{0,0.00}')],
                            formatters={'@date': 'datetime'}))
