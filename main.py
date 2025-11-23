@@ -127,7 +127,7 @@ def create_plot(capital_history, df, predictions, test_start_idx, positions):
     # Plot price over time for the test period
     # test_start_idx in features corresponds to df index: test_start_idx + 3 (since features start from index 3)
     start_df_idx = test_start_idx + 3
-    end_df_idx = start_df_idx + len(capital_history) - 1  # -1 because capital_history includes start
+    end_df_idx = start_df_idx + len(X_test)  # Use full test set length
     if end_df_idx > len(df):
         end_df_idx = len(df)
     test_dates = df['date'].iloc[start_df_idx:end_df_idx]
