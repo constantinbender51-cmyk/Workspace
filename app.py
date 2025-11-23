@@ -99,14 +99,14 @@ def prepare_data(df):
     features = []
     targets = []
     for i in range(len(df_clean)):
-        # Features: 7-day SMA and 14-day EMA values for previous 3 days (days t-4 to t-2), excluding today
+        # Features: 7-day SMA and 14-day EMA values for previous 3 days (days t-3 to t-1)
         if i >= 14:  # Ensure enough history for 3-day lookback
             feature = []
-            # Get SMA values for days t-4 through t-2
-            for j in range(2, 5):
+            # Get SMA values for days t-3 through t-1
+            for j in range(1, 4):
                 feature.append(df_clean['sma_7_close'].iloc[i - j])
-            # Get EMA values for days t-4 through t-2
-            for j in range(2, 5):
+            # Get EMA values for days t-3 through t-1
+            for j in range(1, 4):
                 feature.append(df_clean['ema_14_close'].iloc[i - j])
             features.append(feature)
             # Target: today's closing price
@@ -136,7 +136,7 @@ def train_model(features, targets):
     y_train = targets[:split_idx]
     y_test = targets[split_idx:]
     # Training indices correspond to the indices in the cleaned DataFrame for the training set
-    # Adjust indices to account for the shifted features (using days t-4 through t-2 to predict day t)
+    # Adjust indices to account for the shifted features (using days t-3 through t-1 to predict day t)
     train_indices = list(range(split_idx + 14, split_idx + 14 + len(y_train)))
     model = LinearRegression()
     model.fit(X_train, y_train)
