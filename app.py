@@ -1,9 +1,11 @@
 from flask import Flask, render_template
 import pandas as pd
 import numpy as np
-from sklearn.linear_model import LinearRegression
 from sklearn.model_selection import train_test_split
 from sklearn.metrics import mean_squared_error
+from tensorflow.keras.models import Sequential
+from tensorflow.keras.layers import LSTM, Dense
+from tensorflow.keras.optimizers import Adam
 import matplotlib
 matplotlib.use('Agg')
 import matplotlib.pyplot as plt
@@ -188,12 +190,24 @@ def train_model(features, targets):
     # Training indices correspond to the indices in the cleaned DataFrame for the training set
     # Start from index 40 (due to MACD and RSI calculations and 20-day lookback requirement) and use the first split_idx rows after that
     train_indices = list(range(40, 40 + split_idx))
-    model = LinearRegression()
-    model.fit(X_train, y_train)
+    
+    # Reshape features for LSTM input: (samples, time_steps, features)
+    # Each sample has 20 time steps (lookback days) and 10 features per day
+    X_train_reshaped = X_train.reshape(X_train.shape[0], 20, 10)
+    X_test_reshaped = X_test.reshape(X_test.shape[0], 20, 10)
+    
+    # Build LSTM model
+    model = Sequential()
+    model.add(LSTM(50, activation='relu', input_shape=(20, 10)))
+    model.add(Dense(1))
+    model.compile(optimizer=Adam(learning_rate=0.001), loss='mse')
+    
+    # Train the model
+    model.fit(X_train_reshaped, y_train, epochs=50, batch_size=32, verbose=0)
     
     # Calculate predictions and MSE for both training and test sets
-    train_predictions = model.predict(X_train)
-    test_predictions = model.predict(X_test)
+    train_predictions = model.predict(X_train_reshaped, verbose=0).flatten()
+    test_predictions = model.predict(X_test_reshaped, verbose=0).flatten()
     train_mse = mean_squared_error(y_train, train_predictions)
     test_mse = mean_squared_error(y_test, test_predictions)
     
