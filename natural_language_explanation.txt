@@ -1,0 +1,18 @@
+Natural Language Explanation of Training, Prediction, and Capital Development:
+
+1. Data Preparation:
+   - Load the Bitcoin price data from 'btc_data.csv', converting the date column to datetime and setting it as the index.
+   - Calculate a 1-day Simple Moving Average (SMA) of the closing prices and remove any rows with missing values.
+   - For each row in the cleaned data, create a feature set consisting of the SMA value and a target set as the closing price 3 days ahead, removing the last 3 features to align with available targets.
+
+2. Model Training and Prediction:
+   - Split the features and targets into training and testing sets using the first 50% for training and the last 50% for testing.
+   - Train a Linear Regression model on the training data.
+   - Use the trained model to predict prices on the test set and calculate the Mean Squared Error to evaluate prediction accuracy.
+
+3. Capital Development:
+   - Start with an initial capital of $1000.
+   - For each day in the test period, calculate the actual return based on the change in Bitcoin price from the previous day.
+   - If the predicted price is higher than the actual price, interpret this as a negative signal and apply the negative of the actual return to the capital; otherwise, apply the positive actual return.
+   - Update the capital daily by multiplying the previous capital by (1 + return), tracking the growth or decline over time.
+   - This strategy simulates a trading approach where predictions guide position decisions, with results visualized in a plot alongside actual and predicted prices.
