@@ -11,11 +11,14 @@ def fetch_btc_candles():
     end_date = datetime(2023, 9, 30)
     
     all_data = []
-    current_date = start_date
+    current_start = start_date
     
-    while current_date <= end_date:
-        start_time = int(current_date.timestamp() * 1000)
-        end_time = int((current_date + timedelta(days=1)).timestamp() * 1000)
+    while current_start <= end_date:
+        start_time = int(current_start.timestamp() * 1000)
+        # Calculate end time for 1000 candles (1000 days for daily interval)
+        end_time = int((current_start + timedelta(days=1000)).timestamp() * 1000)
+        if end_time > int(end_date.timestamp() * 1000):
+            end_time = int(end_date.timestamp() * 1000)
         
         params = {
             'symbol': symbol,
@@ -38,9 +41,10 @@ def fetch_btc_candles():
                     volume = float(candle[5])
                     date = datetime.fromtimestamp(timestamp / 1000).strftime('%Y-%m-%d')
                     all_data.append([date, open_price, high, low, close, volume])
-                current_date += timedelta(days=len(data))
+                # Move to the next start date after the fetched candles
+                current_start = datetime.fromtimestamp(data[-1][0] / 1000) + timedelta(days=1)
             else:
-                current_date += timedelta(days=1)
+                current_start += timedelta(days=1000)
         else:
             print(f"Error fetching data: {response.status_code}")
             break
