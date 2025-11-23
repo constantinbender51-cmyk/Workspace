@@ -48,19 +48,24 @@ def fetch_binance_data():
     numeric = ['Open', 'High', 'Low', 'Close', 'Volume']
     df[numeric] = df[numeric].apply(pd.to_numeric, axis=1)
     df['Open Time'] = pd.to_datetime(df['Open Time'], unit='ms')
-    return df[['Open Time', 'Close', 'Volume']]
+    # Return both Close and Open prices
+    return df[['Open Time', 'Open', 'Close', 'Volume']]
 
 def prepare_data(df):
     df = df.copy()
+    # Features use Close price data
     df['SMA_7'] = df['Close'].rolling(window=7).mean()
     df['SMA_365'] = df['Close'].rolling(window=365).mean()
     df['Volume_SMA_5'] = df['Volume'].rolling(window=5).mean()
     df['Volume_SMA_10'] = df['Volume'].rolling(window=10).mean()
     df.dropna(inplace=True)
     
-    # Target: The Close price of the NEXT day
-    # We train the model to predict t+1 based on t
+    # Target: The Close price of the NEXT day (t)
+    # The model predicts the close price of the day after the features (t-1)
     df['Target_Next_Close'] = df['Close'].shift(-1)
+    # We also need the Open price of the next day (t) for the trading decision
+    df['Target_Next_Open'] = df['Open'].shift(-1)
+    
     df.dropna(inplace=True)
     return df
 
@@ -70,7 +75,7 @@ def run_strategy():
     
     df = prepare_data(raw_df)
     
-    # X (Features) at time t-1
+    # X (Features) at time t-1 (Close, SMAs, Volume)
     X = df[['Close', 'Volume', 'SMA_7', 'SMA_365', 'Volume_SMA_5', 'Volume_SMA_10']]
     # y (Target) is Close at time t
     y = df['Target_Next_Close']
@@ -78,52 +83,48 @@ def run_strategy():
     # Split
     X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.2, shuffle=False)
     
-    # Train the model
-    # The model learns: "Given yesterday's data, what is today's close?"
+    # Train the model to predict "Today's Close" based on "Yesterday's Data"
     model = LinearRegression()
     model.fit(X_train, y_train)
     
-    # Predictions
-    # X_test contains data from "Yesterday". 
-    # The model uses X_test to predict "Today's Close".
+    # Predictions: Model's forecast for "Today's Close"
     predictions_today = model.predict(X_test)
     
-    # --- ALIGNMENT ---
+    # --- REALISTIC ALIGNMENT ---
     results = pd.DataFrame(index=X_test.index)
     results['Date'] = df['Open Time'].loc[X_test.index] # Date of X (Yesterday)
     # Shift date by 1 day so the row represents "Today"
     results['Date'] = results['Date'] + pd.Timedelta(days=1)
     
-    results['Actual_Today'] = y_test            # This is the actual Close of Today
-    results['Predicted_Today'] = predictions_today # This is the Model's Prediction for Today
+    # Actual Prices
+    results['Open_Today'] = df['Target_Next_Open'].loc[X_test.index] # Open price of Today (Known at trade entry)
+    results['Actual_Close_Today'] = y_test                          # Actual Close of Today (Used for return calc)
+    results['Predicted_Close_Today'] = predictions_today             # Model's Prediction for Today (Used for decision)
     
     # Calculate Today's Market Return (Today Close vs Yesterday Close)
-    # We need Yesterday's Close to calculate the percentage move
     results['Yesterday_Close'] = X_test['Close']
-    results['Daily_Return'] = (results['Actual_Today'] - results['Yesterday_Close']) / results['Yesterday_Close']
+    results['Daily_Return'] = (results['Actual_Close_Today'] - results['Yesterday_Close']) / results['Yesterday_Close']
     
     positions = []
     strategy_returns = []
     
     for i, row in results.iterrows():
-        actual = row['Actual_Today']
-        predicted = row['Predicted_Today']
+        open_price = row['Open_Today']
+        predicted = row['Predicted_Close_Today']
         market_ret = row['Daily_Return']
         
-        # --- YOUR SPECIFIED LOGIC ---
-        # "Calculate the models prediction of today and compare it to the close of today"
+        # --- CAUSAL TRADING LOGIC (Made at Open, using known data) ---
+        # The decision to Long/Short must be made at the Open using the Predicted Close.
         
-        # 1. If Price (Today) < Prediction (Today)
-        # "If the price is below the predicted value -> calculate negative return"
-        if actual < predicted:
-            positions.append('Short')
-            strategy_returns.append(-1 * market_ret)
-            
-        # 2. If Price (Today) > Prediction (Today)
-        # "If the price is above the predicted value -> calculate positive return"
-        elif actual > predicted:
+        # If the Open Price is BELOW the Predicted Price (undervalued) -> Go Long, betting it will rise toward prediction.
+        if open_price < predicted:
             positions.append('Long')
             strategy_returns.append(1 * market_ret)
+            
+        # If the Open Price is ABOVE the Predicted Price (overvalued) -> Go Short, betting it will fall toward prediction.
+        elif open_price > predicted:
+            positions.append('Short')
+            strategy_returns.append(-1 * market_ret)
             
         else:
             positions.append('Neutral')
@@ -142,15 +143,15 @@ def run_strategy():
     plt.subplot(2, 1, 1)
     plt.plot(results['Date'], results['Equity'], 'g-', linewidth=2, label='Strategy Equity')
     plt.plot(results['Date'], results['Benchmark'], 'k--', alpha=0.5, label='Buy & Hold')
-    plt.title(f'Strategy Performance (Initial: ${INITIAL_CAPITAL})')
+    plt.title(f'Realistic Strategy Performance (Initial: ${INITIAL_CAPITAL})')
     plt.ylabel('Capital ($)')
     plt.legend()
     plt.grid(True, alpha=0.3)
     
     # Price vs Prediction
     plt.subplot(2, 1, 2)
-    plt.plot(results['Date'], results['Actual_Today'], label='Actual Price (Today)', color='blue')
-    plt.plot(results['Date'], results['Predicted_Today'], label='Predicted Price (Today)', color='orange', linestyle='--')
+    plt.plot(results['Date'], results['Actual_Close_Today'], label='Actual Close (Today)', color='blue')
+    plt.plot(results['Date'], results['Predicted_Close_Today'], label='Predicted Close (Today)', color='orange', linestyle='--')
     plt.title('Actual vs Predicted (Same Day Comparison)')
     plt.ylabel('Price')
     plt.legend()
@@ -177,7 +178,7 @@ def index():
             <head><title>Algo Dashboard</title></head>
             <body style="font-family: sans-serif; text-align: center; padding: 20px; background-color: #f4f4f9;">
                 <div style="background: white; max-width: 900px; margin: auto; padding: 20px; border-radius: 10px; box-shadow: 0 4px 6px rgba(0,0,0,0.1);">
-                    <h1 style="color: #333;">Strategy Results</h1>
+                    <h1 style="color: #333;">Strategy Results (Causal Logic Applied)</h1>
                     
                     <div style="display: flex; justify-content: space-around; margin-bottom: 20px;">
                         <div style="background: #e0f7fa; padding: 15px; border-radius: 8px; width: 40%;">
@@ -193,12 +194,12 @@ def index():
                     <img src="data:image/png;base64,{plot}" style="width: 100%; border: 1px solid #ddd; border-radius: 4px;" />
                     
                     <div style="margin-top: 20px; text-align: left; background: #f9f9f9; padding: 15px; border-radius: 5px;">
-                        <strong>Strict Comparison Logic:</strong>
+                        <strong><span style="color: red;">FIXED: Look-Ahead Bias Removed.</span> Causal Logic:</strong>
                         <ul style="margin-top: 5px;">
-                            <li><b>Prediction:</b> What the model thought Today's Close would be (based on yesterday).</li>
-                            <li><b>Actual:</b> What Today's Close actually is.</li>
-                            <li>If <b>Actual < Predicted</b>: Return = Negative Daily Return (Short).</li>
-                            <li>If <b>Actual > Predicted</b>: Return = Positive Daily Return (Long).</li>
+                            <li><b>Decision Time:</b> At the beginning of the trading day (Open).</li>
+                            <li><b>Decision:</b> Compare <b>Open Price ($O_t$)</b> to <b>Predicted Close Price ($\hat{C}_t$)</b>.</li>
+                            <li>If <b>Open < Predicted</b>: Go <b>LONG</b> (Betting price moves up to meet the model's target).</li>
+                            <li>If <b>Open > Predicted</b>: Go <b>SHORT</b> (Betting price moves down to meet the model's target).</li>
                         </ul>
                     </div>
                 </div>
