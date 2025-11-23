@@ -19,8 +19,8 @@ model_results = None
 capital_data = None
 
 def fetch_btc_data():
-    """Fetch BTC price data from Binance API from 2022 to present"""
-    end_date = datetime.now()
+    """Fetch BTC price data from Binance API from Jan 2022 to Sep 2023"""
+    end_date = datetime(2023, 9, 30)
     start_date = datetime(2022, 1, 1)
     
     # Binance API endpoint for historical klines
@@ -83,7 +83,7 @@ def fetch_btc_data():
     except Exception as e:
         print(f"Error fetching data from Binance: {e}")
         # Fallback: create sample data
-        dates = pd.date_range(start='2022-01-01', end=datetime.now(), freq='D')
+        dates = pd.date_range(start='2022-01-01', end='2023-09-30', freq='D')
         np.random.seed(42)
         prices = 40000 + np.cumsum(np.random.normal(0, 1000, len(dates)))
         volumes = 1000000000 + np.random.normal(0, 100000000, len(dates))
@@ -139,9 +139,8 @@ def train_model(df):
     df['prediction'] = predictions
     
     # Calculate strategy returns
-    capital = 1000
-    capital_history = []
-    positions = []
+    capital_history = [1000]  # Start with $1000
+    positions = ['hold']  # No position on first day
     
     for i in range(1, len(df)):
         if i >= split_index:  # Only trade in test period
@@ -158,16 +157,17 @@ def train_model(df):
                 returns = (yesterday_close - today_close) / yesterday_close
                 position = 'short'
             
-            capital *= (1 + returns)
+            new_capital = capital_history[-1] * (1 + returns)
+            capital_history.append(new_capital)
             positions.append(position)
         else:
+            # In training period, capital doesn't change
+            capital_history.append(capital_history[-1])
             positions.append('hold')
-        
-        capital_history.append(capital)
     
     # Add capital data to dataframe
-    df['capital'] = [1000] + capital_history
-    df['position'] = ['hold'] + positions
+    df['capital'] = capital_history
+    df['position'] = positions
     
     return {
         'model': model,
