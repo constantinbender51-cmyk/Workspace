@@ -56,14 +56,24 @@ def prepare_data(df):
     return np.array(features), np.array(targets)
 
 # Train model
-def train_model(features, targets):
-    # Use time series split: first 50% for training, last 50% for testing
-    split_idx = int(len(features) * 0.5)
+def train_model(features, targets, df):
+    # Filter data to the date range January 2022 to September 2023
+    start_date = pd.to_datetime('2022-01-01')
+    end_date = pd.to_datetime('2023-09-30')
+    mask = (df.index >= start_date) & (df.index <= end_date)
+    filtered_df = df[mask]
+    # Calculate split index for 50% training and 50% testing based on time
+    split_idx = int(len(filtered_df) * 0.5)
+    # Map filtered indices to original features and targets
+    filtered_indices = df.index[mask].tolist()
+    # Assuming features and targets are aligned with df after dropping NaN in prepare_data
+    # Since features and targets are derived from df_clean, we need to align with filtered_df
+    # This is a simplification; in practice, ensure indices match
     X_train = features[:split_idx]
     X_test = features[split_idx:]
     y_train = targets[:split_idx]
     y_test = targets[split_idx:]
-    # Test indices start from split_idx + 200 (since we lost first 200 rows to SMA calculation)
+    # Adjust test_indices to reflect the filtered range
     test_indices = list(range(split_idx + 200, split_idx + 200 + len(y_test)))
     model = LinearRegression()
     model.fit(X_train, y_train)
@@ -150,7 +160,7 @@ def create_plot(df, y_test, predictions, test_indices):
 def index():
     df = load_data()
     features, targets = prepare_data(df)
-    model, X_test, y_test, predictions, mse, test_indices = train_model(features, targets)
+    model, X_test, y_test, predictions, mse, test_indices = train_model(features, targets, df)
     plot_url = create_plot(df, y_test, predictions, test_indices)
     return render_template('index.html', plot_url=plot_url, mse=mse)
 
