@@ -82,14 +82,18 @@ def prepare_data(df):
     features = []
     targets = []
     for i in range(len(df_clean)):
-        # Features: 14-day SMA, squared 14-day SMA, and on-chain metrics
+        # Features: 14-day SMA, squared 14-day SMA, and on-chain metrics (if available)
         feature = [
             df_clean['sma_14'].iloc[i],
-            df_clean['sma_14_squared'].iloc[i],
-            df_clean['Active_Addresses'].iloc[i],
-            df_clean['Net_Transaction_Count'].iloc[i],
-            df_clean['Transaction_Volume_USD'].iloc[i]
+            df_clean['sma_14_squared'].iloc[i]
         ]
+        # Add on-chain metrics only if they exist in the DataFrame
+        if 'Active_Addresses' in df_clean.columns:
+            feature.append(df_clean['Active_Addresses'].iloc[i])
+        if 'Net_Transaction_Count' in df_clean.columns:
+            feature.append(df_clean['Net_Transaction_Count'].iloc[i])
+        if 'Transaction_Volume_USD' in df_clean.columns:
+            feature.append(df_clean['Transaction_Volume_USD'].iloc[i])
         features.append(feature)
         # Target: next day's closing price
         if i < len(df_clean) - 3:  # Reduced lookback to 3 days
