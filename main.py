@@ -12,7 +12,8 @@ from datetime import datetime, timedelta
 app = Flask(__name__)
 
 def fetch_btc_data():
-    # Fetch BTC daily price data from Binance starting from 2022-01-01 to ensure enough data for proper train/test split    print("DEBUG: Starting to fetch BTC data from Binance")
+    # Fetch BTC daily price data from Binance starting from 2022-01-01 to ensure enough data for proper train/test split
+    print("DEBUG: Starting to fetch BTC data from Binance")
     end_time = int(datetime(2025, 11, 30).timestamp() * 1000)
     start_time = int(datetime(2022, 1, 1).timestamp() * 1000)
     url = f"https://api.binance.com/api/v3/klines?symbol=BTCUSDT&interval=1d&startTime={start_time}&endTime={end_time}"
@@ -28,7 +29,8 @@ def fetch_btc_data():
     return df
 
 def calculate_features(df):
-    # Calculate features without lookahead bias - use shift to ensure no future data    print("DEBUG: Calculating features for the dataset")
+    # Calculate features without lookahead bias - use shift to ensure no future data
+    print("DEBUG: Calculating features for the dataset")
     df['sma_7'] = df['close'].rolling(window=7).mean().shift(1)
     df['sma_365'] = df['close'].rolling(window=365).mean().shift(1)
     df['sma_volume_5'] = df['volume'].rolling(window=5).mean().shift(1)
