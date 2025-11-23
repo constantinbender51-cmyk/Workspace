@@ -99,19 +99,36 @@ def prepare_data(df):
     
     features = []
     targets = []
+    # Use a rolling window of 7 days for net transaction count features
+    window_size = 7
     for i in range(len(df_clean)):
-        # Feature: only net transaction count if available
+        # Feature: net transaction count for the current day and previous 6 days (one week)
         feature = []
         if 'Net_Transaction_Count' in df_clean.columns:
-            feature.append(df_clean['Net_Transaction_Count'].iloc[i])
+            if i >= window_size - 1:
+                # Include the current day and previous 6 days
+                feature = df_clean['Net_Transaction_Count'].iloc[i - window_size + 1:i + 1].tolist()
+            else:
+                # For early days, pad with NaN (will be removed later)
+                feature = [np.nan] * window_size
         features.append(feature)
-        # Target: next day's closing price
-        if i < len(df_clean) - 3:  # Reduced lookback to 3 days
+        # Target: closing price 3 days ahead
+        if i < len(df_clean) - 3:
             target = df_clean['close'].iloc[i + 3]
             targets.append(target)
     
-    # Remove the last 3 features since they have no corresponding target
-    features = features[:-3]
+    # Convert to array and remove rows with NaN in features (due to window padding)
+    features = np.array(features)
+    # Remove rows where any feature is NaN (from window padding)
+    valid_indices = ~np.isnan(features).any(axis=1)
+    features = features[valid_indices]
+    # Adjust targets to match valid features
+    targets = np.array(targets)
+    targets = targets[valid_indices[:len(targets)]]
+    # Ensure features and targets have the same length
+    min_len = min(len(features), len(targets))
+    features = features[:min_len]
+    targets = targets[:min_len]
     return np.array(features), np.array(targets)
 
 # Train model
