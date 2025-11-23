@@ -31,6 +31,11 @@ import requests
 import threading
 import time
 
+
+# ----------  add this near the top of main.py  ----------
+URL = "https://api.binance.com/api/v3/klines"
+# --------------------------------------------------------
+
 # --------------------------------------------------
 # 1. Grab 2022 daily klines from Binance REST
 # --------------------------------------------------
