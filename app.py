@@ -124,34 +124,40 @@ def prepare_data(df):
     features = []
     targets = []
     for i in range(len(df_clean)):
-        # Features: technical indicators and on-chain metrics for previous day (day t-1)
-        if i >= 26:  # Ensure enough history for MACD calculation
+        # Features: technical indicators and on-chain metrics for previous 20 days
+        if i >= 26:  # Ensure enough history for MACD calculation and 20-day lookback
             feature = []
-            # Technical indicators from day t-1
-            feature.append(df_clean['sma_3_close'].iloc[i - 1])
-            feature.append(df_clean['sma_9_close'].iloc[i - 1])
-            feature.append(df_clean['ema_3_volume'].iloc[i - 1])
-            feature.append(df_clean['macd_line'].iloc[i - 1])
-            feature.append(df_clean['signal_line'].iloc[i - 1])
-            feature.append(df_clean['stoch_rsi'].iloc[i - 1])
-            feature.append(df_clean['day_of_week'].iloc[i - 1])
+            # Add features from the last 20 days (t-20 to t-1)
+            for lookback in range(1, 21):
+                if i - lookback >= 0:
+                    # Technical indicators for each day in lookback period
+                    feature.append(df_clean['sma_3_close'].iloc[i - lookback])
+                    feature.append(df_clean['sma_9_close'].iloc[i - lookback])
+                    feature.append(df_clean['ema_3_volume'].iloc[i - lookback])
+                    feature.append(df_clean['macd_line'].iloc[i - lookback])
+                    feature.append(df_clean['signal_line'].iloc[i - lookback])
+                    feature.append(df_clean['stoch_rsi'].iloc[i - lookback])
+                    feature.append(df_clean['day_of_week'].iloc[i - lookback])
+                    
+                    # On-chain metrics for each day in lookback period
+                    if 'Net_Transaction_Count' in df_clean.columns:
+                        feature.append(df_clean['Net_Transaction_Count'].iloc[i - lookback])
+                    else:
+                        feature.append(0)
+                        
+                    if 'Transaction_Volume_USD' in df_clean.columns:
+                        feature.append(df_clean['Transaction_Volume_USD'].iloc[i - lookback])
+                    else:
+                        feature.append(0)
+                        
+                    if 'Active_Addresses' in df_clean.columns:
+                        feature.append(df_clean['Active_Addresses'].iloc[i - lookback])
+                    else:
+                        feature.append(0)
+                else:
+                    # Pad with zeros if not enough history
+                    feature.extend([0] * 10)  # 7 technical + 3 on-chain = 10 features per day
             
-            # On-chain metrics from day t-1
-            if 'Net_Transaction_Count' in df_clean.columns:
-                feature.append(df_clean['Net_Transaction_Count'].iloc[i - 1])
-            else:
-                feature.append(0)
-                
-            if 'Transaction_Volume_USD' in df_clean.columns:
-                feature.append(df_clean['Transaction_Volume_USD'].iloc[i - 1])
-            else:
-                feature.append(0)
-                
-            if 'Active_Addresses' in df_clean.columns:
-                feature.append(df_clean['Active_Addresses'].iloc[i - 1])
-            else:
-                feature.append(0)
-                
             features.append(feature)
             # Target: today's closing price
             target = df_clean['close'].iloc[i]
@@ -180,7 +186,7 @@ def train_model(features, targets):
     y_train = targets[:split_idx]
     y_test = targets[split_idx:]
     # Training indices correspond to the indices in the cleaned DataFrame for the training set
-    # Start from index 26 (due to MACD calculation requirement) and use the first split_idx rows after that
+    # Start from index 26 (due to MACD calculation and 20-day lookback requirement) and use the first split_idx rows after that
     train_indices = list(range(26, 26 + split_idx))
     model = LinearRegression()
     model.fit(X_train, y_train)
