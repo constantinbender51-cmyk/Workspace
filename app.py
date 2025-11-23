@@ -88,28 +88,23 @@ def load_data():
 
 # Prepare features and target
 def prepare_data(df):
-    # Calculate specified SMAs
-    df['sma_14'] = df['close'].rolling(window=14).mean()
-    df['sma_14_volume'] = df['volume'].rolling(window=14).mean()
-    df['sma_14_volume_sma_14_price'] = df['sma_14_volume'] * df['sma_14']
-    df['sma_14_squared'] = df['sma_14'] ** 2
-    
     # Calculate 7-day SMA for close price
     df['sma_7_close'] = df['close'].rolling(window=7).mean()
     
-    # Remove rows with NaN values from SMA and on-chain metric calculations
+    # Remove rows with NaN values from SMA calculations
     df_clean = df.dropna()
     
     features = []
     targets = []
     for i in range(len(df_clean)):
-        # Feature: 7-day SMA of close price (available at start of day)
-        feature = [df_clean['sma_7_close'].iloc[i]]
-        features.append(feature)
-        # Target: closing price 3 days ahead
-        if i < len(df_clean) - 3:
-            target = df_clean['close'].iloc[i + 3]
-            targets.append(target)
+        # Feature: 7-day SMA of close price from previous 7 days (days t-7 to t-1), excluding today
+        if i >= 7:  # Ensure enough history for 7-day lookback
+            feature = [df_clean['sma_7_close'].iloc[i - 1]]  # Use yesterday's SMA value
+            features.append(feature)
+            # Target: closing price 3 days ahead
+            if i < len(df_clean) - 3:
+                target = df_clean['close'].iloc[i + 3]
+                targets.append(target)
     
     # Convert to array and remove rows with NaN in features (due to window padding)
     features = np.array(features)
