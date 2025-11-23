@@ -186,9 +186,14 @@ def index():
     else:
         plot_url = create_plot(df, y_train, predictions, train_indices)
     # Calculate additional metrics for visualization
-    period_start = df.index.min().strftime('%Y-%m-%d')
-    period_end = df.index.max().strftime('%Y-%m-%d')
-    data_points = len(df)
+    if df.index.empty:
+        period_start = 'N/A'
+        period_end = 'N/A'
+        data_points = 0
+    else:
+        period_start = df.index.min().strftime('%Y-%m-%d')
+        period_end = df.index.max().strftime('%Y-%m-%d')
+        data_points = len(df)
     available_metrics = ['close', 'sma_14', 'sma_14_squared']
     for col in ['Active_Addresses', 'Net_Transaction_Count', 'Transaction_Volume_USD']:
         if col in df.columns:
