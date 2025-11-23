@@ -59,7 +59,7 @@ def prepare_data(df):
     df.dropna(inplace=True)
     
     # Target: The Close price of the NEXT day
-    # When we are at index `t`, we want to predict Close at `t+1`
+    # We train the model to predict t+1 based on t
     df['Target_Next_Close'] = df['Close'].shift(-1)
     df.dropna(inplace=True)
     return df
@@ -70,57 +70,61 @@ def run_strategy():
     
     df = prepare_data(raw_df)
     
-    # X (Features) at time t
+    # X (Features) at time t-1
     X = df[['Close', 'Volume', 'SMA_7', 'SMA_365', 'Volume_SMA_5', 'Volume_SMA_10']]
-    # y (Target) is Close at time t+1
+    # y (Target) is Close at time t
     y = df['Target_Next_Close']
     
     # Split
     X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.2, shuffle=False)
     
-    # Train
+    # Train the model
+    # The model learns: "Given yesterday's data, what is today's close?"
     model = LinearRegression()
     model.fit(X_train, y_train)
     
     # Predictions
-    # These are predictions generated using X_test (data at t)
-    # So these predict the price at t+1
-    predictions = model.predict(X_test)
+    # X_test contains data from "Yesterday". 
+    # The model uses X_test to predict "Today's Close".
+    predictions_today = model.predict(X_test)
     
     # --- ALIGNMENT ---
-    # We construct the results dataframe to represent "The Next Day" (t+1)
     results = pd.DataFrame(index=X_test.index)
-    results['Date'] = df['Open Time'].loc[X_test.index] # This is date t
-    # To make it clear, let's shift the date for plotting so it shows the "Result Day"
-    # But for calculation, we just need the prices aligned.
+    results['Date'] = df['Open Time'].loc[X_test.index] # Date of X (Yesterday)
+    # Shift date by 1 day so the row represents "Today"
+    results['Date'] = results['Date'] + pd.Timedelta(days=1)
     
-    results['Yesterday_Close'] = X_test['Close']   # Price at t (Basis for return)
-    results['Today_Close'] = y_test                # Price at t+1 (The Target)
-    results['Today_Predicted'] = predictions       # Prediction for t+1 (The Forecast)
+    results['Actual_Today'] = y_test            # This is the actual Close of Today
+    results['Predicted_Today'] = predictions_today # This is the Model's Prediction for Today
     
-    # Market Return for "Today" (t+1)
-    results['Daily_Return'] = (results['Today_Close'] - results['Yesterday_Close']) / results['Yesterday_Close']
+    # Calculate Today's Market Return (Today Close vs Yesterday Close)
+    # We need Yesterday's Close to calculate the percentage move
+    results['Yesterday_Close'] = X_test['Close']
+    results['Daily_Return'] = (results['Actual_Today'] - results['Yesterday_Close']) / results['Yesterday_Close']
     
     positions = []
     strategy_returns = []
     
     for i, row in results.iterrows():
-        actual = row['Today_Close']
-        predicted = row['Today_Predicted']
+        actual = row['Actual_Today']
+        predicted = row['Predicted_Today']
         market_ret = row['Daily_Return']
         
         # --- YOUR SPECIFIED LOGIC ---
-        # "If the price [Today_Close] is below the predicted value [Today_Predicted]"
+        # "Calculate the models prediction of today and compare it to the close of today"
+        
+        # 1. If Price (Today) < Prediction (Today)
+        # "If the price is below the predicted value -> calculate negative return"
         if actual < predicted:
-            # "...calculate the return of today the negative return of Bitcoin" (Short)
             positions.append('Short')
             strategy_returns.append(-1 * market_ret)
             
-        # "If the price [Today_Close] is above the predicted value [Today_Predicted]"
+        # 2. If Price (Today) > Prediction (Today)
+        # "If the price is above the predicted value -> calculate positive return"
         elif actual > predicted:
-            # "...calculate the return is the positive return of Bitcoin" (Long)
             positions.append('Long')
             strategy_returns.append(1 * market_ret)
+            
         else:
             positions.append('Neutral')
             strategy_returns.append(0)
@@ -145,9 +149,9 @@ def run_strategy():
     
     # Price vs Prediction
     plt.subplot(2, 1, 2)
-    plt.plot(results['Date'], results['Today_Close'], label='Actual Price (Today)', color='blue')
-    plt.plot(results['Date'], results['Today_Predicted'], label='Predicted Price (For Today)', color='orange', linestyle='--')
-    plt.title('Actual Close vs Predicted Close')
+    plt.plot(results['Date'], results['Actual_Today'], label='Actual Price (Today)', color='blue')
+    plt.plot(results['Date'], results['Predicted_Today'], label='Predicted Price (Today)', color='orange', linestyle='--')
+    plt.title('Actual vs Predicted (Same Day Comparison)')
     plt.ylabel('Price')
     plt.legend()
     plt.grid(True, alpha=0.3)
@@ -160,7 +164,7 @@ def run_strategy():
     plt.close()
     
     final_cap = results['Equity'].iloc[-1]
-    rmse = np.sqrt(mean_squared_error(y_test, predictions))
+    rmse = np.sqrt(mean_squared_error(y_test, predictions_today))
     
     return plot_url, round(final_cap, 2), round(rmse, 2)
 
@@ -189,11 +193,12 @@ def index():
                     <img src="data:image/png;base64,{plot}" style="width: 100%; border: 1px solid #ddd; border-radius: 4px;" />
                     
                     <div style="margin-top: 20px; text-align: left; background: #f9f9f9; padding: 15px; border-radius: 5px;">
-                        <strong>Logic Used:</strong>
+                        <strong>Strict Comparison Logic:</strong>
                         <ul style="margin-top: 5px;">
-                            <li>Compares <b>Today's Actual Close</b> vs <b>Today's Predicted Close</b> (made yesterday).</li>
-                            <li>If Actual < Predicted: <b>SHORT</b> (Return = Negative of Daily Move)</li>
-                            <li>If Actual > Predicted: <b>LONG</b> (Return = Positive of Daily Move)</li>
+                            <li><b>Prediction:</b> What the model thought Today's Close would be (based on yesterday).</li>
+                            <li><b>Actual:</b> What Today's Close actually is.</li>
+                            <li>If <b>Actual < Predicted</b>: Return = Negative Daily Return (Short).</li>
+                            <li>If <b>Actual > Predicted</b>: Return = Positive Daily Return (Long).</li>
                         </ul>
                     </div>
                 </div>
