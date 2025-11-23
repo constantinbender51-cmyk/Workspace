@@ -27,7 +27,7 @@ def load_data():
 # Prepare features and target
 def prepare_data(df):
     # Calculate specified SMA
-    df['sma_2'] = df['close'].rolling(window=2).mean()
+    df['sma_1'] = df['close'].rolling(window=1).mean()
     
     # Remove rows with NaN values from SMA calculation
     df_clean = df.dropna()
@@ -35,9 +35,9 @@ def prepare_data(df):
     features = []
     targets = []
     for i in range(len(df_clean)):
-        # Features: 2-day price SMA
+        # Features: 1-day price SMA
         feature = [
-            df_clean['sma_2'].iloc[i]
+            df_clean['sma_1'].iloc[i]
         ]
         features.append(feature)
         # Target: next day's closing price
