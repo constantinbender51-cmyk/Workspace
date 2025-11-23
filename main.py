@@ -106,44 +106,60 @@ def train_model(df):
     preds = model.predict(X_test)
     return model, X_test, y_test, preds, feats
 
-# --------------------------------------------------
-# 4. Build Bokeh plots
-# --------------------------------------------------
+# ------------------------------------------------------------------
+# 4. Mobile-first dashboard
+# ------------------------------------------------------------------
 def build_dashboard(y_test, preds, model, feats, X_test):
-    # 1. True vs. Predicted
-    p1 = figure(title="BTCUSDT – True vs. Predicted (2022 test split)",
-                x_axis_label='Date', y_axis_label='Price (USDT)',
-                x_axis_type='datetime', sizing_mode='stretch_width', height=350)
-    source = ColumnDataSource(data=dict(
-        date=y_test.index,
-        true=y_test.values,
-        pred=preds
-    ))
-    p1.line('date', 'true', legend_label='True', color='black', source=source)
-    p1.line('date', 'pred', legend_label='Pred', color='red',  source=source)
-    p1.add_tools(HoverTool(tooltips=[('date', '@date{%F}'), ('true', '@true{0,0.0}'), ('pred', '@pred{0,0.0}')],
-                           formatters={'@date': 'datetime'}))
+    from bokeh.models import Div
+
+    # 1. True vs Predicted
+    p1 = figure(
+        title="BTCUSDT – True vs Predicted (2022 test split)",
+        x_axis_label='Date',
+        y_axis_label='Price (USDT)',
+        x_axis_type='datetime',
+        sizing_mode="stretch_width",   # full width
+        height=350,                    # only height fixed
+        toolbar_location='above',
+        tools='pan,xwheel_zoom,reset'
+    )
+    src = ColumnDataSource(data={'date': y_test.index,
+                                 'true': y_test.values,
+                                 'pred': preds})
+    p1.line('date', 'true', legend_label='True', color='black', source=src)
+    p1.line('date', 'pred', legend_label='Pred',  color='red',  source=src)
+    p1.add_tools(HoverTool(
+        tooltips=[('date', '@date{%F}'), ('true', '@true{0,0.0}'), ('pred', '@pred{0,0.0}')],
+        formatters={'@date': 'datetime'}))
 
     # 2. Cumulative absolute error
-    err = np.abs(y_test.values - preds)
-    cumerr = np.cumsum(err)
-    p2 = figure(title="Cumulative Absolute Error", x_axis_label='Date',
-                y_axis_label='Cum. Error (USDT)',
-                x_axis_type='datetime', sizing_mode='stretch_width', height=250)
-    p2.line(y_test.index, cumerr, color='orange')
+    cumerr = np.cumsum(np.abs(y_test.values - preds))
+    p2 = figure(title="Cumulative Absolute Error",
+                x_axis_type='datetime',
+                sizing_mode="stretch_width",
+                height=250,
+                toolbar_location='above',
+                tools='pan,xwheel_zoom,reset')
+    p2.line(y_test.index, cumerr, color='orange', line_width=2)
 
     # 3. Feature importance (coefficients)
     coef_df = pd.DataFrame({'feature': feats, 'coef': model.coef_})
-    p3 = figure(x_range=feats, title="Linear-Regression Coefficients",
-                sizing_mode='stretch_width', height=250)
-    p3.vbar(x=feats, top=model.coef_, width=0.8)
+    p3 = figure(x_range=feats,
+                title="Linear-Regression Coefficients",
+                sizing_mode="stretch_width",
+                height=250,
+                toolbar_location='above',
+                tools='pan,xwheel_zoom,reset')
+    p3.vbar(x='feature', top='coef', width=0.7, source=ColumnDataSource(coef_df))
     p3.xaxis.major_label_orientation = 0.8
 
-    mae  = mean_absolute_error(y_test, preds)
-    r2   = r2_score(y_test, preds)
-    stats = Div(text=f"<b>MAE:</b> {mae:,.2f} USDT  |  <b>R²:</b> {r2:.3f}")
+    # Stats banner
+    mae = mean_absolute_error(y_test, preds)
+    r2  = r2_score(y_test, preds)
+    stats = Div(text=f"<b>MAE :</b> {mae:,.2f} USDT &nbsp;&nbsp;|&nbsp;&nbsp; <b>R² :</b> {r2:.3f}")
 
-    return column(stats, p1, p2, p3)
+    # stack everything vertically
+    return column(stats, p1, p2, p3, sizing_mode="stretch_width")
 
 # --------------------------------------------------
 # 5. Flask glue
