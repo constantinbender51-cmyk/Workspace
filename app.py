@@ -75,49 +75,33 @@ def create_plot(df, y_test, predictions, test_indices):
     sorted_y_test = y_test[sorted_indices]
     sorted_predictions = predictions[sorted_indices]
     
-    # Calculate capital with daily accumulation based on prediction from 4 days ago vs actual price yesterday
+    # Calculate capital with daily accumulation based on yesterday's prediction vs actual price
     capital = [1000]  # Start with $1000
     positions = []  # Store position type for coloring
     
     for i in range(len(sorted_y_test)):
-        # Calculate return using the previous two days' prices: yesterday and the day before
-        if i >= 2:  # Ensure there are at least two previous days
+        # Calculate return using today's price vs yesterday's price
+        if i >= 1:  # Ensure there is at least one previous day
             price_yesterday = sorted_y_test[i - 1]
-            price_day_before = sorted_y_test[i - 2]
             return_calc = (sorted_y_test[i] - price_yesterday) / price_yesterday
         else:
-            # For the first two days in test set, use available data; skip if not enough history
-            if i == 0 and test_indices[sorted_indices[i]] >= 2:
+            # For the first day in test set, use available data; skip if not enough history
+            if i == 0 and test_indices[sorted_indices[i]] >= 1:
                 price_yesterday = df['close'].iloc[test_indices[sorted_indices[i]] - 1]
-                price_day_before = df['close'].iloc[test_indices[sorted_indices[i]] - 2]
-                return_calc = (sorted_y_test[i] - price_yesterday) / price_yesterday
-            elif i == 1 and test_indices[sorted_indices[i]] >= 2:
-                price_yesterday = sorted_y_test[i - 1]
-                price_day_before = df['close'].iloc[test_indices[sorted_indices[i]] - 2]
                 return_calc = (sorted_y_test[i] - price_yesterday) / price_yesterday
             else:
                 return_calc = 0  # Default to no return if insufficient data
         
-        # ML Strategy: If predicted price from 4 days ago is lower than actual price yesterday, apply positive return, else negative
-        if i >= 1:  # Ensure prediction from 4 days ago is available
-            pred_index = test_indices[sorted_indices[i]] - 4  # Prediction from 4 days ago
-            if pred_index >= 0 and pred_index < len(df):
-                # Find if pred_index is in test_indices; use prediction if available, else actual price
-                pred_in_test = np.where(test_indices == pred_index)[0]
-                if pred_in_test.size > 0:
-                    pred_price_4_days_ago = sorted_predictions[pred_in_test[0]]
-                else:
-                    pred_price_4_days_ago = df['close'].iloc[pred_index]
-                actual_price_yesterday = sorted_y_test[i - 1]
-                if pred_price_4_days_ago < actual_price_yesterday:
-                    ret = return_calc  # Positive signal: long position
-                    positions.append('long')  # Mark as long
-                else:
-                    ret = -return_calc  # Negative signal: short position
-                    positions.append('short')  # Mark as short
+        # ML Strategy: If yesterday's predicted price is lower than yesterday's actual price, apply positive return, else negative
+        if i >= 1:  # Ensure yesterday's prediction is available
+            pred_price_yesterday = sorted_predictions[i - 1]
+            actual_price_yesterday = sorted_y_test[i - 1]
+            if pred_price_yesterday < actual_price_yesterday:
+                ret = return_calc  # Positive signal: long position
+                positions.append('long')  # Mark as long
             else:
-                ret = 0  # Default if prediction not available
-                positions.append('neutral')  # Mark as neutral
+                ret = -return_calc  # Negative signal: short position
+                positions.append('short')  # Mark as short
         else:
             ret = 0  # Default for first day
             positions.append('neutral')  # Mark as neutral
