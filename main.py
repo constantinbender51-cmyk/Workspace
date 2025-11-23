@@ -31,7 +31,7 @@ def fetch_btc_data():
 def calculate_features(df):
     # Calculate features without lookahead bias - use shift to ensure no future data
     print("DEBUG: Calculating features for the dataset")
-    df['sma_7'] = df['close'].rolling(window=7).mean().shift(1)
+    df['sma_5'] = df['close'].rolling(window=5).mean().shift(1)
     df['sma_365'] = df['close'].rolling(window=365).mean().shift(1)
     df['sma_volume_5'] = df['volume'].rolling(window=5).mean().shift(1)
     df['sma_volume_10'] = df['volume'].rolling(window=10).mean().shift(1)
@@ -42,28 +42,36 @@ def prepare_data(df):
     df = df.dropna()  # Remove rows with NaN values from rolling averages
     print(f"DEBUG: Data shape after calculate_features: {df.shape}")
     
-    # Check if we have enough data after dropping NaN; minimum 7 days for 3-day lookback + 3-day future target
+    # Check if we have enough data after dropping NaN; minimum 8 days for 5-day lookback + 3-day future target
     print(f"DEBUG: Data after dropping NaN has {len(df)} rows")
-    if len(df) < 7:
-        raise ValueError(f"Insufficient data after processing. Have {len(df)} days, need at least 7. Try fetching more data.")
+    if len(df) < 8:
+        raise ValueError(f"Insufficient data after processing. Have {len(df)} days, need at least 8. Try fetching more data.")
     
-    # Create features with 3-day lookback for predicting the close 3 days in the future
+    # Create features with 5-day lookback for predicting the close 3 days in the future
     features = []
     targets = []
     
-    print("DEBUG: Preparing features and targets with 3-day lookback for 3-day future target")
-    for i in range(3, len(df) - 3):  # Start from index 3 to have 3 days of lookback, stop at len(df)-3 to have a 3-day future target
-        # Use technical indicators from the past 3 days (i-3 to i-1) to predict close on day i+3
+    print("DEBUG: Preparing features and targets with 5-day lookback for 3-day future target")
+    for i in range(5, len(df) - 3):  # Start from index 5 to have 5 days of lookback, stop at len(df)-3 to have a 3-day future target
+        # Use technical indicators from the past 5 days (i-5 to i-1) to predict close on day i+3
         feature_row = [
-            df.iloc[i-3]['sma_7'],       # SMA 7 from 3 days ago
-            df.iloc[i-2]['sma_7'],       # SMA 7 from 2 days ago
-            df.iloc[i-1]['sma_7'],       # SMA 7 from 1 day ago
+            df.iloc[i-5]['sma_5'],       # SMA 5 from 5 days ago
+            df.iloc[i-4]['sma_5'],       # SMA 5 from 4 days ago
+            df.iloc[i-3]['sma_5'],       # SMA 5 from 3 days ago
+            df.iloc[i-2]['sma_5'],       # SMA 5 from 2 days ago
+            df.iloc[i-1]['sma_5'],       # SMA 5 from 1 day ago
+            df.iloc[i-5]['sma_365'],     # SMA 365 from 5 days ago
+            df.iloc[i-4]['sma_365'],     # SMA 365 from 4 days ago
             df.iloc[i-3]['sma_365'],     # SMA 365 from 3 days ago
             df.iloc[i-2]['sma_365'],     # SMA 365 from 2 days ago
             df.iloc[i-1]['sma_365'],     # SMA 365 from 1 day ago
+            df.iloc[i-5]['sma_volume_5'], # SMA volume 5 from 5 days ago
+            df.iloc[i-4]['sma_volume_5'], # SMA volume 5 from 4 days ago
             df.iloc[i-3]['sma_volume_5'], # SMA volume 5 from 3 days ago
             df.iloc[i-2]['sma_volume_5'], # SMA volume 5 from 2 days ago
             df.iloc[i-1]['sma_volume_5'], # SMA volume 5 from 1 day ago
+            df.iloc[i-5]['sma_volume_10'], # SMA volume 10 from 5 days ago
+            df.iloc[i-4]['sma_volume_10'], # SMA volume 10 from 4 days ago
             df.iloc[i-3]['sma_volume_10'], # SMA volume 10 from 3 days ago
             df.iloc[i-2]['sma_volume_10'], # SMA volume 10 from 2 days ago
             df.iloc[i-1]['sma_volume_10']  # SMA volume 10 from 1 day ago
