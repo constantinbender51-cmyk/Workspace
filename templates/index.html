@@ -3,7 +3,7 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>BTC Double Descent Experiment</title>
+    <title>BTC Double Descent (Debug Mode)</title>
     <style>
         body { font-family: sans-serif; max-width: 800px; margin: 0 auto; padding: 20px; }
         .container { text-align: center; }
@@ -14,15 +14,26 @@
         button:disabled { background-color: #ccc; }
         #result-container { margin-top: 30px; display: none; }
         img { max-width: 100%; height: auto; border: 1px solid #ddd; }
-        .error { color: red; }
+        .error { color: white; background-color: red; padding: 10px; border-radius: 5px; margin-top: 20px; display:none;}
+        .debug-console { 
+            text-align: left; 
+            background: #f4f4f4; 
+            padding: 10px; 
+            margin-top: 20px; 
+            border: 1px solid #ccc; 
+            height: 150px; 
+            overflow-y: scroll; 
+            font-family: monospace; 
+            font-size: 12px; 
+        }
     </style>
 </head>
 <body>
     <div class="container">
         <h1>Double Descent: BTC Price Prediction</h1>
         <p>
-            Training a massive LSTM (512 units) for 1500 epochs to observe the Double Descent phenomenon.
-            <br><em>Warning: This may take 5-10 minutes.</em>
+            Training LSTM (512 units, 1500 epochs). 
+            <br>Check the debug log below if nothing happens.
         </p>
 
         <button id="startBtn" onclick="startTraining()">Start Training Experiment</button>
@@ -43,43 +54,78 @@
             <img id="resultPlot" src="" alt="Results">
         </div>
         
-        <p id="errorMsg" class="error"></p>
+        <div id="errorMsg" class="error"></div>
+        
+        <div class="debug-console" id="debugConsole">
+            <div>> Ready to start.</div>
+        </div>
     </div>
 
     <script>
         let pollInterval;
+        
+        function log(msg) {
+            console.log(msg);
+            const consoleDiv = document.getElementById('debugConsole');
+            const newLog = document.createElement('div');
+            newLog.innerText = "> " + msg;
+            consoleDiv.appendChild(newLog);
+            consoleDiv.scrollTop = consoleDiv.scrollHeight;
+        }
 
         async function startTraining() {
+            log("Button clicked. Initializing...");
+            
             const btn = document.getElementById('startBtn');
             const progressContainer = document.getElementById('progress-container');
             const resultContainer = document.getElementById('result-container');
             const errorMsg = document.getElementById('errorMsg');
             
             btn.disabled = true;
-            btn.innerText = "Initializing...";
+            btn.innerText = "Requesting Server...";
             resultContainer.style.display = 'none';
+            errorMsg.style.display = 'none';
             errorMsg.innerText = "";
 
             try {
-                const response = await fetch('/start_training', { method: 'POST' });
+                log("Sending POST to /start_training...");
+                const response = await fetch('/start_training', { 
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' }
+                });
+                
+                log(`Response received. Status: ${response.status}`);
+                
+                if (!response.ok) {
+                    throw new Error(`HTTP error! status: ${response.status}`);
+                }
+
                 const data = await response.json();
+                log(`Data received: ${JSON.stringify(data)}`);
                 
                 if (data.status === 'started' || data.status === 'already_running') {
                     progressContainer.style.display = 'block';
+                    log("Starting polling interval...");
                     pollInterval = setInterval(checkStatus, 1000);
                 } else {
-                    errorMsg.innerText = "Failed to start training.";
-                    btn.disabled = false;
+                    throw new Error("Server returned unexpected status: " + data.status);
                 }
             } catch (e) {
+                log("ERROR: " + e.message);
                 errorMsg.innerText = "Error: " + e.message;
+                errorMsg.style.display = 'block';
                 btn.disabled = false;
+                btn.innerText = "Start Training Experiment";
             }
         }
 
         async function checkStatus() {
             try {
                 const response = await fetch('/status');
+                if (!response.ok) {
+                    log(`Polling failed: ${response.status}`);
+                    return;
+                }
                 const data = await response.json();
 
                 if (data.status === 'training') {
@@ -94,6 +140,7 @@
                     }
 
                 } else if (data.status === 'completed') {
+                    log("Training completed!");
                     clearInterval(pollInterval);
                     document.getElementById('progress-container').style.display = 'none';
                     document.getElementById('startBtn').innerText = "Run Again";
@@ -104,9 +151,11 @@
                     document.getElementById('result-container').style.display = 'block';
 
                 } else if (data.status === 'error') {
+                    log("Server reported error: " + data.error);
                     clearInterval(pollInterval);
                     document.getElementById('startBtn').disabled = false;
-                    document.getElementById('errorMsg').innerText = "Error: " + data.error;
+                    document.getElementById('errorMsg').innerText = "Server Error: " + data.error;
+                    document.getElementById('errorMsg').style.display = 'block';
                 }
             } catch (e) {
                 console.error("Polling error", e);
@@ -115,4 +164,5 @@
     </script>
 </body>
 </html>
+
 
