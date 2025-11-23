@@ -36,7 +36,7 @@ def load_data():
         'Transaction_Volume_USD': 'estimated-transaction-volume-usd',
     }
     START_DATE = '2018-01-01'
-    END_DATE = '2024-11-25'
+    END_DATE = '2025-11-25'
     
     def fetch_chart_data(chart_name, start_date):
         params = {
