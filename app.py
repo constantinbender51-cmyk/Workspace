@@ -100,10 +100,10 @@ def prepare_data(df):
     features = []
     targets = []
     for i in range(len(df_clean)):
-        # Feature: only net transaction count * 14 SMA of price if available
+        # Feature: only net transaction count if available
         feature = []
         if 'Net_Transaction_Count' in df_clean.columns:
-            feature.append(df_clean['Net_Transaction_Count'].iloc[i] * df_clean['sma_14'].iloc[i])
+            feature.append(df_clean['Net_Transaction_Count'].iloc[i])
         features.append(feature)
         # Target: next day's closing price
         if i < len(df_clean) - 3:  # Reduced lookback to 3 days
