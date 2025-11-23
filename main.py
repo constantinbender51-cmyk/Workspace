@@ -2,224 +2,257 @@ import pandas as pd
 import numpy as np
 import requests
 from sklearn.linear_model import LinearRegression
-from sklearn.model_selection import train_test_split
 import matplotlib.pyplot as plt
 import io
 import base64
 from flask import Flask, render_template
-from datetime import datetime, timedelta
+from datetime import datetime
 
 app = Flask(__name__)
 
 def fetch_btc_data():
-    # Fetch BTC daily price data from Binance starting from 2022-01-01 to ensure enough data for proper train/test split
-    print("DEBUG: Starting to fetch BTC data from Binance")
+    """Fetch Bitcoin price data from Binance API"""
+    print("DEBUG: Fetching BTC data from Binance")
     end_time = int(datetime(2025, 11, 30).timestamp() * 1000)
     start_time = int(datetime(2022, 1, 1).timestamp() * 1000)
     url = f"https://api.binance.com/api/v3/klines?symbol=BTCUSDT&interval=1d&startTime={start_time}&endTime={end_time}"
+    
     response = requests.get(url)
     data = response.json()
+    
     if not data:
-        raise ValueError("No data fetched from Binance. Check the date range or API availability.")
-    df = pd.DataFrame(data, columns=['open_time', 'open', 'high', 'low', 'close', 'volume', 'close_time', 'quote_asset_volume', 'number_of_trades', 'taker_buy_base_asset_volume', 'taker_buy_quote_asset_volume', 'ignore'])
+        raise ValueError("No data fetched from Binance")
+    
+    df = pd.DataFrame(data, columns=[
+        'open_time', 'open', 'high', 'low', 'close', 'volume', 
+        'close_time', 'quote_asset_volume', 'number_of_trades', 
+        'taker_buy_base_asset_volume', 'taker_buy_quote_asset_volume', 'ignore'
+    ])
+    
     df['close'] = df['close'].astype(float)
     df['volume'] = df['volume'].astype(float)
     df['date'] = pd.to_datetime(df['open_time'], unit='ms')
-    df = df[['date', 'close', 'volume']]
+    df = df[['date', 'close', 'volume']].reset_index(drop=True)
+    
+    print(f"DEBUG: Fetched {len(df)} days of data")
     return df
 
-def calculate_features(df):
-    # Calculate features without lookahead bias - use shift to ensure no future data
-    print("DEBUG: Calculating features for the dataset")
-    df['sma_5'] = df['close'].rolling(window=5).mean().shift(1)
-    df['sma_365'] = df['close'].rolling(window=365).mean().shift(1)
-    df['sma_volume_5'] = df['volume'].rolling(window=5).mean().shift(1)
-    df['sma_volume_10'] = df['volume'].rolling(window=10).mean().shift(1)
-    return df
-
-def prepare_data(df):
-    df = calculate_features(df)
-    df = df.dropna()  # Remove rows with NaN values from rolling averages
-    print(f"DEBUG: Data shape after calculate_features: {df.shape}")
+def create_features_and_targets(df):
+    """
+    Create features and targets for prediction.
     
-    # Check if we have enough data after dropping NaN; minimum 8 days for 5-day lookback + 3-day future target
-    print(f"DEBUG: Data after dropping NaN has {len(df)} rows")
-    if len(df) < 8:
-        raise ValueError(f"Insufficient data after processing. Have {len(df)} days, need at least 8. Try fetching more data.")
+    For each day, we use:
+    - Last 3 days of SMA_7 (price moving average)
+    - Last 3 days of SMA_365 (price moving average)
+    - Last 3 days of SMA_volume_5 (volume moving average)
+    - Last 3 days of SMA_volume_10 (volume moving average)
     
-    # Create features with 5-day lookback for predicting the close 3 days in the future
-    features = []
-    targets = []
+    To predict: Next day's close price
+    """
+    print("DEBUG: Creating features and targets")
     
-    print("DEBUG: Preparing features and targets with 5-day lookback for 3-day future target")
-    for i in range(5, len(df) - 3):  # Start from index 5 to have 5 days of lookback, stop at len(df)-3 to have a 3-day future target
-        # Use technical indicators from the past 5 days (i-5 to i-1) to predict close on day i+3
-        print(f"DEBUG: For target at index {i+3} (date: {df.iloc[i+3]['date']}), using features from indices {i-5} to {i-1}")
-        feature_row = [
-            df.iloc[i-5]['sma_5'],       # SMA 5 from 5 days ago
-            df.iloc[i-4]['sma_5'],       # SMA 5 from 4 days ago
-            df.iloc[i-3]['sma_5'],       # SMA 5 from 3 days ago
-            df.iloc[i-2]['sma_5'],       # SMA 5 from 2 days ago
-            df.iloc[i-1]['sma_5'],       # SMA 5 from 1 day ago
-            df.iloc[i-5]['sma_365'],     # SMA 365 from 5 days ago
-            df.iloc[i-4]['sma_365'],     # SMA 365 from 4 days ago
-            df.iloc[i-3]['sma_365'],     # SMA 365 from 3 days ago
-            df.iloc[i-2]['sma_365'],     # SMA 365 from 2 days ago
-            df.iloc[i-1]['sma_365'],     # SMA 365 from 1 day ago
-            df.iloc[i-5]['sma_volume_5'], # SMA volume 5 from 5 days ago
-            df.iloc[i-4]['sma_volume_5'], # SMA volume 5 from 4 days ago
-            df.iloc[i-3]['sma_volume_5'], # SMA volume 5 from 3 days ago
-            df.iloc[i-2]['sma_volume_5'], # SMA volume 5 from 2 days ago
-            df.iloc[i-1]['sma_volume_5'], # SMA volume 5 from 1 day ago
-            df.iloc[i-5]['sma_volume_10'], # SMA volume 10 from 5 days ago
-            df.iloc[i-4]['sma_volume_10'], # SMA volume 10 from 4 days ago
-            df.iloc[i-3]['sma_volume_10'], # SMA volume 10 from 3 days ago
-            df.iloc[i-2]['sma_volume_10'], # SMA volume 10 from 2 days ago
-            df.iloc[i-1]['sma_volume_10']  # SMA volume 10 from 1 day ago
+    # Calculate moving averages
+    df['sma_7'] = df['close'].rolling(window=7).mean()
+    df['sma_365'] = df['close'].rolling(window=365).mean()
+    df['sma_volume_5'] = df['volume'].rolling(window=5).mean()
+    df['sma_volume_10'] = df['volume'].rolling(window=10).mean()
+    
+    # Drop rows where we don't have all the moving averages yet
+    df = df.dropna().reset_index(drop=True)
+    print(f"DEBUG: After calculating moving averages, have {len(df)} days")
+    
+    # Now create our feature matrix and target vector
+    X = []  # Features
+    y = []  # Targets (next day close price)
+    dates = []  # Keep track of dates for plotting
+    
+    # We need 3 days of history for features, plus 1 day ahead for target
+    # So we start at index 3 and go until len(df)-1
+    for i in range(3, len(df)):
+        # Features: last 3 days of each indicator
+        features = [
+            # Day i-3 indicators
+            df.loc[i-3, 'sma_7'],
+            df.loc[i-3, 'sma_365'],
+            df.loc[i-3, 'sma_volume_5'],
+            df.loc[i-3, 'sma_volume_10'],
+            # Day i-2 indicators
+            df.loc[i-2, 'sma_7'],
+            df.loc[i-2, 'sma_365'],
+            df.loc[i-2, 'sma_volume_5'],
+            df.loc[i-2, 'sma_volume_10'],
+            # Day i-1 indicators
+            df.loc[i-1, 'sma_7'],
+            df.loc[i-1, 'sma_365'],
+            df.loc[i-1, 'sma_volume_5'],
+            df.loc[i-1, 'sma_volume_10'],
         ]
-        features.append(feature_row)
-        targets.append(df.iloc[i+3]['close'])  # Target is close on day i+3 (3 days in the future)
+        
+        # Target: next day's close price (day i)
+        target = df.loc[i, 'close']
+        
+        X.append(features)
+        y.append(target)
+        dates.append(df.loc[i, 'date'])
     
-    print(f"DEBUG: Prepared {len(features)} feature samples and {len(targets)} target samples")
-    print(f"DEBUG: Features shape: {np.array(features).shape}, Targets shape: {np.array(targets).shape}")
-    return np.array(features), np.array(targets), df
+    X = np.array(X)
+    y = np.array(y)
+    
+    print(f"DEBUG: Created {len(X)} samples")
+    print(f"DEBUG: Feature shape: {X.shape}, Target shape: {y.shape}")
+    
+    return X, y, dates, df
 
-def train_model(features, targets):
-    # Check if features and targets are not empty
-    print("DEBUG: Starting model training with 50/50 train-test split")
-    if len(features) == 0 or len(targets) == 0:
-        raise ValueError("No features or targets available for training. Ensure sufficient data.")
-    # Split data 50% for training, 50% for testing
-    split_index = int(len(features) * 0.5)
-    if split_index == 0:
-        raise ValueError("Insufficient data for 50/50 train-test split. Need at least 2 samples.")
-    X_train, X_test = features[:split_index], features[split_index:]
-    y_train, y_test = targets[:split_index], targets[split_index:]
+def train_test_split_data(X, y, dates, train_ratio=0.5):
+    """Split data into train and test sets"""
+    split_idx = int(len(X) * train_ratio)
+    
+    X_train = X[:split_idx]
+    y_train = y[:split_idx]
+    
+    X_test = X[split_idx:]
+    y_test = y[split_idx:]
+    dates_test = dates[split_idx:]
+    
+    print(f"DEBUG: Train size: {len(X_train)}, Test size: {len(X_test)}")
+    
+    return X_train, y_train, X_test, y_test, dates_test
+
+def train_model(X_train, y_train):
+    """Train linear regression model"""
+    print("DEBUG: Training model")
     model = LinearRegression()
     model.fit(X_train, y_train)
-    return model, X_test, y_test
+    print("DEBUG: Model trained")
+    return model
 
-def trading_strategy(df, model, X_test, test_start_idx, start_capital=1000, transaction_cost=0.001):
+def backtest_strategy(model, X_test, y_test, start_capital=1000, transaction_cost=0.001):
+    """
+    Backtest trading strategy:
+    - If current price > predicted price: GO LONG (buy)
+    - If current price < predicted price: GO SHORT (sell)
+    """
+    print("DEBUG: Running backtest")
+    
     capital = start_capital
     capital_history = [capital]
-    positions = []  # Track positions for plotting
+    positions = []
     
-    print("DEBUG: Executing trading strategy on test set")
+    predictions = model.predict(X_test)
     
-    # test_start_idx is the index in the features array where test set begins
-    # Map this to df index: features start at index 3 in df, so add 3
-    for i in range(len(X_test)):
-        prediction = model.predict([X_test[i]])[0]
+    for i in range(len(predictions)):
+        predicted_price = predictions[i]
+        actual_current_price = y_test[i]
         
-        # Current df index for this test sample
-        df_idx = test_start_idx + i + 3
+        # Get next day's price for calculating return
+        if i < len(y_test) - 1:
+            next_day_price = y_test[i + 1]
+        else:
+            # Last day, use same price (no return)
+            next_day_price = actual_current_price
         
-        if df_idx >= len(df) - 3:
-            break
-            
-        current_price = df.iloc[df_idx]['close']
-        future_price = df.iloc[df_idx + 3]['close']
-        
-        # Trading logic: 
-        # If current price > prediction: go LONG (expecting mean reversion down)
-        # If current price < prediction: go SHORT (expecting mean reversion up)
-        if current_price > prediction:
-            # Long position: profit if price goes up
-            position_return = (future_price / current_price)
+        # Trading decision
+        if actual_current_price > predicted_price:
+            # GO LONG: we think price will rise
+            return_pct = (next_day_price / actual_current_price) - 1
             positions.append('long')
         else:
-            # Short position: profit if price goes down
-            position_return = (current_price / future_price)
+            # GO SHORT: we think price will fall
+            return_pct = (actual_current_price / next_day_price) - 1
             positions.append('short')
         
-        # Apply transaction cost and update capital
-        capital = capital * position_return * (1 - transaction_cost)
+        # Apply return and transaction cost
+        capital = capital * (1 + return_pct - transaction_cost)
         capital_history.append(capital)
     
-    return capital_history, positions
-
-def create_plot(capital_history, df, predictions, test_start_idx, positions, X_test):
-    # Create a figure with subplots
-    print("DEBUG: Generating plot for visualization")
-    fig, (ax1, ax2, ax3) = plt.subplots(3, 1, figsize=(10, 12))
+    print(f"DEBUG: Final capital: ${capital:.2f}")
+    print(f"DEBUG: Total return: {((capital/start_capital - 1) * 100):.2f}%")
     
-    # Plot capital development with colors for long (green) and short (red) periods
-    ax1.plot(range(len(capital_history)), capital_history, color='black', linewidth=1)
+    return capital_history, positions, predictions
+
+def create_plots(capital_history, positions, dates_test, y_test, predictions):
+    """Create visualization plots"""
+    print("DEBUG: Creating plots")
+    
+    fig, (ax1, ax2, ax3) = plt.subplots(3, 1, figsize=(12, 14))
+    
+    # Plot 1: Capital over time
+    ax1.plot(range(len(capital_history)), capital_history, color='black', linewidth=2)
+    
+    # Color background based on position
     for i in range(len(positions)):
         if positions[i] == 'long':
-            ax1.axvspan(i, i+1, color='green', alpha=0.3)
-        elif positions[i] == 'short':
-            ax1.axvspan(i, i+1, color='red', alpha=0.3)
-    ax1.set_title('Capital Development Over Time (Green: Long, Red: Short)')
-    ax1.set_xlabel('Trading Day in Test Set')
-    ax1.set_ylabel('Capital ($)')
-    ax1.grid(True)
+            ax1.axvspan(i, i+1, color='green', alpha=0.2)
+        else:
+            ax1.axvspan(i, i+1, color='red', alpha=0.2)
     
-    # Plot price over time for the test period
-    # test_start_idx in features corresponds to df index: test_start_idx + 3 (since features start from index 3)
-    start_df_idx = test_start_idx + 3
-    end_df_idx = start_df_idx + len(X_test)  # Use full test set length
-    if end_df_idx > len(df):
-        end_df_idx = len(df)
-    test_dates = df['date'].iloc[start_df_idx:end_df_idx]
-    test_prices = df['close'].iloc[start_df_idx:end_df_idx]
-    ax2.plot(test_dates, test_prices)
-    ax2.set_title('BTC Price Over Time (Test Period)')
+    ax1.set_title('Portfolio Value Over Time', fontsize=14, fontweight='bold')
+    ax1.set_xlabel('Trading Day')
+    ax1.set_ylabel('Capital ($)')
+    ax1.grid(True, alpha=0.3)
+    ax1.legend(['Portfolio Value', 'Long Position', 'Short Position'])
+    
+    # Plot 2: Bitcoin price over time
+    ax2.plot(dates_test, y_test, color='blue', linewidth=1.5)
+    ax2.set_title('Bitcoin Price (Test Period)', fontsize=14, fontweight='bold')
     ax2.set_xlabel('Date')
     ax2.set_ylabel('Price (USDT)')
-    ax2.grid(True)
+    ax2.grid(True, alpha=0.3)
+    plt.setp(ax2.xaxis.get_majorticklabels(), rotation=45)
     
-    # Plot predictions vs actual for the test set
-    actual_prices = df['close'].iloc[start_df_idx:start_df_idx + len(predictions)]
-    pred_dates = test_dates[:len(predictions)]
-    ax3.plot(pred_dates, predictions, label='Predicted Price', color='red')
-    ax3.plot(pred_dates, actual_prices, label='Actual Price', color='blue')
-    ax3.set_title('Predicted vs Actual Price (Test Set)')
+    # Plot 3: Predicted vs Actual
+    ax3.plot(dates_test, y_test, label='Actual Price', color='blue', linewidth=1.5, alpha=0.7)
+    ax3.plot(dates_test, predictions, label='Predicted Price', color='red', linewidth=1.5, alpha=0.7)
+    ax3.set_title('Model Predictions vs Actual Price', fontsize=14, fontweight='bold')
     ax3.set_xlabel('Date')
     ax3.set_ylabel('Price (USDT)')
     ax3.legend()
-    ax3.grid(True)
+    ax3.grid(True, alpha=0.3)
+    plt.setp(ax3.xaxis.get_majorticklabels(), rotation=45)
     
     plt.tight_layout()
     
-    # Convert plot to base64 string for HTML embedding
+    # Convert to base64
     img = io.BytesIO()
-    plt.savefig(img, format='png')
+    plt.savefig(img, format='png', dpi=100, bbox_inches='tight')
     img.seek(0)
     plot_url = base64.b64encode(img.getvalue()).decode()
     plt.close()
+    
     return plot_url
 
 @app.route('/')
 def index():
     try:
-        # Fetch and prepare data
-        print("DEBUG: Starting index route execution")
+        # Step 1: Fetch data
         df = fetch_btc_data()
-        features, targets, df = prepare_data(df)
         
-        # Train model once with 50% split
-        model, X_test, y_test = train_model(features, targets)
+        # Step 2: Create features and targets
+        X, y, dates, df_with_features = create_features_and_targets(df)
         
-        # Generate predictions for test set
-        predictions = model.predict(X_test)
+        # Step 3: Split into train and test
+        X_train, y_train, X_test, y_test, dates_test = train_test_split_data(X, y, dates, train_ratio=0.5)
         
-        # Apply trading strategy on test set
-        start_capital = 1000
-        transaction_cost = 0.001
-        test_start_idx = int(len(features) * 0.5)  # Start of test set in features array (50% split)
-        capital_history, positions = trading_strategy(df, model, X_test, test_start_idx, start_capital, transaction_cost)
+        # Step 4: Train model
+        model = train_model(X_train, y_train)
         
-        # Create plot
-        plot_url = create_plot(capital_history, df, predictions, test_start_idx, positions, X_test)
+        # Step 5: Backtest strategy
+        capital_history, positions, predictions = backtest_strategy(
+            model, X_test, y_test, start_capital=1000, transaction_cost=0.001
+        )
         
-        print("DEBUG: Successfully generated and rendered plot")
-        print(f"DEBUG: Rendered template with plot URL of length: {len(plot_url)}")
+        # Step 6: Create plots
+        plot_url = create_plots(capital_history, positions, dates_test, y_test, predictions)
+        
+        print("DEBUG: Successfully completed all steps")
         
         return render_template('index.html', plot_url=plot_url)
+        
     except Exception as e:
         print(f"ERROR: {str(e)}")
+        import traceback
+        traceback.print_exc()
         return f"Error: {str(e)}"
 
 if __name__ == '__main__':
-    app.run(host='0.0.0.0', port=8080, debug=False)
+    app.run(host='0.0.0.0', port=8080, debug=True)
