@@ -1,327 +1,286 @@
-from flask import Flask, render_template
+import requests
 import pandas as pd
 import numpy as np
 from sklearn.linear_model import LinearRegression
 from sklearn.model_selection import train_test_split
+from sklearn.metrics import mean_squared_error
+import matplotlib
+matplotlib.use('Agg') # Use non-interactive backend for server
 import matplotlib.pyplot as plt
 import io
 import base64
-import requests
-from datetime import datetime, timedelta
-import threading
-import time
+from flask import Flask, render_template_string
 
+# Initialize Flask App
 app = Flask(__name__)
 
-# Global variables to store data and results
-btc_data = None
-model_results = None
-capital_data = None
+# --- Configuration ---
+SYMBOL = 'BTCUSDT'
+INTERVAL = '1d'
+# Timestamps for Jan 1, 2022 to Sep 30, 2023 (Milliseconds)
+START_TIME = 1640995200000 
+END_TIME = 1696032000000 
+INITIAL_CAPITAL = 1000
 
-def fetch_btc_data():
-    """Fetch BTC price data from Binance API from Jan 2022 to Sep 2023"""
-    end_date = datetime(2023, 9, 30)
-    start_date = datetime(2022, 1, 1)
-    
-    # Binance API endpoint for historical klines
+def fetch_binance_data(symbol, interval, start, end):
+    """
+    Fetches historical kline data from Binance public API.
+    Handles pagination as Binance limits to 1000 candles per call.
+    """
     url = "https://api.binance.com/api/v3/klines"
+    data = []
     
-    # Binance uses milliseconds for timestamps
-    start_timestamp = int(start_date.timestamp() * 1000)
-    end_timestamp = int(end_date.timestamp() * 1000)
+    current_start = start
+    while current_start < end:
+        params = {
+            'symbol': symbol,
+            'interval': interval,
+            'startTime': current_start,
+            'endTime': end,
+            'limit': 1000
+        }
+        response = requests.get(url, params=params)
+        if response.status_code != 200:
+            print(f"Error fetching data: {response.text}")
+            break
+        
+        candles = response.json()
+        if not candles:
+            break
+            
+        data.extend(candles)
+        # Update start time to the last candle's close time + 1ms
+        current_start = candles[-1][6] + 1
+        
+    # Convert to DataFrame
+    df = pd.DataFrame(data, columns=[
+        'Open Time', 'Open', 'High', 'Low', 'Close', 'Volume',
+        'Close Time', 'Quote Asset Volume', 'Number of Trades',
+        'Taker Buy Base', 'Taker Buy Quote', 'Ignore'
+    ])
     
-    all_data = []
-    current_start = start_timestamp
+    # Type conversion
+    numeric_cols = ['Open', 'High', 'Low', 'Close', 'Volume']
+    df[numeric_cols] = df[numeric_cols].apply(pd.to_numeric, axis=1)
+    df['Open Time'] = pd.to_datetime(df['Open Time'], unit='ms')
     
-    try:
-        # Binance limits to 1000 records per request, so we need to paginate
-        while current_start < end_timestamp:
-            params = {
-                'symbol': 'BTCUSDT',
-                'interval': '1d',
-                'startTime': current_start,
-                'endTime': end_timestamp,
-                'limit': 1000
-            }
-            
-            response = requests.get(url, params=params, timeout=30)
-            response.raise_for_status()
-            klines = response.json()
-            
-            if not klines:
-                break
-                
-            all_data.extend(klines)
-            
-            # Move to next period (last kline's close time + 1ms)
-            current_start = int(klines[-1][6]) + 1
-            
-            # Small delay to be respectful to the API
-            time.sleep(0.1)
-        
-        # Process the klines data
-        # Klines format: [open_time, open, high, low, close, volume, close_time, ...]
-        df = pd.DataFrame(all_data, columns=[
-            'open_time', 'open', 'high', 'low', 'close', 'volume',
-            'close_time', 'quote_asset_volume', 'number_of_trades',
-            'taker_buy_base_asset_volume', 'taker_buy_quote_asset_volume', 'ignore'
-        ])
-        
-        # Convert timestamps and prices
-        df['date'] = pd.to_datetime(df['open_time'], unit='ms')
-        df['price'] = df['close'].astype(float)
-        df['volume'] = df['volume'].astype(float)
-        
-        # Set date as index and sort
-        df = df.set_index('date').sort_index()
-        
-        # Keep only necessary columns
-        df = df[['price', 'volume']]
-        
-        return df
-        
-    except Exception as e:
-        print(f"Error fetching data from Binance: {e}")
-        # Fallback: create sample data
-        dates = pd.date_range(start='2022-01-01', end='2023-09-30', freq='D')
-        np.random.seed(42)
-        prices = 40000 + np.cumsum(np.random.normal(0, 1000, len(dates)))
-        volumes = 1000000000 + np.random.normal(0, 100000000, len(dates))
-        
-        df = pd.DataFrame({
-            'price': prices,
-            'volume': volumes
-        }, index=dates)
-        
-        return df
+    return df[['Open Time', 'Close', 'Volume']]
 
-def calculate_features(df):
-    """Calculate SMA features for the model"""
+def prepare_data(df):
+    """
+    Calculates technical indicators and sets up features/targets.
+    """
     df = df.copy()
     
-    # Calculate SMAs
-    df['sma_7'] = df['price'].rolling(window=7).mean()
-    df['sma_365'] = df['price'].rolling(window=365).mean()
-    df['volume_sma_5'] = df['volume'].rolling(window=5).mean()
-    df['volume_sma_10'] = df['volume'].rolling(window=10).mean()
+    # 1. Technical Indicators
+    df['SMA_7'] = df['Close'].rolling(window=7).mean()
+    df['SMA_365'] = df['Close'].rolling(window=365).mean()
+    df['Volume_SMA_5'] = df['Volume'].rolling(window=5).mean()
+    df['Volume_SMA_10'] = df['Volume'].rolling(window=10).mean()
     
-    # Create target (3 days ahead price)
-    df['target_3day'] = df['price'].shift(-3)
+    # Drop NaN values created by SMAs (especially SMA_365)
+    df.dropna(inplace=True)
     
-    # Drop rows with NaN values
-    df = df.dropna()
+    # 2. Features and Target
+    # Target: Next day's closing price (Shifted -1)
+    # Note: We use Shift -1 to align "Today's Features" with "Tomorrow's Price"
+    df['Target_Next_Close'] = df['Close'].shift(-1)
+    
+    # Drop the last row as it has no target
+    df.dropna(inplace=True)
     
     return df
 
-def train_model(df):
-    """Train linear regression model with 50-50 split"""
-    # Split data 50-50 based on time
-    split_index = len(df) // 2
-    train_df = df.iloc[:split_index]
-    test_df = df.iloc[split_index:]
+def run_strategy():
+    """
+    Main logic pipeline: Fetch -> Process -> Train -> Backtest -> Visualize
+    """
+    # 1. Fetch Data
+    raw_df = fetch_binance_data(SYMBOL, INTERVAL, START_TIME, END_TIME)
+    if raw_df.empty:
+        return None, "Failed to fetch data from Binance."
+
+    # 2. Process Data
+    df = prepare_data(raw_df)
     
-    # Features for the model
-    features = ['sma_7', 'sma_365', 'volume_sma_5', 'volume_sma_10']
+    if df.empty:
+        return None, "Not enough data points after calculating SMAs (Check SMA_365)."
+
+    # Define Features (X) and Target (y)
+    feature_cols = ['Close', 'Volume', 'SMA_7', 'SMA_365', 'Volume_SMA_5', 'Volume_SMA_10']
+    X = df[feature_cols]
+    y = df['Target_Next_Close']
+
+    # 3. Train/Test Split (80/20 Time-based)
+    split_idx = int(len(df) * 0.8)
     
-    # Prepare training data
-    X_train = train_df[features]
-    y_train = train_df['target_3day']
+    X_train = X.iloc[:split_idx]
+    y_train = y.iloc[:split_idx]
+    X_test = X.iloc[split_idx:]
+    y_test = y.iloc[split_idx:]
     
-    # Train model
+    # Date index for plotting
+    test_dates = df['Open Time'].iloc[split_idx:]
+    
+    # 4. Model Training
     model = LinearRegression()
     model.fit(X_train, y_train)
     
-    # Make predictions on entire dataset
-    X_all = df[features]
-    predictions = model.predict(X_all)
+    # Predictions
+    predictions = model.predict(X_test)
     
-    # Add predictions to dataframe
-    df['prediction'] = predictions
+    # 5. Backtesting Strategy
+    # Create a results DataFrame for the test period
+    results = pd.DataFrame(index=X_test.index)
+    results['Date'] = test_dates
+    results['Actual_Price'] = X_test['Close'] # Price at time t (Decision time)
+    results['Next_Actual_Price'] = y_test     # Price at time t+1 (Result time)
+    results['Predicted_Next_Price'] = predictions
     
-    # Calculate strategy returns
-    capital_history = [1000]  # Start with $1000
-    positions = ['hold']  # No position on first day
+    # Calculate Market Return (Percent change from t to t+1)
+    results['Market_Return'] = (results['Next_Actual_Price'] - results['Actual_Price']) / results['Actual_Price']
     
-    for i in range(1, len(df)):
-        if i >= split_index:  # Only trade in test period
-            # Use only information available at time of decision
-            # Today's prediction is for 3 days ahead, based on features from 3 days ago
-            if i >= 3:  # Ensure we have enough history
-                three_day_pred = df['prediction'].iloc[i]
-                yesterday_close = df['price'].iloc[i-1]
-                today_close = df['price'].iloc[i]
-                
-                if three_day_pred < yesterday_close:
-                    # Go long: profit = (today_close - yesterday_close) / yesterday_close
-                    returns = (today_close - yesterday_close) / yesterday_close
-                    position = 'long'
-                else:
-                    # Go short: profit = (yesterday_close - today_close) / yesterday_close
-                    returns = (yesterday_close - today_close) / yesterday_close
-                    position = 'short'
-                
-                new_capital = capital_history[-1] * (1 + returns)
-                capital_history.append(new_capital)
-                positions.append(position)
-            else:
-                # Not enough history for 3-day prediction
-                capital_history.append(capital_history[-1])
-                positions.append('hold')
-        else:
-            # In training period, capital doesn't change
-            capital_history.append(capital_history[-1])
-            positions.append('hold')
+    # Decision Rule (Per user prompt):
+    # If prediction > actual price -> Short (Bet against market)
+    # If prediction < actual price -> Long (Bet with market)
+    # Note: "Actual Price" here refers to the price at the moment of decision (t)
     
-    # Add capital data to dataframe
-    df['capital'] = capital_history
-    df['position'] = positions
+    positions = []
+    strategy_returns = []
     
-    return {
-        'model': model,
-        'train_df': train_df,
-        'test_df': test_df,
-        'full_df': df,
-        'split_index': split_index,
-        'features': features
-    }
-
-def create_plot_image(df, split_index, plot_type='price'):
-    """Create matplotlib plot and return as base64 image"""
-    plt.figure(figsize=(12, 6))
-    
-    if plot_type == 'price':
-        # Price and predictions plot
-        plt.plot(df.index, df['price'], label='Actual Price', linewidth=2)
-        plt.plot(df.index, df['prediction'], label='Predicted Price', linewidth=2, alpha=0.7)
-        plt.axvline(x=df.index[split_index], color='red', linestyle='--', 
-                   label='Train/Test Split', alpha=0.7)
-        plt.title('BTC Price vs Predictions (Test Period Highlighted)')
-        plt.xlabel('Date')
-        plt.ylabel('Price (USD)')
-        plt.legend()
-        plt.grid(True, alpha=0.3)
+    for i, row in results.iterrows():
+        pred = row['Predicted_Next_Price']
+        current = row['Actual_Price']
+        mkt_ret = row['Market_Return']
         
-    else:  # capital plot
-        test_period = df.iloc[split_index:]
-        plt.plot(test_period.index, test_period['capital'], 
-                label='Capital Development', linewidth=2, color='green')
-        plt.title('Capital Development in Test Period (Starting: $1000)')
-        plt.xlabel('Date')
-        plt.ylabel('Capital (USD)')
-        plt.legend()
-        plt.grid(True, alpha=0.3)
+        if pred > current:
+            # Short Position
+            # If market goes down (mkt_ret < 0), we make money. 
+            # Short return approx = -1 * Market Return
+            positions.append('Short')
+            strategy_returns.append(-1 * mkt_ret)
+        else:
+            # Long Position
+            # If market goes up (mkt_ret > 0), we make money.
+            positions.append('Long')
+            strategy_returns.append(mkt_ret)
+            
+    results['Position'] = positions
+    results['Strategy_Return'] = strategy_returns
     
-    plt.xticks(rotation=45)
+    # Capital Accumulation
+    results['Equity_Curve'] = INITIAL_CAPITAL * (1 + results['Strategy_Return']).cumprod()
+    results['Market_Curve'] = INITIAL_CAPITAL * (1 + results['Market_Return']).cumprod() # Benchmark
+
+    # 6. Visualization
+    plt.figure(figsize=(12, 8))
+    
+    # Subplot 1: Equity Curves
+    plt.subplot(2, 1, 1)
+    plt.plot(results['Date'], results['Equity_Curve'], label='Strategy Equity', color='green', linewidth=2)
+    plt.plot(results['Date'], results['Market_Curve'], label='Buy & Hold (Benchmark)', color='gray', linestyle='--')
+    plt.title(f'Algo Performance: BTC/USDT (Test Set)\nInitial Capital: ${INITIAL_CAPITAL}', fontsize=14)
+    plt.ylabel('Capital ($)')
+    plt.legend()
+    plt.grid(True, alpha=0.3)
+    
+    # Subplot 2: Price vs Prediction
+    plt.subplot(2, 1, 2)
+    plt.plot(results['Date'], results['Next_Actual_Price'], label='Actual Next Price', color='blue', alpha=0.7)
+    plt.plot(results['Date'], results['Predicted_Next_Price'], label='Predicted Next Price', color='orange', alpha=0.7, linestyle=':')
+    plt.title('Linear Regression Predictions vs Actual', fontsize=12)
+    plt.ylabel('Price (USDT)')
+    plt.legend()
+    plt.grid(True, alpha=0.3)
+    
     plt.tight_layout()
     
-    # Convert plot to base64
+    # Save to Base64
     img = io.BytesIO()
-    plt.savefig(img, format='png', dpi=100, bbox_inches='tight')
+    plt.savefig(img, format='png')
     img.seek(0)
+    plot_url = base64.b64encode(img.getvalue()).decode()
     plt.close()
     
-    return base64.b64encode(img.getvalue()).decode()
-
-def update_data():
-    """Background thread to update data periodically"""
-    global btc_data, model_results, capital_data
+    # Metrics
+    final_capital = results['Equity_Curve'].iloc[-1]
+    total_return = ((final_capital - INITIAL_CAPITAL) / INITIAL_CAPITAL) * 100
+    accuracy = mean_squared_error(y_test, predictions, squared=False)
     
-    while True:
-        try:
-            print("Updating BTC data...")
-            btc_data = fetch_btc_data()
-            feature_data = calculate_features(btc_data)
-            model_results = train_model(feature_data)
-            print("Data update completed")
-        except Exception as e:
-            print(f"Error updating data: {e}")
-        
-        # Update every hour
-        time.sleep(3600)
+    return plot_url, {
+        "final_capital": round(final_capital, 2),
+        "total_return": round(total_return, 2),
+        "rmse": round(accuracy, 2),
+        "trades": len(results)
+    }
+
+# --- Flask Routes ---
 
 @app.route('/')
-def index():
-    if btc_data is None or model_results is None:
-        return "Data is being loaded. Please refresh in a moment."
+def dashboard():
+    plot_url, stats = run_strategy()
     
-    df = model_results['full_df']
-    split_index = model_results['split_index']
-    
-    # Create plots
-    price_plot = create_plot_image(df, split_index, 'price')
-    capital_plot = create_plot_image(df, split_index, 'capital')
-    
-    # Calculate performance metrics
-    test_df = df.iloc[split_index:]
-    final_capital = test_df['capital'].iloc[-1] if len(test_df) > 0 else 1000
-    total_return = ((final_capital - 1000) / 1000) * 100
-    
-    # Get current strategy position
-    current_position = test_df['position'].iloc[-1] if len(test_df) > 0 else 'hold'
-    
-    return f'''
+    if plot_url is None:
+        return f"<h3>Error: {stats}</h3>"
+
+    html = f"""
     <!DOCTYPE html>
-    <html>
+    <html lang="en">
     <head>
-        <title>BTC Trading Strategy</title>
+        <meta charset="UTF-8">
+        <meta name="viewport" content="width=device-width, initial-scale=1.0">
+        <title>BTC Trading Algo Dashboard</title>
         <style>
-            body {{ font-family: Arial, sans-serif; margin: 20px; }}
-            .container {{ max-width: 1200px; margin: 0 auto; }}
-            .plot {{ margin: 20px 0; }}
-            .metrics {{ background: #f5f5f5; padding: 15px; border-radius: 5px; margin: 20px 0; }}
-            .metric-item {{ margin: 5px 0; }}
+            body {{ font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif; background-color: #f4f4f9; color: #333; margin: 0; padding: 20px; }}
+            .container {{ max-width: 1000px; margin: 0 auto; background: white; padding: 30px; border-radius: 10px; box-shadow: 0 4px 6px rgba(0,0,0,0.1); }}
+            h1 {{ color: #2c3e50; text-align: center; }}
+            .stats-grid {{ display: grid; grid-template-columns: repeat(4, 1fr); gap: 20px; margin-bottom: 30px; }}
+            .stat-card {{ background: #eef2f7; padding: 15px; border-radius: 8px; text-align: center; }}
+            .stat-value {{ font-size: 1.5em; font-weight: bold; color: #2980b9; }}
+            .stat-label {{ color: #7f8c8d; font-size: 0.9em; }}
+            img {{ max-width: 100%; height: auto; border: 1px solid #ddd; border-radius: 4px; }}
         </style>
     </head>
     <body>
         <div class="container">
-            <h1>BTC Trading Strategy Dashboard</h1>
+            <h1>Bitcoin Algo Strategy Dashboard</h1>
             
-            <div class="metrics">
-                <h2>Performance Metrics</h2>
-                <div class="metric-item"><strong>Initial Capital:</strong> $1,000</div>
-                <div class="metric-item"><strong>Final Capital:</strong> ${final_capital:,.2f}</div>
-                <div class="metric-item"><strong>Total Return:</strong> {total_return:+.2f}%</div>
-                <div class="metric-item"><strong>Current Position:</strong> {current_position.upper()}</div>
-                <div class="metric-item"><strong>Test Period:</strong> {df.index[split_index].strftime('%Y-%m-%d')} to {df.index[-1].strftime('%Y-%m-%d')}</div>
+            <div class="stats-grid">
+                <div class="stat-card">
+                    <div class="stat-value">${stats['final_capital']}</div>
+                    <div class="stat-label">Final Capital</div>
+                </div>
+                <div class="stat-card">
+                    <div class="stat-value">{stats['total_return']}%</div>
+                    <div class="stat-label">Total Return</div>
+                </div>
+                <div class="stat-card">
+                    <div class="stat-value">{stats['rmse']}</div>
+                    <div class="stat-label">RMSE (Price Error)</div>
+                </div>
+                <div class="stat-card">
+                    <div class="stat-value">{stats['trades']}</div>
+                    <div class="stat-label">Days Traded</div>
+                </div>
+            </div>
+
+            <div style="text-align: center;">
+                <img src="data:image/png;base64,{plot_url}" alt="Performance Chart">
             </div>
             
-            <div class="plot">
-                <h2>BTC Price vs Predictions</h2>
-                <img src="data:image/png;base64,{price_plot}" alt="Price Chart" style="width: 100%; max-width: 1000px;">
-            </div>
-            
-            <div class="plot">
-                <h2>Capital Development (Test Period)</h2>
-                <img src="data:image/png;base64,{capital_plot}" alt="Capital Chart" style="width: 100%; max-width: 1000px;">
-            </div>
-            
-            <div class="metrics">
-                <h3>Strategy Rules</h3>
-                <ul>
-                    <li>If 3-day ahead prediction < yesterday's close: GO LONG today</li>
-                    <li>If 3-day ahead prediction > yesterday's close: GO SHORT today</li>
-                    <li>Features used: 7-day SMA price, 365-day SMA price, 5-day SMA volume, 10-day SMA volume</li>
-                    <li>Target: Price 3 days ahead</li>
-                    <li>Model: Linear Regression</li>
-                    <li>Data split: 50% train, 50% test (chronological)</li>
-                </ul>
+            <div style="margin-top: 20px; font-size: 0.9em; color: #666;">
+                <p><strong>Configuration:</strong><br>
+                Model: Linear Regression<br>
+                Features: SMA_7, SMA_365, Vol_SMA_5, Vol_SMA_10<br>
+                Strategy: Contrarian (Pred > Actual → Short, Pred < Actual → Long)<br>
+                Source: Binance API (BTC/USDT 1d)</p>
             </div>
         </div>
     </body>
     </html>
-    '''
+    """
+    return render_template_string(html)
 
 if __name__ == '__main__':
-    # Start background data update thread
-    update_thread = threading.Thread(target=update_data, daemon=True)
-    update_thread.start()
-    
-    # Initial data load
-    print("Loading initial data...")
-    btc_data = fetch_btc_data()
-    feature_data = calculate_features(btc_data)
-    model_results = train_model(feature_data)
-    print("Initial data loaded")
-    
-    # Start Flask app
-    app.run(host='0.0.0.0', port=8080, debug=False)
+    # Listen on 0.0.0.0 for external access (required for Railway/Docker)
+    app.run(host='0.0.0.0', port=8080)
