@@ -36,21 +36,21 @@ def prepare_data(df):
     df = calculate_features(df)
     df = df.dropna()  # Remove rows with NaN values from rolling averages
     
-    # Create features with 5-day lookback
+    # Create features with 5-day lookback for predicting the next day's close
     features = []
     targets = []
-    for i in range(5, len(df)):
-        row = df.iloc[i]
+    for i in range(5, len(df) - 1):  # Stop at len(df)-1 to have a target for next day
+        # Use features from day i-5 to i-1 to predict close on day i (next day relative to lookback)
         lookback = df.iloc[i-5:i]
         feature_row = [
-            lookback['close'].iloc[-1],  # Latest close in lookback
-            row['sma_7'],
-            row['sma_365'],
-            row['sma_volume_5'],
-            row['sma_volume_10']
+            lookback['close'].iloc[-1],  # Close on day i-1 (yesterday in lookback)
+            df.iloc[i-1]['sma_7'],       # Use lagged SMA values for day i-1
+            df.iloc[i-1]['sma_365'],
+            df.iloc[i-1]['sma_volume_5'],
+            df.iloc[i-1]['sma_volume_10']
         ]
         features.append(feature_row)
-        targets.append(df.iloc[i]['close'])  # Predict next day's close (i.e., current row's close)
+        targets.append(df.iloc[i]['close'])  # Target is close on day i (next day after lookback)
     
     return np.array(features), np.array(targets), df
 
@@ -61,30 +61,38 @@ def train_model(features, targets):
     model.fit(X_train, y_train)
     return model, X_test, y_test
 
-def trading_strategy(df, model, features, start_capital=1000, transaction_cost=0.001):
+def trading_strategy(df, model, X_test, start_capital=1000, transaction_cost=0.001):
     capital = start_capital
     capital_history = [capital]
     positions = []  # Track positions for plotting
     
-    # Use test set indices for trading
-    test_start_idx = len(features) // 2  # 50% split
-    for i in range(test_start_idx, len(features)):
-        prediction = model.predict([features[i]])[0]
-        actual_close = df.iloc[i + 5]['close']  # Adjust index since features start from index 5
-        yesterday_close = df.iloc[i + 4]['close'] if i + 4 < len(df) else df.iloc[i + 3]['close']  # Simplified for edge cases
+    # X_test corresponds to features for the test set; indices in df need adjustment
+    # Features were built for indices 5 to len(df)-2, so test set starts after split
+    test_start_idx = len(X_test) // 2  # Actually, X_test is already the second half due to shuffle=False
+    total_features_start = 5  # Features start from index 5 in df
+    for i in range(len(X_test)):
+        prediction = model.predict([X_test[i]])[0]
+        # Map test index back to df index: features index i corresponds to df index i + total_features_start
+        df_idx = i + total_features_start
+        if df_idx >= len(df) - 1:
+            break  # Avoid index out of bounds
+        yesterday_close = df.iloc[df_idx - 1]['close']  # Close on the day before prediction
+        actual_close = df.iloc[df_idx]['close']  # Actual close on the predicted day
         
         # Decision: buy if yesterday's close > prediction, sell if <
         if yesterday_close > prediction:
             # Buy: long position
             investment = capital
-            capital_after_trade = investment * (1 - transaction_cost)
-            capital = capital_after_trade * (actual_close / yesterday_close)  # Profit/loss
+            capital_after_trade = investment * (1 - transaction_cost)  # Apply transaction cost on entry
+            # Profit/loss: (actual_close / yesterday_close) for long
+            capital = capital_after_trade * (actual_close / yesterday_close)
             positions.append('buy')
         else:
             # Sell: short position
             investment = capital
-            capital_after_trade = investment * (1 - transaction_cost)
-            capital = capital_after_trade * (yesterday_close / actual_close)  # Profit/loss for short
+            capital_after_trade = investment * (1 - transaction_cost)  # Apply transaction cost on entry
+            # Profit/loss: (yesterday_close / actual_close) for short
+            capital = capital_after_trade * (yesterday_close / actual_close)
             positions.append('sell')
         
         capital_history.append(capital)
@@ -98,23 +106,30 @@ def create_plot(capital_history, df, predictions, test_start_idx):
     # Plot capital development
     ax1.plot(range(len(capital_history)), capital_history)
     ax1.set_title('Capital Development Over Time')
-    ax1.set_xlabel('Day')
+    ax1.set_xlabel('Trading Day in Test Set')
     ax1.set_ylabel('Capital ($)')
     ax1.grid(True)
     
-    # Plot price over time
-    test_dates = df['date'].iloc[test_start_idx + 5: test_start_idx + 5 + len(capital_history)]  # Adjust for lookback
-    ax2.plot(test_dates, df['close'].iloc[test_start_idx + 5: test_start_idx + 5 + len(capital_history)])
-    ax2.set_title('BTC Price Over Time')
+    # Plot price over time for the test period
+    # test_start_idx in features corresponds to df index: test_start_idx + 5 (since features start from index 5)
+    start_df_idx = test_start_idx + 5
+    end_df_idx = start_df_idx + len(capital_history) - 1  # -1 because capital_history includes start
+    if end_df_idx > len(df):
+        end_df_idx = len(df)
+    test_dates = df['date'].iloc[start_df_idx:end_df_idx]
+    test_prices = df['close'].iloc[start_df_idx:end_df_idx]
+    ax2.plot(test_dates, test_prices)
+    ax2.set_title('BTC Price Over Time (Test Period)')
     ax2.set_xlabel('Date')
     ax2.set_ylabel('Price (USDT)')
     ax2.grid(True)
     
-    # Plot predictions vs actual
-    actual_prices = df['close'].iloc[test_start_idx + 5: test_start_idx + 5 + len(predictions)]
-    ax3.plot(test_dates[:len(predictions)], predictions, label='Predicted Price', color='red')
-    ax3.plot(test_dates[:len(actual_prices)], actual_prices, label='Actual Price', color='blue')
-    ax3.set_title('Predicted vs Actual Price')
+    # Plot predictions vs actual for the test set
+    actual_prices = df['close'].iloc[start_df_idx:start_df_idx + len(predictions)]
+    pred_dates = test_dates[:len(predictions)]
+    ax3.plot(pred_dates, predictions, label='Predicted Price', color='red')
+    ax3.plot(pred_dates, actual_prices, label='Actual Price', color='blue')
+    ax3.set_title('Predicted vs Actual Price (Test Set)')
     ax3.set_xlabel('Date')
     ax3.set_ylabel('Price (USDT)')
     ax3.legend()
@@ -136,19 +151,19 @@ def index():
     df = fetch_btc_data()
     features, targets, df = prepare_data(df)
     
-    # Train model once
+    # Train model once with 50% split
     model, X_test, y_test = train_model(features, targets)
     
     # Generate predictions for test set
     predictions = model.predict(X_test)
     
-    # Apply trading strategy
+    # Apply trading strategy on test set
     start_capital = 1000
     transaction_cost = 0.001
-    test_start_idx = len(features) // 2
     capital_history, positions = trading_strategy(df, model, X_test, start_capital, transaction_cost)
     
-    # Create plot
+    # Create plot; adjust test_start_idx for plotting
+    test_start_idx = len(features) // 2  # Start of test set in features array
     plot_url = create_plot(capital_history, df, predictions, test_start_idx)
     
     return render_template('index.html', plot_url=plot_url)
