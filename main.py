@@ -140,20 +140,21 @@ def build_dashboard(y_test, preds, model, feats, X_test):
     p3.vbar(x='feature', top='coef', width=0.7, source=ColumnDataSource(coef_df))
     p3.xaxis.major_label_orientation = 0.8
 
-    # 4. DAILY-COMPOUNDING CAPITAL – mean-reversion strategy
+        # 4. DAILY-COMPOUNDING CAPITAL – mean-reversion strategy
     equity = 1000.0
     equity_curve = [equity]
-    btc_pos = 0.0
+    btc_pos = 0.0          # BTC units (positive long, negative short)
 
     for i in range(1, len(y_test)):
         price = y_test.iloc[i-1]
         pred  = preds[i-1]
         signal = 1.0 if price > pred else -1.0   # long when actual > pred
 
-        # mark-to-market previous position
-        equity = btc_pos * price
-        # resize to 100 % of current equity
+        # 1. mark-to-market previous position
+        equity = equity + btc_pos * price
+        # 2. resize to 100 % of current equity (no leverage)
         btc_pos = signal * equity / price
+        # 3. cash is implicitly equity - btc_pos * price (zero here)
         equity_curve.append(equity)
 
     cap_src = ColumnDataSource({'date': y_test.index, 'capital': equity_curve})
