@@ -30,7 +30,6 @@ def prepare_data(df):
     df['sma_7'] = df['close'].rolling(window=7).mean()
     df['sma_14'] = df['close'].rolling(window=14).mean()
     df['sma_50_volume'] = df['volume'].rolling(window=50).mean()
-    df['sma_200_volume'] = df['volume'].rolling(window=200).mean()
     
     # Remove rows with NaN values from SMA calculation
     df_clean = df.dropna()
@@ -38,12 +37,11 @@ def prepare_data(df):
     features = []
     targets = []
     for i in range(len(df_clean)):
-        # Features: 7-day and 14-day price SMAs, 50-day volume SMA, and 200-day volume SMA
+        # Features: 7-day and 14-day price SMAs, and 50-day volume SMA
         feature = [
             df_clean['sma_7'].iloc[i],
             df_clean['sma_14'].iloc[i],
-            df_clean['sma_50_volume'].iloc[i],
-            df_clean['sma_200_volume'].iloc[i]
+            df_clean['sma_50_volume'].iloc[i]
         ]
         features.append(feature)
         # Target: next day's closing price
