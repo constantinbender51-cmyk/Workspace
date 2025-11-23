@@ -91,8 +91,8 @@ def prepare_data(df):
     # Calculate specified SMAs
     df['sma_14'] = df['close'].rolling(window=14).mean()
     df['sma_14_squared'] = df['sma_14'] ** 2
-    df['sma_50_volume'] = df['volume'].rolling(window=50).mean()
-    df['sma_50_volume_sma_14_price'] = df['sma_50_volume'] * df['sma_14']
+    df['sma_14_volume'] = df['volume'].rolling(window=14).mean()
+    df['sma_14_volume_sma_14_price'] = df['sma_14_volume'] * df['sma_14']
     
     # Remove rows with NaN values from SMA and on-chain metric calculations
     df_clean = df.dropna()
@@ -104,7 +104,7 @@ def prepare_data(df):
         feature = [
             df_clean['sma_14'].iloc[i],
             df_clean['sma_14_squared'].iloc[i],
-            df_clean['sma_50_volume_sma_14_price'].iloc[i]
+            df_clean['sma_14_volume_sma_14_price'].iloc[i]
         ]
         # Add on-chain metrics only if they exist in the DataFrame
         features.append(feature)
