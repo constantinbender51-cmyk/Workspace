@@ -219,39 +219,47 @@ def train_model(features, targets):
     train_mse = mean_squared_error(y_train, train_predictions)
     test_mse = mean_squared_error(y_test, test_predictions)
     
-    return model, X_train, y_train, train_predictions, train_mse, test_mse, train_indices
+    # Test indices correspond to the indices in the cleaned DataFrame for the test set
+    test_indices = list(range(40 + split_idx, 40 + len(features)))
+    
+    return model, X_train, y_train, train_predictions, train_mse, test_mse, train_indices, X_test, y_test, test_predictions, test_indices
 
 # Generate plot
-def create_plot(df, y_train, predictions, train_indices):
+def create_plot(df, y_train, train_predictions, train_indices, y_test, test_predictions, test_indices):
     plt.figure(figsize=(10, 8))
-    dates = df.index[train_indices]
-    # Sort by date to ensure chronological plotting
-    sorted_indices = np.argsort(dates)
-    sorted_dates = dates[sorted_indices]
-    sorted_y_train = y_train[sorted_indices]
-    sorted_predictions = predictions[sorted_indices]
     
-    # Calculate capital with daily accumulation based on yesterday's prediction vs actual price
+    # Combine training and test data for plotting
+    all_dates = df.index[train_indices + test_indices]
+    all_y_actual = np.concatenate([y_train, y_test])
+    all_predictions = np.concatenate([train_predictions, test_predictions])
+    
+    # Sort by date to ensure chronological plotting
+    sorted_indices = np.argsort(all_dates)
+    sorted_dates = all_dates[sorted_indices]
+    sorted_y_actual = all_y_actual[sorted_indices]
+    sorted_predictions = all_predictions[sorted_indices]
+    
+    # Calculate capital with daily accumulation based on yesterday's prediction vs actual price for entire period
     capital = [1000]  # Start with $1000
     positions = []  # Store position type for coloring
     
-    for i in range(len(sorted_y_train)):
+    for i in range(len(sorted_y_actual)):
         # Calculate return using today's price vs yesterday's price
         if i >= 1:  # Ensure there is at least one previous day
-            price_yesterday = sorted_y_train[i - 1]
-            return_calc = (sorted_y_train[i] - price_yesterday) / price_yesterday
+            price_yesterday = sorted_y_actual[i - 1]
+            return_calc = (sorted_y_actual[i] - price_yesterday) / price_yesterday
         else:
-            # For the first day in training set, use available data; skip if not enough history
-            if i == 0 and train_indices[sorted_indices[i]] >= 1:
-                price_yesterday = df['close'].iloc[train_indices[sorted_indices[i]] - 1]
-                return_calc = (sorted_y_train[i] - price_yesterday) / price_yesterday
+            # For the first day, use available data; skip if not enough history
+            if i == 0 and (train_indices + test_indices)[sorted_indices[i]] >= 1:
+                price_yesterday = df['close'].iloc[(train_indices + test_indices)[sorted_indices[i]] - 1]
+                return_calc = (sorted_y_actual[i] - price_yesterday) / price_yesterday
             else:
                 return_calc = 0  # Default to no return if insufficient data
         
         # ML Strategy: If yesterday's predicted price is above yesterday's actual price, apply positive return, else negative
         if i >= 1:  # Ensure yesterday's prediction is available
             pred_price_yesterday = sorted_predictions[i - 1]
-            actual_price_yesterday = sorted_y_train[i - 1]
+            actual_price_yesterday = sorted_y_actual[i - 1]
             if pred_price_yesterday > actual_price_yesterday:
                 ret = return_calc * 5  # Positive signal: long position with 5x leverage
                 positions.append('long')  # Mark as long
@@ -268,7 +276,7 @@ def create_plot(df, y_train, predictions, train_indices):
     
     # Plot actual and predicted prices with daily granularity and colored line segments for positions
     plt.subplot(2, 1, 1)
-    plt.plot(sorted_dates, sorted_y_train, label='Actual Price', color='blue')
+    plt.plot(sorted_dates, sorted_y_actual, label='Actual Price', color='blue')
     # Plot prediction line with color based on positions
     prev_idx = 0
     for j in range(1, len(sorted_dates)):
@@ -284,11 +292,11 @@ def create_plot(df, y_train, predictions, train_indices):
     plt.plot([], [], color='red', label='Predicted Price (Short)')
     plt.xlabel('Date')
     plt.ylabel('Price (USD)')
-    plt.title('BTC Price Prediction vs Actual (Training Period, Daily)')
+    plt.title('BTC Price Prediction vs Actual (Training and Test Periods, Daily)')
     plt.legend()
     plt.xticks(rotation=45)
     
-    # Plot capital with color based on position
+    # Plot capital with color based on position for entire period
     plt.subplot(2, 1, 2)
     # Create segments for coloring based on positions
     prev_idx = 0
@@ -318,8 +326,8 @@ def create_plot(df, y_train, predictions, train_indices):
 def index():
     df = load_data()
     features, targets, scaler = prepare_data(df)
-    model, X_train, y_train, predictions, train_mse, test_mse, train_indices = train_model(features, targets)
-    plot_url = create_plot(df, y_train, predictions, train_indices)
+    model, X_train, y_train, train_predictions, train_mse, test_mse, train_indices, X_test, y_test, test_predictions, test_indices = train_model(features, targets)
+    plot_url = create_plot(df, y_train, train_predictions, train_indices, y_test, test_predictions, test_indices)
     return render_template('index.html', plot_url=plot_url, train_mse=train_mse)
 
 if __name__ == '__main__':
