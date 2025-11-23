@@ -31,6 +31,7 @@ def fetch_btc_data():
 def calculate_features(df):
     # Calculate features without lookahead bias - use shift to ensure no future data
     print("DEBUG: Calculating features for the dataset")
+    df['sma_5'] = df['close'].rolling(window=5).mean().shift(1)
     df['sma_7'] = df['close'].rolling(window=7).mean().shift(1)
     df['sma_365'] = df['close'].rolling(window=365).mean().shift(1)
     df['sma_volume_5'] = df['volume'].rolling(window=5).mean().shift(1)
@@ -42,19 +43,22 @@ def prepare_data(df):
     df = df.dropna()  # Remove rows with NaN values from rolling averages
     print(f"DEBUG: Data shape after calculate_features: {df.shape}")
     
-    # Check if we have enough data after dropping NaN; minimum 4 days for 3-day lookback + target
+    # Check if we have enough data after dropping NaN; minimum 7 days for 3-day lookback + 3-day future target
     print(f"DEBUG: Data after dropping NaN has {len(df)} rows")
-    if len(df) < 4:
-        raise ValueError(f"Insufficient data after processing. Have {len(df)} days, need at least 4. Try fetching more data.")
+    if len(df) < 7:
+        raise ValueError(f"Insufficient data after processing. Have {len(df)} days, need at least 7. Try fetching more data.")
     
-    # Create features with 3-day lookback for predicting the next day's close
+    # Create features with 3-day lookback for predicting the close 3 days in the future
     features = []
     targets = []
     
-    print("DEBUG: Preparing features and targets with 3-day lookback")
-    for i in range(3, len(df) - 1):  # Start from index 3 to have 3 days of lookback, stop at len(df)-1 to have a target
-        # Use technical indicators from the past 3 days (i-3 to i-1) to predict close on day i
+    print("DEBUG: Preparing features and targets with 3-day lookback for 3-day future target")
+    for i in range(3, len(df) - 3):  # Start from index 3 to have 3 days of lookback, stop at len(df)-3 to have a 3-day future target
+        # Use technical indicators from the past 3 days (i-3 to i-1) to predict close on day i+3
         feature_row = [
+            df.iloc[i-3]['sma_5'],       # SMA 5 from 3 days ago
+            df.iloc[i-2]['sma_5'],       # SMA 5 from 2 days ago
+            df.iloc[i-1]['sma_5'],       # SMA 5 from 1 day ago
             df.iloc[i-3]['sma_7'],       # SMA 7 from 3 days ago
             df.iloc[i-2]['sma_7'],       # SMA 7 from 2 days ago
             df.iloc[i-1]['sma_7'],       # SMA 7 from 1 day ago
@@ -69,7 +73,7 @@ def prepare_data(df):
             df.iloc[i-1]['sma_volume_10']  # SMA volume 10 from 1 day ago
         ]
         features.append(feature_row)
-        targets.append(df.iloc[i+1]['close'])  # Target is close on day i+1 (true next day prediction)
+        targets.append(df.iloc[i+3]['close'])  # Target is close on day i+3 (3 days in the future)
     
     print(f"DEBUG: Prepared {len(features)} feature samples and {len(targets)} target samples")
     print(f"DEBUG: Features shape: {np.array(features).shape}, Targets shape: {np.array(targets).shape}")
@@ -105,22 +109,22 @@ def trading_strategy(df, model, X_test, test_start_idx, start_capital=1000, tran
         # Current df index for this test sample
         df_idx = test_start_idx + i + 3
         
-        if df_idx >= len(df) - 1:
+        if df_idx >= len(df) - 3:
             break
             
         current_price = df.iloc[df_idx]['close']
-        next_price = df.iloc[df_idx + 1]['close']
+        future_price = df.iloc[df_idx + 3]['close']
         
         # Trading logic: 
         # If current price > prediction: go LONG (expecting mean reversion down)
         # If current price < prediction: go SHORT (expecting mean reversion up)
         if current_price > prediction:
             # Long position: profit if price goes up
-            position_return = (next_price / current_price)
+            position_return = (future_price / current_price)
             positions.append('long')
         else:
             # Short position: profit if price goes down
-            position_return = (current_price / next_price)
+            position_return = (current_price / future_price)
             positions.append('short')
         
         # Apply transaction cost and update capital
