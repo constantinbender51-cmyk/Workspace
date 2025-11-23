@@ -100,8 +100,13 @@ def create_plot(df, y_test, predictions, test_indices):
         # ML Strategy: If predicted price from 4 days ago is lower than actual price yesterday, apply positive return, else negative
         if i >= 1:  # Ensure prediction from 4 days ago is available
             pred_index = test_indices[sorted_indices[i]] - 4  # Prediction from 4 days ago
-            if pred_index >= 0 and pred_index < len(sorted_predictions):
-                pred_price_4_days_ago = sorted_predictions[np.where(test_indices == pred_index)[0][0]] if pred_index in test_indices else df['close'].iloc[pred_index]
+            if pred_index >= 0 and pred_index < len(df):
+                # Find if pred_index is in test_indices; use prediction if available, else actual price
+                pred_in_test = np.where(test_indices == pred_index)[0]
+                if pred_in_test.size > 0:
+                    pred_price_4_days_ago = sorted_predictions[pred_in_test[0]]
+                else:
+                    pred_price_4_days_ago = df['close'].iloc[pred_index]
                 actual_price_yesterday = sorted_y_test[i - 1]
                 if pred_price_4_days_ago < actual_price_yesterday:
                     ret = return_calc  # Positive signal: apply positive return
