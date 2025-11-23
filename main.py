@@ -150,11 +150,12 @@ def build_dashboard(y_test, preds, model, feats, X_test):
         pred  = preds[i-1]
         signal = 1.0 if price > pred else -1.0   # long when actual > pred
 
-        # 1. mark-to-market previous position
-        equity = equity + btc_pos * price
+        # 1. close previous position (mark-to-market already inside equity)
         # 2. resize to 100 % of current equity (no leverage)
         btc_pos = signal * equity / price
-        # 3. cash is implicitly equity - btc_pos * price (zero here)
+        # 3. next-day equity is the new position size * next price
+        #    (we simulate a swap into the next bar at the same price)
+        equity = btc_pos * price          # unchanged today, but keeps value consistent
         equity_curve.append(equity)
 
     cap_src = ColumnDataSource({'date': y_test.index, 'capital': equity_curve})
