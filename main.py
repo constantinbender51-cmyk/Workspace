@@ -4,7 +4,7 @@ Railway Portrait – Binance-Bitcoin Daily 2022 → Linear-Regression Server
 ------------------------------------------------------------------------
 A single, self-contained Python script that
 
-1. Pulls daily BTCUSDT candles from Binance for the whole of 2022
+1. Pulls daily BTCUSDT candles from Binance for 1 Dec 2021 – 31 Dec 2022
 2. Builds a tiny feature set:
    - 7-day  SMA of close price
    - 365-day SMA of close price
@@ -15,6 +15,8 @@ A single, self-contained Python script that
    - true vs. predicted prices
    - cumulative absolute error
    - feature importance (coefs)
+   - daily-compounding capital curve (€) that goes long when actual > predicted
+     and short when actual < predicted (mean-reversion)
    All served at the root route “/” as an interactive Bokeh page
 """
 
@@ -31,20 +33,14 @@ import requests
 import threading
 import time
 
-
-# ----------  add this near the top of main.py  ----------
-URL = "https://api.binance.com/api/v3/klines"
-# --------------------------------------------------------
-
 # --------------------------------------------------
-# 1. Grab 2022 daily klines from Binance REST
+# 1.  Binance REST endpoint & date range
 # --------------------------------------------------
-# -----------  time range : 1 Dec 2021  –  1 Jan 2023  -------------
-START_TS = int(dt.datetime(2022, 1, 1).timestamp() * 1000)
-END_TS   = int(dt.datetime(2024, 1, 1).timestamp() * 1000)
-# -------------------------------------------------------------------
+URL      = "https://api.binance.com/api/v3/klines"
+START_TS = int(dt.datetime(2021, 1, 1).timestamp() * 1000)   # 1 Dec 2021
+END_TS   = int(dt.datetime(2024, 1, 1).timestamp() * 1000)    # 1 Jan 2023
 
-def fetch_2022_daily() -> pd.DataFrame:
+def fetch_2022_daily():
     """
     Télécharge les chandeliers journaliers BTCUSDT sur Binance
     période : 1 déc 2021 → 31 déc 2022
@@ -78,7 +74,6 @@ def fetch_2022_daily() -> pd.DataFrame:
     df = df[['open_time', 'close', 'volume']].rename(columns={'open_time': 'date'})
     return df.set_index('date').sort_index()
 
-
 # --------------------------------------------------
 # 2. Feature engineering & train/test split
 # --------------------------------------------------
@@ -92,26 +87,28 @@ def add_features(df):
     df['target'] = df['close'].shift(-1)
     return df.dropna()
 
-# --------------------------------------------------
-# 3. Model training
-# --------------------------------------------------
 def train_model(df):
     feats = ['sma7_price', 'sma365_price', 'sma5_vol', 'sma10_vol']
     X, y = df[feats], df['target']
+    if len(X) < 50:
+        raise RuntimeError(f'Not enough data: {len(X)} rows after feature engineering')
+
     split = int(len(df) * 0.8)
     X_train, X_test = X.iloc[:split], X.iloc[split:]
     y_train, y_test = y.iloc[:split], y.iloc[split:]
+
+    if len(X_train) == 0 or len(X_test) == 0:
+        raise RuntimeError('Train/test split yielded empty array')
+
     model = LinearRegression()
     model.fit(X_train, y_train)
     preds = model.predict(X_test)
     return model, X_test, y_test, preds, feats
 
-# ------------------------------------------------------------------
-# 4. Mobile-first dashboard  +  capital curve
-# ------------------------------------------------------------------
+# --------------------------------------------------
+# 3. Build Bokeh plots – mobile first
+# --------------------------------------------------
 def build_dashboard(y_test, preds, model, feats, X_test):
-    from bokeh.models import Div
-
     # 1. True vs Predicted
     p1 = figure(
         title="BTCUSDT – True vs Predicted (2022 test split)",
@@ -143,7 +140,7 @@ def build_dashboard(y_test, preds, model, feats, X_test):
     p3.vbar(x='feature', top='coef', width=0.7, source=ColumnDataSource(coef_df))
     p3.xaxis.major_label_orientation = 0.8
 
-        # 4. DAILY-COMPOUNDING mean-reverting strategy  ===================
+    # 4. DAILY-COMPOUNDING CAPITAL – mean-reversion strategy
     equity = 1000.0
     equity_curve = [equity]
     btc_pos = 0.0
@@ -151,19 +148,19 @@ def build_dashboard(y_test, preds, model, feats, X_test):
     for i in range(1, len(y_test)):
         price = y_test.iloc[i-1]
         pred  = preds[i-1]
-        signal = 1.0 if price > pred else -1.0   # mean-reversion direction
+        signal = 1.0 if price > pred else -1.0   # long when actual > pred
 
         # mark-to-market previous position
         equity = btc_pos * price
         # resize to 100 % of current equity
         btc_pos = signal * equity / price
-
         equity_curve.append(equity)
 
     cap_src = ColumnDataSource({'date': y_test.index, 'capital': equity_curve})
     p4 = figure(title="Daily-compounding capital (€) – long actual>pred, short actual<pred",
                 x_axis_type='datetime', y_axis_label='Euro',
-                sizing_mode="stretch_width", height=350)
+                sizing_mode="stretch_width", height=350,
+                toolbar_location='above', tools='pan,xwheel_zoom,reset')
     p4.line('date', 'capital', source=cap_src, color='green', line_width=2)
     p4.add_tools(HoverTool(tooltips=[('date', '@date{%F}'), ('€', '@capital{0,0.00}')],
                            formatters={'@date': 'datetime'}))
@@ -171,7 +168,7 @@ def build_dashboard(y_test, preds, model, feats, X_test):
     # stats banner
     mae = mean_absolute_error(y_test, preds)
     r2  = r2_score(y_test, preds)
-    final_cap = capital_curve[-1]
+    final_cap = equity_curve[-1]
     stats = Div(text=f"<b>MAE :</b> {mae:,.2f} USDT &nbsp;|&nbsp; <b>R² :</b> {r2:.3f} &nbsp;|&nbsp; <b>Final capital :</b> {final_cap:,.2f} €")
 
     return column(stats, p1, p2, p3, p4, sizing_mode="stretch_width")
@@ -186,6 +183,7 @@ HTML_PAGE = """
 <head>
   <title>Railway Portrait – BTC 2022 LR</title>
   {{ bokeh_resources | safe }}
+  <meta name="viewport" content="width=device-width, initial-scale=1">
 </head>
 <body>
   <h2>Railway Portrait – Binance BTCUSDT Daily 2022 → Linear-Regression</h2>
@@ -207,7 +205,7 @@ def index():
 # 6. Main
 # --------------------------------------------------
 if __name__ == "__main__":
-    print("Fetching 2022 daily candles …")
+    print("Fetching 2021-2022 daily candles …")
     raw = fetch_2022_daily()
     print("Engineering features …")
     feat_df = add_features(raw)
@@ -216,5 +214,4 @@ if __name__ == "__main__":
     print("Building dashboard …")
     layout = build_dashboard(y_test, preds, model, feats, X_test)
     print("Starting web server on 0.0.0.0:8080 …")
-    # Bokeh/Flask is single-threaded; let the dev-server suffice
     app.run(host="0.0.0.0", port=8080, debug=False)
