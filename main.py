@@ -76,7 +76,8 @@ def prepare_data(df):
     return np.array(features), np.array(targets), df
 
 def train_model(features, targets):
-    # Check if features and targets are not empty    print("DEBUG: Starting model training with 50/50 train-test split")
+    # Check if features and targets are not empty
+    print("DEBUG: Starting model training with 50/50 train-test split")
     if len(features) == 0 or len(targets) == 0:
         raise ValueError("No features or targets available for training. Ensure sufficient data.")
     # Split data 50% for training, 50% for testing
@@ -89,35 +90,48 @@ def train_model(features, targets):
     model.fit(X_train, y_train)
     return model, X_test, y_test
 
-def trading_strategy(df, model, X_test, start_capital=1000, transaction_cost=0.001):
+def trading_strategy(df, model, X_test, test_start_idx, start_capital=1000, transaction_cost=0.001):
     capital = start_capital
     capital_history = [capital]
-    positions = []  # Track positions for plotting    print("DEBUG: Executing trading strategy on test set")
+    positions = []  # Track positions for plotting
     
-    # X_test corresponds to features for the test set; indices in df need adjustment
-    # Features were built for indices 3 to len(df)-2, so test set starts after train split
-    total_features_start = 3  # Features start from index 3 in df
+    print("DEBUG: Executing trading strategy on test set")
+    
+    # test_start_idx is the index in the features array where test set begins
+    # Map this to df index: features start at index 3 in df, so add 3
     for i in range(len(X_test)):
         prediction = model.predict([X_test[i]])[0]
-        # Map test index back to df index: features index i corresponds to df index i + total_features_start
-        df_idx = i + total_features_start
+        
+        # Current df index for this test sample
+        df_idx = test_start_idx + i + 3
+        
         if df_idx >= len(df) - 1:
-            break  # Avoid index out of bounds
-        actual_close_next = df.iloc[df_idx + 1]['close']  # Actual close on the next day (target of prediction)
-        
-        # Always take a long position
-        # Simple long return: capital grows based on current price divided by previous day's price
+            break
+            
         current_price = df.iloc[df_idx]['close']
-        previous_price = df.iloc[df_idx - 1]['close']
-        capital = capital * (current_price / previous_price)
-        positions.append('long')
+        next_price = df.iloc[df_idx + 1]['close']
         
+        # Trading logic: 
+        # If current price > prediction: go LONG (expecting mean reversion down)
+        # If current price < prediction: go SHORT (expecting mean reversion up)
+        if current_price > prediction:
+            # Long position: profit if price goes up
+            position_return = (next_price / current_price)
+            positions.append('long')
+        else:
+            # Short position: profit if price goes down
+            position_return = (current_price / next_price)
+            positions.append('short')
+        
+        # Apply transaction cost and update capital
+        capital = capital * position_return * (1 - transaction_cost)
         capital_history.append(capital)
     
     return capital_history, positions
 
-def create_plot(capital_history, df, predictions, test_start_idx, positions):
-    # Create a figure with subplots    print("DEBUG: Generating plot for visualization")
+def create_plot(capital_history, df, predictions, test_start_idx, positions, X_test):
+    # Create a figure with subplots
+    print("DEBUG: Generating plot for visualization")
     fig, (ax1, ax2, ax3) = plt.subplots(3, 1, figsize=(10, 12))
     
     # Plot capital development with colors for long (green) and short (red) periods
@@ -170,7 +184,8 @@ def create_plot(capital_history, df, predictions, test_start_idx, positions):
 @app.route('/')
 def index():
     try:
-        # Fetch and prepare data        print("DEBUG: Starting index route execution")
+        # Fetch and prepare data
+        print("DEBUG: Starting index route execution")
         df = fetch_btc_data()
         features, targets, df = prepare_data(df)
         
@@ -183,15 +198,18 @@ def index():
         # Apply trading strategy on test set
         start_capital = 1000
         transaction_cost = 0.001
-        capital_history, positions = trading_strategy(df, model, X_test, start_capital, transaction_cost)
-        
-        # Create plot; adjust test_start_idx for plotting
         test_start_idx = int(len(features) * 0.5)  # Start of test set in features array (50% split)
-        plot_url = create_plot(capital_history, df, predictions, test_start_idx, positions)
+        capital_history, positions = trading_strategy(df, model, X_test, test_start_idx, start_capital, transaction_cost)
+        
+        # Create plot
+        plot_url = create_plot(capital_history, df, predictions, test_start_idx, positions, X_test)
+        
+        print("DEBUG: Successfully generated and rendered plot")
+        print(f"DEBUG: Rendered template with plot URL of length: {len(plot_url)}")
         
         return render_template('index.html', plot_url=plot_url)
-    except Exception as e:        print("DEBUG: Successfully generated and rendered plot")
-        print(f"DEBUG: Rendered template with plot URL of length: {len(plot_url)}")
+    except Exception as e:
+        print(f"ERROR: {str(e)}")
         return f"Error: {str(e)}"
 
 if __name__ == '__main__':
