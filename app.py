@@ -205,7 +205,10 @@ def run_strategy():
     # Metrics
     final_capital = results['Equity_Curve'].iloc[-1]
     total_return = ((final_capital - INITIAL_CAPITAL) / INITIAL_CAPITAL) * 100
-    accuracy = mean_squared_error(y_test, predictions, squared=False)
+    
+    # FIX: squared=False is removed in newer scikit-learn versions
+    # We calculate MSE and take the square root manually to get RMSE
+    accuracy = np.sqrt(mean_squared_error(y_test, predictions))
     
     return plot_url, {
         "final_capital": round(final_capital, 2),
