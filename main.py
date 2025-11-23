@@ -12,9 +12,13 @@ from datetime import datetime, timedelta
 app = Flask(__name__)
 
 def fetch_btc_data():
-    # Fetch BTC daily price data from Binance starting from 2025-01-01
+    # Fetch BTC daily price data from Binance starting from 2025-01-01, extend start if needed for sufficient data
     end_time = int(datetime.now().timestamp() * 1000)
     start_time = int(datetime(2025, 1, 1).timestamp() * 1000)
+    # If current date is too close to start, adjust start to ensure at least 40 days of data for rolling windows
+    required_days = 40  # To accommodate rolling windows and lookback
+    if (datetime.now() - datetime(2025, 1, 1)).days < required_days:
+        start_time = int((datetime.now() - timedelta(days=required_days)).timestamp() * 1000)
     url = f"https://api.binance.com/api/v3/klines?symbol=BTCUSDT&interval=1d&startTime={start_time}&endTime={end_time}"
     response = requests.get(url)
     data = response.json()
@@ -38,9 +42,9 @@ def prepare_data(df):
     df = calculate_features(df)
     df = df.dropna()  # Remove rows with NaN values from rolling averages
     
-    # Check if we have enough data after dropping NaN
-    if len(df) < 6:  # Need at least 6 rows for features and targets (5-day lookback + 1 target)
-        raise ValueError("Insufficient data after processing. Need at least 6 days of data after calculating rolling averages.")
+    # Check if we have enough data after dropping NaN; minimum 6 days for 5-day lookback + target
+    if len(df) < 6:
+        raise ValueError(f"Insufficient data after processing. Have {len(df)} days, need at least 6. Try fetching more data.")
     
     # Create features with 5-day lookback for predicting the next day's close
     features = []
