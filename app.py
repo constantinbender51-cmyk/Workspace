@@ -67,9 +67,14 @@ def train_model(features, targets):
     test_indices = list(range(split_idx, split_idx + len(y_test)))
     model = LinearRegression()
     model.fit(X_train, y_train)
-    predictions = model.predict(X_test)
-    mse = mean_squared_error(y_test, predictions)
-    return model, X_test, y_test, predictions, mse, test_indices
+    
+    # Calculate predictions and MSE for both training and test sets
+    train_predictions = model.predict(X_train)
+    test_predictions = model.predict(X_test)
+    train_mse = mean_squared_error(y_train, train_predictions)
+    test_mse = mean_squared_error(y_test, test_predictions)
+    
+    return model, X_test, y_test, test_predictions, train_mse, test_mse, test_indices
 
 # Generate plot
 def create_plot(df, y_test, predictions, test_indices):
@@ -168,9 +173,9 @@ def create_plot(df, y_test, predictions, test_indices):
 def index():
     df = load_data()
     features, targets = prepare_data(df)
-    model, X_test, y_test, predictions, mse, test_indices = train_model(features, targets)
+    model, X_test, y_test, predictions, train_mse, test_mse, test_indices = train_model(features, targets)
     plot_url = create_plot(df, y_test, predictions, test_indices)
-    return render_template('index.html', plot_url=plot_url, mse=mse)
+    return render_template('index.html', plot_url=plot_url, train_mse=train_mse, test_mse=test_mse)
 
 if __name__ == '__main__':
     app.run(host='0.0.0.0', port=8080, debug=False)
