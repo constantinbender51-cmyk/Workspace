@@ -112,15 +112,11 @@ def run_strategy():
     y = df['Target_Next_Close']
 
     # 3. Train/Test Split (80/20 Time-based)
-    split_idx = int(len(df) * 0.8)
-    
-    X_train = X.iloc[:split_idx]
-    y_train = y.iloc[:split_idx]
-    X_test = X.iloc[split_idx:]
-    y_test = y.iloc[split_idx:]
+    # Using shuffle=False to maintain time order for financial data
+    X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.2, shuffle=False)
     
     # Date index for plotting
-    test_dates = df['Open Time'].iloc[split_idx:]
+    test_dates = df['Open Time'].loc[X_test.index]
     
     # 4. Model Training
     model = LinearRegression()
@@ -130,40 +126,38 @@ def run_strategy():
     predictions = model.predict(X_test)
     
     # 5. Backtesting Strategy
-    # Create a results DataFrame for the test period
     results = pd.DataFrame(index=X_test.index)
     results['Date'] = test_dates
-    results['Actual_Price'] = X_test['Close'] # Price at time t (Decision time)
-    results['Next_Actual_Price'] = y_test     # Price at time t+1 (Result time)
-    results['Predicted_Next_Price'] = predictions
+    results['Actual_Price'] = X_test['Close']        # Price at decision time (t)
+    results['Next_Actual_Price'] = y_test            # Price at outcome time (t+1)
+    results['Predicted_Next_Price'] = predictions    # Model's forecast for (t+1)
     
-    # Calculate Market Return (Percent change from t to t+1)
+    # Market Return: (Price_t+1 - Price_t) / Price_t
     results['Market_Return'] = (results['Next_Actual_Price'] - results['Actual_Price']) / results['Actual_Price']
     
-    # Decision Rule (Per user prompt):
-    # If prediction > actual price -> Short (Bet against market)
-    # If prediction < actual price -> Long (Bet with market)
-    # Note: "Actual Price" here refers to the price at the moment of decision (t)
+    # --- STRATEGY LOGIC ---
+    # User Request:
+    # 1. If Price > Prediction -> Long
+    # 2. If Price < Prediction -> Short
     
     positions = []
     strategy_returns = []
     
     for i, row in results.iterrows():
-        pred = row['Predicted_Next_Price']
-        current = row['Actual_Price']
-        mkt_ret = row['Market_Return']
+        pred_price = row['Predicted_Next_Price']
+        current_price = row['Actual_Price']
+        market_ret = row['Market_Return']
         
-        if pred > current:
-            # Short Position
-            # If market goes down (mkt_ret < 0), we make money. 
-            # Short return approx = -1 * Market Return
-            positions.append('Short')
-            strategy_returns.append(-1 * mkt_ret)
-        else:
-            # Long Position
-            # If market goes up (mkt_ret > 0), we make money.
+        # Logic Implementation
+        if current_price > pred_price:
+            # Condition: Prices above prediction -> Long
             positions.append('Long')
-            strategy_returns.append(mkt_ret)
+            strategy_returns.append(market_ret)
+        else:
+            # Condition: Prices below prediction -> Short
+            positions.append('Short')
+            # Short return is inverse of market return
+            strategy_returns.append(-1 * market_ret)
             
     results['Position'] = positions
     results['Strategy_Return'] = strategy_returns
@@ -173,7 +167,7 @@ def run_strategy():
     results['Market_Curve'] = INITIAL_CAPITAL * (1 + results['Market_Return']).cumprod() # Benchmark
 
     # 6. Visualization
-    plt.figure(figsize=(12, 8))
+    plt.figure(figsize=(12, 10))
     
     # Subplot 1: Equity Curves
     plt.subplot(2, 1, 1)
@@ -185,10 +179,11 @@ def run_strategy():
     plt.grid(True, alpha=0.3)
     
     # Subplot 2: Price vs Prediction
+    # Note: We plot Next Actual vs Predicted Next to see accuracy
     plt.subplot(2, 1, 2)
-    plt.plot(results['Date'], results['Next_Actual_Price'], label='Actual Next Price', color='blue', alpha=0.7)
-    plt.plot(results['Date'], results['Predicted_Next_Price'], label='Predicted Next Price', color='orange', alpha=0.7, linestyle=':')
-    plt.title('Linear Regression Predictions vs Actual', fontsize=12)
+    plt.plot(results['Date'], results['Next_Actual_Price'], label='Actual Next Price (t+1)', color='blue', alpha=0.7)
+    plt.plot(results['Date'], results['Predicted_Next_Price'], label='Predicted Next Price (t+1)', color='orange', alpha=0.7, linestyle='--')
+    plt.title('Prediction Accuracy: Forecast vs Reality', fontsize=12)
     plt.ylabel('Price (USDT)')
     plt.legend()
     plt.grid(True, alpha=0.3)
@@ -206,8 +201,7 @@ def run_strategy():
     final_capital = results['Equity_Curve'].iloc[-1]
     total_return = ((final_capital - INITIAL_CAPITAL) / INITIAL_CAPITAL) * 100
     
-    # FIX: squared=False is removed in newer scikit-learn versions
-    # We calculate MSE and take the square root manually to get RMSE
+    # FIX for scikit-learn 1.6+ (squared=False removed)
     accuracy = np.sqrt(mean_squared_error(y_test, predictions))
     
     return plot_url, {
@@ -241,6 +235,7 @@ def dashboard():
             .stat-card {{ background: #eef2f7; padding: 15px; border-radius: 8px; text-align: center; }}
             .stat-value {{ font-size: 1.5em; font-weight: bold; color: #2980b9; }}
             .stat-label {{ color: #7f8c8d; font-size: 0.9em; }}
+            .logic-box {{ background: #fff8e1; border-left: 5px solid #ffc107; padding: 15px; margin-bottom: 20px; font-size: 0.95em; }}
             img {{ max-width: 100%; height: auto; border: 1px solid #ddd; border-radius: 4px; }}
         </style>
     </head>
@@ -248,6 +243,13 @@ def dashboard():
         <div class="container">
             <h1>Bitcoin Algo Strategy Dashboard</h1>
             
+            <div class="logic-box">
+                <strong>Current Strategy Logic:</strong><br>
+                1. If <em>Actual Price > Predicted Price</em> → <strong>LONG</strong> (Expect Uptrend)<br>
+                2. If <em>Actual Price < Predicted Price</em> → <strong>SHORT</strong> (Expect Downtrend)<br>
+                <small><em>Note: This bets against the model's directional signal relative to current price.</em></small>
+            </div>
+
             <div class="stats-grid">
                 <div class="stat-card">
                     <div class="stat-value">${stats['final_capital']}</div>
@@ -275,7 +277,6 @@ def dashboard():
                 <p><strong>Configuration:</strong><br>
                 Model: Linear Regression<br>
                 Features: SMA_7, SMA_365, Vol_SMA_5, Vol_SMA_10<br>
-                Strategy: Contrarian (Pred > Actual → Short, Pred < Actual → Long)<br>
                 Source: Binance API (BTC/USDT 1d)</p>
             </div>
         </div>
@@ -285,5 +286,5 @@ def dashboard():
     return render_template_string(html)
 
 if __name__ == '__main__':
-    # Listen on 0.0.0.0 for external access (required for Railway/Docker)
+    # Listen on 0.0.0.0 for external access
     app.run(host='0.0.0.0', port=8080)
