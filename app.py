@@ -36,14 +36,15 @@ def prepare_data(df):
     features = []
     targets = []
     for i in range(len(df_clean)):
-        # Features: 14-day SMA, squared 14-day SMA, and on-chain metrics
+        # Features: 14-day SMA, squared 14-day SMA, and on-chain metrics (if available)
         feature = [
             df_clean['sma_14'].iloc[i],
-            df_clean['sma_14_squared'].iloc[i],
-            df_clean['Active_Addresses'].iloc[i],
-            df_clean['Net_Transaction_Count'].iloc[i],
-            df_clean['Transaction_Volume_USD'].iloc[i]
+            df_clean['sma_14_squared'].iloc[i]
         ]
+        # Add on-chain metrics if columns exist
+        for col in ['Active_Addresses', 'Net_Transaction_Count', 'Transaction_Volume_USD']:
+            if col in df_clean.columns:
+                feature.append(df_clean[col].iloc[i])
         features.append(feature)
         # Target: next day's closing price
         if i < len(df_clean) - 3:  # Reduced lookback to 3 days
@@ -51,11 +52,17 @@ def prepare_data(df):
             targets.append(target)
     
     # Remove the last 3 features since they have no corresponding target
-    features = features[:-3]
+    if len(features) > 3:
+        features = features[:-3]
+    else:
+        features = []
     return np.array(features), np.array(targets)
 
 # Train model
 def train_model(features, targets):
+    if len(features) == 0 or len(targets) == 0:
+        # Return default values if no data is available
+        return None, np.array([]), np.array([]), np.array([]), 0, 0, []
     # Use time series split: first 50% for training, last 50% for testing
     split_idx = int(len(features) * 0.5)
     X_train = features[:split_idx]
@@ -173,12 +180,20 @@ def index():
     df = load_data()
     features, targets = prepare_data(df)
     model, X_train, y_train, predictions, train_mse, test_mse, train_indices = train_model(features, targets)
-    plot_url = create_plot(df, y_train, predictions, train_indices)
+    if model is None:
+        plot_url = ''
+        train_mse = 'N/A (No data available for training)'
+    else:
+        plot_url = create_plot(df, y_train, predictions, train_indices)
     # Calculate additional metrics for visualization
     period_start = df.index.min().strftime('%Y-%m-%d')
     period_end = df.index.max().strftime('%Y-%m-%d')
     data_points = len(df)
-    metrics = ', '.join(['close', 'sma_14', 'sma_14_squared', 'Active_Addresses', 'Net_Transaction_Count', 'Transaction_Volume_USD'])
+    available_metrics = ['close', 'sma_14', 'sma_14_squared']
+    for col in ['Active_Addresses', 'Net_Transaction_Count', 'Transaction_Volume_USD']:
+        if col in df.columns:
+            available_metrics.append(col)
+    metrics = ', '.join(available_metrics)
     return render_template('index.html', plot_url=plot_url, train_mse=train_mse, period_start=period_start, period_end=period_end, data_points=data_points, metrics=metrics)
 
 if __name__ == '__main__':
