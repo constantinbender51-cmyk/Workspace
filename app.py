@@ -144,11 +144,13 @@ def train_model(df):
     
     for i in range(1, len(df)):
         if i >= split_index:  # Only trade in test period
-            yesterday_pred = df['prediction'].iloc[i-1]
+            # Use only information available at time of decision
+            # Today's prediction is based on yesterday's features
+            today_pred = df['prediction'].iloc[i]
             yesterday_close = df['price'].iloc[i-1]
             today_close = df['price'].iloc[i]
             
-            if yesterday_pred < yesterday_close:
+            if today_pred < yesterday_close:
                 # Go long: profit = (today_close - yesterday_close) / yesterday_close
                 returns = (today_close - yesterday_close) / yesterday_close
                 position = 'long'
