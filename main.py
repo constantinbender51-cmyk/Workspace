@@ -26,8 +26,8 @@ def fetch_btc_data():
     df['date'] = pd.to_datetime(df['open_time'], unit='ms')
     df = df[['date', 'close', 'volume']]
     print(f"DEBUG: Fetched {len(df)} rows of BTC data")
-    return df
     print(f"DEBUG: Data columns after processing: {df.columns.tolist()}")
+    return df
 
 def calculate_features(df):
     # Calculate features without lookahead bias - use shift to ensure no future data    print("DEBUG: Calculating features for the dataset")
@@ -68,8 +68,9 @@ def prepare_data(df):
         features.append(feature_row)
         targets.append(df.iloc[i+1]['close'])  # Target is close on day i+1 (true next day prediction)
     
-    return np.array(features), np.array(targets), df    print(f"DEBUG: Prepared {len(features)} feature samples and {len(targets)} target samples")
+    print(f"DEBUG: Prepared {len(features)} feature samples and {len(targets)} target samples")
     print(f"DEBUG: Features shape: {np.array(features).shape}, Targets shape: {np.array(targets).shape}")
+    return np.array(features), np.array(targets), df
 
 def train_model(features, targets):
     # Check if features and targets are not empty    print("DEBUG: Starting model training with 50/50 train-test split")
@@ -83,8 +84,9 @@ def train_model(features, targets):
     y_train, y_test = targets[:split_index], targets[split_index:]
     model = LinearRegression()
     model.fit(X_train, y_train)
-    return model, X_test, y_test    print(f"DEBUG: Model trained. Train samples: {len(X_train)}, Test samples: {len(X_test)}")
+    print(f"DEBUG: Model trained. Train samples: {len(X_train)}, Test samples: {len(X_test)}")
     print(f"DEBUG: Model coefficients: {model.coef_}, Intercept: {model.intercept_}")
+    return model, X_test, y_test
 
 def trading_strategy(df, model, X_test, start_capital=1000, transaction_cost=0.001):
     capital = start_capital
@@ -111,8 +113,9 @@ def trading_strategy(df, model, X_test, start_capital=1000, transaction_cost=0.0
         
         capital_history.append(capital)
     
-    return capital_history, positions    print(f"DEBUG: Trading strategy completed. Final capital: {capital}")
+    print(f"DEBUG: Trading strategy completed. Final capital: {capital}")
     print(f"DEBUG: Trading strategy positions: {positions[-5:] if len(positions) > 5 else positions}")
+    return capital_history, positions
 
 def create_plot(capital_history, df, predictions, test_start_idx, positions):
     # Create a figure with subplots    print("DEBUG: Generating plot for visualization")
@@ -163,8 +166,9 @@ def create_plot(capital_history, df, predictions, test_start_idx, positions):
     img.seek(0)
     plot_url = base64.b64encode(img.getvalue()).decode()
     plt.close()
-    return plot_url    print("DEBUG: Plot created and converted to base64")
+    print("DEBUG: Plot created and converted to base64")
     print(f"DEBUG: Plot URL generated with length: {len(plot_url)}")
+    return plot_url
 
 @app.route('/')
 def index():
