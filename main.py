@@ -96,23 +96,23 @@ def trading_strategy(df, model, X_test, start_capital=1000, transaction_cost=0.0
         df_idx = i + total_features_start
         if df_idx >= len(df) - 1:
             break  # Avoid index out of bounds
-        actual_close = df.iloc[df_idx]['close']  # Actual close on the predicted day
+        actual_close_next = df.iloc[df_idx + 1]['close']  # Actual close on the next day (target of prediction)
         
-        # Decision: long if prediction > actual_close, short if <= (expect price to increase for long, decrease for short)
-        if prediction > actual_close:
+        # Decision: long if prediction > actual_close_next, short if <= (expect price to increase for long, decrease for short)
+        if prediction > actual_close_next:
             # Long position: expect price to increase
             investment = capital
             capital_after_trade = investment * (1 - transaction_cost)  # Apply transaction cost on entry
-            # Return: (actual_close / prediction) - 1 for long
-            return_rate = (actual_close / prediction) - 1
+            # Return: (actual_close_next / prediction) - 1 for long
+            return_rate = (actual_close_next / prediction) - 1
             capital = capital_after_trade * (1 + return_rate)
             positions.append('long')
         else:
             # Short position: expect price to decrease
             investment = capital
             capital_after_trade = investment * (1 - transaction_cost)  # Apply transaction cost on entry
-            # Return: (prediction / actual_close) - 1 for short
-            return_rate = (prediction / actual_close) - 1
+            # Return: (prediction / actual_close_next) - 1 for short
+            return_rate = (prediction / actual_close_next) - 1
             capital = capital_after_trade * (1 + return_rate)
             positions.append('short')
         
