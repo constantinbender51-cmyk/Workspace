@@ -248,11 +248,11 @@ def create_plot(df, y_train, predictions, train_indices):
             else:
                 return_calc = 0  # Default to no return if insufficient data
         
-        # ML Strategy: If yesterday's predicted price is lower than yesterday's actual price, apply positive return, else negative
+        # ML Strategy: If yesterday's predicted price is above yesterday's actual price, apply positive return, else negative
         if i >= 1:  # Ensure yesterday's prediction is available
             pred_price_yesterday = sorted_predictions[i - 1]
             actual_price_yesterday = sorted_y_train[i - 1]
-            if pred_price_yesterday < actual_price_yesterday:
+            if pred_price_yesterday > actual_price_yesterday:
                 ret = return_calc  # Positive signal: long position
                 positions.append('long')  # Mark as long
             else:
