@@ -19,44 +19,69 @@ model_results = None
 capital_data = None
 
 def fetch_btc_data():
-    """Fetch BTC price data from 2022 to present"""
+    """Fetch BTC price data from Binance API from 2022 to present"""
     end_date = datetime.now()
     start_date = datetime(2022, 1, 1)
     
-    # Convert to timestamps
-    start_timestamp = int(start_date.timestamp())
-    end_timestamp = int(end_date.timestamp())
+    # Binance API endpoint for historical klines
+    url = "https://api.binance.com/api/v3/klines"
     
-    url = f"https://api.coingecko.com/api/v3/coins/bitcoin/market_chart/range"
-    params = {
-        'vs_currency': 'usd',
-        'from': start_timestamp,
-        'to': end_timestamp
-    }
+    # Binance uses milliseconds for timestamps
+    start_timestamp = int(start_date.timestamp() * 1000)
+    end_timestamp = int(end_date.timestamp() * 1000)
+    
+    all_data = []
+    current_start = start_timestamp
     
     try:
-        response = requests.get(url, params=params, timeout=30)
-        response.raise_for_status()
-        data = response.json()
+        # Binance limits to 1000 records per request, so we need to paginate
+        while current_start < end_timestamp:
+            params = {
+                'symbol': 'BTCUSDT',
+                'interval': '1d',
+                'startTime': current_start,
+                'endTime': end_timestamp,
+                'limit': 1000
+            }
+            
+            response = requests.get(url, params=params, timeout=30)
+            response.raise_for_status()
+            klines = response.json()
+            
+            if not klines:
+                break
+                
+            all_data.extend(klines)
+            
+            # Move to next period (last kline's close time + 1ms)
+            current_start = int(klines[-1][6]) + 1
+            
+            # Small delay to be respectful to the API
+            time.sleep(0.1)
         
-        # Extract prices and volumes
-        prices = data['prices']
-        volumes = data['total_volumes']
+        # Process the klines data
+        # Klines format: [open_time, open, high, low, close, volume, close_time, ...]
+        df = pd.DataFrame(all_data, columns=[
+            'open_time', 'open', 'high', 'low', 'close', 'volume',
+            'close_time', 'quote_asset_volume', 'number_of_trades',
+            'taker_buy_base_asset_volume', 'taker_buy_quote_asset_volume', 'ignore'
+        ])
         
-        # Create DataFrame
-        df = pd.DataFrame(prices, columns=['timestamp', 'price'])
-        df['volume'] = [v[1] for v in volumes]
-        df['date'] = pd.to_datetime(df['timestamp'], unit='ms')
+        # Convert timestamps and prices
+        df['date'] = pd.to_datetime(df['open_time'], unit='ms')
+        df['price'] = df['close'].astype(float)
+        df['volume'] = df['volume'].astype(float)
+        
+        # Set date as index and sort
         df = df.set_index('date').sort_index()
         
-        # Remove duplicates and resample to daily data
-        df = df[~df.index.duplicated(keep='first')]
-        df = df.resample('D').last().ffill()
+        # Keep only necessary columns
+        df = df[['price', 'volume']]
         
         return df
         
     except Exception as e:
-        print(f"Error fetching data: {e}")
+        print(f"Error fetching data from Binance: {e}")
         # Fallback: create sample data
         dates = pd.date_range(start='2022-01-01', end=datetime.now(), freq='D')
         np.random.seed(42)
