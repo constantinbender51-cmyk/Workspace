@@ -19,10 +19,56 @@ def load_data():
     if not os.path.exists('btc_data.csv'):
         # Run the data fetching script if file doesn't exist
         subprocess.run(['python', 'fetch_price_data.py'], check=True)
-    df = pd.read_csv('btc_data.csv')
-    df['date'] = pd.to_datetime(df['date'])
-    df.set_index('date', inplace=True)
-    return df
+    df_price = pd.read_csv('btc_data.csv')
+    df_price['date'] = pd.to_datetime(df_price['date'])
+    df_price.set_index('date', inplace=True)
+    
+    # Fetch on-chain metrics
+    import requests
+    import time
+    BASE_URL = "https://api.blockchain.info/charts/"
+    METRICS = {
+        'Active_Addresses': 'unique-addresses-used',
+        'Net_Transaction_Count': 'n-transactions',
+        'Transaction_Volume_USD': 'estimated-transaction-volume-usd',
+    }
+    START_DATE = '2022-01-01'
+    END_DATE = '2023-09-30'
+    
+    def fetch_chart_data(chart_name, start_date):
+        params = {
+            'format': 'json',
+            'start': start_date,
+            'timespan': 'all',
+            'sampled': 'false'
+        }
+        url = f"{BASE_URL}{chart_name}"
+        try:
+            response = requests.get(url, params=params, timeout=15)
+            response.raise_for_status()
+            data = response.json()
+            if 'values' not in data or not data['values']:
+                return pd.DataFrame()
+            df = pd.DataFrame(data['values'])
+            df['Date'] = pd.to_datetime(df['x'], unit='s', utc=True).dt.tz_localize(None)
+            df = df.set_index('Date')['y'].rename(chart_name)
+            return df
+        except Exception:
+            return pd.DataFrame()
+    
+    all_data = [df_price]
+    for metric_name, chart_endpoint in METRICS.items():
+        time.sleep(1.5)
+        df_metric = fetch_chart_data(chart_endpoint, START_DATE)
+        if not df_metric.empty:
+            df_metric = df_metric.rename(metric_name)
+            all_data.append(df_metric)
+    
+    df_combined = pd.concat(all_data, axis=1)
+    df_final = df_combined.loc[START_DATE:END_DATE].ffill()
+    df_final = df_final[~df_final.index.duplicated(keep='first')]
+    
+    return df_final
 
 # Prepare features and target
 def prepare_data(df):
@@ -30,16 +76,19 @@ def prepare_data(df):
     df['sma_14'] = df['close'].rolling(window=14).mean()
     df['sma_14_squared'] = df['sma_14'] ** 2
     
-    # Remove rows with NaN values from SMA calculation
+    # Remove rows with NaN values from SMA and on-chain metric calculations
     df_clean = df.dropna()
     
     features = []
     targets = []
     for i in range(len(df_clean)):
-        # Features: 14-day SMA and squared 14-day SMA
+        # Features: 14-day SMA, squared 14-day SMA, and on-chain metrics
         feature = [
             df_clean['sma_14'].iloc[i],
-            df_clean['sma_14_squared'].iloc[i]
+            df_clean['sma_14_squared'].iloc[i],
+            df_clean['Active_Addresses'].iloc[i],
+            df_clean['Net_Transaction_Count'].iloc[i],
+            df_clean['Transaction_Volume_USD'].iloc[i]
         ]
         features.append(feature)
         # Target: next day's closing price
