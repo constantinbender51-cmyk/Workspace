@@ -100,13 +100,8 @@ def prepare_data(df):
     features = []
     targets = []
     for i in range(len(df_clean)):
-        # Features: 14-day SMA, squared SMA, and on-chain metrics (if available)
-        feature = [
-            df_clean['sma_14'].iloc[i],
-            df_clean['sma_14_volume_sma_14_price'].iloc[i],
-            df_clean['sma_14_squared'].iloc[i]
-        ]
-        # Add on-chain metrics only if they exist in the DataFrame
+        # Feature: only net transaction count * 14 SMA of price if available
+        feature = []
         if 'Net_Transaction_Count' in df_clean.columns:
             feature.append(df_clean['Net_Transaction_Count'].iloc[i] * df_clean['sma_14'].iloc[i])
         features.append(feature)
