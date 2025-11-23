@@ -70,8 +70,12 @@ def train_model(features, targets, df):
     # Align features and targets with filtered indices
     # Since features and targets are derived from df_clean, align using the cleaned DataFrame indices
     df_clean = df.dropna()  # Recreate df_clean to get consistent indices
+    # Ensure the boolean masks are based on df_clean indices
     train_indices_clean = df_clean.index.isin(train_df.index)
     test_indices_clean = df_clean.index.isin(test_df.index)
+    # Check if dimensions match
+    if len(features) != len(df_clean):
+        raise ValueError("Features array length does not match cleaned DataFrame length")
     X_train = features[train_indices_clean]
     X_test = features[test_indices_clean]
     y_train = targets[train_indices_clean]
@@ -80,7 +84,7 @@ def train_model(features, targets, df):
     model.fit(X_train, y_train)
     predictions = model.predict(X_test)
     mse = mean_squared_error(y_test, predictions)
-    return model, X_test, y_test, predictions, mse, test_indices
+    return model, X_test, y_test, predictions, mse, test_indices_clean
 
 # Generate plot
 def create_plot(df, y_test, predictions, test_indices):
