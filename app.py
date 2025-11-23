@@ -90,6 +90,8 @@ def load_data():
 def prepare_data(df):
     # Calculate 24-day SMA for close price
     df['sma_24_close'] = df['close'].rolling(window=24).mean()
+    # Calculate 48-day SMA for close price
+    df['sma_48_close'] = df['close'].rolling(window=48).mean()
     
     # Remove rows with NaN values from SMA calculation
     df_clean = df.dropna()
@@ -97,11 +99,12 @@ def prepare_data(df):
     features = []
     targets = []
     for i in range(len(df_clean)):
-        # Features: 24-day SMA value for previous day (day t-1)
-        if i >= 24:  # Ensure enough history for 1-day lookback
+        # Features: 24-day SMA and 48-day SMA values for previous day (day t-1)
+        if i >= 48:  # Ensure enough history for 1-day lookback and 48-day SMA
             feature = []
-            # Get SMA value for day t-1
+            # Get SMA values for day t-1
             feature.append(df_clean['sma_24_close'].iloc[i - 1])
+            feature.append(df_clean['sma_48_close'].iloc[i - 1])
             features.append(feature)
             # Target: today's closing price
             target = df_clean['close'].iloc[i]
