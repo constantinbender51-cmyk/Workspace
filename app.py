@@ -32,7 +32,7 @@ def load_data():
         'Net_Transaction_Count': 'n-transactions',
         'Transaction_Volume_USD': 'estimated-transaction-volume-usd',
     }
-    START_DATE = '2022-01-01'
+    START_DATE = '2022-08-10'
     END_DATE = '2023-09-30'
     
     def fetch_chart_data(chart_name, start_date):
