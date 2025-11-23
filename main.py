@@ -54,6 +54,7 @@ def prepare_data(df):
     print("DEBUG: Preparing features and targets with 5-day lookback for 3-day future target")
     for i in range(5, len(df) - 3):  # Start from index 5 to have 5 days of lookback, stop at len(df)-3 to have a 3-day future target
         # Use technical indicators from the past 5 days (i-5 to i-1) to predict close on day i+3
+        print(f"DEBUG: For target at index {i+3} (date: {df.iloc[i+3]['date']}), using features from indices {i-5} to {i-1}")
         feature_row = [
             df.iloc[i-5]['sma_5'],       # SMA 5 from 5 days ago
             df.iloc[i-4]['sma_5'],       # SMA 5 from 4 days ago
