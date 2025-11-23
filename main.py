@@ -25,8 +25,6 @@ def fetch_btc_data():
     df['volume'] = df['volume'].astype(float)
     df['date'] = pd.to_datetime(df['open_time'], unit='ms')
     df = df[['date', 'close', 'volume']]
-    print(f"DEBUG: Fetched {len(df)} rows of BTC data")
-    print(f"DEBUG: Data columns after processing: {df.columns.tolist()}")
     return df
 
 def calculate_features(df):
@@ -42,13 +40,15 @@ def prepare_data(df):
     df = df.dropna()  # Remove rows with NaN values from rolling averages
     print(f"DEBUG: Data shape after calculate_features: {df.shape}")
     
-    # Check if we have enough data after dropping NaN; minimum 4 days for 3-day lookback + target    print(f"DEBUG: Data after dropping NaN has {len(df)} rows")
+    # Check if we have enough data after dropping NaN; minimum 4 days for 3-day lookback + target
+    print(f"DEBUG: Data after dropping NaN has {len(df)} rows")
     if len(df) < 4:
         raise ValueError(f"Insufficient data after processing. Have {len(df)} days, need at least 4. Try fetching more data.")
     
     # Create features with 3-day lookback for predicting the next day's close
     features = []
-    targets = []    print("DEBUG: Preparing features and targets with 3-day lookback")
+    targets = []
+    print("DEBUG: Preparing features and targets with 3-day lookback")
     for i in range(3, len(df) - 1):  # Start from index 3 to have 3 days of lookback, stop at len(df)-1 to have a target
         # Use technical indicators from the past 3 days (i-3 to i-1) to predict close on day i
         feature_row = [
@@ -84,8 +84,6 @@ def train_model(features, targets):
     y_train, y_test = targets[:split_index], targets[split_index:]
     model = LinearRegression()
     model.fit(X_train, y_train)
-    print(f"DEBUG: Model trained. Train samples: {len(X_train)}, Test samples: {len(X_test)}")
-    print(f"DEBUG: Model coefficients: {model.coef_}, Intercept: {model.intercept_}")
     return model, X_test, y_test
 
 def trading_strategy(df, model, X_test, start_capital=1000, transaction_cost=0.001):
@@ -113,8 +111,6 @@ def trading_strategy(df, model, X_test, start_capital=1000, transaction_cost=0.0
         
         capital_history.append(capital)
     
-    print(f"DEBUG: Trading strategy completed. Final capital: {capital}")
-    print(f"DEBUG: Trading strategy positions: {positions[-5:] if len(positions) > 5 else positions}")
     return capital_history, positions
 
 def create_plot(capital_history, df, predictions, test_start_idx, positions):
@@ -166,8 +162,6 @@ def create_plot(capital_history, df, predictions, test_start_idx, positions):
     img.seek(0)
     plot_url = base64.b64encode(img.getvalue()).decode()
     plt.close()
-    print("DEBUG: Plot created and converted to base64")
-    print(f"DEBUG: Plot URL generated with length: {len(plot_url)}")
     return plot_url
 
 @app.route('/')
