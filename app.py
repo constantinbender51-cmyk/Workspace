@@ -104,8 +104,6 @@ def prepare_data(df):
             df_clean['sma_14_squared'].iloc[i]
         ]
         # Add on-chain metrics only if they exist in the DataFrame
-        if 'Active_Addresses' in df_clean.columns:
-            feature.append(df_clean['Active_Addresses'].iloc[i])
         if 'Net_Transaction_Count' in df_clean.columns:
             feature.append(df_clean['Net_Transaction_Count'].iloc[i])
         if 'Transaction_Volume_USD' in df_clean.columns:
