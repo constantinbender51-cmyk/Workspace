@@ -25,7 +25,8 @@ def fetch_btc_data():
     df['volume'] = df['volume'].astype(float)
     df['date'] = pd.to_datetime(df['open_time'], unit='ms')
     df = df[['date', 'close', 'volume']]
-    return df    print(f"DEBUG: Fetched {len(df)} rows of BTC data")
+    print(f"DEBUG: Fetched {len(df)} rows of BTC data")
+    return df
 
 def calculate_features(df):
     # Calculate features without lookahead bias - use shift to ensure no future data    print("DEBUG: Calculating features for the dataset")
