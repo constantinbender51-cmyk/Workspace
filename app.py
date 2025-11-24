@@ -206,12 +206,8 @@ def run_experiment():
             loss.backward()
             optimizer.step()
             
-            # More frequent logging (every 100 epochs)
-            if (epoch + 1) % 100 == 0:
-                 # Print a dot or small status update without newline to show liveness if needed, 
-                 # or just log regularly. We'll stick to log() but maybe less verbose.
-                 if (epoch + 1) % 1000 == 0:
-                    log(f"  [Size {h_size}] Epoch {epoch+1}/{EPOCHS} - Loss: {loss.item():.6f}")
+            # Print loss for every epoch
+            log(f"  [Size {h_size}] Epoch {epoch+1}/{EPOCHS} - Loss: {loss.item():.6f}")
 
         model.eval()
         with torch.no_grad():
