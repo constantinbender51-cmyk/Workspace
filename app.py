@@ -196,13 +196,6 @@ def prepare_data(df):
             feature = []
             for lookback in range(1, 21):
                 if i - lookback >= 0:
-                    # Calculate daily return for each lookback day: (close_{i-lookback} - close_{i-lookback-1}) / close_{i-lookback-1}
-                    # This gives us the return for day (i-lookback) relative to previous day
-                    if i - lookback - 1 >= 0:
-                        daily_return = (df_clean['close'].iloc[i - lookback] - df_clean['close'].iloc[i - lookback - 1]) / df_clean['close'].iloc[i - lookback - 1]
-                    else:
-                        daily_return = 0  # Default to 0 if insufficient data
-                    
                     feature.append(df_clean['sma_3_close'].iloc[i - lookback])
                     feature.append(df_clean['sma_9_close'].iloc[i - lookback])
                     feature.append(df_clean['ema_3_volume'].iloc[i - lookback])
@@ -210,12 +203,11 @@ def prepare_data(df):
                     feature.append(df_clean['signal_line'].iloc[i - lookback])
                     feature.append(df_clean['stoch_rsi'].iloc[i - lookback])
                     feature.append(df_clean['day_of_week'].iloc[i - lookback])
-                    feature.append(daily_return)
                     
                     for col in ['Net_Transaction_Count', 'Transaction_Volume_USD', 'Active_Addresses']:
                         feature.append(df_clean[col].iloc[i - lookback] if col in df_clean.columns else 0)
                 else:
-                    feature.extend([0] * 11)
+                    feature.extend([0] * 10)
             features.append(feature)
             targets.append(df_clean['close'].iloc[i])
     
@@ -327,8 +319,8 @@ def run_training_task():
         y_test = targets_scaled[split_idx:]
         train_indices = list(range(40, 40 + split_idx))
         
-        X_train_reshaped = X_train.reshape(X_train.shape[0], 20, 11)
-        X_test_reshaped = X_test.reshape(X_test.shape[0], 20, 11)
+        X_train_reshaped = X_train.reshape(X_train.shape[0], 20, 10)
+        X_test_reshaped = X_test.reshape(X_test.shape[0], 20, 10)
         
         # INCREASED EPOCHS AND ADDED REGULARIZATION
         EPOCHS = 100
