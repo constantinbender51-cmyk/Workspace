@@ -3,7 +3,7 @@ Based on the code in the repository, here are the specifications of the trading 
 **Data Sources:**
 - Price data: Fetched from Binance API (BTCUSDT daily candles) via `fetch_price_data.py`, including open, high, low, close prices, and volume.
 - On-chain metrics: Retrieved from Blockchain.info API, including Active Addresses, Net Transaction Count, and Transaction Volume USD.
-- Date range: From 2022-08-10 to 2023-09-30.
+- Date range: From 2018-01-01 to 2025-11-30.
 
 **Data Preprocessing:**
 - Combines price and on-chain data, handling missing values with forward fill.
