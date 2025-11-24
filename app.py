@@ -196,7 +196,8 @@ def prepare_data(df):
             feature = []
             for lookback in range(1, 21):
                 if i - lookback >= 0:
-                    # Calculate daily return using historical data only: (close_{i-lookback} - close_{i-lookback-1}) / close_{i-lookback-1}
+                    # Calculate daily return for each lookback day: (close_{i-lookback} - close_{i-lookback-1}) / close_{i-lookback-1}
+                    # This gives us the return for day (i-lookback) relative to previous day
                     if i - lookback - 1 >= 0:
                         daily_return = (df_clean['close'].iloc[i - lookback] - df_clean['close'].iloc[i - lookback - 1]) / df_clean['close'].iloc[i - lookback - 1]
                     else:
