@@ -6,7 +6,7 @@
     <meta http-equiv="refresh" content="60">
     <title>BTC Double Descent (Optimized)</title>
     <style>
-        body { font-family: sans-serif; max-width: 800px; margin: 0 auto; padding: 20px; background-color: #121212; color: #e0e0e0; }
+        body { font-family: sans-serif; max-width: 900px; margin: 0 auto; padding: 20px; background-color: #121212; color: #e0e0e0; }
         .container { text-align: center; }
         #progress-container { display: none; margin: 20px 0; }
         progress { width: 100%; height: 30px; }
@@ -17,25 +17,29 @@
         #result-container { margin-top: 30px; display: none; }
         img { max-width: 100%; height: auto; border: 1px solid #333; }
         .error { color: white; background-color: #c62828; padding: 10px; border-radius: 5px; margin-top: 20px; display:none;}
+        .metrics { margin-top: 15px; font-size: 0.9em; color: #b0b0b0; }
         .debug-console { 
             text-align: left; 
             background: #1e1e1e; 
             padding: 10px; 
             margin-top: 20px; 
             border: 1px solid #333; 
-            height: 150px; 
+            height: 180px; 
             overflow-y: scroll; 
             font-family: monospace; 
             font-size: 12px; 
             color: #e0e0e0; 
         }
+        .log-info { color: #90caf9; }
+        .log-error { color: #ef9a9a; }
+        .log-success { color: #a5d6a7; }
     </style>
 </head>
 <body>
     <div class="container">
         <h1>Double Descent: BTC Price Prediction</h1>
         <p>
-            Training LSTM. 
+            Training LSTM (Target: Returns / Residuals).
         </p>
 
         <button id="startBtn" onclick="startTraining()" style="display: none;">Start Training Experiment</button>
@@ -57,7 +61,16 @@
         <div id="result-container">
             <h2>Experiment Results</h2>
             <p>Final Training MSE: <span id="finalMse"></span></p>
+            <div class="metrics">
+                <p>sMAPE: <span id="finalSmape"></span></p>
+                <p>MAE: <span id="finalMae"></span></p>
+            </div>
             <img id="resultPlot" src="" alt="Results">
+            <div class="metrics">
+                <h3>Residual Diagnostics</h3>
+                <p>Autocorrelation: <span id="residAuto"></span></p>
+                <p>Error Std Dev: <span id="residStd"></span></p>
+            </div>
         </div>
         
         <div id="errorMsg" class="error"></div>
@@ -70,16 +83,18 @@
     <script>
         let isPolling = false;
         
-        function log(msg) {
+        function log(msg, type="info") {
             console.log(msg);
             const consoleDiv = document.getElementById('debugConsole');
             const newLog = document.createElement('div');
             newLog.innerText = "> " + msg;
+            if (type === "error") newLog.classList.add("log-error");
+            else if (type === "success") newLog.classList.add("log-success");
+            else newLog.classList.add("log-info");
             consoleDiv.appendChild(newLog);
             consoleDiv.scrollTop = consoleDiv.scrollHeight;
         }
 
-        // Auto-start polling when page loads
         document.addEventListener('DOMContentLoaded', function() {
             log("Page loaded. Checking training status...");
             isPolling = true;
@@ -110,14 +125,14 @@
                 
                 if (data.status === 'started' || data.status === 'already_running') {
                     progressContainer.style.display = 'block';
-                    log("Training started. Polling loop initiated.");
+                    log("Training started. Polling loop initiated.", "success");
                     isPolling = true;
-                    checkStatus(); // Start the loop
+                    checkStatus();
                 } else {
                     throw new Error("Server status: " + data.status);
                 }
             } catch (e) {
-                log("ERROR: " + e.message);
+                log("ERROR: " + e.message, "error");
                 errorMsg.innerText = "Error: " + e.message;
                 errorMsg.style.display = 'block';
                 btn.disabled = false;
@@ -129,9 +144,8 @@
             if (!isPolling) return;
 
             try {
-                // Fetch with a timeout so we don't hang forever if server is busy
                 const controller = new AbortController();
-                const timeoutId = setTimeout(() => controller.abort(), 2000); // 2 second timeout
+                const timeoutId = setTimeout(() => controller.abort(), 2000);
 
                 const response = await fetch('/status', { signal: controller.signal });
                 clearTimeout(timeoutId);
@@ -155,12 +169,10 @@
                     
                     const now = new Date();
                     document.getElementById('heartbeat').innerText = `Last Update: ${now.toLocaleTimeString()}`;
-
-                    // Schedule next poll
                     setTimeout(checkStatus, 1000);
 
                 } else if (data.status === 'completed') {
-                    log("Training completed successfully.");
+                    log("Training completed successfully.", "success");
                     isPolling = false;
                     document.getElementById('progress-container').style.display = 'none';
                     document.getElementById('startBtn').innerText = "Run Again";
@@ -168,30 +180,4 @@
                     document.getElementById('startBtn').style.display = 'block';
                     
                     document.getElementById('resultPlot').src = "data:image/png;base64," + data.plot_url;
-                    document.getElementById('finalMse').innerText = data.train_mse.toExponential(4);
-                    document.getElementById('result-container').style.display = 'block';
-
-                } else if (data.status === 'error') {
-                    log("TRAINING FAILED: " + data.error);
-                    isPolling = false;
-                    document.getElementById('startBtn').disabled = false;
-                    document.getElementById('startBtn').style.display = 'block';
-                    document.getElementById('errorMsg').innerText = "Server Error: " + data.error;
-                    document.getElementById('errorMsg').style.display = 'block';
-                } else if (data.status === 'idle') {
-                    // If training hasn't started yet, show the start button
-                    document.getElementById('startBtn').style.display = 'block';
-                    document.getElementById('startBtn').disabled = false;
-                    setTimeout(checkStatus, 2000); // Check again in 2 seconds
-                }
-            } catch (e) {
-                // If fetch fails (timeout or network error), just log and retry
-                log("Poll skipped (server busy): " + e.message);
-                if (isPolling) setTimeout(checkStatus, 2000); // Wait a bit longer before retrying
-            }
-        }
-    </script>
-</body>
-</html>
-
-
+                    document.getElementById('finalMse').innerText = data.train_mse.toExponential
