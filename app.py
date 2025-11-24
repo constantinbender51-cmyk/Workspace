@@ -127,7 +127,7 @@ def load_data():
         for metric_name, chart_endpoint in METRICS.items():
             time.sleep(1)  # Sleep for 1 second between API calls to respect rate limits
             try:
-                params = {'format': 'json', 'start': START_DATE, 'end': END_DATE, 'rollingAverage': '1d'}
+                params = {'format': 'json', 'start': START_DATE, 'end': END_DATE}
                 response = requests.get(f"{BASE_URL}{chart_endpoint}", params=params, timeout=10)
                 if response.status_code == 200:
                     data = response.json()
