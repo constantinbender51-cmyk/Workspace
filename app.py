@@ -207,9 +207,7 @@ def prepare_data(df):
     df_clean = df.dropna()
     
     features = []
-    # Calculate log returns for the target
-    df_clean['log_return'] = np.log(df_clean['close'] / df_clean['close'].shift(1))
-    
+    # Use close price as the target
     targets = []
     for i in range(len(df_clean)):
         if i >= 40:
@@ -235,7 +233,7 @@ def prepare_data(df):
                     # For days before the start of the sequence, use zeros
                     feature.extend([0] * 10)
             features.append(feature)
-            targets.append(df_clean['log_return'].iloc[i])
+            targets.append(df_clean['close'].iloc[i])
     
     features = np.array(features)
     valid_indices = ~np.isnan(features).any(axis=1)
@@ -288,22 +286,22 @@ def create_plot(df, y_train, predictions, train_indices, history_loss, history_v
         all_y_actual.extend(sorted_y_test)
         all_y_predicted.extend(sorted_test_predictions)
     
-    # Plot 1: Combined actual vs predicted log returns
+    # Plot 1: Combined actual vs predicted prices
     plt.subplot(3, 1, 1)
-    plt.plot(all_dates, all_y_actual, label='Actual Log Return', color='blue')
-    plt.plot(all_dates, all_y_predicted, label='Predicted Log Return', color='green', alpha=0.7)
-    plt.title('BTC Log Return Prediction (Training and Test Sets)')
+    plt.plot(all_dates, all_y_actual, label='Actual Price', color='blue')
+    plt.plot(all_dates, all_y_predicted, label='Predicted Price', color='green', alpha=0.7)
+    plt.title('BTC Price Prediction (Training and Test Sets)')
     plt.legend()
     plt.xticks(rotation=45)
 
-    # Strategy capital calculation for combined data using log returns
+    # Strategy capital calculation for combined data using price predictions
     capital = [1000]
     for i in range(1, len(all_y_actual)):
-        # all_y_actual and all_y_predicted are now log returns
-        actual_log_ret = all_y_actual[i]
-        predicted_log_ret = all_y_predicted[i]
-        pos = 1 if predicted_log_ret > 0 else -1  # Long if predicted log return positive, short if negative
-        capital.append(capital[-1] * (1 + (actual_log_ret * pos * 1)))
+        # all_y_actual and all_y_predicted are now prices
+        actual_price = all_y_actual[i]
+        predicted_price = all_y_predicted[i]
+        pos = 1 if predicted_price > actual_price else -1  # Long if predicted price higher, short if lower
+        capital.append(capital[-1] * (1 + ((actual_price - all_y_actual[i-1]) / all_y_actual[i-1] * pos * 1)))
     
     plt.subplot(3, 1, 2)
     plt.plot(all_dates, capital, color='purple')
