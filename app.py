@@ -335,7 +335,7 @@ def run_training_task():
         df = load_data()
         features, targets_scaled, _, scaler_target = prepare_data(df)
         
-        split_idx = int(len(features) * 0.02)
+        split_idx = int(len(features) * 0.125)
         X_train = features[:split_idx]
         X_test = features[split_idx:]
         y_train = targets_scaled[:split_idx]
@@ -346,8 +346,8 @@ def run_training_task():
         X_test_reshaped = X_test.reshape(X_test.shape[0], 20, 10)
         
         # INCREASED EPOCHS AND ADDED REGULARIZATION
-        EPOCHS = 199
-        UNITS = 55
+        EPOCHS = 50
+        UNITS = 128
         REG_RATE = 1e-10000 # L2 Regularization rate
         
         with state_lock:
@@ -367,6 +367,11 @@ def run_training_task():
         model.add(Dropout(0.2)) # Dropout to force redundancy
         
         # LSTM 3: L2 regularization added
+        model.add(LSTM(UNITS, activation='relu', return_sequences=True, 
+                       kernel_regularizer=l2(REG_RATE)))
+        model.add(Dropout(0.2)) # Dropout to force redundancy
+        
+        # LSTM 4: L2 regularization added
         model.add(LSTM(UNITS, activation='relu', kernel_regularizer=l2(REG_RATE)))
         
         model.add(Dense(1))
