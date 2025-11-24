@@ -137,8 +137,8 @@ def load_data():
             'Net_Transaction_Count': 'n-transactions',
             'Transaction_Volume_USD': 'estimated-transaction-volume-usd',
         }
-        START_DATE = '2022-09-01'
-        END_DATE = '2023-09-30'
+        START_DATE = '2021-01-01'
+        END_DATE = '2022-12-31'
         
         all_data = [df_price]
         for metric_name, chart_endpoint in METRICS.items():
