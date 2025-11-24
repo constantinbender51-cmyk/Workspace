@@ -275,7 +275,7 @@ def create_plot(df, y_train, predictions, train_indices, history_loss, history_v
     for i in range(1, len(all_y_actual)):
         ret = (all_y_actual[i] - all_y_actual[i-1]) / all_y_actual[i-1]
         pos = 1 if all_y_predicted[i-1] > all_y_actual[i-1] else -1 
-        capital.append(capital[-1] * (1 + (ret * pos * 5)))
+        capital.append(capital[-1] * (1 + (ret * pos * 1)))
     
     plt.subplot(3, 1, 2)
     plt.plot(all_dates, capital, color='purple')
