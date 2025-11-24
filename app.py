@@ -211,7 +211,7 @@ def prepare_data(df):
     for i in range(len(df_clean)):
         if i >= 40:
             feature = []
-            for lookback in range(1, 21):
+            for lookback in range(1, 13):
                 if i - lookback >= 0:
                     # Use actual values for each feature
                     feature.append(df_clean['sma_3_close'].iloc[i - lookback])
@@ -342,8 +342,8 @@ def run_training_task():
         y_test = targets_scaled[split_idx:]
         train_indices = list(range(40, 40 + split_idx))
         
-        X_train_reshaped = X_train.reshape(X_train.shape[0], 20, 10)
-        X_test_reshaped = X_test.reshape(X_test.shape[0], 20, 10)
+        X_train_reshaped = X_train.reshape(X_train.shape[0], 12, 10)
+        X_test_reshaped = X_test.reshape(X_test.shape[0], 12, 10)
         
         # INCREASED EPOCHS AND ADDED REGULARIZATION
         EPOCHS = 1000
@@ -358,7 +358,7 @@ def run_training_task():
         
         # LSTM 1: L2 regularization added to the kernel weights
         model.add(LSTM(UNITS, activation='relu', return_sequences=True, 
-                       input_shape=(20, 10), kernel_regularizer=l2(REG_RATE)))
+                       input_shape=(12, 10), kernel_regularizer=l2(REG_RATE)))
         model.add(Dropout(0.5)) # Dropout to force redundancy
         
         # LSTM 2: L2 regularization added
