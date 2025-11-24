@@ -105,11 +105,9 @@ def prepare_dataset():
     log("--- Starting Data Pipeline ---")
     btc_df = get_binance_data(limit=365)
     hash_df = get_blockchain_data("hash-rate")
-    diff_df = get_blockchain_data("difficulty")
     
     log("Merging datasets...")
     df = btc_df.merge(hash_df, on="date", how="inner")
-    df = df.merge(diff_df, on="date", how="inner")
     df = df.sort_values("date").reset_index(drop=True)
     
     df["log_ret"] = np.log(df["close"] / df["close"].shift(1))
@@ -162,7 +160,7 @@ def run_experiment():
     
     df = prepare_dataset()
     
-    feature_cols = ["log_ret", "hash-rate", "difficulty"]
+    feature_cols = ["log_ret", "hash-rate"]
     target_col = ["target_sma7"]
     
     log("Normalizing features...")
