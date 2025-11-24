@@ -346,7 +346,7 @@ def run_training_task():
         X_test_reshaped = X_test.reshape(X_test.shape[0], 20, 10)
         
         # INCREASED EPOCHS AND ADDED REGULARIZATION
-        EPOCHS = 50
+        EPOCHS = 1000
         UNITS = 128
         REG_RATE = 1e-10000 # L2 Regularization rate
         
@@ -384,7 +384,7 @@ def run_training_task():
         history = model.fit(
             X_train_reshaped, y_train,
             epochs=EPOCHS,
-            batch_size=32,
+            batch_size=64,
             verbose=0,
             validation_data=(X_test_reshaped, y_test),
             callbacks=[ThrottledProgressCallback(EPOCHS, update_frequency=5)]
