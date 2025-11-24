@@ -214,12 +214,12 @@ def prepare_data(df):
     
     return features_scaled, targets_scaled, scaler_features, scaler_target
 
-def create_plot(df, y_train, predictions, train_indices, history_loss, history_val_loss):
+def create_plot(df, y_train, predictions, train_indices, history_loss, history_val_loss, y_test=None, test_predictions=None, test_indices=None):
     logger.info("Step 4: Generating Plots...")
     history_loss = [x if x is not None else 0 for x in history_loss]
     history_val_loss = [x if x is not None else 0 for x in history_val_loss]
 
-    plt.figure(figsize=(10, 12))
+    plt.figure(figsize=(10, 16))
     
     dates = df.index[train_indices]
     sorted_indices = np.argsort(dates)
@@ -227,10 +227,10 @@ def create_plot(df, y_train, predictions, train_indices, history_loss, history_v
     sorted_y_train = y_train[sorted_indices]
     sorted_predictions = predictions[sorted_indices]
     
-    plt.subplot(3, 1, 1)
+    plt.subplot(4, 1, 1)
     plt.plot(sorted_dates, sorted_y_train, label='Actual Price', color='blue')
     plt.plot(sorted_dates, sorted_predictions, label='Predicted', color='green', alpha=0.7)
-    plt.title('BTC Price Prediction (Scaled Training)')
+    plt.title('BTC Price Prediction (Training Set)')
     plt.legend()
     plt.xticks(rotation=45)
 
@@ -242,18 +242,40 @@ def create_plot(df, y_train, predictions, train_indices, history_loss, history_v
         pos = 1 if sorted_predictions[i-1] > sorted_y_train[i-1] else -1 
         capital.append(capital[-1] * (1 + (ret * pos * 5)))
     
-    plt.subplot(3, 1, 2)
+    plt.subplot(4, 1, 2)
     plt.plot(sorted_dates, capital, color='purple')
     plt.title('Strategy Capital (Long/Short based on Predicted vs Actual)')
     plt.xticks(rotation=45)
 
-    plt.subplot(3, 1, 3)
-    plt.semilogy(history_loss, label='Train Loss', color='blue')
-    plt.semilogy(history_val_loss, label='Test Loss (Val)', color='orange')
-    plt.xlabel('Epochs')
-    plt.ylabel('MSE Loss (Log Scale)')
-    plt.title('Double Descent Visualization')
-    plt.legend()
+    if y_test is not None and test_predictions is not None and test_indices is not None:
+        test_dates = df.index[test_indices]
+        sorted_test_indices = np.argsort(test_dates)
+        sorted_test_dates = test_dates[sorted_test_indices]
+        sorted_y_test = y_test[sorted_test_indices]
+        sorted_test_predictions = test_predictions[sorted_test_indices]
+        
+        plt.subplot(4, 1, 3)
+        plt.plot(sorted_test_dates, sorted_y_test, label='Actual Price', color='blue')
+        plt.plot(sorted_test_dates, sorted_test_predictions, label='Predicted', color='red', alpha=0.7)
+        plt.title('BTC Price Prediction (Test Set)')
+        plt.legend()
+        plt.xticks(rotation=45)
+        
+        plt.subplot(4, 1, 4)
+        plt.semilogy(history_loss, label='Train Loss', color='blue')
+        plt.semilogy(history_val_loss, label='Test Loss (Val)', color='orange')
+        plt.xlabel('Epochs')
+        plt.ylabel('MSE Loss (Log Scale)')
+        plt.title('Double Descent Visualization')
+        plt.legend()
+    else:
+        plt.subplot(4, 1, 3)
+        plt.semilogy(history_loss, label='Train Loss', color='blue')
+        plt.semilogy(history_val_loss, label='Test Loss (Val)', color='orange')
+        plt.xlabel('Epochs')
+        plt.ylabel('MSE Loss (Log Scale)')
+        plt.title('Double Descent Visualization')
+        plt.legend()
 
     plt.tight_layout()
     img = io.BytesIO()
@@ -329,14 +351,19 @@ def run_training_task():
         
         # Get predictions in Scaled format
         train_predictions_scaled = model.predict(X_train_reshaped, verbose=0)
+        test_predictions_scaled = model.predict(X_test_reshaped, verbose=0)
         
         # INVERSE TRANSFORM: Convert scaled outputs back to real dollar prices
         train_predictions_real = scaler_target.inverse_transform(train_predictions_scaled).flatten()
         y_train_real = scaler_target.inverse_transform(y_train).flatten()
+        test_predictions_real = scaler_target.inverse_transform(test_predictions_scaled).flatten()
+        y_test_real = scaler_target.inverse_transform(y_test).flatten()
+        test_indices = list(range(40 + split_idx, 40 + split_idx + len(y_test_real)))
         
         plot_url = create_plot(
             df, y_train_real, train_predictions_real, train_indices, 
-            history.history['loss'], history.history['val_loss']
+            history.history['loss'], history.history['val_loss'],
+            y_test_real, test_predictions_real, test_indices
         )
         
         with state_lock:
