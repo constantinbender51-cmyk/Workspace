@@ -12,6 +12,16 @@ import sys
 import http.server
 import socketserver
 import os
+import time
+
+# -----------------------------------------------------------------------------
+# 0. UTILS
+# -----------------------------------------------------------------------------
+
+def log(message):
+    """Prints a message with a timestamp."""
+    timestamp = datetime.now().strftime("%H:%M:%S")
+    print(f"[{timestamp}] {message}")
 
 # -----------------------------------------------------------------------------
 # 1. DATA ACQUISITION
@@ -21,7 +31,7 @@ def get_binance_data(symbol="BTCUSDT", interval="1d", limit=365):
     """
     Fetches historical kline data from Binance public API.
     """
-    print(f"Fetching {symbol} data from Binance...")
+    log(f"Fetching {symbol} data from Binance (Limit: {limit} days)...")
     base_url = "https://api.binance.com/api/v3/klines"
     
     # Calculate timestamps for the last 'limit' days
@@ -40,11 +50,13 @@ def get_binance_data(symbol="BTCUSDT", interval="1d", limit=365):
     }
     
     try:
+        log(f"Requesting URL: {base_url} with params {params}")
         response = requests.get(base_url, params=params)
         response.raise_for_status()
         data = response.json()
+        log(f"Successfully fetched {len(data)} records from Binance.")
     except Exception as e:
-        print(f"Error fetching Binance data: {e}")
+        log(f"Error fetching Binance data: {e}")
         sys.exit(1)
         
     # Columns: Open Time, Open, High, Low, Close, Volume, ...
@@ -66,15 +78,16 @@ def get_blockchain_data(chart_name, timespan="1year"):
     """
     Fetches chart data from Blockchain.com public API.
     """
-    print(f"Fetching {chart_name} from Blockchain.com...")
+    log(f"Fetching {chart_name} from Blockchain.com...")
     url = f"https://api.blockchain.info/charts/{chart_name}?timespan={timespan}&format=json"
     
     try:
         response = requests.get(url)
         response.raise_for_status()
         data = response.json()
+        log(f"Successfully fetched {chart_name}. Data points: {len(data['values'])}")
     except Exception as e:
-        print(f"Error fetching Blockchain.com data: {e}")
+        log(f"Error fetching Blockchain.com data: {e}")
         sys.exit(1)
         
     values = data["values"]
@@ -86,6 +99,43 @@ def get_blockchain_data(chart_name, timespan="1year"):
     
     # Handle duplicates if multiple points per day, take mean
     df = df.groupby("date")[chart_name].mean().reset_index()
+    return df
+
+# -----------------------------------------------------------------------------
+# 2. FEATURE ENGINEERING
+# -----------------------------------------------------------------------------
+
+def prepare_dataset():
+    # 1. Fetch
+    log("--- Starting Data Pipeline ---")
+    btc_df = get_binance_data(limit=365)
+    hash_df = get_blockchain_data("hash-rate")
+    diff_df = get_blockchain_data("difficulty")
+    
+    # 2. Merge
+    log("Merging datasets...")
+    df = btc_df.merge(hash_df, on="date", how="inner")
+    log(f"Shape after merging Hash Rate: {df.shape}")
+    
+    df = df.merge(diff_df, on="date", how="inner")
+    log(f"Shape after merging Difficulty: {df.shape}")
+    
+    df = df.sort_values("date").reset_index(drop=True)
+    
+    # 3. Calculate Log Returns
+    # R_t = ln(P_t / P_{t-1})
+    df["log_ret"] = np.log(df["close"] / df["close"].shift(1))
+    
+    # 4. Calculate Target: SMA 7 of Log Returns
+    df["target_sma7"] = df["log_ret"].rolling(window=7).mean()
+    
+    # 5. Drop NaNs created by shifting/rolling
+    initial_len = len(df)
+    df.dropna(inplace=True)
+    dropped_len = initial_len - len(df)
+    log(f"Dropped {dropped_len} NaN rows due to rolling window calculation.")
+    
+    log(f"Dataset prepared. Final Shape: {df.shape}")
     return df
 
 # -----------------------------------------------------------------------------
@@ -165,6 +215,7 @@ def run_experiment():
     target_col = ["target_sma7"]
     
     # Normalize
+    log("Normalizing features...")
     scaler_x = MinMaxScaler()
     scaler_y = MinMaxScaler()
     
@@ -176,6 +227,7 @@ def run_experiment():
     # Add noise to training labels to accentuate the double descent peak
     # (Common technique in Double Descent literature to make the effect visible on small data)
     noise_level = 0.05
+    log(f"Adding Gaussian noise (std={noise_level}) to training labels to visualize double descent...")
     
     # Split
     # We use a random split here rather than time-series split to strictly demonstrate 
@@ -194,11 +246,13 @@ def run_experiment():
     train_losses = []
     test_losses = []
     
-    print("\nStarting Double Descent Experiment...")
-    print(f"{'Hidden Size':<15} | {'Train MSE':<15} | {'Test MSE':<15}")
-    print("-" * 50)
+    log("\n=== Starting Double Descent Experiment ===")
+    print(f"{'Hidden Size':<15} | {'Train MSE':<15} | {'Test MSE':<15} | {'Time (s)':<10}")
+    print("-" * 65)
     
     for h_size in HIDDEN_SIZES:
+        model_start_time = time.time()
+        
         model = SimpleLSTM(input_size=len(feature_cols), hidden_size=h_size)
         optimizer = optim.Adam(model.parameters(), lr=LEARNING_RATE)
         criterion = nn.MSELoss()
@@ -212,6 +266,10 @@ def run_experiment():
             loss.backward()
             optimizer.step()
             
+            # Detailed epoch logging
+            if (epoch + 1) % 500 == 0:
+                log(f"  [Size {h_size}] Epoch {epoch+1}/{EPOCHS} - Loss: {loss.item():.6f}")
+
         # Evaluation
         model.eval()
         with torch.no_grad():
@@ -226,12 +284,14 @@ def run_experiment():
         train_losses.append(train_mse)
         test_losses.append(test_mse)
         
-        print(f"{h_size:<15} | {train_mse:.6f}          | {test_mse:.6f}")
+        elapsed = time.time() - model_start_time
+        print(f"{h_size:<15} | {train_mse:.6f}          | {test_mse:.6f}          | {elapsed:.2f}s")
 
     # -----------------------------------------------------------------------------
     # 5. VISUALIZATION
     # -----------------------------------------------------------------------------
     
+    log("Generating plot...")
     plt.figure(figsize=(10, 6))
     plt.plot(HIDDEN_SIZES, train_losses, 'o--', label='Train MSE (Generalization)', color='blue')
     plt.plot(HIDDEN_SIZES, test_losses, 'o-', label='Test MSE', color='red', linewidth=2)
@@ -259,7 +319,7 @@ def run_experiment():
     # Save plot and start server
     plot_filename = "double_descent_plot.png"
     plt.savefig(plot_filename)
-    print(f"\nPlot saved to {plot_filename}")
+    log(f"Plot saved to {plot_filename}")
     
     # Create a simple HTML viewer
     html_content = f"""
@@ -293,7 +353,7 @@ if __name__ == "__main__":
     try:
         import torch
     except ImportError:
-        print("Please install torch: pip install torch")
+        log("Please install torch: pip install torch")
         sys.exit(1)
         
     run_experiment()
