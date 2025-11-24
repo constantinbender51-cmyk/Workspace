@@ -345,7 +345,7 @@ def run_training_task():
         
         # LSTM 1: L2 regularization added to the kernel weights
         model.add(LSTM(UNITS, activation='relu', return_sequences=True, 
-                       input_shape=(20, 11), kernel_regularizer=l2(REG_RATE)))
+                       input_shape=(20, 10), kernel_regularizer=l2(REG_RATE)))
         model.add(Dropout(0.2)) # Dropout to force redundancy
         
         # LSTM 2: L2 regularization added
