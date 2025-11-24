@@ -19,9 +19,9 @@ import time
 # -----------------------------------------------------------------------------
 
 def log(message):
-    """Prints a message with a timestamp."""
+    """Prints a message with a timestamp and forces flush."""
     timestamp = datetime.now().strftime("%H:%M:%S")
-    print(f"[{timestamp}] {message}")
+    print(f"[{timestamp}] {message}", flush=True)
 
 # -----------------------------------------------------------------------------
 # 1. DATA ACQUISITION
@@ -34,9 +34,8 @@ def get_binance_data(symbol="BTCUSDT", interval="1d", limit=365):
     log(f"Fetching {symbol} data from Binance (Limit: {limit} days)...")
     base_url = "https://api.binance.com/api/v3/klines"
     
-    # Calculate timestamps for the last 'limit' days
     end_time = datetime.now()
-    start_time = end_time - timedelta(days=limit + 30) # Buffer for SMA calculation
+    start_time = end_time - timedelta(days=limit + 30)
     
     start_ts = int(start_time.timestamp() * 1000)
     end_ts = int(end_time.timestamp() * 1000)
@@ -50,8 +49,9 @@ def get_binance_data(symbol="BTCUSDT", interval="1d", limit=365):
     }
     
     try:
-        log(f"Requesting URL: {base_url} with params {params}")
-        response = requests.get(base_url, params=params)
+        log(f"Requesting URL: {base_url}")
+        # Added timeout to prevent hanging
+        response = requests.get(base_url, params=params, timeout=10)
         response.raise_for_status()
         data = response.json()
         log(f"Successfully fetched {len(data)} records from Binance.")
@@ -59,18 +59,14 @@ def get_binance_data(symbol="BTCUSDT", interval="1d", limit=365):
         log(f"Error fetching Binance data: {e}")
         sys.exit(1)
         
-    # Columns: Open Time, Open, High, Low, Close, Volume, ...
     df = pd.DataFrame(data, columns=[
         "timestamp", "open", "high", "low", "close", "volume",
         "close_time", "quote_asset_volume", "number_of_trades",
         "taker_buy_base_asset_volume", "taker_buy_quote_asset_volume", "ignore"
     ])
     
-    # Convert types
     df["timestamp"] = pd.to_datetime(df["timestamp"], unit="ms")
     df["close"] = df["close"].astype(float)
-    
-    # Set index to date (remove time component for merging)
     df["date"] = df["timestamp"].dt.normalize()
     return df[["date", "close"]]
 
@@ -82,7 +78,8 @@ def get_blockchain_data(chart_name, timespan="1year"):
     url = f"https://api.blockchain.info/charts/{chart_name}?timespan={timespan}&format=json"
     
     try:
-        response = requests.get(url)
+        # Added timeout to prevent hanging
+        response = requests.get(url, timeout=10)
         response.raise_for_status()
         data = response.json()
         log(f"Successfully fetched {chart_name}. Data points: {len(data['values'])}")
@@ -97,7 +94,6 @@ def get_blockchain_data(chart_name, timespan="1year"):
     df["timestamp"] = pd.to_datetime(df["timestamp"], unit="s")
     df["date"] = df["timestamp"].dt.normalize()
     
-    # Handle duplicates if multiple points per day, take mean
     df = df.groupby("date")[chart_name].mean().reset_index()
     return df
 
@@ -106,64 +102,23 @@ def get_blockchain_data(chart_name, timespan="1year"):
 # -----------------------------------------------------------------------------
 
 def prepare_dataset():
-    # 1. Fetch
     log("--- Starting Data Pipeline ---")
     btc_df = get_binance_data(limit=365)
     hash_df = get_blockchain_data("hash-rate")
     diff_df = get_blockchain_data("difficulty")
     
-    # 2. Merge
     log("Merging datasets...")
     df = btc_df.merge(hash_df, on="date", how="inner")
-    log(f"Shape after merging Hash Rate: {df.shape}")
-    
     df = df.merge(diff_df, on="date", how="inner")
-    log(f"Shape after merging Difficulty: {df.shape}")
-    
     df = df.sort_values("date").reset_index(drop=True)
     
-    # 3. Calculate Log Returns
-    # R_t = ln(P_t / P_{t-1})
     df["log_ret"] = np.log(df["close"] / df["close"].shift(1))
-    
-    # 4. Calculate Target: SMA 7 of Log Returns
     df["target_sma7"] = df["log_ret"].rolling(window=7).mean()
     
-    # 5. Drop NaNs created by shifting/rolling
     initial_len = len(df)
     df.dropna(inplace=True)
     dropped_len = initial_len - len(df)
-    log(f"Dropped {dropped_len} NaN rows due to rolling window calculation.")
-    
-    log(f"Dataset prepared. Final Shape: {df.shape}")
-    return df
-
-# -----------------------------------------------------------------------------
-# 2. FEATURE ENGINEERING
-# -----------------------------------------------------------------------------
-
-def prepare_dataset():
-    # 1. Fetch
-    btc_df = get_binance_data(limit=365)
-    hash_df = get_blockchain_data("hash-rate")
-    diff_df = get_blockchain_data("difficulty")
-    
-    # 2. Merge
-    df = btc_df.merge(hash_df, on="date", how="inner")
-    df = df.merge(diff_df, on="date", how="inner")
-    df = df.sort_values("date").reset_index(drop=True)
-    
-    # 3. Calculate Log Returns
-    # R_t = ln(P_t / P_{t-1})
-    df["log_ret"] = np.log(df["close"] / df["close"].shift(1))
-    
-    # 4. Calculate Target: SMA 7 of Log Returns
-    df["target_sma7"] = df["log_ret"].rolling(window=7).mean()
-    
-    # 5. Drop NaNs created by shifting/rolling
-    df.dropna(inplace=True)
-    
-    print(f"Dataset prepared. Shape: {df.shape}")
+    log(f"Dropped {dropped_len} NaN rows. Final Shape: {df.shape}")
     return df
 
 # -----------------------------------------------------------------------------
@@ -175,13 +130,10 @@ class SimpleLSTM(nn.Module):
         super(SimpleLSTM, self).__init__()
         self.hidden_size = hidden_size
         self.lstm = nn.LSTM(input_size, hidden_size, batch_first=True)
-        # No dropout to keep the model 'pure' for double descent observation
         self.fc = nn.Linear(hidden_size, output_size)
         
     def forward(self, x):
-        # x shape: (batch, seq_len, input_size)
         out, _ = self.lstm(x)
-        # Take the last time step output
         out = out[:, -1, :]
         out = self.fc(out)
         return out
@@ -200,21 +152,19 @@ def create_sequences(features, targets, seq_length=10):
 # -----------------------------------------------------------------------------
 
 def run_experiment():
+    log("Initializing experiment...")
+    
     # --- Config ---
     SEQ_LENGTH = 14
-    EPOCHS = 2000  # High epochs to ensure we hit the interpolation regime
+    EPOCHS = 2000
     LEARNING_RATE = 0.001
-    # We vary hidden size to sweep through under-parameterized -> peak -> over-parameterized
     HIDDEN_SIZES = [1, 2, 3, 4, 6, 8, 10, 15, 20, 30, 45, 64]
     
-    # --- Data Prep ---
     df = prepare_dataset()
     
-    # Features: Log Return, Hash Rate, Difficulty
     feature_cols = ["log_ret", "hash-rate", "difficulty"]
     target_col = ["target_sma7"]
     
-    # Normalize
     log("Normalizing features...")
     scaler_x = MinMaxScaler()
     scaler_y = MinMaxScaler()
@@ -224,20 +174,12 @@ def run_experiment():
     
     X_seq, y_seq = create_sequences(X_scaled, y_scaled, SEQ_LENGTH)
     
-    # Add noise to training labels to accentuate the double descent peak
-    # (Common technique in Double Descent literature to make the effect visible on small data)
     noise_level = 0.05
-    log(f"Adding Gaussian noise (std={noise_level}) to training labels to visualize double descent...")
+    log(f"Adding Gaussian noise (std={noise_level}) to training labels...")
     
-    # Split
-    # We use a random split here rather than time-series split to strictly demonstrate 
-    # the capacity phenomenon (bias-variance trade-off) without distribution shift interference.
     X_train, X_test, y_train, y_test = train_test_split(X_seq, y_seq, test_size=0.2, random_state=42)
-    
-    # Add noise ONLY to training targets
     y_train_noisy = y_train + np.random.normal(0, noise_level, y_train.shape)
     
-    # Convert to PyTorch tensors
     X_train_t = torch.FloatTensor(X_train)
     y_train_t = torch.FloatTensor(y_train_noisy)
     X_test_t = torch.FloatTensor(X_test)
@@ -246,18 +188,18 @@ def run_experiment():
     train_losses = []
     test_losses = []
     
-    log("\n=== Starting Double Descent Experiment ===")
-    print(f"{'Hidden Size':<15} | {'Train MSE':<15} | {'Test MSE':<15} | {'Time (s)':<10}")
-    print("-" * 65)
+    log("\n=== Starting Double Descent Training Loop ===")
+    print(f"{'Hidden Size':<15} | {'Train MSE':<15} | {'Test MSE':<15} | {'Time (s)':<10}", flush=True)
+    print("-" * 65, flush=True)
     
     for h_size in HIDDEN_SIZES:
+        log(f"Training Hidden Size: {h_size}") # Log start of specific model
         model_start_time = time.time()
         
         model = SimpleLSTM(input_size=len(feature_cols), hidden_size=h_size)
         optimizer = optim.Adam(model.parameters(), lr=LEARNING_RATE)
         criterion = nn.MSELoss()
         
-        # Training Loop
         model.train()
         for epoch in range(EPOCHS):
             optimizer.zero_grad()
@@ -266,18 +208,17 @@ def run_experiment():
             loss.backward()
             optimizer.step()
             
-            # Detailed epoch logging
-            if (epoch + 1) % 500 == 0:
-                log(f"  [Size {h_size}] Epoch {epoch+1}/{EPOCHS} - Loss: {loss.item():.6f}")
+            # More frequent logging (every 100 epochs)
+            if (epoch + 1) % 100 == 0:
+                 # Print a dot or small status update without newline to show liveness if needed, 
+                 # or just log regularly. We'll stick to log() but maybe less verbose.
+                 if (epoch + 1) % 1000 == 0:
+                    log(f"  [Size {h_size}] Epoch {epoch+1}/{EPOCHS} - Loss: {loss.item():.6f}")
 
-        # Evaluation
         model.eval()
         with torch.no_grad():
             train_pred = model(X_train_t)
             test_pred = model(X_test_t)
-            
-            # Calculate final MSE (using clean y_train for metric logging if preferred, 
-            # but standard is to measure against what it saw. We'll measure against clean to see generalization)
             train_mse = criterion(train_pred, torch.FloatTensor(y_train)).item() 
             test_mse = criterion(test_pred, y_test_t).item()
             
@@ -285,7 +226,7 @@ def run_experiment():
         test_losses.append(test_mse)
         
         elapsed = time.time() - model_start_time
-        print(f"{h_size:<15} | {train_mse:.6f}          | {test_mse:.6f}          | {elapsed:.2f}s")
+        print(f"{h_size:<15} | {train_mse:.6f}          | {test_mse:.6f}          | {elapsed:.2f}s", flush=True)
 
     # -----------------------------------------------------------------------------
     # 5. VISUALIZATION
@@ -304,24 +245,23 @@ def run_experiment():
     plt.grid(True, which="both", ls="-", alpha=0.5)
     
     # Annotate the "Peak"
-    max_test_loss = max(test_losses)
-    max_idx = test_losses.index(max_test_loss)
-    peak_x = HIDDEN_SIZES[max_idx]
-    
-    plt.annotate('Interpolation Threshold\n(Peak Overfitting)', 
-                 xy=(peak_x, max_test_loss), 
-                 xytext=(peak_x, max_test_loss * 1.1),
-                 arrowprops=dict(facecolor='black', shrink=0.05),
-                 horizontalalignment='center')
+    if test_losses:
+        max_test_loss = max(test_losses)
+        max_idx = test_losses.index(max_test_loss)
+        peak_x = HIDDEN_SIZES[max_idx]
+        
+        plt.annotate('Interpolation Threshold\n(Peak Overfitting)', 
+                    xy=(peak_x, max_test_loss), 
+                    xytext=(peak_x, max_test_loss * 1.1),
+                    arrowprops=dict(facecolor='black', shrink=0.05),
+                    horizontalalignment='center')
                  
     plt.tight_layout()
     
-    # Save plot and start server
     plot_filename = "double_descent_plot.png"
     plt.savefig(plot_filename)
     log(f"Plot saved to {plot_filename}")
     
-    # Create a simple HTML viewer
     html_content = f"""
     <html>
         <head><title>Double Descent Experiment</title></head>
@@ -338,18 +278,16 @@ def run_experiment():
     PORT = 8080
     Handler = http.server.SimpleHTTPRequestHandler
     
-    # Allow port reuse to prevent 'Address already in use' errors
     class ReusableTCPServer(socketserver.TCPServer):
         allow_reuse_address = True
 
-    print(f"\nStarting web server on 0.0.0.0:{PORT}...")
-    print(f"View the result at http://localhost:{PORT}")
+    print(f"\nStarting web server on 0.0.0.0:{PORT}...", flush=True)
+    print(f"View the result at http://localhost:{PORT}", flush=True)
     
     with ReusableTCPServer(("0.0.0.0", PORT), Handler) as httpd:
         httpd.serve_forever()
 
 if __name__ == "__main__":
-    # Check for library availability
     try:
         import torch
     except ImportError:
