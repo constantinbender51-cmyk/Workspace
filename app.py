@@ -137,7 +137,7 @@ def load_data():
             'Net_Transaction_Count': 'n-transactions',
             'Transaction_Volume_USD': 'estimated-transaction-volume-usd',
         }
-        START_DATE = '2018-01-01'
+        START_DATE = '2023-01-01'
         END_DATE = '2025-11-30'
         
         all_data = [df_price]
@@ -211,7 +211,7 @@ def prepare_data(df):
     for i in range(len(df_clean)):
         if i >= 40:
             feature = []
-            for lookback in range(1, 21):
+            for lookback in range(1, 13):
                 if i - lookback >= 0:
                     # Use actual values for each feature
                     feature.append(df_clean['sma_3_close'].iloc[i - lookback])
@@ -335,20 +335,20 @@ def run_training_task():
         df = load_data()
         features, targets_scaled, _, scaler_target = prepare_data(df)
         
-        split_idx = int(len(features) * 0.125)
+        split_idx = int(len(features) * 0.7)
         X_train = features[:split_idx]
         X_test = features[split_idx:]
         y_train = targets_scaled[:split_idx]
         y_test = targets_scaled[split_idx:]
         train_indices = list(range(40, 40 + split_idx))
         
-        X_train_reshaped = X_train.reshape(X_train.shape[0], 20, 10)
-        X_test_reshaped = X_test.reshape(X_test.shape[0], 20, 10)
+        X_train_reshaped = X_train.reshape(X_train.shape[0], 12, 10)
+        X_test_reshaped = X_test.reshape(X_test.shape[0], 12, 10)
         
         # INCREASED EPOCHS AND ADDED REGULARIZATION
         EPOCHS = 1000
         UNITS = 128
-        REG_RATE = 1e-10000 # L2 Regularization rate
+        REG_RATE = 1e-4 # L2 Regularization rate
         
         with state_lock:
             training_state['total_epochs'] = EPOCHS
@@ -358,21 +358,17 @@ def run_training_task():
         
         # LSTM 1: L2 regularization added to the kernel weights
         model.add(LSTM(UNITS, activation='relu', return_sequences=True, 
-                       input_shape=(20, 10), kernel_regularizer=l2(REG_RATE)))
-        model.add(Dropout(0.2)) # Dropout to force redundancy
+                       input_shape=(12, 10), kernel_regularizer=l2(REG_RATE)))
+        model.add(Dropout(0.5)) # Dropout to force redundancy
         
         # LSTM 2: L2 regularization added
         model.add(LSTM(UNITS, activation='relu', return_sequences=True, 
                        kernel_regularizer=l2(REG_RATE)))
-        model.add(Dropout(0.2)) # Dropout to force redundancy
+        model.add(Dropout(0.5)) # Dropout to force redundancy
         
         # LSTM 3: L2 regularization added
-        model.add(LSTM(UNITS, activation='relu', return_sequences=True, 
-                       kernel_regularizer=l2(REG_RATE)))
-        model.add(Dropout(0.2)) # Dropout to force redundancy
-        
-        # LSTM 4: L2 regularization added
         model.add(LSTM(UNITS, activation='relu', kernel_regularizer=l2(REG_RATE)))
+        model.add(Dropout(0.5)) # Dropout to force redundancy
         
         model.add(Dense(1))
         
@@ -381,13 +377,22 @@ def run_training_task():
         model.compile(optimizer=optimizer, loss='mse')
         
         logger.info("Starting model.fit() ...")
+        from tensorflow.keras.callbacks import EarlyStopping
+        
+        early_stopping = EarlyStopping(
+            monitor='val_loss',
+            patience=10,
+            restore_best_weights=True,
+            verbose=1
+        )
+        
         history = model.fit(
             X_train_reshaped, y_train,
             epochs=EPOCHS,
-            batch_size=64,
+            batch_size=128,
             verbose=0,
             validation_data=(X_test_reshaped, y_test),
-            callbacks=[ThrottledProgressCallback(EPOCHS, update_frequency=5)]
+            callbacks=[ThrottledProgressCallback(EPOCHS, update_frequency=5), early_stopping]
         )
         logger.info("Training completed.")
         
