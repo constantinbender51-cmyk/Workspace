@@ -43,7 +43,8 @@
             <progress id="progressBar" value="0" max="100"></progress>
             <div class="stats">
                 <span id="epochStatus">Epoch: 0 / 1000</span>
-                <span id="lossStatus">Loss: --</span>
+                <span id="trainLossStatus">Train Loss: --</span>
+                <span id="testLossStatus">Test Loss: --</span>
             </div>
             <div class="sub-stats">
                 <span id="batchStatus">Batch: -- / --</span> | 
@@ -141,7 +142,10 @@
                     document.getElementById('epochStatus').innerText = `Epoch: ${data.epoch} / ${data.total_epochs}`;
                     
                     if (data.current_train_loss) {
-                        document.getElementById('lossStatus').innerText = `Loss: ${data.current_train_loss.toExponential(4)}`;
+                        document.getElementById('trainLossStatus').innerText = `Train Loss: ${data.current_train_loss.toExponential(4)}`;
+                    }
+                    if (data.current_val_loss) {
+                        document.getElementById('testLossStatus').innerText = `Test Loss: ${data.current_val_loss.toExponential(4)}`;
                     }
                     if (data.batch) {
                          document.getElementById('batchStatus').innerText = `Batch: ${data.batch} / ${data.total_batches}`;
@@ -151,7 +155,7 @@
                     document.getElementById('heartbeat').innerText = `Last Update: ${now.toLocaleTimeString()}`;
 
                     // Schedule next poll
-                    setTimeout(checkStatus, 1000);
+                    setTimeout(checkStatus, 10000);
 
                 } else if (data.status === 'completed') {
                     log("Training completed successfully.");
