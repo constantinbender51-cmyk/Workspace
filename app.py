@@ -331,7 +331,7 @@ def run_training_task():
         # INCREASED EPOCHS AND ADDED REGULARIZATION
         EPOCHS = 4
         UNITS = 512
-        REG_RATE = 1e-10 # L2 Regularization rate
+        REG_RATE = 1e-0 # L2 Regularization rate
         
         with state_lock:
             training_state['total_epochs'] = EPOCHS
