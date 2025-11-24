@@ -1,465 +1,299 @@
-from flask import Flask, render_template, jsonify, request
+import requests
 import pandas as pd
 import numpy as np
-from sklearn.metrics import mean_squared_error
-from sklearn.preprocessing import StandardScaler
-from tensorflow.keras.models import Sequential
-from tensorflow.keras.layers import LSTM, Dense, Dropout # Import Dropout
-from tensorflow.keras.optimizers import Adam
-from tensorflow.keras.callbacks import Callback
-from tensorflow.keras import backend as K
-from tensorflow.keras.regularizers import l2 # Import L2 Regularizer
-import matplotlib
-matplotlib.use('Agg')
+import torch
+import torch.nn as nn
+import torch.optim as optim
 import matplotlib.pyplot as plt
-import io
-import base64
+from sklearn.preprocessing import MinMaxScaler
+from sklearn.model_selection import train_test_split
+from datetime import datetime, timedelta
+import sys
+import http.server
+import socketserver
 import os
-import subprocess
-import threading
-import time
-import logging
-import traceback
-import math
 
-# --- Setup Logging ---
-logging.basicConfig(level=logging.INFO)
-logger = logging.getLogger(__name__)
+# -----------------------------------------------------------------------------
+# 1. DATA ACQUISITION
+# -----------------------------------------------------------------------------
 
-app = Flask(__name__)
-
-# --- Global State & Lock ---
-state_lock = threading.Lock()
-training_state = {
-    'status': 'idle',
-    'progress': 0,
-    'epoch': 0,
-    'total_epochs': 0,
-    'batch': 0,
-    'total_batches': 0,
-    'train_loss': [],
-    'val_loss': [],
-    'current_train_loss': 0,
-    'current_val_loss': 0,
-    'plot_url': None,
-    'train_mse': 0,
-    'error': None,
-    'last_update': 0
-}
-
-# --- Auto-start training on app startup ---
-def start_training_on_startup():
-    """Start training automatically when the app starts"""
-    time.sleep(2)  # Give the app time to fully initialize
-    with state_lock:
-        if training_state['status'] == 'idle':
-            training_state['status'] = 'starting'
-            training_state['progress'] = 0
-            training_state['epoch'] = 0
-            training_state['plot_url'] = None
-            training_state['error'] = None
+def get_binance_data(symbol="BTCUSDT", interval="1d", limit=365):
+    """
+    Fetches historical kline data from Binance public API.
+    """
+    print(f"Fetching {symbol} data from Binance...")
+    base_url = "https://api.binance.com/api/v3/klines"
     
-    thread = threading.Thread(target=run_training_task)
-    thread.daemon = True
-    thread.start()
-    logger.info("Auto-started training on app startup")
-
-# --- Helper to prevent JSON crashes ---
-def sanitize_float(val):
-    try:
-        if val is None: return None
-        if isinstance(val, (float, np.floating)):
-            if np.isnan(val) or np.isinf(val):
-                return None
-        return float(val)
-    except:
-        return None
-
-class ThrottledProgressCallback(Callback):
-    def __init__(self, total_epochs, update_frequency=5):
-        self.total_epochs = total_epochs
-        self.update_frequency = update_frequency
-
-    def on_epoch_begin(self, epoch, logs=None):
-        with state_lock:
-            training_state['epoch'] = epoch + 1
-
-    def on_train_batch_end(self, batch, logs=None):
-        if batch % self.update_frequency == 0:
-            logs = logs or {}
-            loss = sanitize_float(logs.get('loss'))
-            
-            with state_lock:
-                training_state['batch'] = batch + 1
-                training_state['current_train_loss'] = loss
-                training_state['last_update'] = time.time()
-                
-                if self.params and 'steps' in self.params:
-                    total_steps = self.params['steps']
-                    training_state['total_batches'] = total_steps
-                    current_epoch_progress = (training_state['epoch'] - 1) / self.total_epochs
-                    current_batch_progress = (batch + 1) / total_steps
-                    total_progress = current_epoch_progress + (current_batch_progress / self.total_epochs)
-                    training_state['progress'] = int(total_progress * 100)
-
-    def on_epoch_end(self, epoch, logs=None):
-        logs = logs or {}
-        val_loss = sanitize_float(logs.get('val_loss'))
-        loss = sanitize_float(logs.get('loss'))
-        
-        with state_lock:
-            training_state['current_val_loss'] = val_loss
-            training_state['train_loss'].append(loss)
-            training_state['val_loss'].append(val_loss)
-        
-        if (epoch + 1) % 50 == 0:
-            logger.info(f"Epoch {epoch+1}/{self.total_epochs} - Loss: {loss}")
-
-def load_data():
-    logger.info("Step 1: Loading Data...")
-    if not os.path.exists('btc_data.csv'):
-        logger.info("btc_data.csv not found. Running fetch script...")
-        try:
-            subprocess.run(['python', 'fetch_price_data.py'], check=True)
-        except subprocess.CalledProcessError as e:
-            logger.error(f"Fetch script failed: {e}")
-            raise e
-
-    df_price = pd.read_csv('btc_data.csv')
-    df_price['date'] = pd.to_datetime(df_price['date'])
-    df_price.set_index('date', inplace=True)
+    # Calculate timestamps for the last 'limit' days
+    end_time = datetime.now()
+    start_time = end_time - timedelta(days=limit + 30) # Buffer for SMA calculation
+    
+    start_ts = int(start_time.timestamp() * 1000)
+    end_ts = int(end_time.timestamp() * 1000)
+    
+    params = {
+        "symbol": symbol,
+        "interval": interval,
+        "startTime": start_ts,
+        "endTime": end_ts,
+        "limit": 1000
+    }
     
     try:
-        import requests
-        BASE_URL = "https://api.blockchain.info/charts/"
-        METRICS = {
-            'Active_Addresses': 'n-unique-addresses',
-            'Net_Transaction_Count': 'n-transactions',
-            'Transaction_Volume_USD': 'estimated-transaction-volume-usd',
-        }
-        START_DATE = '2022-01-01'
-        END_DATE = '2023-12-31'
-        
-        all_data = [df_price]
-        for metric_name, chart_endpoint in METRICS.items():
-            yearly_data = []
-            # Make 8 separate API calls for each year from 2018 to 2025 to cover the full range
-            for year in range(2018, 2026):
-                time.sleep(1)  # Sleep for 1 second between API calls to respect rate limits
-                try:
-                    year_start = f"{year}-01-01"
-                    year_end = f"{year}-12-31"
-                    # Adjust end date for 2025 to match END_DATE
-                    if year == 2025:
-                        year_end = END_DATE
-                    params = {'format': 'json', 'start': year_start, 'end': year_end, 'timespan': '1year'}
-                    response = requests.get(f"{BASE_URL}{chart_endpoint}", params=params, timeout=10)
-                    if response.status_code == 200:
-                        data = response.json()
-                        if 'values' in data:
-                            df = pd.DataFrame(data['values'])
-                            df['Date'] = pd.to_datetime(df['x'], unit='s', utc=True).dt.tz_localize(None)
-                            df = df.set_index('Date')['y']
-                            yearly_data.append(df)
-                except Exception as e:
-                    logger.warning(f"Skipping {metric_name} for year {year}: {e}")
-            
-            # Combine all yearly data for this metric
-            if yearly_data:
-                combined_df = pd.concat(yearly_data, axis=0)
-                combined_df = combined_df[~combined_df.index.duplicated(keep='first')]
-                combined_df = combined_df.sort_index()
-                combined_df = combined_df.rename(metric_name)
-                all_data.append(combined_df)
-                
-        df_combined = pd.concat(all_data, axis=1, join='inner')
-        df_final = df_combined.loc[START_DATE:END_DATE].ffill()
-        df_final = df_final[~df_final.index.duplicated(keep='first')]
-        
-
-        
-        return df_final
+        response = requests.get(base_url, params=params)
+        response.raise_for_status()
+        data = response.json()
     except Exception as e:
-        logger.error(f"Data merge error: {e}")
-        return df_price 
+        print(f"Error fetching Binance data: {e}")
+        sys.exit(1)
+        
+    # Columns: Open Time, Open, High, Low, Close, Volume, ...
+    df = pd.DataFrame(data, columns=[
+        "timestamp", "open", "high", "low", "close", "volume",
+        "close_time", "quote_asset_volume", "number_of_trades",
+        "taker_buy_base_asset_volume", "taker_buy_quote_asset_volume", "ignore"
+    ])
+    
+    # Convert types
+    df["timestamp"] = pd.to_datetime(df["timestamp"], unit="ms")
+    df["close"] = df["close"].astype(float)
+    
+    # Set index to date (remove time component for merging)
+    df["date"] = df["timestamp"].dt.normalize()
+    return df[["date", "close"]]
 
-def prepare_data(df):
-    logger.info("Step 2: Preparing Features...")
-    df['sma_3_close'] = df['close'].rolling(window=3).mean()
-    df['sma_9_close'] = df['close'].rolling(window=9).mean()
-    df['ema_3_volume'] = df['volume'].ewm(span=3).mean()
+def get_blockchain_data(chart_name, timespan="1year"):
+    """
+    Fetches chart data from Blockchain.com public API.
+    """
+    print(f"Fetching {chart_name} from Blockchain.com...")
+    url = f"https://api.blockchain.info/charts/{chart_name}?timespan={timespan}&format=json"
     
-    ema_12 = df['close'].ewm(span=12).mean()
-    ema_26 = df['close'].ewm(span=26).mean()
-    df['macd_line'] = ema_12 - ema_26
-    df['signal_line'] = df['macd_line'].ewm(span=9).mean()
+    try:
+        response = requests.get(url)
+        response.raise_for_status()
+        data = response.json()
+    except Exception as e:
+        print(f"Error fetching Blockchain.com data: {e}")
+        sys.exit(1)
+        
+    values = data["values"]
+    df = pd.DataFrame(values)
+    df.rename(columns={"x": "timestamp", "y": chart_name}, inplace=True)
     
-    delta = df['close'].diff()
-    gain = (delta.where(delta > 0, 0)).rolling(window=14).mean()
-    loss = (-delta.where(delta < 0, 0)).rolling(window=14).mean()
-    rs = gain / loss
-    rsi = 100 - (100 / (1 + rs))
-    rsi_min = rsi.rolling(window=14).min()
-    rsi_max = rsi.rolling(window=14).max()
-    df['stoch_rsi'] = 100 * (rsi - rsi_min) / (rsi_max - rsi_min)
-    df['day_of_week'] = df.index.dayofweek + 1
+    df["timestamp"] = pd.to_datetime(df["timestamp"], unit="s")
+    df["date"] = df["timestamp"].dt.normalize()
     
-    df_clean = df.dropna()
-    
-    features = []
-    # Use close price as the target
-    targets = []
-    for i in range(len(df_clean)):
-        if i >= 40:
-            feature = []
-            for lookback in range(1, 13):
-                if i - lookback >= 0:
-                    # Use actual values for each feature
-                    feature.append(df_clean['sma_3_close'].iloc[i - lookback])
-                    feature.append(df_clean['sma_9_close'].iloc[i - lookback])
-                    feature.append(df_clean['ema_3_volume'].iloc[i - lookback])
-                    feature.append(df_clean['macd_line'].iloc[i - lookback])
-                    feature.append(df_clean['signal_line'].iloc[i - lookback])
-                    feature.append(df_clean['stoch_rsi'].iloc[i - lookback])
-                    feature.append(df_clean['day_of_week'].iloc[i - lookback])
-                    
-                    # On-chain metrics actual values
-                    for col in ['Net_Transaction_Count', 'Transaction_Volume_USD', 'Active_Addresses']:
-                        if col in df_clean.columns:
-                            feature.append(df_clean[col].iloc[i - lookback])
-                        else:
-                            feature.append(0)
-                else:
-                    # For days before the start of the sequence, use zeros
-                    feature.extend([0] * 10)
-            features.append(feature)
-            targets.append(df_clean['close'].iloc[i])
-    
-    features = np.array(features)
-    valid_indices = ~np.isnan(features).any(axis=1)
-    features = features[valid_indices]
-    targets = np.array(targets)
-    targets = targets[valid_indices[:len(targets)]]
-    min_len = min(len(features), len(targets))
-    
-    # Scale Features
-    scaler_features = StandardScaler()
-    features_scaled = scaler_features.fit_transform(features[:min_len])
-    
-    # Scale Targets
-    scaler_target = StandardScaler()
-    targets_reshaped = targets[:min_len].reshape(-1, 1)
-    targets_scaled = scaler_target.fit_transform(targets_reshaped)
-    
-    return features_scaled, targets_scaled, scaler_features, scaler_target
+    # Handle duplicates if multiple points per day, take mean
+    df = df.groupby("date")[chart_name].mean().reset_index()
+    return df
 
-def create_plot(df, y_train, predictions, train_indices, history_loss, history_val_loss, y_test=None, test_predictions=None, test_indices=None):
-    logger.info("Step 4: Generating Plots...")
-    history_loss = [x if x is not None else 0 for x in history_loss]
-    history_val_loss = [x if x is not None else 0 for x in history_val_loss]
+# -----------------------------------------------------------------------------
+# 2. FEATURE ENGINEERING
+# -----------------------------------------------------------------------------
 
-    plt.figure(figsize=(10, 12))
+def prepare_dataset():
+    # 1. Fetch
+    btc_df = get_binance_data(limit=365)
+    hash_df = get_blockchain_data("hash-rate")
+    diff_df = get_blockchain_data("difficulty")
     
-    # Combine training and test data for continuous timeline
-    all_dates = []
-    all_y_actual = []
-    all_y_predicted = []
+    # 2. Merge
+    df = btc_df.merge(hash_df, on="date", how="inner")
+    df = df.merge(diff_df, on="date", how="inner")
+    df = df.sort_values("date").reset_index(drop=True)
     
-    # Add training data
-    train_dates = df.index[train_indices]
-    sorted_train_indices = np.argsort(train_dates)
-    sorted_train_dates = train_dates[sorted_train_indices]
-    sorted_y_train = y_train[sorted_train_indices]
-    sorted_predictions = predictions[sorted_train_indices]
-    all_dates.extend(sorted_train_dates)
-    all_y_actual.extend(sorted_y_train)
-    all_y_predicted.extend(sorted_predictions)
+    # 3. Calculate Log Returns
+    # R_t = ln(P_t / P_{t-1})
+    df["log_ret"] = np.log(df["close"] / df["close"].shift(1))
     
-    # Add test data if available
-    if y_test is not None and test_predictions is not None and test_indices is not None:
-        test_dates = df.index[test_indices]
-        sorted_test_indices = np.argsort(test_dates)
-        sorted_test_dates = test_dates[sorted_test_indices]
-        sorted_y_test = y_test[sorted_test_indices]
-        sorted_test_predictions = test_predictions[sorted_test_indices]
-        all_dates.extend(sorted_test_dates)
-        all_y_actual.extend(sorted_y_test)
-        all_y_predicted.extend(sorted_test_predictions)
+    # 4. Calculate Target: SMA 7 of Log Returns
+    df["target_sma7"] = df["log_ret"].rolling(window=7).mean()
     
-    # Plot 1: Combined actual vs predicted prices
-    plt.subplot(3, 1, 1)
-    plt.plot(all_dates, all_y_actual, label='Actual Price', color='blue')
-    plt.plot(all_dates, all_y_predicted, label='Predicted Price', color='green', alpha=0.7)
-    plt.title('BTC Price Prediction (Training and Test Sets)')
+    # 5. Drop NaNs created by shifting/rolling
+    df.dropna(inplace=True)
+    
+    print(f"Dataset prepared. Shape: {df.shape}")
+    return df
+
+# -----------------------------------------------------------------------------
+# 3. MODEL DEFINITION
+# -----------------------------------------------------------------------------
+
+class SimpleLSTM(nn.Module):
+    def __init__(self, input_size, hidden_size, output_size=1):
+        super(SimpleLSTM, self).__init__()
+        self.hidden_size = hidden_size
+        self.lstm = nn.LSTM(input_size, hidden_size, batch_first=True)
+        # No dropout to keep the model 'pure' for double descent observation
+        self.fc = nn.Linear(hidden_size, output_size)
+        
+    def forward(self, x):
+        # x shape: (batch, seq_len, input_size)
+        out, _ = self.lstm(x)
+        # Take the last time step output
+        out = out[:, -1, :]
+        out = self.fc(out)
+        return out
+
+def create_sequences(features, targets, seq_length=10):
+    xs, ys = [], []
+    for i in range(len(features) - seq_length):
+        x = features[i:(i + seq_length)]
+        y = targets[i + seq_length]
+        xs.append(x)
+        ys.append(y)
+    return np.array(xs), np.array(ys)
+
+# -----------------------------------------------------------------------------
+# 4. MAIN EXPERIMENT LOOP
+# -----------------------------------------------------------------------------
+
+def run_experiment():
+    # --- Config ---
+    SEQ_LENGTH = 14
+    EPOCHS = 2000  # High epochs to ensure we hit the interpolation regime
+    LEARNING_RATE = 0.001
+    # We vary hidden size to sweep through under-parameterized -> peak -> over-parameterized
+    HIDDEN_SIZES = [1, 2, 3, 4, 6, 8, 10, 15, 20, 30, 45, 64]
+    
+    # --- Data Prep ---
+    df = prepare_dataset()
+    
+    # Features: Log Return, Hash Rate, Difficulty
+    feature_cols = ["log_ret", "hash-rate", "difficulty"]
+    target_col = ["target_sma7"]
+    
+    # Normalize
+    scaler_x = MinMaxScaler()
+    scaler_y = MinMaxScaler()
+    
+    X_scaled = scaler_x.fit_transform(df[feature_cols])
+    y_scaled = scaler_y.fit_transform(df[target_col])
+    
+    X_seq, y_seq = create_sequences(X_scaled, y_scaled, SEQ_LENGTH)
+    
+    # Add noise to training labels to accentuate the double descent peak
+    # (Common technique in Double Descent literature to make the effect visible on small data)
+    noise_level = 0.05
+    
+    # Split
+    # We use a random split here rather than time-series split to strictly demonstrate 
+    # the capacity phenomenon (bias-variance trade-off) without distribution shift interference.
+    X_train, X_test, y_train, y_test = train_test_split(X_seq, y_seq, test_size=0.2, random_state=42)
+    
+    # Add noise ONLY to training targets
+    y_train_noisy = y_train + np.random.normal(0, noise_level, y_train.shape)
+    
+    # Convert to PyTorch tensors
+    X_train_t = torch.FloatTensor(X_train)
+    y_train_t = torch.FloatTensor(y_train_noisy)
+    X_test_t = torch.FloatTensor(X_test)
+    y_test_t = torch.FloatTensor(y_test)
+    
+    train_losses = []
+    test_losses = []
+    
+    print("\nStarting Double Descent Experiment...")
+    print(f"{'Hidden Size':<15} | {'Train MSE':<15} | {'Test MSE':<15}")
+    print("-" * 50)
+    
+    for h_size in HIDDEN_SIZES:
+        model = SimpleLSTM(input_size=len(feature_cols), hidden_size=h_size)
+        optimizer = optim.Adam(model.parameters(), lr=LEARNING_RATE)
+        criterion = nn.MSELoss()
+        
+        # Training Loop
+        model.train()
+        for epoch in range(EPOCHS):
+            optimizer.zero_grad()
+            outputs = model(X_train_t)
+            loss = criterion(outputs, y_train_t)
+            loss.backward()
+            optimizer.step()
+            
+        # Evaluation
+        model.eval()
+        with torch.no_grad():
+            train_pred = model(X_train_t)
+            test_pred = model(X_test_t)
+            
+            # Calculate final MSE (using clean y_train for metric logging if preferred, 
+            # but standard is to measure against what it saw. We'll measure against clean to see generalization)
+            train_mse = criterion(train_pred, torch.FloatTensor(y_train)).item() 
+            test_mse = criterion(test_pred, y_test_t).item()
+            
+        train_losses.append(train_mse)
+        test_losses.append(test_mse)
+        
+        print(f"{h_size:<15} | {train_mse:.6f}          | {test_mse:.6f}")
+
+    # -----------------------------------------------------------------------------
+    # 5. VISUALIZATION
+    # -----------------------------------------------------------------------------
+    
+    plt.figure(figsize=(10, 6))
+    plt.plot(HIDDEN_SIZES, train_losses, 'o--', label='Train MSE (Generalization)', color='blue')
+    plt.plot(HIDDEN_SIZES, test_losses, 'o-', label='Test MSE', color='red', linewidth=2)
+    
+    plt.xscale('log')
+    plt.xlabel('Model Complexity (Hidden Size) - Log Scale')
+    plt.ylabel('Mean Squared Error')
+    plt.title('Double Descent in LSTM (BTC Log Return SMA7)')
     plt.legend()
-    plt.xticks(rotation=45)
-
-    # Strategy capital calculation for combined data using price predictions
-    capital = [1000]
-    for i in range(1, len(all_y_actual)):
-        # all_y_actual and all_y_predicted are now prices
-        actual_price = all_y_actual[i]
-        predicted_price = all_y_predicted[i]
-        pos = 1 if predicted_price > actual_price else -1  # Long if predicted price higher, short if lower
-        capital.append(capital[-1] * (1 + ((actual_price - all_y_actual[i-1]) / all_y_actual[i-1] * pos * 1)))
+    plt.grid(True, which="both", ls="-", alpha=0.5)
     
-    plt.subplot(3, 1, 2)
-    plt.plot(all_dates, capital, color='purple')
-    plt.title('Strategy Capital (Long/Short based on Predicted Log Return)')
-    plt.xticks(rotation=45)
-
-    # Plot 3: Loss curves
-    plt.subplot(3, 1, 3)
-    plt.semilogy(history_loss, label='Train Loss', color='blue')
-    plt.semilogy(history_val_loss, label='Test Loss (Val)', color='orange')
-    plt.xlabel('Epochs')
-    plt.ylabel('MSE Loss (Log Scale)')
-    plt.title('Double Descent Visualization')
-    plt.legend()
-
+    # Annotate the "Peak"
+    max_test_loss = max(test_losses)
+    max_idx = test_losses.index(max_test_loss)
+    peak_x = HIDDEN_SIZES[max_idx]
+    
+    plt.annotate('Interpolation Threshold\n(Peak Overfitting)', 
+                 xy=(peak_x, max_test_loss), 
+                 xytext=(peak_x, max_test_loss * 1.1),
+                 arrowprops=dict(facecolor='black', shrink=0.05),
+                 horizontalalignment='center')
+                 
     plt.tight_layout()
-    img = io.BytesIO()
-    plt.savefig(img, format='png')
-    plt.close() # Important to close plot after saving
-    img.seek(0)
-    return base64.b64encode(img.getvalue()).decode()
-
-def run_training_task():
-    global training_state
-    logger.info("Background thread started.")
-    K.clear_session()
     
+    # Save plot and start server
+    plot_filename = "double_descent_plot.png"
+    plt.savefig(plot_filename)
+    print(f"\nPlot saved to {plot_filename}")
+    
+    # Create a simple HTML viewer
+    html_content = f"""
+    <html>
+        <head><title>Double Descent Experiment</title></head>
+        <body style="font-family: sans-serif; text-align: center; padding: 20px;">
+            <h1>Double Descent Phenomenon in LSTM</h1>
+            <p>Training vs Test MSE across model complexity</p>
+            <img src="{plot_filename}" style="max-width: 100%; height: auto; border: 1px solid #ccc; box-shadow: 0 4px 8px rgba(0,0,0,0.1);">
+        </body>
+    </html>
+    """
+    with open("index.html", "w") as f:
+        f.write(html_content)
+
+    PORT = 8080
+    Handler = http.server.SimpleHTTPRequestHandler
+    
+    # Allow port reuse to prevent 'Address already in use' errors
+    class ReusableTCPServer(socketserver.TCPServer):
+        allow_reuse_address = True
+
+    print(f"\nStarting web server on 0.0.0.0:{PORT}...")
+    print(f"View the result at http://localhost:{PORT}")
+    
+    with ReusableTCPServer(("0.0.0.0", PORT), Handler) as httpd:
+        httpd.serve_forever()
+
+if __name__ == "__main__":
+    # Check for library availability
     try:
-        with state_lock:
-            training_state['status'] = 'training'
-            training_state['train_loss'] = []
-            training_state['val_loss'] = []
+        import torch
+    except ImportError:
+        print("Please install torch: pip install torch")
+        sys.exit(1)
         
-        df = load_data()
-        features, targets_scaled, _, scaler_target = prepare_data(df)
-        
-        split_idx = int(len(features) * 0.7)
-        X_train = features[:split_idx]
-        X_test = features[split_idx:]
-        y_train = targets_scaled[:split_idx]
-        y_test = targets_scaled[split_idx:]
-        train_indices = list(range(40, 40 + split_idx))
-        
-        X_train_reshaped = X_train.reshape(X_train.shape[0], 12, 10)
-        X_test_reshaped = X_test.reshape(X_test.shape[0], 12, 10)
-        
-        # INCREASED EPOCHS AND ADDED REGULARIZATION
-        EPOCHS = 5000
-        UNITS = 512
-        REG_RATE = 1e-4 # L2 Regularization rate
-        
-        with state_lock:
-            training_state['total_epochs'] = EPOCHS
-        
-        logger.info(f"Building Model (Units: {UNITS}, Epochs: {EPOCHS}, L2: {REG_RATE})...")
-        model = Sequential()
-        
-        # LSTM 1: L2 regularization added to the kernel weights
-        model.add(LSTM(UNITS, activation='relu', return_sequences=True, 
-                       input_shape=(12, 10), kernel_regularizer=l2(REG_RATE)))
-        model.add(Dropout(0.5)) # Dropout to force redundancy
-        
-        # LSTM 2: L2 regularization added
-        model.add(LSTM(UNITS, activation='relu', return_sequences=True, 
-                       kernel_regularizer=l2(REG_RATE)))
-        model.add(Dropout(0.5)) # Dropout to force redundancy
-        
-        # LSTM 3: L2 regularization added
-        model.add(LSTM(UNITS, activation='relu', kernel_regularizer=l2(REG_RATE)))
-        model.add(Dropout(0.5)) # Dropout to force redundancy
-        
-        model.add(Dense(1))
-        
-        # Use low learning rate and clipnorm for stability
-        optimizer = Adam(learning_rate=0.0001, clipnorm=1.0)
-        model.compile(optimizer=optimizer, loss='mse')
-        
-        logger.info("Starting model.fit() ...")
-        from tensorflow.keras.callbacks import EarlyStopping
-        
-        early_stopping = EarlyStopping(
-            monitor='val_loss',
-            patience=1000,
-            restore_best_weights=True,
-            verbose=1
-        )
-        
-        history = model.fit(
-            X_train_reshaped, y_train,
-            epochs=EPOCHS,
-            batch_size=128,
-            verbose=0,
-            validation_data=(X_test_reshaped, y_test),
-            callbacks=[ThrottledProgressCallback(EPOCHS, update_frequency=5), early_stopping]
-        )
-        logger.info("Training completed.")
-        
-        # Get predictions in Scaled format
-        train_predictions_scaled = model.predict(X_train_reshaped, verbose=0)
-        test_predictions_scaled = model.predict(X_test_reshaped, verbose=0)
-        
-        # INVERSE TRANSFORM: Convert scaled outputs back to real dollar prices
-        train_predictions_real = scaler_target.inverse_transform(train_predictions_scaled).flatten()
-        y_train_real = scaler_target.inverse_transform(y_train).flatten()
-        test_predictions_real = scaler_target.inverse_transform(test_predictions_scaled).flatten()
-        y_test_real = scaler_target.inverse_transform(y_test).flatten()
-        test_indices = list(range(40 + split_idx, 40 + split_idx + len(y_test_real)))
-        
-        plot_url = create_plot(
-            df, y_train_real, train_predictions_real, train_indices, 
-            history.history['loss'], history.history['val_loss'],
-            y_test_real, test_predictions_real, test_indices
-        )
-        
-        with state_lock:
-            training_state['plot_url'] = plot_url
-            # Note: The 'loss' here now includes the L2 penalty, which is why it might not approach 0 as closely as before.
-            training_state['train_mse'] = sanitize_float(history.history['loss'][-1])
-            training_state['status'] = 'completed'
-        
-    except Exception as e:
-        logger.error(f"CRITICAL TRAINING FAILURE: {e}")
-        logger.error(traceback.format_exc())
-        with state_lock:
-            training_state['status'] = 'error'
-            training_state['error'] = str(e)
-
-@app.route('/')
-def index():
-    return render_template('index.html')
-
-@app.route('/start_training', methods=['POST'])
-def start_training():
-    with state_lock:
-        if training_state['status'] == 'training':
-            return jsonify({'status': 'already_running'})
-        
-        training_state['status'] = 'starting'
-        training_state['progress'] = 0
-        training_state['epoch'] = 0
-        training_state['plot_url'] = None
-        training_state['error'] = None
-    
-    thread = threading.Thread(target=run_training_task)
-    thread.daemon = True
-    thread.start()
-    
-    return jsonify({'status': 'started'})
-
-@app.route('/status')
-def status():
-    with state_lock:
-        return jsonify(training_state)
-
-# Start training automatically when app starts
-startup_thread = threading.Thread(target=start_training_on_startup)
-startup_thread.daemon = True
-startup_thread.start()
-
-if __name__ == '__main__':
-    app.run(host='0.0.0.0', port=8080, debug=False)
+    run_experiment()
