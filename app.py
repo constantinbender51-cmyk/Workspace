@@ -318,7 +318,7 @@ def run_training_task():
         df = load_data()
         features, targets_scaled, _, scaler_target = prepare_data(df)
         
-        split_idx = int(len(features) * 0.01)
+        split_idx = int(len(features) * 0.02)
         X_train = features[:split_idx]
         X_test = features[split_idx:]
         y_train = targets_scaled[:split_idx]
