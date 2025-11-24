@@ -3,6 +3,7 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <meta http-equiv="refresh" content="10">
     <title>BTC Double Descent (Optimized)</title>
     <style>
         body { font-family: sans-serif; max-width: 800px; margin: 0 auto; padding: 20px; }
@@ -155,7 +156,7 @@
                     document.getElementById('heartbeat').innerText = `Last Update: ${now.toLocaleTimeString()}`;
 
                     // Schedule next poll
-                    setTimeout(checkStatus, 10000);
+                    setTimeout(checkStatus, 1000);
 
                 } else if (data.status === 'completed') {
                     log("Training completed successfully.");
