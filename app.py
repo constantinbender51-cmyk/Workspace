@@ -308,7 +308,7 @@ def run_training_task():
         X_test_reshaped = X_test.reshape(X_test.shape[0], 20, 10)
         
         # INCREASED EPOCHS AND ADDED REGULARIZATION
-        EPOCHS = 300
+        EPOCHS = 30
         UNITS = 128
         REG_RATE = 1e-3 # L2 Regularization rate
         
