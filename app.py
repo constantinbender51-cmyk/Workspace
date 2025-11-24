@@ -126,12 +126,15 @@ def load_data():
         all_data = [df_price]
         for metric_name, chart_endpoint in METRICS.items():
             yearly_data = []
-            # Make 7 separate API calls for each year from 2018 to 2024
-            for year in range(2018, 2025):
+            # Make 8 separate API calls for each year from 2018 to 2025 to cover the full range
+            for year in range(2018, 2026):
                 time.sleep(1)  # Sleep for 1 second between API calls to respect rate limits
                 try:
                     year_start = f"{year}-01-01"
                     year_end = f"{year}-12-31"
+                    # Adjust end date for 2025 to match END_DATE
+                    if year == 2025:
+                        year_end = END_DATE
                     params = {'format': 'json', 'start': year_start, 'end': year_end, 'timespan': '1year'}
                     response = requests.get(f"{BASE_URL}{chart_endpoint}", params=params, timeout=10)
                     if response.status_code == 200:
@@ -320,7 +323,7 @@ def run_training_task():
         X_test_reshaped = X_test.reshape(X_test.shape[0], 20, 10)
         
         # INCREASED EPOCHS AND ADDED REGULARIZATION
-        EPOCHS = 30
+        EPOCHS = 1000
         UNITS = 128
         REG_RATE = 1e-3 # L2 Regularization rate
         
