@@ -196,16 +196,26 @@ def prepare_data(df):
             feature = []
             for lookback in range(1, 21):
                 if i - lookback >= 0:
-                    feature.append(df_clean['sma_3_close'].iloc[i - lookback])
-                    feature.append(df_clean['sma_9_close'].iloc[i - lookback])
-                    feature.append(df_clean['ema_3_volume'].iloc[i - lookback])
-                    feature.append(df_clean['macd_line'].iloc[i - lookback])
-                    feature.append(df_clean['signal_line'].iloc[i - lookback])
-                    feature.append(df_clean['stoch_rsi'].iloc[i - lookback])
-                    feature.append(df_clean['day_of_week'].iloc[i - lookback])
-                    
-                    for col in ['Net_Transaction_Count', 'Transaction_Volume_USD', 'Active_Addresses']:
-                        feature.append(df_clean[col].iloc[i - lookback] if col in df_clean.columns else 0)
+                    # Calculate derivatives (differences) for each feature
+                    if i - lookback - 1 >= 0:
+                        # Technical indicators derivatives
+                        feature.append(df_clean['sma_3_close'].iloc[i - lookback] - df_clean['sma_3_close'].iloc[i - lookback - 1])
+                        feature.append(df_clean['sma_9_close'].iloc[i - lookback] - df_clean['sma_9_close'].iloc[i - lookback - 1])
+                        feature.append(df_clean['ema_3_volume'].iloc[i - lookback] - df_clean['ema_3_volume'].iloc[i - lookback - 1])
+                        feature.append(df_clean['macd_line'].iloc[i - lookback] - df_clean['macd_line'].iloc[i - lookback - 1])
+                        feature.append(df_clean['signal_line'].iloc[i - lookback] - df_clean['signal_line'].iloc[i - lookback - 1])
+                        feature.append(df_clean['stoch_rsi'].iloc[i - lookback] - df_clean['stoch_rsi'].iloc[i - lookback - 1])
+                        feature.append(df_clean['day_of_week'].iloc[i - lookback] - df_clean['day_of_week'].iloc[i - lookback - 1])
+                        
+                        # On-chain metrics derivatives
+                        for col in ['Net_Transaction_Count', 'Transaction_Volume_USD', 'Active_Addresses']:
+                            if col in df_clean.columns:
+                                feature.append(df_clean[col].iloc[i - lookback] - df_clean[col].iloc[i - lookback - 1])
+                            else:
+                                feature.append(0)
+                    else:
+                        # For the first day in sequence, use zero derivatives
+                        feature.extend([0] * 10)
                 else:
                     feature.extend([0] * 10)
             features.append(feature)
