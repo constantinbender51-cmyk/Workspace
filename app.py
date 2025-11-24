@@ -209,7 +209,7 @@ def prepare_data(df):
     features = []
     targets = []
     for i in range(len(df_clean)):
-        if i >= 40:
+        if i >= 12:
             feature = []
             for lookback in range(1, 13):
                 if i - lookback >= 0:
@@ -405,7 +405,7 @@ def run_training_task():
         y_train_real = scaler_target.inverse_transform(y_train).flatten()
         test_predictions_real = scaler_target.inverse_transform(test_predictions_scaled).flatten()
         y_test_real = scaler_target.inverse_transform(y_test).flatten()
-        test_indices = list(range(40 + split_idx, 40 + split_idx + len(y_test_real)))
+        test_indices = list(range(12 + split_idx, 12 + split_idx + len(y_test_real)))
         
         plot_url = create_plot(
             df, y_train_real, train_predictions_real, train_indices, 
