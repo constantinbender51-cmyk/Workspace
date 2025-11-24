@@ -36,7 +36,7 @@
             Training LSTM. 
         </p>
 
-        <button id="startBtn" onclick="startTraining()">Start Training Experiment</button>
+        <button id="startBtn" onclick="startTraining()" style="display: none;">Start Training Experiment</button>
 
         <div id="progress-container">
             <h3>Training in Progress...</h3>
@@ -75,6 +75,13 @@
             consoleDiv.appendChild(newLog);
             consoleDiv.scrollTop = consoleDiv.scrollHeight;
         }
+
+        // Auto-start polling when page loads
+        document.addEventListener('DOMContentLoaded', function() {
+            log("Page loaded. Checking training status...");
+            isPolling = true;
+            checkStatus();
+        });
 
         async function startTraining() {
             log("Initializing training request...");
@@ -128,7 +135,8 @@
 
                 const data = await response.json();
 
-                if (data.status === 'training') {
+                if (data.status === 'training' || data.status === 'starting') {
+                    document.getElementById('progress-container').style.display = 'block';
                     document.getElementById('progressBar').value = data.progress;
                     document.getElementById('epochStatus').innerText = `Epoch: ${data.epoch} / ${data.total_epochs}`;
                     
@@ -151,6 +159,7 @@
                     document.getElementById('progress-container').style.display = 'none';
                     document.getElementById('startBtn').innerText = "Run Again";
                     document.getElementById('startBtn').disabled = false;
+                    document.getElementById('startBtn').style.display = 'block';
                     
                     document.getElementById('resultPlot').src = "data:image/png;base64," + data.plot_url;
                     document.getElementById('finalMse').innerText = data.train_mse.toExponential(4);
@@ -160,8 +169,14 @@
                     log("TRAINING FAILED: " + data.error);
                     isPolling = false;
                     document.getElementById('startBtn').disabled = false;
+                    document.getElementById('startBtn').style.display = 'block';
                     document.getElementById('errorMsg').innerText = "Server Error: " + data.error;
                     document.getElementById('errorMsg').style.display = 'block';
+                } else if (data.status === 'idle') {
+                    // If training hasn't started yet, show the start button
+                    document.getElementById('startBtn').style.display = 'block';
+                    document.getElementById('startBtn').disabled = false;
+                    setTimeout(checkStatus, 2000); // Check again in 2 seconds
                 }
             } catch (e) {
                 // If fetch fails (timeout or network error), just log and retry
