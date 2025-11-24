@@ -347,7 +347,7 @@ def run_training_task():
         
         # INCREASED EPOCHS AND ADDED REGULARIZATION
         EPOCHS = 1000
-        UNITS = 86
+        UNITS = 128
         REG_RATE = 1e-4 # L2 Regularization rate
         
         with state_lock:
