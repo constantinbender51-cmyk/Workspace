@@ -182,4 +182,26 @@
                     document.getElementById('finalSmape').innerText = data.smape?.toFixed(2) + " %";
                     document.getElementById('residStd').innerText = data.resid_std?.toExponential(4);
                     document.getElementById('residAuto').innerText = data.resid_auto?.toExponential(4);
-                    document.getElementById('result-container').style.display =
+                    document.getElementById('result-container').style.display = 'block';
+
+                } else if (data.status === 'error') {
+                    log("TRAINING FAILED: " + data.error, "error");
+                    isPolling = false;
+                    document.getElementById('startBtn').disabled = false;
+                    document.getElementById('startBtn').style.display = 'block';
+                    document.getElementById('errorMsg').innerText = "Server Error: " + data.error;
+                    document.getElementById('errorMsg').style.display = 'block';
+                } else if (data.status === 'idle') {
+                    document.getElementById('startBtn').style.display = 'block';
+                    document.getElementById('startBtn').disabled = false;
+                    setTimeout(checkStatus, 2000);
+                }
+            } catch (e) {
+                log("Poll skipped (server busy): " + e.message, "error");
+                if (isPolling) setTimeout(checkStatus, 2000);
+            }
+        }
+    </script>
+</body>
+</html>
+
