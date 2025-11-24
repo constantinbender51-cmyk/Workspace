@@ -187,6 +187,9 @@ def prepare_data(df):
     df['stoch_rsi'] = 100 * (rsi - rsi_min) / (rsi_max - rsi_min)
     df['day_of_week'] = df.index.dayofweek + 1
     
+    # Calculate daily return: (close_t - close_{t-1}) / close_{t-1}
+    df['daily_return'] = df['close'].pct_change()
+    
     df_clean = df.dropna()
     
     features = []
@@ -203,11 +206,12 @@ def prepare_data(df):
                     feature.append(df_clean['signal_line'].iloc[i - lookback])
                     feature.append(df_clean['stoch_rsi'].iloc[i - lookback])
                     feature.append(df_clean['day_of_week'].iloc[i - lookback])
+                    feature.append(df_clean['daily_return'].iloc[i - lookback])
                     
                     for col in ['Net_Transaction_Count', 'Transaction_Volume_USD', 'Active_Addresses']:
                         feature.append(df_clean[col].iloc[i - lookback] if col in df_clean.columns else 0)
                 else:
-                    feature.extend([0] * 10)
+                    feature.extend([0] * 11)
             features.append(feature)
             targets.append(df_clean['close'].iloc[i])
     
@@ -319,8 +323,8 @@ def run_training_task():
         y_test = targets_scaled[split_idx:]
         train_indices = list(range(40, 40 + split_idx))
         
-        X_train_reshaped = X_train.reshape(X_train.shape[0], 20, 10)
-        X_test_reshaped = X_test.reshape(X_test.shape[0], 20, 10)
+        X_train_reshaped = X_train.reshape(X_train.shape[0], 20, 11)
+        X_test_reshaped = X_test.reshape(X_test.shape[0], 20, 11)
         
         # INCREASED EPOCHS AND ADDED REGULARIZATION
         EPOCHS = 100
@@ -335,7 +339,7 @@ def run_training_task():
         
         # LSTM 1: L2 regularization added to the kernel weights
         model.add(LSTM(UNITS, activation='relu', return_sequences=True, 
-                       input_shape=(20, 10), kernel_regularizer=l2(REG_RATE)))
+                       input_shape=(20, 11), kernel_regularizer=l2(REG_RATE)))
         model.add(Dropout(0.2)) # Dropout to force redundancy
         
         # LSTM 2: L2 regularization added
