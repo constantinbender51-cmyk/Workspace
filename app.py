@@ -219,63 +219,62 @@ def create_plot(df, y_train, predictions, train_indices, history_loss, history_v
     history_loss = [x if x is not None else 0 for x in history_loss]
     history_val_loss = [x if x is not None else 0 for x in history_val_loss]
 
-    plt.figure(figsize=(10, 16))
+    plt.figure(figsize=(10, 12))
     
-    dates = df.index[train_indices]
-    sorted_indices = np.argsort(dates)
-    sorted_dates = dates[sorted_indices]
-    sorted_y_train = y_train[sorted_indices]
-    sorted_predictions = predictions[sorted_indices]
+    # Combine training and test data for continuous timeline
+    all_dates = []
+    all_y_actual = []
+    all_y_predicted = []
     
-    plt.subplot(4, 1, 1)
-    plt.plot(sorted_dates, sorted_y_train, label='Actual Price', color='blue')
-    plt.plot(sorted_dates, sorted_predictions, label='Predicted', color='green', alpha=0.7)
-    plt.title('BTC Price Prediction (Training Set)')
-    plt.legend()
-    plt.xticks(rotation=45)
-
-    capital = [1000]
-    # Simple Trading Strategy: Long if predicted price is higher than actual (momentum-based)
-    for i in range(1, len(sorted_y_train)):
-        ret = (sorted_y_train[i] - sorted_y_train[i-1]) / sorted_y_train[i-1]
-        # Position: 1 (Long, expects price to go up) if prediction > actual (momentum) else -1 (Short)
-        pos = 1 if sorted_predictions[i-1] > sorted_y_train[i-1] else -1 
-        capital.append(capital[-1] * (1 + (ret * pos * 5)))
+    # Add training data
+    train_dates = df.index[train_indices]
+    sorted_train_indices = np.argsort(train_dates)
+    sorted_train_dates = train_dates[sorted_train_indices]
+    sorted_y_train = y_train[sorted_train_indices]
+    sorted_predictions = predictions[sorted_train_indices]
+    all_dates.extend(sorted_train_dates)
+    all_y_actual.extend(sorted_y_train)
+    all_y_predicted.extend(sorted_predictions)
     
-    plt.subplot(4, 1, 2)
-    plt.plot(sorted_dates, capital, color='purple')
-    plt.title('Strategy Capital (Long/Short based on Predicted vs Actual)')
-    plt.xticks(rotation=45)
-
+    # Add test data if available
     if y_test is not None and test_predictions is not None and test_indices is not None:
         test_dates = df.index[test_indices]
         sorted_test_indices = np.argsort(test_dates)
         sorted_test_dates = test_dates[sorted_test_indices]
         sorted_y_test = y_test[sorted_test_indices]
         sorted_test_predictions = test_predictions[sorted_test_indices]
-        
-        plt.subplot(4, 1, 3)
-        plt.plot(sorted_test_dates, sorted_y_test, label='Actual Price', color='blue')
-        plt.plot(sorted_test_dates, sorted_test_predictions, label='Predicted', color='red', alpha=0.7)
-        plt.title('BTC Price Prediction (Test Set)')
-        plt.legend()
-        plt.xticks(rotation=45)
-        
-        plt.subplot(4, 1, 4)
-        plt.semilogy(history_loss, label='Train Loss', color='blue')
-        plt.semilogy(history_val_loss, label='Test Loss (Val)', color='orange')
-        plt.xlabel('Epochs')
-        plt.ylabel('MSE Loss (Log Scale)')
-        plt.title('Double Descent Visualization')
-        plt.legend()
-    else:
-        plt.subplot(4, 1, 3)
-        plt.semilogy(history_loss, label='Train Loss', color='blue')
-        plt.semilogy(history_val_loss, label='Test Loss (Val)', color='orange')
-        plt.xlabel('Epochs')
-        plt.ylabel('MSE Loss (Log Scale)')
-        plt.title('Double Descent Visualization')
-        plt.legend()
+        all_dates.extend(sorted_test_dates)
+        all_y_actual.extend(sorted_y_test)
+        all_y_predicted.extend(sorted_test_predictions)
+    
+    # Plot 1: Combined actual vs predicted prices
+    plt.subplot(3, 1, 1)
+    plt.plot(all_dates, all_y_actual, label='Actual Price', color='blue')
+    plt.plot(all_dates, all_y_predicted, label='Predicted', color='green', alpha=0.7)
+    plt.title('BTC Price Prediction (Training and Test Sets)')
+    plt.legend()
+    plt.xticks(rotation=45)
+
+    # Strategy capital calculation for combined data
+    capital = [1000]
+    for i in range(1, len(all_y_actual)):
+        ret = (all_y_actual[i] - all_y_actual[i-1]) / all_y_actual[i-1]
+        pos = 1 if all_y_predicted[i-1] > all_y_actual[i-1] else -1 
+        capital.append(capital[-1] * (1 + (ret * pos * 5)))
+    
+    plt.subplot(3, 1, 2)
+    plt.plot(all_dates, capital, color='purple')
+    plt.title('Strategy Capital (Long/Short based on Predicted vs Actual)')
+    plt.xticks(rotation=45)
+
+    # Plot 3: Loss curves
+    plt.subplot(3, 1, 3)
+    plt.semilogy(history_loss, label='Train Loss', color='blue')
+    plt.semilogy(history_val_loss, label='Test Loss (Val)', color='orange')
+    plt.xlabel('Epochs')
+    plt.ylabel('MSE Loss (Log Scale)')
+    plt.title('Double Descent Visualization')
+    plt.legend()
 
     plt.tight_layout()
     img = io.BytesIO()
