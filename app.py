@@ -120,8 +120,8 @@ def load_data():
             'Net_Transaction_Count': 'n-transactions',
             'Transaction_Volume_USD': 'estimated-transaction-volume-usd',
         }
-        START_DATE = '2022-08-10'
-        END_DATE = '2023-09-30'
+        START_DATE = '2018-01-01'
+        END_DATE = '2025-11-30'
         
         all_data = [df_price]
         for metric_name, chart_endpoint in METRICS.items():
@@ -143,8 +143,7 @@ def load_data():
         df_final = df_combined.loc[START_DATE:END_DATE].ffill()
         df_final = df_final[~df_final.index.duplicated(keep='first')]
         
-        logger.info("Reducing dataset size to last 200 days to force high P/N ratio.")
-        df_final = df_final.tail(200)
+
         
         return df_final
     except Exception as e:
