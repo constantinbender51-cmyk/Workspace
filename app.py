@@ -261,19 +261,7 @@ def run_experiment():
     plt.savefig(plot_filename)
     print(f"\nPlot saved to {plot_filename}")
     
-    # Create a simple HTML viewer
-    html_content = f"""
-    <html>
-        <head><title>Double Descent Experiment</title></head>
-        <body style="font-family: sans-serif; text-align: center; padding: 20px;">
-            <h1>Double Descent Phenomenon in LSTM</h1>
-            <p>Training vs Test MSE across model complexity</p>
-            <img src="{plot_filename}" style="max-width: 100%; height: auto; border: 1px solid #ccc; box-shadow: 0 4px 8px rgba(0,0,0,0.1);">
-        </body>
-    </html>
-    """
-    with open("index.html", "w") as f:
-        f.write(html_content)
+
 
     PORT = 8080
     Handler = http.server.SimpleHTTPRequestHandler
