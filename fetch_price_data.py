@@ -8,7 +8,7 @@ def fetch_btc_candles():
     symbol = 'BTCUSDT'
     interval = '1d'
     start_date = datetime(2018, 1, 1)
-    end_date = datetime.now()
+    end_date = datetime(2025, 11, 30)
     
     all_data = []
     current_start = start_date
