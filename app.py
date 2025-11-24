@@ -125,19 +125,32 @@ def load_data():
         
         all_data = [df_price]
         for metric_name, chart_endpoint in METRICS.items():
-            time.sleep(1)  # Sleep for 1 second between API calls to respect rate limits
-            try:
-                params = {'format': 'json', 'start': START_DATE, 'end': END_DATE, 'timespan': '7years'}
-                response = requests.get(f"{BASE_URL}{chart_endpoint}", params=params, timeout=10)
-                if response.status_code == 200:
-                    data = response.json()
-                    if 'values' in data:
-                        df = pd.DataFrame(data['values'])
-                        df['Date'] = pd.to_datetime(df['x'], unit='s', utc=True).dt.tz_localize(None)
-                        df = df.set_index('Date')['y'].rename(metric_name)
-                        all_data.append(df)
-            except Exception as e:
-                logger.warning(f"Skipping {metric_name}: {e}")
+            yearly_data = []
+            # Make 7 separate API calls for each year from 2018 to 2024
+            for year in range(2018, 2025):
+                time.sleep(1)  # Sleep for 1 second between API calls to respect rate limits
+                try:
+                    year_start = f"{year}-01-01"
+                    year_end = f"{year}-12-31"
+                    params = {'format': 'json', 'start': year_start, 'end': year_end, 'timespan': '1year'}
+                    response = requests.get(f"{BASE_URL}{chart_endpoint}", params=params, timeout=10)
+                    if response.status_code == 200:
+                        data = response.json()
+                        if 'values' in data:
+                            df = pd.DataFrame(data['values'])
+                            df['Date'] = pd.to_datetime(df['x'], unit='s', utc=True).dt.tz_localize(None)
+                            df = df.set_index('Date')['y']
+                            yearly_data.append(df)
+                except Exception as e:
+                    logger.warning(f"Skipping {metric_name} for year {year}: {e}")
+            
+            # Combine all yearly data for this metric
+            if yearly_data:
+                combined_df = pd.concat(yearly_data, axis=0)
+                combined_df = combined_df[~combined_df.index.duplicated(keep='first')]
+                combined_df = combined_df.sort_index()
+                combined_df = combined_df.rename(metric_name)
+                all_data.append(combined_df)
                 
         df_combined = pd.concat(all_data, axis=1, join='inner')
         df_final = df_combined.loc[START_DATE:END_DATE].ffill()
