@@ -39,7 +39,7 @@
     <div class="container">
         <h1>Double Descent: BTC Price Prediction</h1>
         <p>
-            Training LSTM (Target: Returns / Residuals).
+            Training LSTM (Target: Log Returns).
         </p>
 
         <button id="startBtn" onclick="startTraining()" style="display: none;">Start Training Experiment</button>
@@ -60,17 +60,14 @@
 
         <div id="result-container">
             <h2>Experiment Results</h2>
-            <p>Final Training MSE: <span id="finalMse"></span></p>
+            <p>Final Training Loss: <span id="finalMse"></span></p>
             <div class="metrics">
-                <p>sMAPE: <span id="finalSmape"></span></p>
                 <p>MAE: <span id="finalMae"></span></p>
+                <p>sMAPE: <span id="finalSmape"></span></p>
+                <p>Residual Std Dev: <span id="residStd"></span></p>
+                <p>Residual Autocorr (lag1): <span id="residAuto"></span></p>
             </div>
             <img id="resultPlot" src="" alt="Results">
-            <div class="metrics">
-                <h3>Residual Diagnostics</h3>
-                <p>Autocorrelation: <span id="residAuto"></span></p>
-                <p>Error Std Dev: <span id="residStd"></span></p>
-            </div>
         </div>
         
         <div id="errorMsg" class="error"></div>
@@ -180,4 +177,9 @@
                     document.getElementById('startBtn').style.display = 'block';
                     
                     document.getElementById('resultPlot').src = "data:image/png;base64," + data.plot_url;
-                    document.getElementById('finalMse').innerText = data.train_mse.toExponential
+                    document.getElementById('finalMse').innerText = data.train_mse?.toExponential(4);
+                    document.getElementById('finalMae').innerText = data.mae?.toExponential(4);
+                    document.getElementById('finalSmape').innerText = data.smape?.toFixed(2) + " %";
+                    document.getElementById('residStd').innerText = data.resid_std?.toExponential(4);
+                    document.getElementById('residAuto').innerText = data.resid_auto?.toExponential(4);
+                    document.getElementById('result-container').style.display =
