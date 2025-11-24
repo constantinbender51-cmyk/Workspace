@@ -187,9 +187,6 @@ def prepare_data(df):
     df['stoch_rsi'] = 100 * (rsi - rsi_min) / (rsi_max - rsi_min)
     df['day_of_week'] = df.index.dayofweek + 1
     
-    # Calculate daily return: (close_t - close_{t-1}) / close_{t-1}
-    df['daily_return'] = df['close'].pct_change()
-    
     df_clean = df.dropna()
     
     features = []
@@ -199,6 +196,12 @@ def prepare_data(df):
             feature = []
             for lookback in range(1, 21):
                 if i - lookback >= 0:
+                    # Calculate daily return using historical data only: (close_{i-lookback} - close_{i-lookback-1}) / close_{i-lookback-1}
+                    if i - lookback - 1 >= 0:
+                        daily_return = (df_clean['close'].iloc[i - lookback] - df_clean['close'].iloc[i - lookback - 1]) / df_clean['close'].iloc[i - lookback - 1]
+                    else:
+                        daily_return = 0  # Default to 0 if insufficient data
+                    
                     feature.append(df_clean['sma_3_close'].iloc[i - lookback])
                     feature.append(df_clean['sma_9_close'].iloc[i - lookback])
                     feature.append(df_clean['ema_3_volume'].iloc[i - lookback])
@@ -206,7 +209,7 @@ def prepare_data(df):
                     feature.append(df_clean['signal_line'].iloc[i - lookback])
                     feature.append(df_clean['stoch_rsi'].iloc[i - lookback])
                     feature.append(df_clean['day_of_week'].iloc[i - lookback])
-                    feature.append(df_clean['daily_return'].iloc[i - lookback])
+                    feature.append(daily_return)
                     
                     for col in ['Net_Transaction_Count', 'Transaction_Volume_USD', 'Active_Addresses']:
                         feature.append(df_clean[col].iloc[i - lookback] if col in df_clean.columns else 0)
