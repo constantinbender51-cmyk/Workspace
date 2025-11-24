@@ -47,6 +47,23 @@ training_state = {
     'last_update': 0
 }
 
+# --- Auto-start training on app startup ---
+def start_training_on_startup():
+    """Start training automatically when the app starts"""
+    time.sleep(2)  # Give the app time to fully initialize
+    with state_lock:
+        if training_state['status'] == 'idle':
+            training_state['status'] = 'starting'
+            training_state['progress'] = 0
+            training_state['epoch'] = 0
+            training_state['plot_url'] = None
+            training_state['error'] = None
+    
+    thread = threading.Thread(target=run_training_task)
+    thread.daemon = True
+    thread.start()
+    logger.info("Auto-started training on app startup")
+
 # --- Helper to prevent JSON crashes ---
 def sanitize_float(val):
     try:
@@ -425,6 +442,11 @@ def start_training():
 def status():
     with state_lock:
         return jsonify(training_state)
+
+# Start training automatically when app starts
+startup_thread = threading.Thread(target=start_training_on_startup)
+startup_thread.daemon = True
+startup_thread.start()
 
 if __name__ == '__main__':
     app.run(host='0.0.0.0', port=8080, debug=False)
