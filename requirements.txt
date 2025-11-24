@@ -7,3 +7,4 @@ requests==2.31.0
 gunicorn==21.2.0
 setuptools==69.0.3
 tensorflow==2.13.0
+statsmodels==0.14.2
