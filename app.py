@@ -125,7 +125,7 @@ def load_data():
         
         all_data = [df_price]
         for metric_name, chart_endpoint in METRICS.items():
-            time.sleep(1)
+            time.sleep(1)  # Sleep for 1 second between API calls to respect rate limits
             try:
                 params = {'format': 'json', 'start': START_DATE, 'timespan': '1year', 'rollingAverage': '1d'}
                 response = requests.get(f"{BASE_URL}{chart_endpoint}", params=params, timeout=10)
