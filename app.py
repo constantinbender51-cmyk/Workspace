@@ -289,9 +289,13 @@ def index():
 
 @app.route('/download')
 def download_csv():
+    # Filter DataFrame to include only date, OHLCV, and optimal_position columns
+    columns_to_include = ['date', 'open', 'high', 'low', 'close', 'volume', 'optimal_position']
+    filtered_df = df[columns_to_include]
+    
     # Create a CSV in memory
     csv_buffer = io.StringIO()
-    df.to_csv(csv_buffer, index=False)
+    filtered_df.to_csv(csv_buffer, index=False)
     csv_buffer.seek(0)
     
     # Send as file download
