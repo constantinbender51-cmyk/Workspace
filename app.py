@@ -1,7 +1,7 @@
 import gdown
 import pandas as pd
 import numpy as np
-from sklearn.linear_model import LogisticRegression
+from sklearn.ensemble import RandomForestClassifier
 from sklearn.model_selection import train_test_split
 from sklearn.metrics import accuracy_score, classification_report, confusion_matrix
 import matplotlib
@@ -75,8 +75,8 @@ def train_model(csv_file):
         X, y, test_size=0.2, shuffle=False
     )
     
-    print("Training Logistic Regression model...")
-    model = LogisticRegression(max_iter=10000, random_state=42, multi_class='multinomial')
+    print("Training Random Forest model...")
+    model = RandomForestClassifier(n_estimators=100, random_state=42)
     model.fit(X_train, y_train)
     
     # Make predictions
@@ -160,7 +160,7 @@ def create_plot(results, df):
     fig = plt.figure(figsize=(18, 12))
     gs = fig.add_gridspec(4, 3, hspace=0.35, wspace=0.3)
     
-    fig.suptitle('Logistic Regression Model: Optimal Position Classification', fontsize=16, fontweight='bold')
+    fig.suptitle('Random Forest Model: Optimal Position Classification', fontsize=16, fontweight='bold')
     
     # Plot 1: Training Confusion Matrix
     ax1 = fig.add_subplot(gs[0, 0])
@@ -370,7 +370,7 @@ def create_plot(results, df):
                     </div>
                 </div>
                 <div style="margin-top: 15px;">
-                    <p><strong>Model Type:</strong> Multinomial Logistic Regression</p>
+                    <p><strong>Model Type:</strong> Random Forest Classifier</p>
                     <p><strong>Features:</strong> 30 days of OHLCV data (lagged features)</p>
                     <p><strong>Target Classes:</strong> -1 (Short), 0 (Neutral), 1 (Long)</p>
                     <p><strong>Train/Test Split:</strong> 80% / 20% (time-series split)</p>
