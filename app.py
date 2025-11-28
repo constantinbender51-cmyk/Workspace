@@ -226,7 +226,6 @@ def create_plot(results, df):
     # Plot 6: Training Capital Development
     ax6 = fig.add_subplot(gs[3, :2])
     x_capital_train = np.arange(len(capital_optimal_train))
-    ax6.plot(x_capital_train, capital_optimal_train, label='Optimal Position', linewidth=2, color='green', alpha=0.8)
     ax6.plot(x_capital_train, capital_predicted_train, label='Predicted Position', linewidth=2, color='blue', alpha=0.8)
     ax6.plot(x_capital_train, capital_bh_train, label='Buy & Hold', linewidth=1.5, color='gray', alpha=0.6, linestyle=':')
     ax6.set_xlabel('Time Index')
@@ -234,16 +233,14 @@ def create_plot(results, df):
     ax6.set_title(f'Training Set: Capital Development (Start: $10,000)')
     ax6.legend()
     ax6.grid(True, alpha=0.3)
-    final_optimal_train = capital_optimal_train[-1]
     final_predicted_train = capital_predicted_train[-1]
     final_bh_train = capital_bh_train[-1]
-    ax6.text(0.02, 0.98, f'Final Capital:\nOptimal: ${final_optimal_train:,.0f}\nPredicted: ${final_predicted_train:,.0f}\nBuy&Hold: ${final_bh_train:,.0f}', 
+    ax6.text(0.02, 0.98, f'Final Capital:\nPredicted: ${final_predicted_train:,.0f}\nBuy&Hold: ${final_bh_train:,.0f}', 
              transform=ax6.transAxes, verticalalignment='top', bbox=dict(boxstyle='round', facecolor='wheat', alpha=0.5))
     
     # Plot 7: Test Capital Development
     ax7 = fig.add_subplot(gs[3, 2])
     x_capital_test = np.arange(len(capital_optimal_test))
-    ax7.plot(x_capital_test, capital_optimal_test, label='Optimal Position', linewidth=2, color='green', alpha=0.8)
     ax7.plot(x_capital_test, capital_predicted_test, label='Predicted Position', linewidth=2, color='orange', alpha=0.8)
     ax7.plot(x_capital_test, capital_bh_test, label='Buy & Hold', linewidth=1.5, color='gray', alpha=0.6, linestyle=':')
     ax7.set_xlabel('Time Index')
@@ -251,10 +248,9 @@ def create_plot(results, df):
     ax7.set_title(f'Test Set: Capital Development')
     ax7.legend()
     ax7.grid(True, alpha=0.3)
-    final_optimal_test = capital_optimal_test[-1]
     final_predicted_test = capital_predicted_test[-1]
     final_bh_test = capital_bh_test[-1]
-    ax7.text(0.02, 0.98, f'Final:\n${final_optimal_test:,.0f}\n${final_predicted_test:,.0f}\n${final_bh_test:,.0f}', 
+    ax7.text(0.02, 0.98, f'Final:\n${final_predicted_test:,.0f}\n${final_bh_test:,.0f}', 
              transform=ax7.transAxes, verticalalignment='top', fontsize=9, bbox=dict(boxstyle='round', facecolor='wheat', alpha=0.5))
     
     plt.savefig('prediction_results.png', dpi=150, bbox_inches='tight')
