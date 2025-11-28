@@ -461,8 +461,11 @@ if __name__ == "__main__":
         # Train model and get predictions
         results = train_model(csv_file)
         
+        # Load data again for visualization
+        df = pd.read_csv(csv_file)
+        
         # Create visualization
-        create_plot(results)
+        create_plot(results, df)
         
         # Start web server
         start_server()
