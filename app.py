@@ -123,7 +123,7 @@ def calculate_capital_curve(positions, returns, initial_capital=10000):
     """
     capital = [initial_capital]
     
-    for i in range(len(positions)):
+    for i in range(len(returns)):
         # Position determines exposure: -1 = short, 0 = no position, 1 = long
         position_return = positions[i] * returns[i]
         new_capital = capital[-1] * (1 + position_return)
