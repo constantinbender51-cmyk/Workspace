@@ -30,14 +30,15 @@ TRANSACTION_COST = 0.032  # 3.2% total (0.8% + 0.8%)
 df['return'] = df['close'].pct_change()
 
 # Determine optimal position for each day (what position to hold TODAY to profit from TOMORROW)
+# Note: We need returns > 2x TRANSACTION_COST to account for entry + exit fees
 df['optimal_position'] = 0  # 0 = FLAT, 1 = LONG, -1 = SHORT
 
 for i in range(len(df) - 1):
     next_return = df.loc[i + 1, 'return']
     
-    if next_return > TRANSACTION_COST:
+    if next_return > (2 * TRANSACTION_COST):
         df.loc[i, 'optimal_position'] = 1  # LONG
-    elif next_return < -TRANSACTION_COST:
+    elif next_return < -(2 * TRANSACTION_COST):
         df.loc[i, 'optimal_position'] = -1  # SHORT
     else:
         df.loc[i, 'optimal_position'] = 0  # FLAT
