@@ -2,4 +2,6 @@ gdown
 pandas
 numpy
 matplotlib
+scikit-learn
+seaborn
 flask
