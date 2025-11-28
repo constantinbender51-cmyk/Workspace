@@ -76,7 +76,7 @@ def train_model(csv_file):
     )
     
     print("Training Logistic Regression model...")
-    model = LogisticRegression(max_iter=8000, random_state=42, multi_class='multinomial')
+    model = LogisticRegression(max_iter=1000, random_state=42, multi_class='multinomial')
     model.fit(X_train, y_train)
     
     # Make predictions
@@ -114,12 +114,51 @@ def train_model(csv_file):
         'classes': model.classes_
     }
 
+# Calculate capital development
+def calculate_capital_curve(positions, returns, initial_capital=10000):
+    """
+    Calculate capital development based on positions and returns.
+    positions: array of -1, 0, 1 (short, neutral, long)
+    returns: array of price returns
+    """
+    capital = [initial_capital]
+    
+    for i in range(len(positions)):
+        # Position determines exposure: -1 = short, 0 = no position, 1 = long
+        position_return = positions[i] * returns[i]
+        new_capital = capital[-1] * (1 + position_return)
+        capital.append(new_capital)
+    
+    return np.array(capital)
+
 # Create visualization
-def create_plot(results):
+def create_plot(results, df):
     print("Creating visualization...")
     
-    fig = plt.figure(figsize=(16, 10))
-    gs = fig.add_gridspec(3, 3, hspace=0.3, wspace=0.3)
+    # Calculate returns from close prices
+    df.columns = df.columns.str.lower()
+    close_prices = df['close'].values
+    returns = np.diff(close_prices) / close_prices[:-1]
+    
+    # Align returns with our predictions (account for 30-day lookback)
+    lookback = 30
+    returns_aligned_train = returns[lookback:lookback+len(results['y_train'])]
+    returns_aligned_test = returns[lookback+len(results['y_train']):lookback+len(results['y_train'])+len(results['y_test'])]
+    
+    # Calculate capital curves
+    capital_optimal_train = calculate_capital_curve(results['y_train'], returns_aligned_train)
+    capital_predicted_train = calculate_capital_curve(results['y_pred_train'], returns_aligned_train)
+    capital_optimal_test = calculate_capital_curve(results['y_test'], returns_aligned_test)
+    capital_predicted_test = calculate_capital_curve(results['y_pred_test'], returns_aligned_test)
+    
+    # Calculate buy-and-hold baseline
+    capital_bh_train = 10000 * (1 + np.cumsum(returns_aligned_train))
+    capital_bh_train = np.insert(capital_bh_train, 0, 10000)
+    capital_bh_test = capital_bh_train[-1] * (1 + np.cumsum(returns_aligned_test))
+    capital_bh_test = np.insert(capital_bh_test, 0, capital_bh_train[-1])
+    
+    fig = plt.figure(figsize=(18, 12))
+    gs = fig.add_gridspec(4, 3, hspace=0.35, wspace=0.3)
     
     fig.suptitle('Logistic Regression Model: Optimal Position Classification', fontsize=16, fontweight='bold')
     
@@ -184,8 +223,51 @@ def create_plot(results):
     ax5.legend()
     ax5.grid(True, alpha=0.3)
     
+    # Plot 6: Training Capital Development
+    ax6 = fig.add_subplot(gs[3, :2])
+    x_capital_train = np.arange(len(capital_optimal_train))
+    ax6.plot(x_capital_train, capital_optimal_train, label='Optimal Position', linewidth=2, color='green', alpha=0.8)
+    ax6.plot(x_capital_train, capital_predicted_train, label='Predicted Position', linewidth=2, color='blue', alpha=0.8)
+    ax6.plot(x_capital_train, capital_bh_train, label='Buy & Hold', linewidth=1.5, color='gray', alpha=0.6, linestyle=':')
+    ax6.set_xlabel('Time Index')
+    ax6.set_ylabel('Capital ($)')
+    ax6.set_title(f'Training Set: Capital Development (Start: $10,000)')
+    ax6.legend()
+    ax6.grid(True, alpha=0.3)
+    final_optimal_train = capital_optimal_train[-1]
+    final_predicted_train = capital_predicted_train[-1]
+    final_bh_train = capital_bh_train[-1]
+    ax6.text(0.02, 0.98, f'Final Capital:\nOptimal: ${final_optimal_train:,.0f}\nPredicted: ${final_predicted_train:,.0f}\nBuy&Hold: ${final_bh_train:,.0f}', 
+             transform=ax6.transAxes, verticalalignment='top', bbox=dict(boxstyle='round', facecolor='wheat', alpha=0.5))
+    
+    # Plot 7: Test Capital Development
+    ax7 = fig.add_subplot(gs[3, 2])
+    x_capital_test = np.arange(len(capital_optimal_test))
+    ax7.plot(x_capital_test, capital_optimal_test, label='Optimal Position', linewidth=2, color='green', alpha=0.8)
+    ax7.plot(x_capital_test, capital_predicted_test, label='Predicted Position', linewidth=2, color='orange', alpha=0.8)
+    ax7.plot(x_capital_test, capital_bh_test, label='Buy & Hold', linewidth=1.5, color='gray', alpha=0.6, linestyle=':')
+    ax7.set_xlabel('Time Index')
+    ax7.set_ylabel('Capital ($)')
+    ax7.set_title(f'Test Set: Capital Development')
+    ax7.legend()
+    ax7.grid(True, alpha=0.3)
+    final_optimal_test = capital_optimal_test[-1]
+    final_predicted_test = capital_predicted_test[-1]
+    final_bh_test = capital_bh_test[-1]
+    ax7.text(0.02, 0.98, f'Final:\n${final_optimal_test:,.0f}\n${final_predicted_test:,.0f}\n${final_bh_test:,.0f}', 
+             transform=ax7.transAxes, verticalalignment='top', fontsize=9, bbox=dict(boxstyle='round', facecolor='wheat', alpha=0.5))
+    
     plt.savefig('prediction_results.png', dpi=150, bbox_inches='tight')
     print("Plot saved as prediction_results.png")
+    
+    # Calculate performance metrics
+    total_return_optimal_train = (capital_optimal_train[-1] / 10000 - 1) * 100
+    total_return_predicted_train = (capital_predicted_train[-1] / 10000 - 1) * 100
+    total_return_bh_train = (capital_bh_train[-1] / 10000 - 1) * 100
+    
+    total_return_optimal_test = (capital_optimal_test[-1] / capital_optimal_test[0] - 1) * 100
+    total_return_predicted_test = (capital_predicted_test[-1] / capital_predicted_test[0] - 1) * 100
+    total_return_bh_test = (capital_bh_test[-1] / capital_bh_test[0] - 1) * 100
     
     # Create HTML page
     html_content = """
@@ -200,7 +282,7 @@ def create_plot(results):
                 background-color: #f5f5f5;
             }}
             .container {{
-                max-width: 1400px;
+                max-width: 1600px;
                 margin: 0 auto;
                 background-color: white;
                 padding: 20px;
@@ -229,7 +311,7 @@ def create_plot(results):
             }}
             .metric-row {{
                 display: grid;
-                grid-template-columns: 1fr 1fr;
+                grid-template-columns: 1fr 1fr 1fr;
                 gap: 20px;
                 margin-top: 15px;
             }}
@@ -239,6 +321,12 @@ def create_plot(results):
                 border-radius: 5px;
                 border-left: 4px solid #3498db;
             }}
+            .metric-box.optimal {{
+                border-left-color: #27ae60;
+            }}
+            .metric-box.predicted {{
+                border-left-color: #e74c3c;
+            }}
             .metric-label {{
                 font-weight: bold;
                 color: #555;
@@ -247,6 +335,18 @@ def create_plot(results):
             .metric-value {{
                 font-size: 24px;
                 color: #2c3e50;
+            }}
+            .returns-section {{
+                background-color: #fff9e6;
+                padding: 20px;
+                border-radius: 5px;
+                margin: 20px 0;
+            }}
+            .returns-grid {{
+                display: grid;
+                grid-template-columns: 1fr 1fr;
+                gap: 20px;
+                margin-top: 15px;
             }}
         </style>
     </head>
@@ -264,6 +364,10 @@ def create_plot(results):
                         <div class="metric-label">Test Accuracy</div>
                         <div class="metric-value">{:.2%}</div>
                     </div>
+                    <div class="metric-box">
+                        <div class="metric-label">Initial Capital</div>
+                        <div class="metric-value">$10,000</div>
+                    </div>
                 </div>
                 <div style="margin-top: 15px;">
                     <p><strong>Model Type:</strong> Multinomial Logistic Regression</p>
@@ -272,11 +376,57 @@ def create_plot(results):
                     <p><strong>Train/Test Split:</strong> 80% / 20% (time-series split)</p>
                 </div>
             </div>
+            
+            <div class="returns-section">
+                <h2>Capital Development Performance</h2>
+                <div class="returns-grid">
+                    <div>
+                        <h3>Training Set Returns</h3>
+                        <div class="metric-box optimal">
+                            <div class="metric-label">Optimal Position Strategy</div>
+                            <div class="metric-value">{:+.2f}%</div>
+                        </div>
+                        <div class="metric-box predicted" style="margin-top: 10px;">
+                            <div class="metric-label">Predicted Position Strategy</div>
+                            <div class="metric-value">{:+.2f}%</div>
+                        </div>
+                        <div class="metric-box" style="margin-top: 10px;">
+                            <div class="metric-label">Buy & Hold Baseline</div>
+                            <div class="metric-value">{:+.2f}%</div>
+                        </div>
+                    </div>
+                    <div>
+                        <h3>Test Set Returns</h3>
+                        <div class="metric-box optimal">
+                            <div class="metric-label">Optimal Position Strategy</div>
+                            <div class="metric-value">{:+.2f}%</div>
+                        </div>
+                        <div class="metric-box predicted" style="margin-top: 10px;">
+                            <div class="metric-label">Predicted Position Strategy</div>
+                            <div class="metric-value">{:+.2f}%</div>
+                        </div>
+                        <div class="metric-box" style="margin-top: 10px;">
+                            <div class="metric-label">Buy & Hold Baseline</div>
+                            <div class="metric-value">{:+.2f}%</div>
+                        </div>
+                    </div>
+                </div>
+            </div>
+            
             <img src="prediction_results.png" alt="Prediction Results">
         </div>
     </body>
     </html>
-    """.format(results['train_acc'], results['test_acc'])
+    """.format(
+        results['train_acc'], 
+        results['test_acc'],
+        total_return_optimal_train,
+        total_return_predicted_train,
+        total_return_bh_train,
+        total_return_optimal_test,
+        total_return_predicted_test,
+        total_return_bh_test
+    )
     
     with open('index.html', 'w') as f:
         f.write(html_content)
