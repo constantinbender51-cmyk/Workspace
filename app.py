@@ -76,7 +76,7 @@ def train_model(csv_file):
     )
     
     print("Training Logistic Regression model...")
-    model = LogisticRegression(max_iter=4000, random_state=42, multi_class='multinomial')
+    model = LogisticRegression(max_iter=8000, random_state=42, multi_class='multinomial')
     model.fit(X_train, y_train)
     
     # Make predictions
