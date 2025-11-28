@@ -3,7 +3,7 @@ import pandas as pd
 import numpy as np
 import matplotlib.pyplot as plt
 from matplotlib.patches import Rectangle
-from flask import Flask, render_template_string
+from flask import Flask, render_template_string, send_file
 import io
 import base64
 
@@ -215,11 +215,31 @@ HTML_TEMPLATE = """
             height: auto;
             border-radius: 8px;
         }
+        .download-link {
+            display: block;
+            text-align: center;
+            margin: 20px 0;
+        }
+        .download-link a {
+            background-color: #4CAF50;
+            color: white;
+            padding: 10px 20px;
+            text-decoration: none;
+            border-radius: 5px;
+            font-size: 16px;
+        }
+        .download-link a:hover {
+            background-color: #45a049;
+        }
     </style>
 </head>
 <body>
     <div class="container">
         <h1>🎯 Optimal Trading Strategy Analysis</h1>
+        
+        <div class="download-link">
+            <a href="/download">Download OHLCV + Optimal Positions CSV</a>
+        </div>
         
         <div class="stats">
             <div class="stat-box">
@@ -265,6 +285,21 @@ def index():
         days_short=days_short,
         days_flat=days_flat,
         img_data=img_base64
+    )
+
+@app.route('/download')
+def download_csv():
+    # Create a CSV in memory
+    csv_buffer = io.StringIO()
+    df.to_csv(csv_buffer, index=False)
+    csv_buffer.seek(0)
+    
+    # Send as file download
+    return send_file(
+        io.BytesIO(csv_buffer.getvalue().encode('utf-8')),
+        mimetype='text/csv',
+        as_attachment=True,
+        download_name='ohlcv_optimal_positions.csv'
     )
 
 print("Starting web server on http://0.0.0.0:8080")
