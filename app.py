@@ -1,485 +1,316 @@
 import gdown
 import pandas as pd
 import numpy as np
-import xgboost as xgb
-from sklearn.model_selection import train_test_split
-from sklearn.metrics import accuracy_score, classification_report, confusion_matrix
-import matplotlib
-matplotlib.use('Agg')  # Use non-interactive backend
 import matplotlib.pyplot as plt
-import seaborn as sns
-from http.server import HTTPServer, SimpleHTTPRequestHandler
-import os
-import threading
+from matplotlib.patches import Rectangle
+from flask import Flask, render_template_string, send_file
+import io
+import base64
 
 # Download file from Google Drive
-def download_data():
-    print("Downloading data from Google Drive...")
-    url = "https://drive.google.com/uc?id=1Bn7Bv1Z4Evxl3N4Ep_wYwaMc45VpOvtc"
-    output = "data.csv"
-    gdown.download(url, output, quiet=False)
-    print(f"Downloaded to {output}")
-    return output
+file_id = "16gXMCEX5WxcpEaR0xg-Wmr0dsDPniSkg"
+url = f"https://drive.google.com/uc?id={file_id}"
+output = "daily_ohlcv.csv"
 
-# Create features using 30 days of OHLCV data
-def create_features(df, lookback=30):
-    features = []
-    targets = []
-    
-    # Ensure we have the required columns
-    ohlcv_cols = ['open', 'high', 'low', 'close', 'volume']
-    
-    # Check which columns exist (case-insensitive)
-    df.columns = df.columns.str.lower()
-    available_cols = [col for col in ohlcv_cols if col in df.columns]
-    
-    print(f"Available OHLCV columns: {available_cols}")
-    print(f"Checking for optimal_position column...")
-    
-    if 'optimal_position' not in df.columns:
-        print("Available columns:", df.columns.tolist())
-        raise ValueError("optimal_position column not found in dataset")
-    
-    # Create lagged features
-    for i in range(lookback, len(df)):
-        feature_vector = []
-        
-        # Add lagged OHLCV values for the past 'lookback' days
-        for col in available_cols:
-            for lag in range(lookback):
-                feature_vector.append(df[col].iloc[i - lookback + lag])
-        
-        features.append(feature_vector)
-        targets.append(df['optimal_position'].iloc[i])
-    
-    return np.array(features), np.array(targets)
+print("Downloading data...")
+gdown.download(url, output, quiet=False)
 
-# Train model and generate predictions
-def train_model(csv_file):
-    print("Loading data...")
-    df = pd.read_csv(csv_file)
+# Load data
+print("Loading data...")
+df = pd.read_csv(output)
+print(f"Loaded {len(df)} rows")
+print(df.head())
+
+# Calculate optimal positions
+print("\nCalculating optimal positions...")
+
+TRANSACTION_COST = 0.002  # 0.2% total (0.1% + 0.1%)
+
+# Calculate daily returns
+df['return'] = df['close'].pct_change()
+
+# Determine optimal position for each day (what position to hold TODAY to profit from TOMORROW)
+df['optimal_position'] = 0  # 0 = FLAT, 1 = LONG, -1 = SHORT
+
+for i in range(len(df) - 1):
+    next_return = df.loc[i + 1, 'return']
     
-    print(f"Data shape: {df.shape}")
-    print(f"Columns: {df.columns.tolist()}")
-    
-    print("Creating features...")
-    X, y = create_features(df, lookback=30)
-    
-    print(f"Features shape: {X.shape}")
-    print(f"Targets shape: {y.shape}")
-    print(f"Unique classes: {np.unique(y)}")
-    print(f"Class distribution: {np.bincount(y.astype(int) + 1)}")  # Assuming -1, 0, 1
-    
-    # Map labels from [-1, 0, 1] to [0, 1, 2] for XGBoost compatibility
-    label_mapping = {-1: 0, 0: 1, 1: 2}
-    reverse_mapping = {0: -1, 1: 0, 2: 1}
-    y_mapped = np.array([label_mapping[label] for label in y])
-    
-    # Split data
-    X_train, X_test, y_train, y_test = train_test_split(
-        X, y_mapped, test_size=0.2, shuffle=False
-    )
-    
-    print("Training XGBoost model...")
-    model = xgb.XGBClassifier(random_state=42, objective='multi:softprob')
-    model.fit(X_train, y_train)
-    
-    # Make predictions and map back to original labels
-    y_pred_train_mapped = model.predict(X_train)
-    y_pred_test_mapped = model.predict(X_test)
-    
-    # Map predictions back to original labels [-1, 0, 1]
-    y_pred_train = np.array([reverse_mapping[label] for label in y_pred_train_mapped])
-    y_pred_test = np.array([reverse_mapping[label] for label in y_pred_test_mapped])
-    
-    # Get original y_train and y_test for visualization
-    y_train_original = np.array([reverse_mapping[label] for label in y_train])
-    y_test_original = np.array([reverse_mapping[label] for label in y_test])
-    
-    # Get prediction probabilities
-    y_pred_proba_train = model.predict_proba(X_train)
-    y_pred_proba_test = model.predict_proba(X_test)
-    
-    # Calculate metrics
-    train_acc = accuracy_score(y_train, y_pred_train)
-    test_acc = accuracy_score(y_test, y_pred_test)
-    
-    print(f"\nModel Performance:")
-    print(f"Train Accuracy: {train_acc:.4f}")
-    print(f"Test Accuracy: {test_acc:.4f}")
-    
-    print("\nClassification Report (Test Set):")
-    print(classification_report(y_test, y_pred_test, labels=[0, 1, 2], target_names=['Short (-1)', 'Neutral (0)', 'Long (1)']))
-    
-    # Confusion matrices
-    cm_train = confusion_matrix(y_train, y_pred_train)
-    cm_test = confusion_matrix(y_test, y_pred_test)
-    
-    return {
-        'y_train': y_train_original,
-        'y_pred_train': y_pred_train,
-        'y_test': y_test_original,
-        'y_pred_test': y_pred_test,
-        'train_acc': train_acc,
-        'test_acc': test_acc,
-        'cm_train': cm_train,
-        'cm_test': cm_test,
-        'classes': np.array([-1, 0, 1])
-    }
+    if next_return > TRANSACTION_COST:
+        df.loc[i, 'optimal_position'] = 1  # LONG
+    elif next_return < -TRANSACTION_COST:
+        df.loc[i, 'optimal_position'] = -1  # SHORT
+    else:
+        df.loc[i, 'optimal_position'] = 0  # FLAT
 
 # Calculate capital development
-def calculate_capital_curve(positions, returns, initial_capital=10000):
-    """
-    Calculate capital development based on positions and returns.
-    positions: array of -1, 0, 1 (short, neutral, long)
-    returns: array of price returns
-    """
-    capital = [initial_capital]
+capital = [1.0]  # Start with $1
+position = 0  # Start FLAT
+position_changes = 0
+
+for i in range(1, len(df)):
+    current_capital = capital[-1]
     
-    for i in range(len(returns)):
-        # Position determines exposure: -1 = short, 0 = no position, 1 = long
-        position_return = positions[i] * returns[i]
-        new_capital = capital[-1] * (1 + position_return)
-        capital.append(new_capital)
+    target_position = df.loc[i - 1, 'optimal_position']
+    daily_return = df.loc[i, 'return']
     
-    return np.array(capital)
+    # Check if position change
+    if target_position != position:
+        current_capital *= (1 - TRANSACTION_COST)  # Pay transaction cost
+        position = target_position
+        position_changes += 1
+    
+    # Apply daily return based on position
+    if position == 1:  # LONG
+        current_capital *= (1 + daily_return)
+    elif position == -1:  # SHORT
+        current_capital *= (1 - daily_return)
+    # FLAT: no change
+    
+    capital.append(current_capital)
+
+df['capital'] = capital
+
+# Calculate statistics
+total_return = (capital[-1] - 1) * 100
+buy_hold_return = ((df['close'].iloc[-1] / df['close'].iloc[0]) - 1) * 100
+days_long = (df['optimal_position'] == 1).sum()
+days_short = (df['optimal_position'] == -1).sum()
+days_flat = (df['optimal_position'] == 0).sum()
+
+print(f"\n{'='*60}")
+print(f"OPTIMAL STRATEGY RESULTS")
+print(f"{'='*60}")
+print(f"Total Return:        {total_return:.2f}%")
+print(f"Buy & Hold Return:   {buy_hold_return:.2f}%")
+print(f"Position Changes:    {position_changes}")
+print(f"Days Long:           {days_long} ({days_long/len(df)*100:.1f}%)")
+print(f"Days Short:          {days_short} ({days_short/len(df)*100:.1f}%)")
+print(f"Days Flat:           {days_flat} ({days_flat/len(df)*100:.1f}%)")
+print(f"Final Capital:       ${capital[-1]:.4f}")
+print(f"{'='*60}\n")
 
 # Create visualization
-def create_plot(results, df):
-    print("Creating visualization...")
+print("Creating visualization...")
+
+fig, axes = plt.subplots(3, 1, figsize=(16, 12))
+fig.suptitle('Optimal Trading Strategy with Perfect Foresight', fontsize=16, fontweight='bold')
+
+# Plot 1: Price with position background
+ax1 = axes[0]
+ax1.plot(df.index, df['close'], color='black', linewidth=1.5, label='Close Price')
+ax1.set_ylabel('Price', fontsize=12)
+ax1.set_title('Price Chart with Optimal Positions', fontsize=14)
+ax1.grid(True, alpha=0.3)
+ax1.legend()
+
+# Add colored background for positions
+ymin, ymax = ax1.get_ylim()
+for i in range(len(df)):
+    pos = df.loc[i, 'optimal_position']
+    if pos == 1:  # LONG
+        color = 'green'
+        alpha = 0.1
+    elif pos == -1:  # SHORT
+        color = 'red'
+        alpha = 0.1
+    else:  # FLAT
+        continue
     
-    # Calculate returns from close prices
-    df.columns = df.columns.str.lower()
-    close_prices = df['close'].values
-    returns = np.diff(close_prices) / close_prices[:-1]
-    
-    # Align returns with our predictions (account for 30-day lookback)
-    lookback = 30
-    returns_aligned_train = returns[lookback:lookback+len(results['y_train'])]
-    returns_aligned_test = returns[lookback+len(results['y_train']):lookback+len(results['y_train'])+len(results['y_test'])]
-    
-    # Calculate capital curves
-    capital_optimal_train = calculate_capital_curve(results['y_train'], returns_aligned_train)
-    capital_predicted_train = calculate_capital_curve(results['y_pred_train'], returns_aligned_train)
-    capital_optimal_test = calculate_capital_curve(results['y_test'], returns_aligned_test)
-    capital_predicted_test = calculate_capital_curve(results['y_pred_test'], returns_aligned_test)
-    
-    # Calculate buy-and-hold baseline
-    capital_bh_train = 10000 * (1 + np.cumsum(returns_aligned_train))
-    capital_bh_train = np.insert(capital_bh_train, 0, 10000)
-    capital_bh_test = capital_bh_train[-1] * (1 + np.cumsum(returns_aligned_test))
-    capital_bh_test = np.insert(capital_bh_test, 0, capital_bh_train[-1])
-    
-    fig = plt.figure(figsize=(18, 12))
-    gs = fig.add_gridspec(4, 3, hspace=0.35, wspace=0.3)
-    
-    fig.suptitle('XGBoost Model: Optimal Position Classification', fontsize=16, fontweight='bold')
-    
-    # Plot 1: Training Confusion Matrix
-    ax1 = fig.add_subplot(gs[0, 0])
-    sns.heatmap(results['cm_train'], annot=True, fmt='d', cmap='Blues', ax=ax1,
-                xticklabels=['Short', 'Neutral', 'Long'],
-                yticklabels=['Short', 'Neutral', 'Long'])
-    ax1.set_title(f"Training Confusion Matrix\nAccuracy: {results['train_acc']:.4f}")
-    ax1.set_ylabel('Actual')
-    ax1.set_xlabel('Predicted')
-    
-    # Plot 2: Test Confusion Matrix
-    ax2 = fig.add_subplot(gs[0, 1])
-    sns.heatmap(results['cm_test'], annot=True, fmt='d', cmap='Oranges', ax=ax2,
-                xticklabels=['Short', 'Neutral', 'Long'],
-                yticklabels=['Short', 'Neutral', 'Long'])
-    ax2.set_title(f"Test Confusion Matrix\nAccuracy: {results['test_acc']:.4f}")
-    ax2.set_ylabel('Actual')
-    ax2.set_xlabel('Predicted')
-    
-    # Plot 3: Class Distribution
-    ax3 = fig.add_subplot(gs[0, 2])
-    unique_train, counts_train = np.unique(results['y_train'], return_counts=True)
-    unique_test, counts_test = np.unique(results['y_test'], return_counts=True)
-    
-    x = np.arange(len(unique_train))
-    width = 0.35
-    ax3.bar(x - width/2, counts_train, width, label='Train', alpha=0.8)
-    ax3.bar(x + width/2, counts_test, width, label='Test', alpha=0.8)
-    ax3.set_xlabel('Position Class')
-    ax3.set_ylabel('Count')
-    ax3.set_title('Class Distribution')
-    ax3.set_xticks(x)
-    ax3.set_xticklabels(['Short (-1)', 'Neutral (0)', 'Long (1)'])
-    ax3.legend()
-    ax3.grid(True, alpha=0.3, axis='y')
-    
-    # Plot 4: Training Time Series
-    ax4 = fig.add_subplot(gs[1, :])
-    x_train = np.arange(len(results['y_train']))
-    ax4.plot(x_train, results['y_train'], label='Actual', alpha=0.6, linewidth=1.5, color='blue')
-    ax4.plot(x_train, results['y_pred_train'], label='Predicted', alpha=0.6, linewidth=1.5, color='red', linestyle='--')
-    ax4.set_xlabel('Time Index')
-    ax4.set_ylabel('Position')
-    ax4.set_title('Training Set: Actual vs Predicted Positions')
-    ax4.set_yticks([-1, 0, 1])
-    ax4.set_yticklabels(['Short (-1)', 'Neutral (0)', 'Long (1)'])
-    ax4.legend()
-    ax4.grid(True, alpha=0.3)
-    
-    # Plot 5: Test Time Series
-    ax5 = fig.add_subplot(gs[2, :])
-    x_test = np.arange(len(results['y_test']))
-    ax5.plot(x_test, results['y_test'], label='Actual', alpha=0.6, linewidth=1.5, color='blue')
-    ax5.plot(x_test, results['y_pred_test'], label='Predicted', alpha=0.6, linewidth=1.5, color='orange', linestyle='--')
-    ax5.set_xlabel('Time Index')
-    ax5.set_ylabel('Position')
-    ax5.set_title('Test Set: Actual vs Predicted Positions')
-    ax5.set_yticks([-1, 0, 1])
-    ax5.set_yticklabels(['Short (-1)', 'Neutral (0)', 'Long (1)'])
-    ax5.legend()
-    ax5.grid(True, alpha=0.3)
-    
-    # Plot 6: Training Capital Development
-    ax6 = fig.add_subplot(gs[3, :2])
-    x_capital_train = np.arange(len(capital_optimal_train))
-    ax6.plot(x_capital_train, capital_predicted_train, label='Predicted Position', linewidth=2, color='blue', alpha=0.8)
-    ax6.plot(x_capital_train, capital_bh_train, label='Buy & Hold', linewidth=1.5, color='gray', alpha=0.6, linestyle=':')
-    ax6.set_xlabel('Time Index')
-    ax6.set_ylabel('Capital ($)')
-    ax6.set_title(f'Training Set: Capital Development (Start: $10,000)')
-    ax6.legend()
-    ax6.grid(True, alpha=0.3)
-    final_predicted_train = capital_predicted_train[-1]
-    final_bh_train = capital_bh_train[-1]
-    ax6.text(0.02, 0.98, f'Final Capital:\nPredicted: ${final_predicted_train:,.0f}\nBuy&Hold: ${final_bh_train:,.0f}', 
-             transform=ax6.transAxes, verticalalignment='top', bbox=dict(boxstyle='round', facecolor='wheat', alpha=0.5))
-    
-    # Plot 7: Test Capital Development
-    ax7 = fig.add_subplot(gs[3, 2])
-    x_capital_test = np.arange(len(capital_optimal_test))
-    ax7.plot(x_capital_test, capital_predicted_test, label='Predicted Position', linewidth=2, color='orange', alpha=0.8)
-    ax7.plot(x_capital_test, capital_bh_test, label='Buy & Hold', linewidth=1.5, color='gray', alpha=0.6, linestyle=':')
-    ax7.set_xlabel('Time Index')
-    ax7.set_ylabel('Capital ($)')
-    ax7.set_title(f'Test Set: Capital Development')
-    ax7.legend()
-    ax7.grid(True, alpha=0.3)
-    final_predicted_test = capital_predicted_test[-1]
-    final_bh_test = capital_bh_test[-1]
-    ax7.text(0.02, 0.98, f'Final:\n${final_predicted_test:,.0f}\n${final_bh_test:,.0f}', 
-             transform=ax7.transAxes, verticalalignment='top', fontsize=9, bbox=dict(boxstyle='round', facecolor='wheat', alpha=0.5))
-    
-    plt.savefig('prediction_results.png', dpi=150, bbox_inches='tight')
-    print("Plot saved as prediction_results.png")
-    
-    # Calculate performance metrics
-    total_return_optimal_train = (capital_optimal_train[-1] / 10000 - 1) * 100
-    total_return_predicted_train = (capital_predicted_train[-1] / 10000 - 1) * 100
-    total_return_bh_train = (capital_bh_train[-1] / 10000 - 1) * 100
-    
-    total_return_optimal_test = (capital_optimal_test[-1] / capital_optimal_test[0] - 1) * 100
-    total_return_predicted_test = (capital_predicted_test[-1] / capital_predicted_test[0] - 1) * 100
-    total_return_bh_test = (capital_bh_test[-1] / capital_bh_test[0] - 1) * 100
-    
-    # Create HTML page
-    html_content = """
-    <!DOCTYPE html>
-    <html>
-    <head>
-        <title>OHLCV XGBoost Results</title>
-        <style>
-            body {{
-                font-family: Arial, sans-serif;
-                margin: 20px;
-                background-color: #f5f5f5;
-            }}
-            .container {{
-                max-width: 1600px;
-                margin: 0 auto;
-                background-color: white;
-                padding: 20px;
-                border-radius: 10px;
-                box-shadow: 0 2px 10px rgba(0,0,0,0.1);
-            }}
-            h1 {{
-                color: #333;
-                text-align: center;
-            }}
-            img {{
-                width: 100%;
-                height: auto;
-                border: 1px solid #ddd;
-                border-radius: 5px;
-            }}
-            .metrics {{
-                background-color: #e8f4f8;
-                padding: 20px;
-                border-radius: 5px;
-                margin: 20px 0;
-            }}
-            .metrics h2 {{
-                margin-top: 0;
-                color: #2c3e50;
-            }}
-            .metric-row {{
-                display: grid;
-                grid-template-columns: 1fr 1fr 1fr;
-                gap: 20px;
-                margin-top: 15px;
-            }}
-            .metric-box {{
-                background-color: white;
-                padding: 15px;
-                border-radius: 5px;
-                border-left: 4px solid #3498db;
-            }}
-            .metric-box.optimal {{
-                border-left-color: #27ae60;
-            }}
-            .metric-box.predicted {{
-                border-left-color: #e74c3c;
-            }}
-            .metric-label {{
-                font-weight: bold;
-                color: #555;
-                margin-bottom: 5px;
-            }}
-            .metric-value {{
-                font-size: 24px;
-                color: #2c3e50;
-            }}
-            .returns-section {{
-                background-color: #fff9e6;
-                padding: 20px;
-                border-radius: 5px;
-                margin: 20px 0;
-            }}
-            .returns-grid {{
-                display: grid;
-                grid-template-columns: 1fr 1fr;
-                gap: 20px;
-                margin-top: 15px;
-            }}
-        </style>
-    </head>
-    <body>
-        <div class="container">
-            <h1>OHLCV XGBoost Model Results</h1>
-            <div class="metrics">
-                <h2>Model Performance</h2>
-                <div class="metric-row">
-                    <div class="metric-box">
-                        <div class="metric-label">Training Accuracy</div>
-                        <div class="metric-value">{:.2%}</div>
-                    </div>
-                    <div class="metric-box">
-                        <div class="metric-label">Test Accuracy</div>
-                        <div class="metric-value">{:.2%}</div>
-                    </div>
-                    <div class="metric-box">
-                        <div class="metric-label">Initial Capital</div>
-                        <div class="metric-value">$10,000</div>
-                    </div>
-                </div>
-                <div style="margin-top: 15px;">
-                    <p><strong>Model Type:</strong> XGBoost</p>
-                    <p><strong>Features:</strong> 30 days of OHLCV data (lagged features)</p>
-                    <p><strong>Target Classes:</strong> -1 (Short), 0 (Neutral), 1 (Long)</p>
-                    <p><strong>Train/Test Split:</strong> 80% / 20% (time-series split)</p>
-                </div>
-            </div>
-            
-            <div class="returns-section">
-                <h2>Capital Development Performance</h2>
-                <div class="returns-grid">
-                    <div>
-                        <h3>Training Set Returns</h3>
-                        <div class="metric-box optimal">
-                            <div class="metric-label">Optimal Position Strategy</div>
-                            <div class="metric-value">{:+.2f}%</div>
-                        </div>
-                        <div class="metric-box predicted" style="margin-top: 10px;">
-                            <div class="metric-label">Predicted Position Strategy</div>
-                            <div class="metric-value">{:+.2f}%</div>
-                        </div>
-                        <div class="metric-box" style="margin-top: 10px;">
-                            <div class="metric-label">Buy & Hold Baseline</div>
-                            <div class="metric-value">{:+.2f}%</div>
-                        </div>
-                    </div>
-                    <div>
-                        <h3>Test Set Returns</h3>
-                        <div class="metric-box optimal">
-                            <div class="metric-label">Optimal Position Strategy</div>
-                            <div class="metric-value">{:+.2f}%</div>
-                        </div>
-                        <div class="metric-box predicted" style="margin-top: 10px;">
-                            <div class="metric-label">Predicted Position Strategy</div>
-                            <div class="metric-value">{:+.2f}%</div>
-                        </div>
-                        <div class="metric-box" style="margin-top: 10px;">
-                            <div class="metric-label">Buy & Hold Baseline</div>
-                            <div class="metric-value">{:+.2f}%</div>
-                        </div>
-                    </div>
-                </div>
-            </div>
-            
-            <img src="prediction_results.png" alt="Prediction Results">
+    ax1.axvspan(i, i + 1, color=color, alpha=alpha)
+
+# Plot 2: Position indicator
+ax2 = axes[1]
+ax2.fill_between(df.index, 0, df['optimal_position'], 
+                  where=(df['optimal_position'] > 0), color='green', alpha=0.5, label='LONG')
+ax2.fill_between(df.index, 0, df['optimal_position'], 
+                  where=(df['optimal_position'] < 0), color='red', alpha=0.5, label='SHORT')
+ax2.axhline(y=0, color='black', linestyle='-', linewidth=0.5)
+ax2.set_ylabel('Position', fontsize=12)
+ax2.set_ylim(-1.5, 1.5)
+ax2.set_yticks([-1, 0, 1])
+ax2.set_yticklabels(['SHORT', 'FLAT', 'LONG'])
+ax2.set_title('Optimal Position Over Time', fontsize=14)
+ax2.grid(True, alpha=0.3)
+ax2.legend()
+
+# Plot 3: Capital development
+ax3 = axes[2]
+ax3.plot(df.index, df['capital'], color='blue', linewidth=2, label='Optimal Strategy')
+buy_hold_capital = df['close'] / df['close'].iloc[0]
+ax3.plot(df.index, buy_hold_capital, color='orange', linewidth=2, 
+         linestyle='--', label='Buy & Hold', alpha=0.7)
+ax3.set_ylabel('Capital (Starting = $1)', fontsize=12)
+ax3.set_xlabel('Day', fontsize=12)
+ax3.set_title('Capital Development', fontsize=14)
+ax3.grid(True, alpha=0.3)
+ax3.legend()
+
+# Add statistics text box
+stats_text = f"Total Return: {total_return:.2f}%\n"
+stats_text += f"Position Changes: {position_changes}\n"
+stats_text += f"Transaction Cost: {TRANSACTION_COST*100}%"
+ax3.text(0.02, 0.98, stats_text, transform=ax3.transAxes, 
+         fontsize=10, verticalalignment='top',
+         bbox=dict(boxstyle='round', facecolor='wheat', alpha=0.5))
+
+plt.tight_layout()
+
+# Save plot to bytes
+img_bytes = io.BytesIO()
+plt.savefig(img_bytes, format='png', dpi=100, bbox_inches='tight')
+img_bytes.seek(0)
+img_base64 = base64.b64encode(img_bytes.read()).decode()
+
+# Create Flask app
+app = Flask(__name__)
+
+HTML_TEMPLATE = """
+<!DOCTYPE html>
+<html>
+<head>
+    <title>Optimal Trading Strategy</title>
+    <style>
+        body {
+            font-family: Arial, sans-serif;
+            margin: 20px;
+            background-color: #f5f5f5;
+        }
+        .container {
+            max-width: 1600px;
+            margin: 0 auto;
+            background-color: white;
+            padding: 20px;
+            border-radius: 10px;
+            box-shadow: 0 2px 10px rgba(0,0,0,0.1);
+        }
+        h1 {
+            color: #333;
+            text-align: center;
+        }
+        .stats {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+            gap: 15px;
+            margin: 20px 0;
+        }
+        .stat-box {
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            color: white;
+            padding: 15px;
+            border-radius: 8px;
+            text-align: center;
+        }
+        .stat-box h3 {
+            margin: 0;
+            font-size: 14px;
+            opacity: 0.9;
+        }
+        .stat-box p {
+            margin: 10px 0 0 0;
+            font-size: 24px;
+            font-weight: bold;
+        }
+        img {
+            width: 100%;
+            height: auto;
+            border-radius: 8px;
+        }
+        .download-link {
+            display: block;
+            text-align: center;
+            margin: 20px 0;
+        }
+        .download-link a {
+            background-color: #4CAF50;
+            color: white;
+            padding: 10px 20px;
+            text-decoration: none;
+            border-radius: 5px;
+            font-size: 16px;
+        }
+        .download-link a:hover {
+            background-color: #45a049;
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <h1>🎯 Optimal Trading Strategy Analysis</h1>
+        
+        <div class="download-link">
+            <a href="/download">Download OHLCV + Optimal Positions CSV</a>
         </div>
-    </body>
-    </html>
-    """.format(
-        results['train_acc'], 
-        results['test_acc'],
-        total_return_optimal_train,
-        total_return_predicted_train,
-        total_return_bh_train,
-        total_return_optimal_test,
-        total_return_predicted_test,
-        total_return_bh_test
+        
+        <div class="stats">
+            <div class="stat-box">
+                <h3>Total Return</h3>
+                <p>{{ total_return }}%</p>
+            </div>
+            <div class="stat-box">
+                <h3>Buy & Hold Return</h3>
+                <p>{{ buy_hold_return }}%</p>
+            </div>
+            <div class="stat-box">
+                <h3>Position Changes</h3>
+                <p>{{ position_changes }}</p>
+            </div>
+            <div class="stat-box">
+                <h3>Days Long</h3>
+                <p>{{ days_long }}</p>
+            </div>
+            <div class="stat-box">
+                <h3>Days Short</h3>
+                <p>{{ days_short }}</p>
+            </div>
+            <div class="stat-box">
+                <h3>Days Flat</h3>
+                <p>{{ days_flat }}</p>
+            </div>
+        </div>
+        
+        <img src="data:image/png;base64,{{ img_data }}" alt="Trading Strategy Visualization">
+    </div>
+</body>
+</html>
+"""
+
+@app.route('/')
+def index():
+    return render_template_string(
+        HTML_TEMPLATE,
+        total_return=f"{total_return:.2f}",
+        buy_hold_return=f"{buy_hold_return:.2f}",
+        position_changes=position_changes,
+        days_long=days_long,
+        days_short=days_short,
+        days_flat=days_flat,
+        img_data=img_base64
     )
-    
-    with open('index.html', 'w') as f:
-        f.write(html_content)
-    
-    print("HTML page created as index.html")
 
-# Start web server
-def start_server():
-    os.chdir(os.path.dirname(os.path.abspath(__file__)) or '.')
+@app.route('/download')
+def download_csv():
+    # Filter DataFrame to include only datetime, OHLCV, and optimal_position columns
+    # Check if 'datetime' column exists, otherwise use the first column as datetime
+    available_columns = df.columns.tolist()
+    datetime_column = 'datetime' if 'datetime' in available_columns else available_columns[0]
+    columns_to_include = [datetime_column, 'open', 'high', 'low', 'close', 'volume', 'optimal_position']
+    # Ensure all columns exist in the DataFrame
+    columns_to_include = [col for col in columns_to_include if col in available_columns]
+    filtered_df = df[columns_to_include]
     
-    server_address = ('0.0.0.0', 8080)
-    httpd = HTTPServer(server_address, SimpleHTTPRequestHandler)
+    # Create a CSV in memory
+    csv_buffer = io.StringIO()
+    filtered_df.to_csv(csv_buffer, index=False)
+    csv_buffer.seek(0)
     
-    print(f"\n{'='*60}")
-    print(f"Web server running at http://0.0.0.0:8080")
-    print(f"Access from your browser at http://localhost:8080")
-    print(f"Press Ctrl+C to stop the server")
-    print(f"{'='*60}\n")
-    
-    try:
-        httpd.serve_forever()
-    except KeyboardInterrupt:
-        print("\nShutting down server...")
-        httpd.shutdown()
+    # Send as file download
+    return send_file(
+        io.BytesIO(csv_buffer.getvalue().encode('utf-8')),
+        mimetype='text/csv',
+        as_attachment=True,
+        download_name='ohlcv_optimal_positions.csv'
+    )
 
-# Main execution
-if __name__ == "__main__":
-    try:
-        # Download data
-        csv_file = download_data()
-        
-        # Train model and get predictions
-        results = train_model(csv_file)
-        
-        # Load data again for visualization
-        df = pd.read_csv(csv_file)
-        
-        # Create visualization
-        create_plot(results, df)
-        
-        # Start web server
-        start_server()
-        
-    except Exception as e:
-        print(f"\nError: {e}")
-        import traceback
-        traceback.print_exc()
+print("Starting web server on http://0.0.0.0:8080")
+print("Press Ctrl+C to stop")
+app.run(host='0.0.0.0', port=8080, debug=False)
