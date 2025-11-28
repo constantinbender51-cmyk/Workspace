@@ -76,7 +76,7 @@ def train_model(csv_file):
     )
     
     print("Training Random Forest model...")
-    model = RandomForestClassifier(n_estimators=100, random_state=42)
+    model = RandomForestClassifier(n_estimators=1000, random_state=42)
     model.fit(X_train, y_train)
     
     # Make predictions
