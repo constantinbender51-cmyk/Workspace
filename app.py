@@ -109,7 +109,7 @@ def train_model(csv_file):
     print(f"Test Accuracy: {test_acc:.4f}")
     
     print("\nClassification Report (Test Set):")
-    print(classification_report(y_test, y_pred_test, target_names=['Short (-1)', 'Neutral (0)', 'Long (1)']))
+    print(classification_report(y_test, y_pred_test, labels=[0, 1, 2], target_names=['Short (-1)', 'Neutral (0)', 'Long (1)']))
     
     # Confusion matrices
     cm_train = confusion_matrix(y_train, y_pred_train)
