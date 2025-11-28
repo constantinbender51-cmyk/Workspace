@@ -1,7 +1,7 @@
 import gdown
 import pandas as pd
 import numpy as np
-from sklearn.svm import SVC
+import xgboost as xgb
 from sklearn.model_selection import train_test_split
 from sklearn.metrics import accuracy_score, classification_report, confusion_matrix
 import matplotlib
@@ -75,8 +75,8 @@ def train_model(csv_file):
         X, y, test_size=0.2, shuffle=False
     )
     
-    print("Training Support Vector Machine model...")
-    model = SVC(probability=True, random_state=42)
+    print("Training XGBoost model...")
+    model = xgb.XGBClassifier(random_state=42, objective='multi:softprob')
     model.fit(X_train, y_train)
     
     # Make predictions
@@ -160,7 +160,7 @@ def create_plot(results, df):
     fig = plt.figure(figsize=(18, 12))
     gs = fig.add_gridspec(4, 3, hspace=0.35, wspace=0.3)
     
-    fig.suptitle('Support Vector Machine Model: Optimal Position Classification', fontsize=16, fontweight='bold')
+    fig.suptitle('XGBoost Model: Optimal Position Classification', fontsize=16, fontweight='bold')
     
     # Plot 1: Training Confusion Matrix
     ax1 = fig.add_subplot(gs[0, 0])
@@ -270,7 +270,7 @@ def create_plot(results, df):
     <!DOCTYPE html>
     <html>
     <head>
-        <title>OHLCV Logistic Regression Results</title>
+        <title>OHLCV XGBoost Results</title>
         <style>
             body {{
                 font-family: Arial, sans-serif;
@@ -348,7 +348,7 @@ def create_plot(results, df):
     </head>
     <body>
         <div class="container">
-            <h1>OHLCV Logistic Regression Model Results</h1>
+            <h1>OHLCV XGBoost Model Results</h1>
             <div class="metrics">
                 <h2>Model Performance</h2>
                 <div class="metric-row">
@@ -366,7 +366,7 @@ def create_plot(results, df):
                     </div>
                 </div>
                 <div style="margin-top: 15px;">
-                    <p><strong>Model Type:</strong> Support Vector Machine (SVM)</p>
+                    <p><strong>Model Type:</strong> XGBoost</p>
                     <p><strong>Features:</strong> 30 days of OHLCV data (lagged features)</p>
                     <p><strong>Target Classes:</strong> -1 (Short), 0 (Neutral), 1 (Long)</p>
                     <p><strong>Train/Test Split:</strong> 80% / 20% (time-series split)</p>
