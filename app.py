@@ -289,11 +289,11 @@ def index():
 
 @app.route('/download')
 def download_csv():
-    # Filter DataFrame to include only date, OHLCV, and optimal_position columns
-    # Check if 'date' column exists, otherwise use the first column as date
+    # Filter DataFrame to include only datetime, OHLCV, and optimal_position columns
+    # Check if 'datetime' column exists, otherwise use the first column as datetime
     available_columns = df.columns.tolist()
-    date_column = 'date' if 'date' in available_columns else available_columns[0]
-    columns_to_include = [date_column, 'open', 'high', 'low', 'close', 'volume', 'optimal_position']
+    datetime_column = 'datetime' if 'datetime' in available_columns else available_columns[0]
+    columns_to_include = [datetime_column, 'open', 'high', 'low', 'close', 'volume', 'optimal_position']
     # Ensure all columns exist in the DataFrame
     columns_to_include = [col for col in columns_to_include if col in available_columns]
     filtered_df = df[columns_to_include]
