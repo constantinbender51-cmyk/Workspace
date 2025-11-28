@@ -70,18 +70,31 @@ def train_model(csv_file):
     print(f"Unique classes: {np.unique(y)}")
     print(f"Class distribution: {np.bincount(y.astype(int) + 1)}")  # Assuming -1, 0, 1
     
+    # Map labels from [-1, 0, 1] to [0, 1, 2] for XGBoost compatibility
+    label_mapping = {-1: 0, 0: 1, 1: 2}
+    reverse_mapping = {0: -1, 1: 0, 2: 1}
+    y_mapped = np.array([label_mapping[label] for label in y])
+    
     # Split data
     X_train, X_test, y_train, y_test = train_test_split(
-        X, y, test_size=0.2, shuffle=False
+        X, y_mapped, test_size=0.2, shuffle=False
     )
     
     print("Training XGBoost model...")
     model = xgb.XGBClassifier(random_state=42, objective='multi:softprob')
     model.fit(X_train, y_train)
     
-    # Make predictions
-    y_pred_train = model.predict(X_train)
-    y_pred_test = model.predict(X_test)
+    # Make predictions and map back to original labels
+    y_pred_train_mapped = model.predict(X_train)
+    y_pred_test_mapped = model.predict(X_test)
+    
+    # Map predictions back to original labels [-1, 0, 1]
+    y_pred_train = np.array([reverse_mapping[label] for label in y_pred_train_mapped])
+    y_pred_test = np.array([reverse_mapping[label] for label in y_pred_test_mapped])
+    
+    # Get original y_train and y_test for visualization
+    y_train_original = np.array([reverse_mapping[label] for label in y_train])
+    y_test_original = np.array([reverse_mapping[label] for label in y_test])
     
     # Get prediction probabilities
     y_pred_proba_train = model.predict_proba(X_train)
@@ -103,15 +116,15 @@ def train_model(csv_file):
     cm_test = confusion_matrix(y_test, y_pred_test)
     
     return {
-        'y_train': y_train,
+        'y_train': y_train_original,
         'y_pred_train': y_pred_train,
-        'y_test': y_test,
+        'y_test': y_test_original,
         'y_pred_test': y_pred_test,
         'train_acc': train_acc,
         'test_acc': test_acc,
         'cm_train': cm_train,
         'cm_test': cm_test,
-        'classes': model.classes_
+        'classes': np.array([-1, 0, 1])
     }
 
 # Calculate capital development
