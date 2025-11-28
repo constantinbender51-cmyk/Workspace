@@ -24,7 +24,7 @@ print(df.head())
 # Calculate optimal positions
 print("\nCalculating optimal positions...")
 
-TRANSACTION_COST = 0.002  # 0.2% total (0.1% + 0.1%)
+TRANSACTION_COST = 0.004  # 0.4% total (0.2% + 0.2%)
 
 # Calculate daily returns
 df['return'] = df['close'].pct_change()
