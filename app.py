@@ -70,29 +70,53 @@ def train_model(csv_file):
     print(f"Unique classes: {np.unique(y)}")
     print(f"Class distribution: {np.bincount(y.astype(int) + 1)}")  # Assuming -1, 0, 1
     
-    # Split data
-    X_train, X_test, y_train, y_test = train_test_split(
-        X, y, test_size=0.2, shuffle=False
-    )
+    # Split data with time-series aware split
+    # Use first 70% for training, next 15% for validation, last 15% for test
+    train_size = int(len(X) * 0.7)
+    val_size = int(len(X) * 0.15)
+    
+    X_train = X[:train_size]
+    y_train = y[:train_size]
+    X_val = X[train_size:train_size+val_size]
+    y_val = y[train_size:train_size+val_size]
+    X_test = X[train_size+val_size:]
+    y_test = y[train_size+val_size:]
+    
+    print(f"Training set size: {len(X_train)}")
+    print(f"Validation set size: {len(X_val)}")
+    print(f"Test set size: {len(X_test)}")
     
     print("Training Random Forest model...")
-    model = RandomForestClassifier(n_estimators=100, random_state=42)
+    model = RandomForestClassifier(
+        n_estimators=100, 
+        max_depth=10,  # Limit tree depth to reduce overfitting
+        min_samples_split=20,  # Require more samples to split
+        min_samples_leaf=10,  # Require more samples in leaf nodes
+        max_features='sqrt',  # Use subset of features for each tree
+        random_state=42
+    )
     model.fit(X_train, y_train)
     
     # Make predictions
     y_pred_train = model.predict(X_train)
+    y_pred_val = model.predict(X_val)
     y_pred_test = model.predict(X_test)
     
     # Get prediction probabilities
     y_pred_proba_train = model.predict_proba(X_train)
+    y_pred_proba_val = model.predict_proba(X_val)
     y_pred_proba_test = model.predict_proba(X_test)
     
     # Calculate metrics
     train_acc = accuracy_score(y_train, y_pred_train)
+    val_acc = accuracy_score(y_val, y_pred_val)
     test_acc = accuracy_score(y_test, y_pred_test)
+    
+    print(f"Validation Accuracy: {val_acc:.4f}")
     
     print(f"\nModel Performance:")
     print(f"Train Accuracy: {train_acc:.4f}")
+    print(f"Validation Accuracy: {val_acc:.4f}")
     print(f"Test Accuracy: {test_acc:.4f}")
     
     print("\nClassification Report (Test Set):")
@@ -100,16 +124,21 @@ def train_model(csv_file):
     
     # Confusion matrices
     cm_train = confusion_matrix(y_train, y_pred_train)
+    cm_val = confusion_matrix(y_val, y_pred_val)
     cm_test = confusion_matrix(y_test, y_pred_test)
     
     return {
         'y_train': y_train,
         'y_pred_train': y_pred_train,
+        'y_val': y_val,
+        'y_pred_val': y_pred_val,
         'y_test': y_test,
         'y_pred_test': y_pred_test,
         'train_acc': train_acc,
+        'val_acc': val_acc,
         'test_acc': test_acc,
         'cm_train': cm_train,
+        'cm_val': cm_val,
         'cm_test': cm_test,
         'classes': model.classes_
     }
