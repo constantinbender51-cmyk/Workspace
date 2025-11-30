@@ -6,7 +6,9 @@ import io
 import base64
 from datetime import datetime, timedelta
 import requests
-from sklearn.linear_model import LinearRegression
+import tensorflow as tf
+from tensorflow.keras.models import Sequential
+from tensorflow.keras.layers import LSTM, Dense
 
 app = Flask(__name__)
 
@@ -55,11 +57,22 @@ def prepare_features_target(data, feature_window=90, target_window=365):
     
     return np.array(features), np.array(targets), data
 
-def train_sklearn_model(features, targets):
-    # Use scikit-learn LinearRegression as a simple model (placeholder for LSTM)
-    print("Training scikit-learn model (LinearRegression)")
-    model = LinearRegression()
-    model.fit(features, targets)
+def train_lstm_model(features, targets):
+    # Reshape features for LSTM input: (samples, timesteps, features)
+    # Assuming features are flattened from 90 days * 5 features (OHLCV), reshape to (samples, 90, 5)
+    n_samples = features.shape[0]
+    features_reshaped = features.reshape(n_samples, 90, 5)
+    
+    # Build LSTM model
+    model = Sequential([
+        LSTM(50, activation='relu', input_shape=(90, 5)),
+        Dense(1)
+    ])
+    model.compile(optimizer='adam', loss='mse')
+    
+    # Train the model
+    print("Training LSTM model with TensorFlow/Keras")
+    model.fit(features_reshaped, targets, epochs=50, validation_split=0.2, verbose=0)
     return model
 
 @app.route('/')
@@ -69,10 +82,11 @@ def index():
     features, targets, data_with_sma = prepare_features_target(data)
     
     # Train model
-    model = train_sklearn_model(features, targets)
+    model = train_lstm_model(features, targets)
     
     # Generate predictions
-    predictions = model.predict(features)
+    features_reshaped = features.reshape(features.shape[0], 90, 5)
+    predictions = model.predict(features_reshaped).flatten()
     
     # Prepare data for chart
     valid_indices = data_with_sma.index[90:-1]  # Align with features
@@ -103,9 +117,9 @@ def index():
         <title>LSTM Model vs 365 SMA</title>
     </head>
     <body>
-        <h1>Scikit-learn Model Predictions vs 365-Day Simple Moving Average</h1>
+        <h1>LSTM Model Predictions vs 365-Day Simple Moving Average</h1>
         <img src="data:image/png;base64,{{ plot_url }}" alt="Chart">
-        <p>Note: Using scikit-learn LinearRegression as a simple model. For LSTM, use a deep learning library.</p>
+        <p>Note: Using TensorFlow/Keras for LSTM model training.</p>
     </body>
     </html>
     '''
