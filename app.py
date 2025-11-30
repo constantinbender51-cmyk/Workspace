@@ -48,14 +48,16 @@ def prepare_features_target(data, feature_window=90, target_window=365):
     # Create features: past 90 days of OHLCV
     features = []
     targets = []
+    valid_indices = []
     for i in range(feature_window, len(data) - 1):
         if not pd.isna(data['sma_365'].iloc[i + 1]):
             feature = data[['open', 'high', 'low', 'close', 'volume']].iloc[i - feature_window + 1: i + 1].values.flatten()
             target = data['sma_365'].iloc[i + 1]
             features.append(feature)
             targets.append(target)
+            valid_indices.append(data.index[i + 1])
     
-    return np.array(features), np.array(targets), data
+    return np.array(features), np.array(targets), data, valid_indices
 
 def train_lstm_model(features, targets):
     # Reshape features for LSTM input: (samples, timesteps, features)
@@ -79,7 +81,7 @@ def train_lstm_model(features, targets):
 def index():
     # Fetch and prepare data
     data = fetch_ohlcv_data()
-    features, targets, data_with_sma = prepare_features_target(data)
+    features, targets, data_with_sma, valid_indices = prepare_features_target(data)
     
     # Train model
     model = train_lstm_model(features, targets)
@@ -89,8 +91,7 @@ def index():
     predictions = model.predict(features_reshaped).flatten()
     
     # Prepare data for chart
-    valid_indices = data_with_sma.index[90:-1]  # Align with features
-    actual_sma = data_with_sma['sma_365'].loc[valid_indices].values
+    actual_sma = targets
     
     # Create plot
     plt.figure(figsize=(12, 6))
