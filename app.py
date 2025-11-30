@@ -74,7 +74,7 @@ def train_lstm_model(features, targets):
     
     # Train the model
     print("Training LSTM model with TensorFlow/Keras")
-    model.fit(features_reshaped, targets, epochs=50, validation_split=0.2, verbose=0)
+    model.fit(features_reshaped, targets, epochs=10, validation_split=0.2, verbose=1)
     return model
 
 @app.route('/')
