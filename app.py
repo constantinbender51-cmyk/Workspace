@@ -5,33 +5,34 @@ import matplotlib.pyplot as plt
 import io
 import base64
 from datetime import datetime, timedelta
+import requests
 
 app = Flask(__name__)
 
-# Mock data generation for demonstration
-# In a real scenario, replace this with actual Binance API calls
+# Fetch OHLCV data from Binance public API
 def fetch_ohlcv_data():
-    # Generate mock daily OHLCV data from 2018-01-01 to current date
-    start_date = datetime(2018, 1, 1)
-    end_date = datetime.now()
-    dates = pd.date_range(start=start_date, end=end_date, freq='D')
+    symbol = 'BTCUSDT'  # Example symbol, can be parameterized
+    interval = '1d'
+    start_time = int(datetime(2018, 1, 1).timestamp() * 1000)  # Binance uses milliseconds
+    end_time = int(datetime.now().timestamp() * 1000)
+    url = f'https://api.binance.com/api/v3/klines?symbol={symbol}&interval={interval}&startTime={start_time}&endTime={end_time}&limit=1000'
     
-    # Simulate price data with some noise and trend
-    np.random.seed(42)
-    price = 100 + np.cumsum(np.random.randn(len(dates)) * 0.5)
-    high = price + np.abs(np.random.randn(len(dates)) * 2)
-    low = price - np.abs(np.random.randn(len(dates)) * 2)
-    open_price = price + np.random.randn(len(dates)) * 1
-    volume = np.random.uniform(1000, 10000, len(dates))
+    all_data = []
+    while start_time < end_time:
+        response = requests.get(url)
+        if response.status_code != 200:
+            raise Exception(f"API request failed with status {response.status_code}: {response.text}")
+        data = response.json()
+        if not data:
+            break
+        all_data.extend(data)
+        start_time = data[-1][0] + 1  # Move to next time after last entry
+        url = f'https://api.binance.com/api/v3/klines?symbol={symbol}&interval={interval}&startTime={start_time}&endTime={end_time}&limit=1000'
     
-    df = pd.DataFrame({
-        'date': dates,
-        'open': open_price,
-        'high': high,
-        'low': low,
-        'close': price,
-        'volume': volume
-    })
+    # Convert to DataFrame
+    df = pd.DataFrame(all_data, columns=['open_time', 'open', 'high', 'low', 'close', 'volume', 'close_time', 'quote_asset_volume', 'number_of_trades', 'taker_buy_base_asset_volume', 'taker_buy_quote_asset_volume', 'ignore'])
+    df['date'] = pd.to_datetime(df['open_time'], unit='ms')
+    df = df[['date', 'open', 'high', 'low', 'close', 'volume']].astype({'open': float, 'high': float, 'low': float, 'close': float, 'volume': float})
     df.set_index('date', inplace=True)
     return df
 
