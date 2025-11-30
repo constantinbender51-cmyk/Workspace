@@ -6,6 +6,7 @@ import io
 import base64
 from datetime import datetime, timedelta
 import requests
+from sklearn.linear_model import LinearRegression
 
 app = Flask(__name__)
 
@@ -54,13 +55,12 @@ def prepare_features_target(data, feature_window=90, target_window=365):
     
     return np.array(features), np.array(targets), data
 
-def train_lstm_model(features, targets):
-    # Mock model training for demonstration
-    # In a real scenario, implement LSTM using TensorFlow/Keras or PyTorch
-    print("Training LSTM model (mock implementation)")
-    # Placeholder for model training logic
-    # For example: model.fit(features, targets, epochs=10, batch_size=32)
-    return lambda x: np.mean(x[:, -5:], axis=1)  # Mock predictor: average of last 5 closes
+def train_sklearn_model(features, targets):
+    # Use scikit-learn LinearRegression as a simple model (placeholder for LSTM)
+    print("Training scikit-learn model (LinearRegression)")
+    model = LinearRegression()
+    model.fit(features, targets)
+    return model
 
 @app.route('/')
 def index():
@@ -69,10 +69,10 @@ def index():
     features, targets, data_with_sma = prepare_features_target(data)
     
     # Train model
-    model = train_lstm_model(features, targets)
+    model = train_sklearn_model(features, targets)
     
-    # Generate predictions (mock)
-    predictions = model(features)
+    # Generate predictions
+    predictions = model.predict(features)
     
     # Prepare data for chart
     valid_indices = data_with_sma.index[90:-1]  # Align with features
@@ -103,9 +103,9 @@ def index():
         <title>LSTM Model vs 365 SMA</title>
     </head>
     <body>
-        <h1>LSTM Model Predictions vs 365-Day Simple Moving Average</h1>
+        <h1>Scikit-learn Model Predictions vs 365-Day Simple Moving Average</h1>
         <img src="data:image/png;base64,{{ plot_url }}" alt="Chart">
-        <p>Note: This is a demonstration with mock data. Replace with real Binance API and LSTM implementation for production use.</p>
+        <p>Note: Using scikit-learn LinearRegression as a simple model. For LSTM, use a deep learning library.</p>
     </body>
     </html>
     '''
