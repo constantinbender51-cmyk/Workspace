@@ -70,11 +70,17 @@ def prepare_features_target(data, feature_window=90, target_window=365):
     features_array = np.array(features)
     targets_array = np.array(targets)
     
-    # Normalize features using MinMaxScaler (0 to 1)
-    scaler = MinMaxScaler()
-    features_normalized = scaler.fit_transform(features_array)
+    # Normalize features and targets using MinMaxScaler (0 to 1) to prevent large values
+    feature_scaler = MinMaxScaler()
+    target_scaler = MinMaxScaler()
+    features_normalized = feature_scaler.fit_transform(features_array)
+    targets_normalized = target_scaler.fit_transform(targets_array.reshape(-1, 1)).flatten()
     
-    return features_normalized, targets_array, data, valid_indices, scaler
+    # Check for NaN values
+    if np.any(np.isnan(features_normalized)) or np.any(np.isnan(targets_normalized)):
+        raise ValueError("NaN values detected in normalized data")
+    
+    return features_normalized, targets_normalized, data, valid_indices, feature_scaler, target_scaler
 
 def train_lstm_model(features, targets):
     # Reshape features for LSTM input: (samples, timesteps, features)
@@ -82,16 +88,20 @@ def train_lstm_model(features, targets):
     n_samples = features.shape[0]
     features_reshaped = features.reshape(n_samples, 90, 5)
     
-    # Build LSTM model
+    # Build LSTM model with gradient clipping to prevent exploding gradients
     model = Sequential([
-        LSTM(50, activation='relu', input_shape=(90, 5)),
+        LSTM(50, activation='relu', input_shape=(90, 5), kernel_constraint=tf.keras.constraints.MaxNorm(3)),
         Dense(1)
     ])
-    model.compile(optimizer='adam', loss='mse')
+    optimizer = tf.keras.optimizers.Adam(learning_rate=0.001, clipvalue=1.0)
+    model.compile(optimizer=optimizer, loss='mse')
+    
+    # Add early stopping to prevent overfitting and improve stability
+    early_stopping = tf.keras.callbacks.EarlyStopping(monitor='val_loss', patience=5, restore_best_weights=True)
     
     # Train the model
     print("Training LSTM model with TensorFlow/Keras")
-    history = model.fit(features_reshaped, targets, epochs=20, validation_split=0.2, verbose=1)
+    history = model.fit(features_reshaped, targets, epochs=20, validation_split=0.2, verbose=1, callbacks=[early_stopping])
     return model, history
 
 # Function to train model in background
@@ -104,7 +114,7 @@ def train_model_background():
     try:
         # Fetch and prepare data
         data = fetch_ohlcv_data()
-        features, targets, data_with_sma, valid_indices, scaler = prepare_features_target(data)
+        features, targets, data_with_sma, valid_indices, feature_scaler, target_scaler = prepare_features_target(data)
         
         # Train model
         trained_model, training_history = train_lstm_model(features, targets)
@@ -113,6 +123,7 @@ def train_model_background():
         print(f"Training completed in {time.time() - training_start_time:.2f} seconds")
     except Exception as e:
         print(f"Training failed: {e}")
+        training_complete = False
     finally:
         training_in_progress = False
 
@@ -200,10 +211,12 @@ def index():
     if training_complete and trained_model is not None and training_history is not None:
         # Fetch and prepare data for predictions
         data = fetch_ohlcv_data()
-        features, targets, data_with_sma, valid_indices, scaler = prepare_features_target(data)
+        features, targets, data_with_sma, valid_indices, feature_scaler, target_scaler = prepare_features_target(data)
         features_reshaped = features.reshape(features.shape[0], 90, 5)
-        predictions = trained_model.predict(features_reshaped).flatten()
-        actual_sma = targets
+        predictions_normalized = trained_model.predict(features_reshaped).flatten()
+        # Inverse transform predictions and targets to original scale for plotting
+        predictions = target_scaler.inverse_transform(predictions_normalized.reshape(-1, 1)).flatten()
+        actual_sma = target_scaler.inverse_transform(targets.reshape(-1, 1)).flatten()
         
         # Create first plot: LSTM predictions vs actual SMA
         plt.figure(figsize=(12, 6))
