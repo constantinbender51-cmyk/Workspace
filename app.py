@@ -9,6 +9,7 @@ import requests
 import tensorflow as tf
 from tensorflow.keras.models import Sequential
 from tensorflow.keras.layers import LSTM, Dense
+from sklearn.preprocessing import MinMaxScaler
 import threading
 import time
 
@@ -66,7 +67,14 @@ def prepare_features_target(data, feature_window=90, target_window=365):
             targets.append(target)
             valid_indices.append(data.index[i + 1])
     
-    return np.array(features), np.array(targets), data, valid_indices
+    features_array = np.array(features)
+    targets_array = np.array(targets)
+    
+    # Normalize features using MinMaxScaler (0 to 1)
+    scaler = MinMaxScaler()
+    features_normalized = scaler.fit_transform(features_array)
+    
+    return features_normalized, targets_array, data, valid_indices, scaler
 
 def train_lstm_model(features, targets):
     # Reshape features for LSTM input: (samples, timesteps, features)
@@ -96,7 +104,7 @@ def train_model_background():
     try:
         # Fetch and prepare data
         data = fetch_ohlcv_data()
-        features, targets, data_with_sma, valid_indices = prepare_features_target(data)
+        features, targets, data_with_sma, valid_indices, scaler = prepare_features_target(data)
         
         # Train model
         trained_model, training_history = train_lstm_model(features, targets)
@@ -152,10 +160,6 @@ def index():
             </div>
             
             <!-- Generate predictions and plots only after training is complete -->
-            {% set data = fetch_ohlcv_data() %}
-            {% set features, targets, data_with_sma, valid_indices = prepare_features_target(data) %}
-            {% set features_reshaped = features.reshape(features.shape[0], 90, 5) %}
-            {% set predictions = trained_model.predict(features_reshaped).flatten() %}
             
             <div class="plot">
                 <h2>LSTM Model Predictions vs 365-Day Simple Moving Average</h2>
@@ -196,7 +200,7 @@ def index():
     if training_complete and trained_model is not None and training_history is not None:
         # Fetch and prepare data for predictions
         data = fetch_ohlcv_data()
-        features, targets, data_with_sma, valid_indices = prepare_features_target(data)
+        features, targets, data_with_sma, valid_indices, scaler = prepare_features_target(data)
         features_reshaped = features.reshape(features.shape[0], 90, 5)
         predictions = trained_model.predict(features_reshaped).flatten()
         actual_sma = targets
