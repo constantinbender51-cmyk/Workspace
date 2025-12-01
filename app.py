@@ -94,7 +94,7 @@ def train_lstm_model(features, targets):
     # Build LSTM model with gradient clipping to prevent exploding gradients
     model = Sequential([
         LSTM(50, activation='relu', input_shape=(90, 5), kernel_constraint=tf.keras.constraints.MaxNorm(3), kernel_regularizer=tf.keras.regularizers.l1_l2(l1=4e-2, l2=4e-2)),
-        tf.keras.layers.Dropout(0.729),
+        tf.keras.layers.Dropout(0.6561),
         Dense(1, kernel_regularizer=tf.keras.regularizers.l1_l2(l1=4e-2, l2=4e-2))
     ])
     optimizer = tf.keras.optimizers.Adam(learning_rate=0.001, clipvalue=1.0)
