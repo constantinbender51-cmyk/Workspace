@@ -12,6 +12,7 @@ from tensorflow.keras.layers import LSTM, Dense
 from sklearn.preprocessing import MinMaxScaler
 import threading
 import time
+import json
 
 app = Flask(__name__)
 
@@ -21,6 +22,8 @@ training_history = None
 training_in_progress = False
 training_complete = False
 training_start_time = None
+loss_history = []
+val_loss_history = []
 
 # Fetch OHLCV data from Binance public API
 def fetch_ohlcv_data():
@@ -99,17 +102,28 @@ def train_lstm_model(features, targets):
     # Add early stopping to prevent overfitting and improve stability
     early_stopping = tf.keras.callbacks.EarlyStopping(monitor='val_loss', patience=100, restore_best_weights=True)
     
+    # Custom callback to capture loss and val_loss during training
+    class LossHistoryCallback(tf.keras.callbacks.Callback):
+        def on_epoch_end(self, epoch, logs=None):
+            if logs:
+                loss_history.append(logs.get('loss'))
+                val_loss_history.append(logs.get('val_loss'))
+                # Print for debugging
+                print(f"Epoch {epoch+1}: loss={logs.get('loss')}, val_loss={logs.get('val_loss')}")
+    
     # Train the model
     print("Training LSTM model with TensorFlow/Keras")
-    history = model.fit(features_reshaped, targets, epochs=40, validation_split=0.2, verbose=1, callbacks=[early_stopping])
+    history = model.fit(features_reshaped, targets, epochs=40, validation_split=0.2, verbose=1, callbacks=[early_stopping, LossHistoryCallback()])
     return model, history
 
 # Function to train model in background
 def train_model_background():
-    global trained_model, training_history, training_in_progress, training_complete, training_start_time
+    global trained_model, training_history, training_in_progress, training_complete, training_start_time, loss_history, val_loss_history
     training_in_progress = True
     training_complete = False
     training_start_time = time.time()
+    loss_history.clear()
+    val_loss_history.clear()
     
     try:
         # Fetch and prepare data
@@ -134,6 +148,82 @@ training_thread.start()
 
 @app.route('/')
 def index():
+@app.route('/progress')
+def progress():
+    global trained_model, training_history, training_in_progress, training_complete, training_start_time, loss_history, val_loss_history
+    
+    def generate():
+        while True:
+            # Calculate elapsed time
+            elapsed = 0
+            if training_start_time:
+                elapsed = int(time.time() - training_start_time)
+            
+            # Format start time
+            start_time_str = "N/A"
+            if training_start_time:
+                start_time_str = time.strftime('%Y-%m-%d %H:%M:%S', time.localtime(training_start_time))
+            
+            # Prepare data to send
+            data = {
+                'training_in_progress': training_in_progress,
+                'training_complete': training_complete,
+                'start_time': start_time_str,
+                'elapsed_time': elapsed,
+                'loss_history': loss_history.copy(),
+                'val_loss_history': val_loss_history.copy(),
+                'epochs_completed': len(loss_history),
+                'total_epochs': 40,
+                'trained_model_exists': trained_model is not None
+            }
+            
+            # If training is complete, add plot URLs
+            if training_complete and trained_model is not None and training_history is not None:
+                # Fetch and prepare data for predictions
+                data_fetched = fetch_ohlcv_data()
+                features, targets, data_with_sma, valid_indices, feature_scaler, target_scaler = prepare_features_target(data_fetched)
+                features_reshaped = features.reshape(features.shape[0], 90, 5)
+                predictions_normalized = trained_model.predict(features_reshaped).flatten()
+                predictions = target_scaler.inverse_transform(predictions_normalized.reshape(-1, 1)).flatten()
+                actual_sma = target_scaler.inverse_transform(targets.reshape(-1, 1)).flatten()
+                
+                # Create first plot
+                plt.figure(figsize=(12, 6))
+                plt.plot(valid_indices, actual_sma, label='Actual 365 SMA', color='blue')
+                plt.plot(valid_indices, predictions, label='Model Predictions', color='red', linestyle='--')
+                plt.title('LSTM Model Predictions vs Actual 365-Day SMA')
+                plt.xlabel('Date')
+                plt.ylabel('Price')
+                plt.legend()
+                plt.grid(True)
+                
+                img1 = io.BytesIO()
+                plt.savefig(img1, format='png', bbox_inches='tight')
+                img1.seek(0)
+                data['plot_url1'] = base64.b64encode(img1.getvalue()).decode()
+                plt.close()
+                
+                # Create second plot with log scale
+                plt.figure(figsize=(12, 6))
+                plt.plot(training_history.history['loss'], label='Training Loss', color='blue')
+                plt.plot(training_history.history['val_loss'], label='Validation Loss', color='red', linestyle='--')
+                plt.title('Training Loss vs Validation Loss (40 Epochs) - Log Scale')
+                plt.xlabel('Epoch')
+                plt.ylabel('Loss (MSE) - Log Scale')
+                plt.yscale('log')
+                plt.legend()
+                plt.grid(True)
+                
+                img2 = io.BytesIO()
+                plt.savefig(img2, format='png', bbox_inches='tight')
+                img2.seek(0)
+                data['plot_url2'] = base64.b64encode(img2.getvalue()).decode()
+                plt.close()
+            
+            yield f"data: {json.dumps(data)}\n\n"
+            time.sleep(1)  # Send updates every second
+    
+    return app.response_class(generate(), mimetype='text/event-stream')
     global trained_model, training_history, training_in_progress, training_complete, training_start_time
     
     # HTML template with dynamic content
@@ -142,7 +232,6 @@ def index():
     <html>
     <head>
         <title>LSTM Model Training Progress</title>
-        <meta http-equiv="refresh" content="1"> <!-- Auto-refresh every 1 second to show progress -->
         <style>
             body { font-family: Arial, sans-serif; margin: 20px; }
             .status { padding: 10px; margin: 10px 0; border-radius: 5px; }
@@ -150,47 +239,122 @@ def index():
             .complete { background-color: #d4edda; border: 1px solid #c3e6cb; }
             .error { background-color: #f8d7da; border: 1px solid #f5c6cb; }
             .plot { margin: 20px 0; }
+            #loss-data { margin-top: 20px; }
+            table { border-collapse: collapse; width: 100%; }
+            th, td { border: 1px solid #ddd; padding: 8px; text-align: center; }
+            th { background-color: #f2f2f2; }
         </style>
     </head>
     <body>
         <h1>LSTM Model Training Progress</h1>
         
-        {% if training_in_progress %}
-            <div class="status training">
-                <h2>Training in Progress...</h2>
-                <p>Model training started at {{ start_time }}.</p>
-                <p>Elapsed time: {{ elapsed_time }} seconds</p>
-                <p>Please wait while the model trains with 40 epochs. This page will auto-refresh every 1 second.</p>
-                <p>Check the console for detailed progress (epoch-by-epoch updates).</p>
-            </div>
-        {% elif training_complete and trained_model is not none and training_history is not none %}
-            <div class="status complete">
-                <h2>Training Complete!</h2>
-                <p>Model trained successfully in {{ elapsed_time }} seconds.</p>
-                <p>Total epochs: 40</p>
-            </div>
+        <div id="status-container">
+            <!-- Status will be updated dynamically -->
+        </div>
+        
+        <div id="loss-data">
+            <h2>Loss and Validation Loss</h2>
+            <table id="loss-table">
+                <thead>
+                    <tr>
+                        <th>Epoch</th>
+                        <th>Loss</th>
+                        <th>Validation Loss</th>
+                    </tr>
+                </thead>
+                <tbody id="loss-table-body">
+                    <!-- Rows will be added dynamically -->
+                </tbody>
+            </table>
+        </div>
+        
+        <div id="plots-container">
+            <!-- Plots will be inserted here after training completes -->
+        </div>
+        
+        <script>
+            const eventSource = new EventSource('/progress');
             
-            <!-- Generate predictions and plots only after training is complete -->
+            eventSource.onmessage = function(event) {
+                const data = JSON.parse(event.data);
+                
+                // Update status container
+                const statusContainer = document.getElementById('status-container');
+                let statusHTML = '';
+                
+                if (data.training_in_progress) {
+                    statusHTML = `
+                        <div class="status training">
+                            <h2>Training in Progress...</h2>
+                            <p>Model training started at ${data.start_time}.</p>
+                            <p>Elapsed time: ${data.elapsed_time} seconds</p>
+                            <p>Please wait while the model trains with 40 epochs.</p>
+                            <p>Epochs completed: ${data.epochs_completed}</p>
+                            <p>Check the console for detailed progress.</p>
+                        </div>
+                    `;
+                } else if (data.training_complete && data.trained_model_exists) {
+                    statusHTML = `
+                        <div class="status complete">
+                            <h2>Training Complete!</h2>
+                            <p>Model trained successfully in ${data.elapsed_time} seconds.</p>
+                            <p>Total epochs: ${data.total_epochs}</p>
+                        </div>
+                    `;
+                    // Insert plots after training completes
+                    const plotsContainer = document.getElementById('plots-container');
+                    plotsContainer.innerHTML = `
+                        <div class="plot">
+                            <h2>LSTM Model Predictions vs 365-Day Simple Moving Average</h2>
+                            <img src="data:image/png;base64,${data.plot_url1}" alt="Predictions Chart">
+                        </div>
+                        <div class="plot">
+                            <h2>Training Loss vs Validation Loss</h2>
+                            <p>Epochs increased from 20 to 40 (2x).</p>
+                            <img src="data:image/png;base64,${data.plot_url2}" alt="Loss Chart">
+                        </div>
+                        <p>Note: Using TensorFlow/Keras for LSTM model training.</p>
+                    `;
+                    eventSource.close(); // Close SSE connection after training completes
+                } else {
+                    statusHTML = `
+                        <div class="status error">
+                            <h2>Training Status Unknown</h2>
+                            <p>Model training has not started or encountered an error.</p>
+                            <p>Please check the application logs.</p>
+                        </div>
+                    `;
+                }
+                
+                statusContainer.innerHTML = statusHTML;
+                
+                // Update loss table
+                const lossTableBody = document.getElementById('loss-table-body');
+                if (data.loss_history && data.val_loss_history) {
+                    lossTableBody.innerHTML = '';
+                    for (let i = 0; i < data.loss_history.length; i++) {
+                        const row = document.createElement('tr');
+                        row.innerHTML = `
+                            <td>${i + 1}</td>
+                            <td>${data.loss_history[i].toFixed(6)}</td>
+                            <td>${data.val_loss_history[i].toFixed(6)}</td>
+                        `;
+                        lossTableBody.appendChild(row);
+                    }
+                }
+            };
             
-            <div class="plot">
-                <h2>LSTM Model Predictions vs 365-Day Simple Moving Average</h2>
-                <img src="data:image/png;base64,{{ plot_url1 }}" alt="Predictions Chart">
-            </div>
-            
-            <div class="plot">
-                <h2>Training Loss vs Validation Loss</h2>
-                <p>Epochs increased from 20 to 40 (2x).</p>
-                <img src="data:image/png;base64,{{ plot_url2 }}" alt="Loss Chart">
-            </div>
-            
-            <p>Note: Using TensorFlow/Keras for LSTM model training.</p>
-        {% else %}
-            <div class="status error">
-                <h2>Training Status Unknown</h2>
-                <p>Model training has not started or encountered an error.</p>
-                <p>Please check the application logs.</p>
-            </div>
-        {% endif %}
+            eventSource.onerror = function(error) {
+                console.error('EventSource failed:', error);
+                const statusContainer = document.getElementById('status-container');
+                statusContainer.innerHTML = `
+                    <div class="status error">
+                        <h2>Connection Error</h2>
+                        <p>Failed to connect to progress stream. Please refresh the page.</p>
+                    </div>
+                `;
+            };
+        </script>
     </body>
     </html>
     '''
@@ -205,59 +369,7 @@ def index():
     if training_start_time:
         start_time_str = time.strftime('%Y-%m-%d %H:%M:%S', time.localtime(training_start_time))
     
-    # If training is complete, generate plots
-    plot_url1 = ""
-    plot_url2 = ""
-    if training_complete and trained_model is not None and training_history is not None:
-        # Fetch and prepare data for predictions
-        data = fetch_ohlcv_data()
-        features, targets, data_with_sma, valid_indices, feature_scaler, target_scaler = prepare_features_target(data)
-        features_reshaped = features.reshape(features.shape[0], 90, 5)
-        predictions_normalized = trained_model.predict(features_reshaped).flatten()
-        # Inverse transform predictions and targets to original scale for plotting
-        predictions = target_scaler.inverse_transform(predictions_normalized.reshape(-1, 1)).flatten()
-        actual_sma = target_scaler.inverse_transform(targets.reshape(-1, 1)).flatten()
-        
-        # Create first plot: LSTM predictions vs actual SMA
-        plt.figure(figsize=(12, 6))
-        plt.plot(valid_indices, actual_sma, label='Actual 365 SMA', color='blue')
-        plt.plot(valid_indices, predictions, label='Model Predictions', color='red', linestyle='--')
-        plt.title('LSTM Model Predictions vs Actual 365-Day SMA')
-        plt.xlabel('Date')
-        plt.ylabel('Price')
-        plt.legend()
-        plt.grid(True)
-        
-        img1 = io.BytesIO()
-        plt.savefig(img1, format='png', bbox_inches='tight')
-        img1.seek(0)
-        plot_url1 = base64.b64encode(img1.getvalue()).decode()
-        plt.close()
-        
-        # Create second plot: Training loss vs validation loss with log scale y-axis
-        plt.figure(figsize=(12, 6))
-        plt.plot(training_history.history['loss'], label='Training Loss', color='blue')
-        plt.plot(training_history.history['val_loss'], label='Validation Loss', color='red', linestyle='--')
-        plt.title('Training Loss vs Validation Loss (40 Epochs) - Log Scale')
-        plt.xlabel('Epoch')
-        plt.ylabel('Loss (MSE) - Log Scale')
-        plt.yscale('log')
-        plt.legend()
-        plt.grid(True)
-        
-        img2 = io.BytesIO()
-        plt.savefig(img2, format='png', bbox_inches='tight')
-        img2.seek(0)
-        plot_url2 = base64.b64encode(img2.getvalue()).decode()
-        plt.close()
-    
-    return render_template_string(html_template, 
-                                  training_in_progress=training_in_progress,
-                                  training_complete=training_complete,
-                                  start_time=start_time_str,
-                                  elapsed_time=elapsed,
-                                  plot_url1=plot_url1,
-                                  plot_url2=plot_url2)
+    return render_template_string(html_template)
 
 if __name__ == '__main__':
     app.run(host='0.0.0.0', port=8080, debug=False)
