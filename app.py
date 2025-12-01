@@ -93,9 +93,9 @@ def train_lstm_model(features, targets):
     
     # Build LSTM model with gradient clipping to prevent exploding gradients
     model = Sequential([
-        LSTM(50, activation='relu', input_shape=(90, 5), kernel_constraint=tf.keras.constraints.MaxNorm(3), kernel_regularizer=tf.keras.regularizers.l1_l2(l1=1e-2, l2=1e-2)),
+        LSTM(50, activation='relu', input_shape=(90, 5), kernel_constraint=tf.keras.constraints.MaxNorm(3), kernel_regularizer=tf.keras.regularizers.l1_l2(l1=5e-3, l2=5e-3)),
         tf.keras.layers.Dropout(0.32805),
-        Dense(1, kernel_regularizer=tf.keras.regularizers.l1_l2(l1=1e-2, l2=1e-2))
+        Dense(1, kernel_regularizer=tf.keras.regularizers.l1_l2(l1=5e-3, l2=5e-3))
     ])
     optimizer = tf.keras.optimizers.Adam(learning_rate=0.001, clipvalue=1.0)
     model.compile(optimizer=optimizer, loss='mse')
@@ -114,7 +114,7 @@ def train_lstm_model(features, targets):
     
     # Train the model
     print("Training LSTM model with TensorFlow/Keras")
-    history = model.fit(features_reshaped, targets, epochs=40, validation_split=0.2, verbose=1, callbacks=[early_stopping, LossHistoryCallback()])
+    history = model.fit(features_reshaped, targets, epochs=20, validation_split=0.2, verbose=1, callbacks=[early_stopping, LossHistoryCallback()])
     return model, history
 
 # Function to train model in background
@@ -213,7 +213,7 @@ def index():
                             <h2>Training in Progress...</h2>
                             <p>Model training started at ${data.start_time}.</p>
                             <p>Elapsed time: ${data.elapsed_time} seconds</p>
-                            <p>Please wait while the model trains with 40 epochs.</p>
+                            <p>Please wait while the model trains with 20 epochs.</p>
                             <p>Epochs completed: ${data.epochs_completed}</p>
                             <p>Check the console for detailed progress.</p>
                         </div>
@@ -235,7 +235,7 @@ def index():
                         </div>
                         <div class="plot">
                             <h2>Training Loss vs Validation Loss</h2>
-                            <p>Epochs increased from 20 to 40 (2x).</p>
+                            <p>Epochs reduced from 40 to 20 (2x).</p>
                             <img src="data:image/png;base64,${data.plot_url2}" alt="Loss Chart">
                         </div>
                         <p>Note: Using TensorFlow/Keras for LSTM model training.</p>
@@ -321,7 +321,7 @@ def progress():
                 'loss_history': loss_history.copy(),
                 'val_loss_history': val_loss_history.copy(),
                 'epochs_completed': len(loss_history),
-                'total_epochs': 40,
+                'total_epochs': 20,
                 'trained_model_exists': trained_model is not None
             }
             
@@ -355,7 +355,7 @@ def progress():
                 plt.figure(figsize=(12, 6))
                 plt.plot(training_history.history['loss'], label='Training Loss', color='blue')
                 plt.plot(training_history.history['val_loss'], label='Validation Loss', color='red', linestyle='--')
-                plt.title('Training Loss vs Validation Loss (40 Epochs) - Log Scale')
+                plt.title('Training Loss vs Validation Loss (20 Epochs) - Log Scale')
                 plt.xlabel('Epoch')
                 plt.ylabel('Loss (MSE) - Log Scale')
                 plt.yscale('log')
