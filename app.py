@@ -55,19 +55,35 @@ def fetch_ohlcv_data():
 def calculate_sma(data, window):
     return data.rolling(window=window).mean()
 
-def prepare_features_target(data, feature_window=30, target_window=365):
+def prepare_features_target(data, feature_window=60, target_window=365):
     data['sma_365'] = calculate_sma(data['close'], target_window)
     
-    # Calculate SMA 28 as feature
-    data['sma_28'] = calculate_sma(data['close'], 28)
+    # Calculate features: ATR, price minus 7-day SMA, and daily return
+    # ATR (Average True Range)
+    high_low = data['high'] - data['low']
+    high_close = np.abs(data['high'] - data['close'].shift(1))
+    low_close = np.abs(data['low'] - data['close'].shift(1))
+    true_range = pd.concat([high_low, high_close, low_close], axis=1).max(axis=1)
+    data['atr'] = calculate_sma(true_range, 14)  # Using 14-day window for ATR
     
-    # Create features: past 30 days of SMA 28 values
+    # Price minus 7-day SMA
+    data['sma_7'] = calculate_sma(data['close'], 7)
+    data['price_minus_sma7'] = data['close'] - data['sma_7']
+    
+    # Daily return: price - price(t-1)
+    data['daily_return'] = data['close'] - data['close'].shift(1)
+    
+    # Create features: past 60 days of each feature (ATR, price_minus_sma7, daily_return)
     features = []
     targets = []
     valid_indices = []
     for i in range(feature_window, len(data) - 1):
         if not pd.isna(data['sma_365'].iloc[i + 1]):
-            feature = data['sma_28'].iloc[i - feature_window + 1: i + 1].values.flatten()
+            feature_atr = data['atr'].iloc[i - feature_window + 1: i + 1].values
+            feature_price_sma = data['price_minus_sma7'].iloc[i - feature_window + 1: i + 1].values
+            feature_return = data['daily_return'].iloc[i - feature_window + 1: i + 1].values
+            # Combine features into a single array (flattened)
+            feature = np.column_stack((feature_atr, feature_price_sma, feature_return)).flatten()
             target = data['sma_365'].iloc[i + 1]
             features.append(feature)
             targets.append(target)
@@ -90,13 +106,13 @@ def prepare_features_target(data, feature_window=30, target_window=365):
 
 def train_lstm_model(features, targets):
     # Reshape features for LSTM input: (samples, timesteps, features)
-    # Features are flattened from 30 days * 1 feature (SMA 28 / volume ratio), reshape to (samples, 30, 1)
+    # Features are flattened from 60 days * 3 features, reshape to (samples, 60, 3)
     n_samples = features.shape[0]
-    features_reshaped = features.reshape(n_samples, 30, 1)
+    features_reshaped = features.reshape(n_samples, 60, 3)
     
     # Build LSTM model with gradient clipping to prevent exploding gradients
     model = Sequential([
-        LSTM(50, activation='relu', input_shape=(30, 1), kernel_constraint=tf.keras.constraints.MaxNorm(3), kernel_regularizer=tf.keras.regularizers.l1_l2(l1=5e-3, l2=5e-3)),
+        LSTM(50, activation='relu', input_shape=(60, 3), kernel_constraint=tf.keras.constraints.MaxNorm(3), kernel_regularizer=tf.keras.regularizers.l1_l2(l1=5e-3, l2=5e-3)),
         tf.keras.layers.Dropout(0.164025),
         Dense(1, kernel_regularizer=tf.keras.regularizers.l1_l2(l1=5e-3, l2=5e-3))
     ])
