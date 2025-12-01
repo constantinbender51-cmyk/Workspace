@@ -101,7 +101,7 @@ def train_lstm_model(features, targets):
     
     # Train the model
     print("Training LSTM model with TensorFlow/Keras")
-    history = model.fit(features_reshaped, targets, epochs=20, validation_split=0.2, verbose=1, callbacks=[early_stopping])
+    history = model.fit(features_reshaped, targets, epochs=40, validation_split=0.2, verbose=1, callbacks=[early_stopping])
     return model, history
 
 # Function to train model in background
@@ -142,7 +142,7 @@ def index():
     <html>
     <head>
         <title>LSTM Model Training Progress</title>
-        <meta http-equiv="refresh" content="5"> <!-- Auto-refresh every 5 seconds to show progress -->
+        <meta http-equiv="refresh" content="1"> <!-- Auto-refresh every 1 second to show progress -->
         <style>
             body { font-family: Arial, sans-serif; margin: 20px; }
             .status { padding: 10px; margin: 10px 0; border-radius: 5px; }
@@ -160,14 +160,14 @@ def index():
                 <h2>Training in Progress...</h2>
                 <p>Model training started at {{ start_time }}.</p>
                 <p>Elapsed time: {{ elapsed_time }} seconds</p>
-                <p>Please wait while the model trains with 20 epochs. This page will auto-refresh every 5 seconds.</p>
+                <p>Please wait while the model trains with 40 epochs. This page will auto-refresh every 1 second.</p>
                 <p>Check the console for detailed progress (epoch-by-epoch updates).</p>
             </div>
         {% elif training_complete and trained_model is not none and training_history is not none %}
             <div class="status complete">
                 <h2>Training Complete!</h2>
                 <p>Model trained successfully in {{ elapsed_time }} seconds.</p>
-                <p>Total epochs: 20</p>
+                <p>Total epochs: 40</p>
             </div>
             
             <!-- Generate predictions and plots only after training is complete -->
@@ -179,7 +179,7 @@ def index():
             
             <div class="plot">
                 <h2>Training Loss vs Validation Loss</h2>
-                <p>Epochs increased from 10 to 20 (2x).</p>
+                <p>Epochs increased from 20 to 40 (2x).</p>
                 <img src="data:image/png;base64,{{ plot_url2 }}" alt="Loss Chart">
             </div>
             
@@ -238,7 +238,7 @@ def index():
         plt.figure(figsize=(12, 6))
         plt.plot(training_history.history['loss'], label='Training Loss', color='blue')
         plt.plot(training_history.history['val_loss'], label='Validation Loss', color='red', linestyle='--')
-        plt.title('Training Loss vs Validation Loss (20 Epochs) - Log Scale')
+        plt.title('Training Loss vs Validation Loss (40 Epochs) - Log Scale')
         plt.xlabel('Epoch')
         plt.ylabel('Loss (MSE) - Log Scale')
         plt.yscale('log')
