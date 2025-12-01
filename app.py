@@ -74,8 +74,8 @@ def train_lstm_model(features, targets):
     
     # Train the model
     print("Training LSTM model with TensorFlow/Keras")
-    model.fit(features_reshaped, targets, epochs=10, validation_split=0.2, verbose=1)
-    return model
+    history = model.fit(features_reshaped, targets, epochs=20, validation_split=0.2, verbose=1)
+    return model, history
 
 @app.route('/')
 def index():
@@ -84,7 +84,7 @@ def index():
     features, targets, data_with_sma, valid_indices = prepare_features_target(data)
     
     # Train model
-    model = train_lstm_model(features, targets)
+    model, history = train_lstm_model(features, targets)
     
     # Generate predictions
     features_reshaped = features.reshape(features.shape[0], 90, 5)
@@ -93,7 +93,7 @@ def index():
     # Prepare data for chart
     actual_sma = targets
     
-    # Create plot
+    # Create first plot: LSTM predictions vs actual SMA
     plt.figure(figsize=(12, 6))
     plt.plot(valid_indices, actual_sma, label='Actual 365 SMA', color='blue')
     plt.plot(valid_indices, predictions, label='Model Predictions', color='red', linestyle='--')
@@ -103,11 +103,28 @@ def index():
     plt.legend()
     plt.grid(True)
     
-    # Convert plot to base64 for HTML embedding
-    img = io.BytesIO()
-    plt.savefig(img, format='png', bbox_inches='tight')
-    img.seek(0)
-    plot_url = base64.b64encode(img.getvalue()).decode()
+    # Convert first plot to base64 for HTML embedding
+    img1 = io.BytesIO()
+    plt.savefig(img1, format='png', bbox_inches='tight')
+    img1.seek(0)
+    plot_url1 = base64.b64encode(img1.getvalue()).decode()
+    plt.close()
+    
+    # Create second plot: Training loss vs validation loss
+    plt.figure(figsize=(12, 6))
+    plt.plot(history.history['loss'], label='Training Loss', color='blue')
+    plt.plot(history.history['val_loss'], label='Validation Loss', color='red', linestyle='--')
+    plt.title('Training Loss vs Validation Loss (20 Epochs)')
+    plt.xlabel('Epoch')
+    plt.ylabel('Loss (MSE)')
+    plt.legend()
+    plt.grid(True)
+    
+    # Convert second plot to base64 for HTML embedding
+    img2 = io.BytesIO()
+    plt.savefig(img2, format='png', bbox_inches='tight')
+    img2.seek(0)
+    plot_url2 = base64.b64encode(img2.getvalue()).decode()
     plt.close()
     
     # HTML template
@@ -119,12 +136,15 @@ def index():
     </head>
     <body>
         <h1>LSTM Model Predictions vs 365-Day Simple Moving Average</h1>
-        <img src="data:image/png;base64,{{ plot_url }}" alt="Chart">
+        <img src="data:image/png;base64,{{ plot_url1 }}" alt="Chart">
+        <h2>Training Loss vs Validation Loss</h2>
+        <p>Epochs increased from 10 to 20 (2x).</p>
+        <img src="data:image/png;base64,{{ plot_url2 }}" alt="Loss Chart">
         <p>Note: Using TensorFlow/Keras for LSTM model training.</p>
     </body>
     </html>
     '''
-    return render_template_string(html_template, plot_url=plot_url)
+    return render_template_string(html_template, plot_url1=plot_url1, plot_url2=plot_url2)
 
 if __name__ == '__main__':
     app.run(host='0.0.0.0', port=8080, debug=False)
