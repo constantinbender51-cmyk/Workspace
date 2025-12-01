@@ -354,7 +354,7 @@ def progress():
                 # Fetch and prepare data for predictions
                 data_fetched = fetch_ohlcv_data()
                 features, targets, data_with_sma, valid_indices, feature_scaler, target_scaler = prepare_features_target(data_fetched)
-                features_reshaped = features.reshape(features.shape[0], 30, 1)
+                features_reshaped = features.reshape(features.shape[0], 60, 3)
                 predictions_normalized = trained_model.predict(features_reshaped).flatten()
                 predictions = target_scaler.inverse_transform(predictions_normalized.reshape(-1, 1)).flatten()
                 actual_sma = target_scaler.inverse_transform(targets.reshape(-1, 1)).flatten()
