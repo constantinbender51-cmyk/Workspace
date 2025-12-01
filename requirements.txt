@@ -1,7 +1,0 @@
-flask
-pandas
-numpy
-matplotlib
-requests
-tensorflow
-scikit-learn
