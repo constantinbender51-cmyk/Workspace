@@ -58,30 +58,35 @@ def calculate_sma(data, window):
 def prepare_features_target(data, feature_window=60, target_window=365):
     data['sma_365'] = calculate_sma(data['close'], target_window)
     
-    # Calculate features: ATR, price minus 7-day SMA, and daily return
-    # ATR (Average True Range)
+    # Calculate features with normalization as requested
+    # ATR divided by |high-low|
     high_low = data['high'] - data['low']
     high_close = np.abs(data['high'] - data['close'].shift(1))
     low_close = np.abs(data['low'] - data['close'].shift(1))
     true_range = pd.concat([high_low, high_close, low_close], axis=1).max(axis=1)
     data['atr'] = calculate_sma(true_range, 14)  # Using 14-day window for ATR
+    # Avoid division by zero by adding a small epsilon
+    epsilon = 1e-8
+    data['atr_normalized'] = data['atr'] / (np.abs(high_low) + epsilon)
     
-    # Price minus 7-day SMA
+    # Price minus 7-day SMA divided by SMA 7
     data['sma_7'] = calculate_sma(data['close'], 7)
     data['price_minus_sma7'] = data['close'] - data['sma_7']
+    data['price_minus_sma7_normalized'] = data['price_minus_sma7'] / (data['sma_7'] + epsilon)
     
-    # Daily return: price - price(t-1)
+    # Daily return divided by price(t-1)
     data['daily_return'] = data['close'] - data['close'].shift(1)
+    data['daily_return_normalized'] = data['daily_return'] / (data['close'].shift(1) + epsilon)
     
-    # Create features: past 60 days of each feature (ATR, price_minus_sma7, daily_return)
+    # Create features: past 60 days of each normalized feature (atr_normalized, price_minus_sma7_normalized, daily_return_normalized)
     features = []
     targets = []
     valid_indices = []
     for i in range(feature_window, len(data) - 1):
         if not pd.isna(data['sma_365'].iloc[i + 1]):
-            feature_atr = data['atr'].iloc[i - feature_window + 1: i + 1].values
-            feature_price_sma = data['price_minus_sma7'].iloc[i - feature_window + 1: i + 1].values
-            feature_return = data['daily_return'].iloc[i - feature_window + 1: i + 1].values
+            feature_atr = data['atr_normalized'].iloc[i - feature_window + 1: i + 1].values
+            feature_price_sma = data['price_minus_sma7_normalized'].iloc[i - feature_window + 1: i + 1].values
+            feature_return = data['daily_return_normalized'].iloc[i - feature_window + 1: i + 1].values
             # Combine features into a single array (flattened)
             feature = np.column_stack((feature_atr, feature_price_sma, feature_return)).flatten()
             target = data['sma_365'].iloc[i + 1]
