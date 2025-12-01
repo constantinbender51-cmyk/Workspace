@@ -9,8 +9,17 @@ import requests
 import tensorflow as tf
 from tensorflow.keras.models import Sequential
 from tensorflow.keras.layers import LSTM, Dense
+import threading
+import time
 
 app = Flask(__name__)
+
+# Global variables for model and training status
+trained_model = None
+training_history = None
+training_in_progress = False
+training_complete = False
+training_start_time = None
 
 # Fetch OHLCV data from Binance public API
 def fetch_ohlcv_data():
@@ -77,74 +86,160 @@ def train_lstm_model(features, targets):
     history = model.fit(features_reshaped, targets, epochs=20, validation_split=0.2, verbose=1)
     return model, history
 
+# Function to train model in background
+def train_model_background():
+    global trained_model, training_history, training_in_progress, training_complete, training_start_time
+    training_in_progress = True
+    training_complete = False
+    training_start_time = time.time()
+    
+    try:
+        # Fetch and prepare data
+        data = fetch_ohlcv_data()
+        features, targets, data_with_sma, valid_indices = prepare_features_target(data)
+        
+        # Train model
+        trained_model, training_history = train_lstm_model(features, targets)
+        
+        training_complete = True
+        print(f"Training completed in {time.time() - training_start_time:.2f} seconds")
+    except Exception as e:
+        print(f"Training failed: {e}")
+    finally:
+        training_in_progress = False
+
+# Start training when the script runs
+print("Starting model training in background...")
+training_thread = threading.Thread(target=train_model_background, daemon=True)
+training_thread.start()
+
 @app.route('/')
 def index():
-    # Fetch and prepare data
-    data = fetch_ohlcv_data()
-    features, targets, data_with_sma, valid_indices = prepare_features_target(data)
+    global trained_model, training_history, training_in_progress, training_complete, training_start_time
     
-    # Train model
-    model, history = train_lstm_model(features, targets)
-    
-    # Generate predictions
-    features_reshaped = features.reshape(features.shape[0], 90, 5)
-    predictions = model.predict(features_reshaped).flatten()
-    
-    # Prepare data for chart
-    actual_sma = targets
-    
-    # Create first plot: LSTM predictions vs actual SMA
-    plt.figure(figsize=(12, 6))
-    plt.plot(valid_indices, actual_sma, label='Actual 365 SMA', color='blue')
-    plt.plot(valid_indices, predictions, label='Model Predictions', color='red', linestyle='--')
-    plt.title('LSTM Model Predictions vs Actual 365-Day SMA')
-    plt.xlabel('Date')
-    plt.ylabel('Price')
-    plt.legend()
-    plt.grid(True)
-    
-    # Convert first plot to base64 for HTML embedding
-    img1 = io.BytesIO()
-    plt.savefig(img1, format='png', bbox_inches='tight')
-    img1.seek(0)
-    plot_url1 = base64.b64encode(img1.getvalue()).decode()
-    plt.close()
-    
-    # Create second plot: Training loss vs validation loss
-    plt.figure(figsize=(12, 6))
-    plt.plot(history.history['loss'], label='Training Loss', color='blue')
-    plt.plot(history.history['val_loss'], label='Validation Loss', color='red', linestyle='--')
-    plt.title('Training Loss vs Validation Loss (20 Epochs)')
-    plt.xlabel('Epoch')
-    plt.ylabel('Loss (MSE)')
-    plt.legend()
-    plt.grid(True)
-    
-    # Convert second plot to base64 for HTML embedding
-    img2 = io.BytesIO()
-    plt.savefig(img2, format='png', bbox_inches='tight')
-    img2.seek(0)
-    plot_url2 = base64.b64encode(img2.getvalue()).decode()
-    plt.close()
-    
-    # HTML template
+    # HTML template with dynamic content
     html_template = '''
     <!DOCTYPE html>
     <html>
     <head>
-        <title>LSTM Model vs 365 SMA</title>
+        <title>LSTM Model Training Progress</title>
+        <meta http-equiv="refresh" content="5"> <!-- Auto-refresh every 5 seconds to show progress -->
+        <style>
+            body { font-family: Arial, sans-serif; margin: 20px; }
+            .status { padding: 10px; margin: 10px 0; border-radius: 5px; }
+            .training { background-color: #fff3cd; border: 1px solid #ffeaa7; }
+            .complete { background-color: #d4edda; border: 1px solid #c3e6cb; }
+            .error { background-color: #f8d7da; border: 1px solid #f5c6cb; }
+            .plot { margin: 20px 0; }
+        </style>
     </head>
     <body>
-        <h1>LSTM Model Predictions vs 365-Day Simple Moving Average</h1>
-        <img src="data:image/png;base64,{{ plot_url1 }}" alt="Chart">
-        <h2>Training Loss vs Validation Loss</h2>
-        <p>Epochs increased from 10 to 20 (2x).</p>
-        <img src="data:image/png;base64,{{ plot_url2 }}" alt="Loss Chart">
-        <p>Note: Using TensorFlow/Keras for LSTM model training.</p>
+        <h1>LSTM Model Training Progress</h1>
+        
+        {% if training_in_progress %}
+            <div class="status training">
+                <h2>Training in Progress...</h2>
+                <p>Model training started at {{ start_time }}.</p>
+                <p>Elapsed time: {{ elapsed_time }} seconds</p>
+                <p>Please wait while the model trains with 20 epochs. This page will auto-refresh every 5 seconds.</p>
+                <p>Check the console for detailed progress (epoch-by-epoch updates).</p>
+            </div>
+        {% elif training_complete and trained_model is not none and training_history is not none %}
+            <div class="status complete">
+                <h2>Training Complete!</h2>
+                <p>Model trained successfully in {{ elapsed_time }} seconds.</p>
+                <p>Total epochs: 20</p>
+            </div>
+            
+            <!-- Generate predictions and plots only after training is complete -->
+            {% set data = fetch_ohlcv_data() %}
+            {% set features, targets, data_with_sma, valid_indices = prepare_features_target(data) %}
+            {% set features_reshaped = features.reshape(features.shape[0], 90, 5) %}
+            {% set predictions = trained_model.predict(features_reshaped).flatten() %}
+            
+            <div class="plot">
+                <h2>LSTM Model Predictions vs 365-Day Simple Moving Average</h2>
+                <img src="data:image/png;base64,{{ plot_url1 }}" alt="Predictions Chart">
+            </div>
+            
+            <div class="plot">
+                <h2>Training Loss vs Validation Loss</h2>
+                <p>Epochs increased from 10 to 20 (2x).</p>
+                <img src="data:image/png;base64,{{ plot_url2 }}" alt="Loss Chart">
+            </div>
+            
+            <p>Note: Using TensorFlow/Keras for LSTM model training.</p>
+        {% else %}
+            <div class="status error">
+                <h2>Training Status Unknown</h2>
+                <p>Model training has not started or encountered an error.</p>
+                <p>Please check the application logs.</p>
+            </div>
+        {% endif %}
     </body>
     </html>
     '''
-    return render_template_string(html_template, plot_url1=plot_url1, plot_url2=plot_url2)
+    
+    # Calculate elapsed time
+    elapsed = 0
+    if training_start_time:
+        elapsed = int(time.time() - training_start_time)
+    
+    # Format start time
+    start_time_str = "N/A"
+    if training_start_time:
+        start_time_str = time.strftime('%Y-%m-%d %H:%M:%S', time.localtime(training_start_time))
+    
+    # If training is complete, generate plots
+    plot_url1 = ""
+    plot_url2 = ""
+    if training_complete and trained_model is not None and training_history is not None:
+        # Fetch and prepare data for predictions
+        data = fetch_ohlcv_data()
+        features, targets, data_with_sma, valid_indices = prepare_features_target(data)
+        features_reshaped = features.reshape(features.shape[0], 90, 5)
+        predictions = trained_model.predict(features_reshaped).flatten()
+        actual_sma = targets
+        
+        # Create first plot: LSTM predictions vs actual SMA
+        plt.figure(figsize=(12, 6))
+        plt.plot(valid_indices, actual_sma, label='Actual 365 SMA', color='blue')
+        plt.plot(valid_indices, predictions, label='Model Predictions', color='red', linestyle='--')
+        plt.title('LSTM Model Predictions vs Actual 365-Day SMA')
+        plt.xlabel('Date')
+        plt.ylabel('Price')
+        plt.legend()
+        plt.grid(True)
+        
+        img1 = io.BytesIO()
+        plt.savefig(img1, format='png', bbox_inches='tight')
+        img1.seek(0)
+        plot_url1 = base64.b64encode(img1.getvalue()).decode()
+        plt.close()
+        
+        # Create second plot: Training loss vs validation loss
+        plt.figure(figsize=(12, 6))
+        plt.plot(training_history.history['loss'], label='Training Loss', color='blue')
+        plt.plot(training_history.history['val_loss'], label='Validation Loss', color='red', linestyle='--')
+        plt.title('Training Loss vs Validation Loss (20 Epochs)')
+        plt.xlabel('Epoch')
+        plt.ylabel('Loss (MSE)')
+        plt.legend()
+        plt.grid(True)
+        
+        img2 = io.BytesIO()
+        plt.savefig(img2, format='png', bbox_inches='tight')
+        img2.seek(0)
+        plot_url2 = base64.b64encode(img2.getvalue()).decode()
+        plt.close()
+    
+    return render_template_string(html_template, 
+                                  training_in_progress=training_in_progress,
+                                  training_complete=training_complete,
+                                  start_time=start_time_str,
+                                  elapsed_time=elapsed,
+                                  plot_url1=plot_url1,
+                                  plot_url2=plot_url2)
 
 if __name__ == '__main__':
     app.run(host='0.0.0.0', port=8080, debug=False)
