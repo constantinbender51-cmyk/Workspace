@@ -148,6 +148,153 @@ training_thread.start()
 
 @app.route('/')
 def index():
+    global trained_model, training_history, training_in_progress, training_complete, training_start_time
+    
+    # HTML template with dynamic content
+    html_template = '''
+    <!DOCTYPE html>
+    <html>
+    <head>
+        <title>LSTM Model Training Progress</title>
+        <style>
+            body { font-family: Arial, sans-serif; margin: 20px; }
+            .status { padding: 10px; margin: 10px 0; border-radius: 5px; }
+            .training { background-color: #fff3cd; border: 1px solid #ffeaa7; }
+            .complete { background-color: #d4edda; border: 1px solid #c3e6cb; }
+            .error { background-color: #f8d7da; border: 1px solid #f5c6cb; }
+            .plot { margin: 20px 0; }
+            #loss-data { margin-top: 20px; }
+            table { border-collapse: collapse; width: 100%; }
+            th, td { border: 1px solid #ddd; padding: 8px; text-align: center; }
+            th { background-color: #f2f2f2; }
+        </style>
+    </head>
+    <body>
+        <h1>LSTM Model Training Progress</h1>
+        
+        <div id="status-container">
+            <!-- Status will be updated dynamically -->
+        </div>
+        
+        <div id="loss-data">
+            <h2>Loss and Validation Loss</h2>
+            <table id="loss-table">
+                <thead>
+                    <tr>
+                        <th>Epoch</th>
+                        <th>Loss</th>
+                        <th>Validation Loss</th>
+                    </tr>
+                </thead>
+                <tbody id="loss-table-body">
+                    <!-- Rows will be added dynamically -->
+                </tbody>
+            </table>
+        </div>
+        
+        <div id="plots-container">
+            <!-- Plots will be inserted here after training completes -->
+        </div>
+        
+        <script>
+            const eventSource = new EventSource('/progress');
+            
+            eventSource.onmessage = function(event) {
+                const data = JSON.parse(event.data);
+                
+                // Update status container
+                const statusContainer = document.getElementById('status-container');
+                let statusHTML = '';
+                
+                if (data.training_in_progress) {
+                    statusHTML = `
+                        <div class="status training">
+                            <h2>Training in Progress...</h2>
+                            <p>Model training started at ${data.start_time}.</p>
+                            <p>Elapsed time: ${data.elapsed_time} seconds</p>
+                            <p>Please wait while the model trains with 40 epochs.</p>
+                            <p>Epochs completed: ${data.epochs_completed}</p>
+                            <p>Check the console for detailed progress.</p>
+                        </div>
+                    `;
+                } else if (data.training_complete && data.trained_model_exists) {
+                    statusHTML = `
+                        <div class="status complete">
+                            <h2>Training Complete!</h2>
+                            <p>Model trained successfully in ${data.elapsed_time} seconds.</p>
+                            <p>Total epochs: ${data.total_epochs}</p>
+                        </div>
+                    `;
+                    // Insert plots after training completes
+                    const plotsContainer = document.getElementById('plots-container');
+                    plotsContainer.innerHTML = `
+                        <div class="plot">
+                            <h2>LSTM Model Predictions vs 365-Day Simple Moving Average</h2>
+                            <img src="data:image/png;base64,${data.plot_url1}" alt="Predictions Chart">
+                        </div>
+                        <div class="plot">
+                            <h2>Training Loss vs Validation Loss</h2>
+                            <p>Epochs increased from 20 to 40 (2x).</p>
+                            <img src="data:image/png;base64,${data.plot_url2}" alt="Loss Chart">
+                        </div>
+                        <p>Note: Using TensorFlow/Keras for LSTM model training.</p>
+                    `;
+                    eventSource.close(); // Close SSE connection after training completes
+                } else {
+                    statusHTML = `
+                        <div class="status error">
+                            <h2>Training Status Unknown</h2>
+                            <p>Model training has not started or encountered an error.</p>
+                            <p>Please check the application logs.</p>
+                        </div>
+                    `;
+                }
+                
+                statusContainer.innerHTML = statusHTML;
+                
+                // Update loss table
+                const lossTableBody = document.getElementById('loss-table-body');
+                if (data.loss_history && data.val_loss_history) {
+                    lossTableBody.innerHTML = '';
+                    for (let i = 0; i < data.loss_history.length; i++) {
+                        const row = document.createElement('tr');
+                        row.innerHTML = `
+                            <td>${i + 1}</td>
+                            <td>${data.loss_history[i].toFixed(6)}</td>
+                            <td>${data.val_loss_history[i].toFixed(6)}</td>
+                        `;
+                        lossTableBody.appendChild(row);
+                    }
+                }
+            };
+            
+            eventSource.onerror = function(error) {
+                console.error('EventSource failed:', error);
+                const statusContainer = document.getElementById('status-container');
+                statusContainer.innerHTML = `
+                    <div class="status error">
+                        <h2>Connection Error</h2>
+                        <p>Failed to connect to progress stream. Please refresh the page.</p>
+                    </div>
+                `;
+            };
+        </script>
+    </body>
+    </html>
+    '''
+    
+    # Calculate elapsed time
+    elapsed = 0
+    if training_start_time:
+        elapsed = int(time.time() - training_start_time)
+    
+    # Format start time
+    start_time_str = "N/A"
+    if training_start_time:
+        start_time_str = time.strftime('%Y-%m-%d %H:%M:%S', time.localtime(training_start_time))
+    
+    return render_template_string(html_template)
+
 @app.route('/progress')
 def progress():
     global trained_model, training_history, training_in_progress, training_complete, training_start_time, loss_history, val_loss_history
