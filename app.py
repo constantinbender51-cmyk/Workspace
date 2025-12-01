@@ -114,7 +114,7 @@ def train_lstm_model(features, targets):
     
     # Train the model
     print("Training LSTM model with TensorFlow/Keras")
-    history = model.fit(features_reshaped, targets, epochs=20, validation_split=0.2, verbose=1, callbacks=[early_stopping, LossHistoryCallback()])
+    history = model.fit(features_reshaped, targets, epochs=20, validation_split=0.2, batch_size=64, verbose=1, callbacks=[early_stopping, LossHistoryCallback()])
     return model, history
 
 # Function to train model in background
