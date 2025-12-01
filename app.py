@@ -58,17 +58,16 @@ def calculate_sma(data, window):
 def prepare_features_target(data, feature_window=30, target_window=365):
     data['sma_365'] = calculate_sma(data['close'], target_window)
     
-    # Calculate SMA 28 and compute SMA 28 / volume ratio as feature
+    # Calculate SMA 28 as feature
     data['sma_28'] = calculate_sma(data['close'], 28)
-    data['sma_28_volume_ratio'] = data['sma_28'] / data['volume']
     
-    # Create features: past 30 days of SMA 28 / volume ratio values
+    # Create features: past 30 days of SMA 28 values
     features = []
     targets = []
     valid_indices = []
     for i in range(feature_window, len(data) - 1):
         if not pd.isna(data['sma_365'].iloc[i + 1]):
-            feature = data['sma_28_volume_ratio'].iloc[i - feature_window + 1: i + 1].values.flatten()
+            feature = data['sma_28'].iloc[i - feature_window + 1: i + 1].values.flatten()
             target = data['sma_365'].iloc[i + 1]
             features.append(feature)
             targets.append(target)
