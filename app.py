@@ -97,7 +97,7 @@ def train_lstm_model(features, targets):
     model.compile(optimizer=optimizer, loss='mse')
     
     # Add early stopping to prevent overfitting and improve stability
-    early_stopping = tf.keras.callbacks.EarlyStopping(monitor='val_loss', patience=5, restore_best_weights=True)
+    early_stopping = tf.keras.callbacks.EarlyStopping(monitor='val_loss', patience=100, restore_best_weights=True)
     
     # Train the model
     print("Training LSTM model with TensorFlow/Keras")
@@ -234,13 +234,14 @@ def index():
         plot_url1 = base64.b64encode(img1.getvalue()).decode()
         plt.close()
         
-        # Create second plot: Training loss vs validation loss
+        # Create second plot: Training loss vs validation loss with log scale y-axis
         plt.figure(figsize=(12, 6))
         plt.plot(training_history.history['loss'], label='Training Loss', color='blue')
         plt.plot(training_history.history['val_loss'], label='Validation Loss', color='red', linestyle='--')
-        plt.title('Training Loss vs Validation Loss (20 Epochs)')
+        plt.title('Training Loss vs Validation Loss (20 Epochs) - Log Scale')
         plt.xlabel('Epoch')
-        plt.ylabel('Loss (MSE)')
+        plt.ylabel('Loss (MSE) - Log Scale')
+        plt.yscale('log')
         plt.legend()
         plt.grid(True)
         
