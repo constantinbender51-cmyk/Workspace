@@ -55,16 +55,22 @@ def fetch_ohlcv_data():
 def calculate_sma(data, window):
     return data.rolling(window=window).mean()
 
-def prepare_features_target(data, feature_window=90, target_window=365):
+def prepare_features_target(data, feature_window=30, target_window=365):
     data['sma_365'] = calculate_sma(data['close'], target_window)
     
-    # Create features: past 90 days of OHLCV
+    # Calculate SMA features: 7, 14, 28, 56 days
+    data['sma_7'] = calculate_sma(data['close'], 7)
+    data['sma_14'] = calculate_sma(data['close'], 14)
+    data['sma_28'] = calculate_sma(data['close'], 28)
+    data['sma_56'] = calculate_sma(data['close'], 56)
+    
+    # Create features: past 30 days of SMA values (7, 14, 28, 56)
     features = []
     targets = []
     valid_indices = []
     for i in range(feature_window, len(data) - 1):
         if not pd.isna(data['sma_365'].iloc[i + 1]):
-            feature = data[['open', 'high', 'low', 'close', 'volume']].iloc[i - feature_window + 1: i + 1].values.flatten()
+            feature = data[['sma_7', 'sma_14', 'sma_28', 'sma_56']].iloc[i - feature_window + 1: i + 1].values.flatten()
             target = data['sma_365'].iloc[i + 1]
             features.append(feature)
             targets.append(target)
@@ -87,13 +93,13 @@ def prepare_features_target(data, feature_window=90, target_window=365):
 
 def train_lstm_model(features, targets):
     # Reshape features for LSTM input: (samples, timesteps, features)
-    # Assuming features are flattened from 90 days * 5 features (OHLCV), reshape to (samples, 90, 5)
+    # Assuming features are flattened from 30 days * 4 SMA features, reshape to (samples, 30, 4)
     n_samples = features.shape[0]
-    features_reshaped = features.reshape(n_samples, 90, 5)
+    features_reshaped = features.reshape(n_samples, 30, 4)
     
     # Build LSTM model with gradient clipping to prevent exploding gradients
     model = Sequential([
-        LSTM(50, activation='relu', input_shape=(90, 5), kernel_constraint=tf.keras.constraints.MaxNorm(3), kernel_regularizer=tf.keras.regularizers.l1_l2(l1=5e-3, l2=5e-3)),
+        LSTM(50, activation='relu', input_shape=(30, 4), kernel_constraint=tf.keras.constraints.MaxNorm(3), kernel_regularizer=tf.keras.regularizers.l1_l2(l1=5e-3, l2=5e-3)),
         tf.keras.layers.Dropout(0.164025),
         Dense(1, kernel_regularizer=tf.keras.regularizers.l1_l2(l1=5e-3, l2=5e-3))
     ])
@@ -330,7 +336,7 @@ def progress():
                 # Fetch and prepare data for predictions
                 data_fetched = fetch_ohlcv_data()
                 features, targets, data_with_sma, valid_indices, feature_scaler, target_scaler = prepare_features_target(data_fetched)
-                features_reshaped = features.reshape(features.shape[0], 90, 5)
+                features_reshaped = features.reshape(features.shape[0], 30, 4)
                 predictions_normalized = trained_model.predict(features_reshaped).flatten()
                 predictions = target_scaler.inverse_transform(predictions_normalized.reshape(-1, 1)).flatten()
                 actual_sma = target_scaler.inverse_transform(targets.reshape(-1, 1)).flatten()
