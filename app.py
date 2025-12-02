@@ -297,20 +297,23 @@ def create_plot(df):
     """Create a plot of cumulative returns"""
     plt.figure(figsize=(12, 6))
     
-    # Plot cumulative returns
-    plt.plot(df.index, df['cumulative_returns'], 
+    # Plot cumulative returns with log scale
+    plt.plot(df.index, df['cumulative_returns'] + 1,  # Add 1 for log scale
              label='Cumulative Strategy Returns', 
              linewidth=2, 
              color='blue')
     
-    # Add horizontal line at zero
-    plt.axhline(y=0, color='gray', linestyle='--', alpha=0.5)
+    # Set y-axis to log scale
+    plt.yscale('log')
+    
+    # Add horizontal line at 1 (0 returns in log scale)
+    plt.axhline(y=1, color='gray', linestyle='--', alpha=0.5)
     
     # Formatting
-    plt.title('Cumulative Returns of SMA Crossover Strategy', fontsize=16, pad=20)
+    plt.title('Cumulative Returns of SMA Crossover Strategy (Log Scale)', fontsize=16, pad=20)
     plt.xlabel('Date', fontsize=12)
-    plt.ylabel('Cumulative Returns', fontsize=12)
-    plt.grid(True, alpha=0.3)
+    plt.ylabel('Cumulative Returns (Log Scale)', fontsize=12)
+    plt.grid(True, alpha=0.3, which='both')
     plt.legend(fontsize=12)
     plt.tight_layout()
     
