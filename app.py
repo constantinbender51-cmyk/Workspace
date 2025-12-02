@@ -261,15 +261,12 @@ def calculate_strategy_returns(df):
     # Initialize strategy returns column
     df_clean['strategy_returns'] = 0.0
     
-    # Variables for stop loss tracking
-    position_value = 1.0  # Start with value of 1
-    position_high = 1.0   # Highest value since position entry
-    in_position = False   # Whether we're currently in a position
-    stop_loss_pct = 0.05  # 5% stop loss
-    
     # Apply strategy rules with stop loss
     for i in range(len(df_clean)):
         close_price = df_clean['close'].iloc[i]
+        open_price = df_clean['open'].iloc[i]
+        high_price = df_clean['high'].iloc[i]
+        low_price = df_clean['low'].iloc[i]
         sma_120 = df_clean['sma_120'].iloc[i]
         sma_365 = df_clean['sma_365'].iloc[i]
         daily_return = df_clean['returns'].iloc[i]
@@ -295,37 +292,24 @@ def calculate_strategy_returns(df):
         if leveraged_signal != 0:
             leveraged_signal = leveraged_signal - fee_rate
         
-        # Check stop loss if in position
-        if in_position:
-            # Update position value with today's return
-            position_value = position_value * (1 + leveraged_signal)
-            
-            # Update position high
-            if position_value > position_high:
-                position_high = position_value
-            
-            # Check if stop loss triggered
-            drawdown = (position_value - position_high) / position_high
-            if drawdown <= -stop_loss_pct:
-                # Stop loss triggered: close position
-                df_clean['strategy_returns'].iloc[i] = 0.0
-                in_position = False
-                position_value = 1.0
-                position_high = 1.0
-            else:
-                # No stop loss: use the signal
-                df_clean['strategy_returns'].iloc[i] = leveraged_signal
+        # Check for stop loss conditions
+        stop_loss_triggered = False
+        stop_loss_pct = 0.05  # 5% stop loss
+        
+        # Condition 1: Price above both SMAs and low is 5% or more below open
+        if close_price > sma_120 and close_price > sma_365:
+            if low_price <= open_price * (1 - stop_loss_pct):
+                stop_loss_triggered = True
+        # Condition 2: Price below both SMAs and high is 5% or more above open
+        elif close_price < sma_120 and close_price < sma_365:
+            if high_price >= open_price * (1 + stop_loss_pct):
+                stop_loss_triggered = True
+        
+        # Apply stop loss if triggered
+        if stop_loss_triggered:
+            df_clean['strategy_returns'].iloc[i] = -0.05  # 5% loss
         else:
-            # Not in position: check if we should enter
-            if leveraged_signal != 0:
-                # Enter position
-                df_clean['strategy_returns'].iloc[i] = leveraged_signal
-                in_position = True
-                position_value = 1.0 * (1 + leveraged_signal)
-                position_high = position_value
-            else:
-                # No position, no signal
-                df_clean['strategy_returns'].iloc[i] = 0.0
+            df_clean['strategy_returns'].iloc[i] = leveraged_signal
     
     # Calculate cumulative returns
     df_clean['cumulative_returns'] = (1 + df_clean['strategy_returns']).cumprod() - 1
