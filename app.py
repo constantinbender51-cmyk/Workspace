@@ -239,7 +239,7 @@ def create_sample_data():
     return df
 
 def calculate_strategy_returns(df):
-    """Calculate strategy returns based on SMA crossover rules with 0.1% daily fee"""
+    """Calculate strategy returns based on SMA crossover rules with 1.5x leverage and 0.04% daily fee"""
     # Calculate daily returns
     df['returns'] = df['close'].pct_change()
     
@@ -269,6 +269,10 @@ def calculate_strategy_returns(df):
         # Rule 3: Add 0 return otherwise
         else:
             df_clean['strategy_returns'].iloc[i] = 0.0
+    
+    # Apply 1.5x leverage to strategy returns
+    leverage = 1.5
+    df_clean['strategy_returns'] = df_clean['strategy_returns'] * leverage
     
     # Apply 0.04% fee to every trading day
     # The fee is deducted from the daily strategy returns
