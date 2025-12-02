@@ -115,6 +115,33 @@ HTML_TEMPLATE = """
         </div>
         
         <div class="info-box">
+            <h3>Monthly Strategy Returns</h3>
+            <div style="max-height: 400px; overflow-y: auto; margin-top: 15px;">
+                <table style="width: 100%; border-collapse: collapse;">
+                    <thead>
+                        <tr style="background-color: #f2f2f2;">
+                            <th style="padding: 10px; text-align: left; border-bottom: 2px solid #ddd;">Month</th>
+                            <th style="padding: 10px; text-align: right; border-bottom: 2px solid #ddd;">Return (%)</th>
+                        </tr>
+                    </thead>
+                    <tbody>
+                        {% for month in monthly_returns %}
+                        <tr style="border-bottom: 1px solid #ddd;">
+                            <td style="padding: 8px 10px;">{{ month.year_month }}</td>
+                            <td style="padding: 8px 10px; text-align: right; color: {% if month.is_positive %}#28a745{% else %}#dc3545{% endif %};">
+                                {{ month.return_pct }}%
+                            </td>
+                        </tr>
+                        {% endfor %}
+                    </tbody>
+                </table>
+            </div>
+            <p style="margin-top: 15px; font-size: 14px; color: #666;">
+                <strong>Note:</strong> Monthly returns are calculated from daily strategy returns resampled to month-end.
+            </p>
+        </div>
+        
+        <div class="info-box">
             <h3>Data Information</h3>
             <p><strong>Symbol:</strong> BTC/USDT</p>
             <p><strong>Exchange:</strong> Binance</p>
@@ -283,6 +310,32 @@ def create_plot(df):
     
     return plot_url
 
+
+def calculate_monthly_returns(df):
+    """Calculate monthly returns from strategy returns"""
+    # Create a copy of the dataframe with strategy returns
+    df_monthly = df.copy()
+    
+    # Resample to monthly frequency and calculate monthly returns
+    # Using the last day of each month
+    monthly_returns = df_monthly['strategy_returns'].resample('M').apply(
+        lambda x: (1 + x).prod() - 1
+    )
+    
+    # Convert to percentage and round
+    monthly_returns_pct = (monthly_returns * 100).round(2)
+    
+    # Create a list of dictionaries for easy template rendering
+    monthly_data = []
+    for date, return_pct in monthly_returns_pct.items():
+        monthly_data.append({
+            'year_month': date.strftime('%Y-%m'),
+            'return_pct': return_pct,
+            'is_positive': return_pct >= 0
+        })
+    
+    return monthly_data
+
 @app.route('/')
 def index():
     """Main route that displays the strategy returns plot"""
@@ -305,6 +358,9 @@ def index():
     positive_days = positive_mask.sum()
     negative_days = negative_mask.sum()
     
+    # Calculate monthly returns
+    monthly_returns = calculate_monthly_returns(df_strategy)
+    
     # Prepare template data
     template_data = {
         'plot_url': plot_url,
@@ -312,6 +368,7 @@ def index():
         'final_cum_return': final_cum_return,
         'positive_days': int(positive_days),
         'negative_days': int(negative_days),
+        'monthly_returns': monthly_returns,
         'start_date': df_strategy.index[0].strftime('%Y-%m-%d') if len(df_strategy) > 0 else '2018-01-01',
         'end_date': df_strategy.index[-1].strftime('%Y-%m-%d') if len(df_strategy) > 0 else datetime.now().strftime('%Y-%m-%d'),
         'total_days': len(df_strategy),
