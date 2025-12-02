@@ -635,7 +635,9 @@ def grid_search():
     </html>
     """
     
-    return grid_search_html@app.route('/')
+    return grid_search_html
+
+@app.route('/')
 def index():
     """Main route that displays the strategy returns plot"""
     # Fetch and process data
