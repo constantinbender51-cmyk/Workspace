@@ -239,7 +239,7 @@ def create_sample_data():
     return df
 
 def calculate_strategy_returns(df):
-    """Calculate strategy returns based on SMA crossover rules with 1.5x leverage and 0.04% daily fee"""
+    """Calculate strategy returns based on SMA crossover rules with 1.5x leverage, 0.04% daily fee, and stop loss based on ATR"""
     # Calculate daily returns
     df['returns'] = df['close'].pct_change()
     
@@ -247,25 +247,51 @@ def calculate_strategy_returns(df):
     df['sma_120'] = df['close'].rolling(window=120).mean()
     df['sma_365'] = df['close'].rolling(window=365).mean()
     
-    # Drop NaN values (first 365 days won't have SMA_365)
+    # Calculate ATR (Average True Range) with 14-day window
+    df['high_low'] = df['high'] - df['low']
+    df['high_close'] = abs(df['high'] - df['close'].shift(1))
+    df['low_close'] = abs(df['low'] - df['close'].shift(1))
+    df['true_range'] = df[['high_low', 'high_close', 'low_close']].max(axis=1)
+    df['atr'] = df['true_range'].rolling(window=14).mean()
+    
+    # Drop NaN values (first 365 days won't have SMA_365, and ATR needs 14 days)
     df_clean = df.dropna().copy()
     
     # Initialize strategy returns column
     df_clean['strategy_returns'] = 0.0
     
-    # Apply strategy rules
+    # Apply strategy rules with stop loss
     for i in range(len(df_clean)):
         close_price = df_clean['close'].iloc[i]
         sma_120 = df_clean['sma_120'].iloc[i]
         sma_365 = df_clean['sma_365'].iloc[i]
         daily_return = df_clean['returns'].iloc[i]
+        open_price = df_clean['open'].iloc[i]
+        low_price = df_clean['low'].iloc[i]
+        high_price = df_clean['high'].iloc[i]
+        atr = df_clean['atr'].iloc[i]
+        
+        # Calculate stop loss thresholds
+        stop_loss_threshold = 3.2 * atr
         
         # Rule 1: Add returns when price is above both SMAs
         if close_price > sma_120 and close_price > sma_365:
-            df_clean['strategy_returns'].iloc[i] = daily_return
+            # Check stop loss: if low is 3.2 ATR below open
+            if low_price <= open_price - stop_loss_threshold:
+                # Cap return to -3.2 ATR (as a percentage of open) minus fee if applicable
+                capped_return = -stop_loss_threshold / open_price
+                df_clean['strategy_returns'].iloc[i] = capped_return
+            else:
+                df_clean['strategy_returns'].iloc[i] = daily_return
         # Rule 2: Subtract returns when price is below both SMAs
         elif close_price < sma_120 and close_price < sma_365:
-            df_clean['strategy_returns'].iloc[i] = -daily_return
+            # Check stop loss: if high is 3.2 ATR above open
+            if high_price >= open_price + stop_loss_threshold:
+                # Cap return to -3.2 ATR (as a percentage of open) minus fee if applicable
+                capped_return = -stop_loss_threshold / open_price
+                df_clean['strategy_returns'].iloc[i] = capped_return
+            else:
+                df_clean['strategy_returns'].iloc[i] = -daily_return
         # Rule 3: Add 0 return otherwise
         else:
             df_clean['strategy_returns'].iloc[i] = 0.0
