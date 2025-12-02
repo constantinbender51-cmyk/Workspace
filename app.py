@@ -270,9 +270,9 @@ def calculate_strategy_returns(df):
         else:
             df_clean['strategy_returns'].iloc[i] = 0.0
     
-    # Apply 0.1% fee to every trading day
+    # Apply 0.04% fee to every trading day
     # The fee is deducted from the daily strategy returns
-    fee_rate = 0.001  # 0.1%
+    fee_rate = 0.0004  # 0.04%
     df_clean['strategy_returns'] = df_clean['strategy_returns'] - fee_rate
     
     # Calculate cumulative returns
