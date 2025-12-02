@@ -274,10 +274,11 @@ def calculate_strategy_returns(df):
     leverage = 1.5
     df_clean['strategy_returns'] = df_clean['strategy_returns'] * leverage
     
-    # Apply 0.04% fee to every trading day
-    # The fee is deducted from the daily strategy returns
+    # Apply 0.04% fee only on days with non-zero strategy returns
     fee_rate = 0.0004  # 0.04%
-    df_clean['strategy_returns'] = df_clean['strategy_returns'] - fee_rate
+    df_clean['strategy_returns'] = df_clean['strategy_returns'].apply(
+        lambda x: x - fee_rate if x != 0 else x
+    )
     
     # Calculate cumulative returns
     df_clean['cumulative_returns'] = (1 + df_clean['strategy_returns']).cumprod() - 1
