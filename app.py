@@ -247,7 +247,7 @@ def create_sample_data():
     return df
 
 def calculate_strategy_returns(df):
-    """Calculate strategy returns based on SMA crossover rules with 1.5x leverage and 0.04% daily fee"""
+    """Calculate strategy returns based on SMA crossover rules with 1.5x leverage, 0.04% daily fee, and 5% stop loss"""
     # Calculate daily returns
     df['returns'] = df['close'].pct_change()
     
@@ -261,32 +261,71 @@ def calculate_strategy_returns(df):
     # Initialize strategy returns column
     df_clean['strategy_returns'] = 0.0
     
-    # Apply strategy rules
+    # Variables for stop loss tracking
+    position_value = 1.0  # Start with value of 1
+    position_high = 1.0   # Highest value since position entry
+    in_position = False   # Whether we're currently in a position
+    stop_loss_pct = 0.05  # 5% stop loss
+    
+    # Apply strategy rules with stop loss
     for i in range(len(df_clean)):
         close_price = df_clean['close'].iloc[i]
         sma_120 = df_clean['sma_120'].iloc[i]
         sma_365 = df_clean['sma_365'].iloc[i]
         daily_return = df_clean['returns'].iloc[i]
         
+        # Calculate raw strategy signal
+        raw_signal = 0.0
         # Rule 1: Add returns when price is above both SMAs
         if close_price > sma_120 and close_price > sma_365:
-            df_clean['strategy_returns'].iloc[i] = daily_return
+            raw_signal = daily_return
         # Rule 2: Subtract returns when price is below both SMAs
         elif close_price < sma_120 and close_price < sma_365:
-            df_clean['strategy_returns'].iloc[i] = -daily_return
+            raw_signal = -daily_return
         # Rule 3: Add 0 return otherwise
         else:
-            df_clean['strategy_returns'].iloc[i] = 0.0
-    
-    # Apply 1.5x leverage to strategy returns
-    leverage = 1.5
-    df_clean['strategy_returns'] = df_clean['strategy_returns'] * leverage
-    
-    # Apply 0.04% fee only on days with non-zero strategy returns
-    fee_rate = 0.0004  # 0.04%
-    df_clean['strategy_returns'] = df_clean['strategy_returns'].apply(
-        lambda x: x - fee_rate if x != 0 else x
-    )
+            raw_signal = 0.0
+        
+        # Apply leverage
+        leverage = 1.5
+        leveraged_signal = raw_signal * leverage
+        
+        # Apply fee only on days with non-zero signal
+        fee_rate = 0.0004  # 0.04%
+        if leveraged_signal != 0:
+            leveraged_signal = leveraged_signal - fee_rate
+        
+        # Check stop loss if in position
+        if in_position:
+            # Update position value with today's return
+            position_value = position_value * (1 + leveraged_signal)
+            
+            # Update position high
+            if position_value > position_high:
+                position_high = position_value
+            
+            # Check if stop loss triggered
+            drawdown = (position_value - position_high) / position_high
+            if drawdown <= -stop_loss_pct:
+                # Stop loss triggered: close position
+                df_clean['strategy_returns'].iloc[i] = 0.0
+                in_position = False
+                position_value = 1.0
+                position_high = 1.0
+            else:
+                # No stop loss: use the signal
+                df_clean['strategy_returns'].iloc[i] = leveraged_signal
+        else:
+            # Not in position: check if we should enter
+            if leveraged_signal != 0:
+                # Enter position
+                df_clean['strategy_returns'].iloc[i] = leveraged_signal
+                in_position = True
+                position_value = 1.0 * (1 + leveraged_signal)
+                position_high = position_value
+            else:
+                # No position, no signal
+                df_clean['strategy_returns'].iloc[i] = 0.0
     
     # Calculate cumulative returns
     df_clean['cumulative_returns'] = (1 + df_clean['strategy_returns']).cumprod() - 1
