@@ -338,6 +338,8 @@ def create_plot(df):
     plt.ylabel('Cumulative Returns', fontsize=12)
     plt.grid(True, alpha=0.3)
     plt.legend(fontsize=12)
+    # Use log scale on y-axis
+    plt.yscale('log')
     plt.tight_layout()
     
     # Convert plot to base64 string
