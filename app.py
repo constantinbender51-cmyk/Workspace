@@ -315,8 +315,7 @@ def calculate_strategy_returns(df):
     )
     
     # Calculate cumulative returns
-    # Using cumprod() without subtracting 1 to avoid negative values for log scale
-    df_clean['cumulative_returns'] = (1 + df_clean['strategy_returns']).cumprod()
+    df_clean['cumulative_returns'] = (1 + df_clean['strategy_returns']).cumprod() - 1
     
     return df_clean
 
@@ -339,8 +338,6 @@ def create_plot(df):
     plt.ylabel('Cumulative Returns', fontsize=12)
     plt.grid(True, alpha=0.3)
     plt.legend(fontsize=12)
-    # Use log scale on y-axis
-    plt.yscale('log')
     plt.tight_layout()
     
     # Convert plot to base64 string
@@ -425,11 +422,9 @@ def index():
     plot_url = create_plot(df_strategy)
     
     # Calculate statistics
-    # Note: cumulative_returns now represents growth factor (starting from 1)
-    total_return_factor = df_strategy['cumulative_returns'].iloc[-1] if len(df_strategy) > 0 else 1
-    total_return = total_return_factor - 1  # Convert back to return
+    total_return = df_strategy['cumulative_returns'].iloc[-1] if len(df_strategy) > 0 else 0
     total_return_pct = round(total_return * 100, 2)
-    final_cum_return = round(total_return_factor, 4)
+    final_cum_return = round(total_return, 4)
     
     # Count signal days
     positive_mask = (df_strategy['close'] > df_strategy['sma_120']) & (df_strategy['close'] > df_strategy['sma_365'])
