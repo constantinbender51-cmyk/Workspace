@@ -107,11 +107,19 @@ HTML_TEMPLATE = """
                 <div class="stat-value">{{ negative_days }}</div>
                 <div class="stat-label">Negative Signal Days</div>
             </div>
+            <div class="stat-card">
+                <div class="stat-value">{{ avg_monthly_return_pct }}%</div>
+                <div class="stat-label">Avg Monthly Return</div>
+            </div>
         </div>
         
         <div class="plot-container">
             <h3>Cumulative Returns Over Time</h3>
             <img src="data:image/png;base64,{{ plot_url }}" alt="Cumulative Returns Plot">
+        </div>
+        <div class="plot-container">
+            <h3>Monthly Strategy Returns</h3>
+            <img src="data:image/png;base64,{{ monthly_plot_url }}" alt="Monthly Returns Plot">
         </div>
         
         <div class="info-box">
@@ -342,6 +350,42 @@ def create_plot(df):
     return plot_url
 
 
+def create_monthly_plot(monthly_returns_raw):
+    """Create a bar plot of monthly returns"""
+    plt.figure(figsize=(14, 6))
+    
+    # Create bar plot
+    dates = monthly_returns_raw.index.strftime('%Y-%m')
+    values = monthly_returns_raw.values * 100  # Convert to percentage
+    
+    # Color bars based on positive/negative
+    colors = ['green' if val >= 0 else 'red' for val in values]
+    
+    plt.bar(dates, values, color=colors, alpha=0.7)
+    
+    # Add horizontal line at zero
+    plt.axhline(y=0, color='black', linestyle='-', alpha=0.3)
+    
+    # Formatting
+    plt.title('Monthly Strategy Returns (%)', fontsize=16, pad=20)
+    plt.xlabel('Month', fontsize=12)
+    plt.ylabel('Return (%)', fontsize=12)
+    plt.grid(True, alpha=0.3, axis='y')
+    
+    # Rotate x-axis labels for better readability
+    plt.xticks(rotation=45, ha='right')
+    plt.tight_layout()
+    
+    # Convert plot to base64 string
+    img = io.BytesIO()
+    plt.savefig(img, format='png', dpi=100)
+    img.seek(0)
+    plot_url = base64.b64encode(img.getvalue()).decode('utf8')
+    plt.close()
+    
+    return plot_url
+
+
 def calculate_monthly_returns(df):
     """Calculate monthly returns from strategy returns"""
     # Create a copy of the dataframe with strategy returns
@@ -349,12 +393,12 @@ def calculate_monthly_returns(df):
     
     # Resample to monthly frequency and calculate monthly returns
     # Using the last day of each month
-    monthly_returns = df_monthly['strategy_returns'].resample('M').apply(
+    monthly_returns_raw = df_monthly['strategy_returns'].resample('M').apply(
         lambda x: (1 + x).prod() - 1
     )
     
     # Convert to percentage and round
-    monthly_returns_pct = (monthly_returns * 100).round(2)
+    monthly_returns_pct = (monthly_returns_raw * 100).round(2)
     
     # Create a list of dictionaries for easy template rendering
     monthly_data = []
@@ -365,7 +409,7 @@ def calculate_monthly_returns(df):
             'is_positive': return_pct >= 0
         })
     
-    return monthly_data
+    return monthly_data, monthly_returns_raw
 
 @app.route('/')
 def index():
@@ -390,13 +434,21 @@ def index():
     negative_days = negative_mask.sum()
     
     # Calculate monthly returns
-    monthly_returns = calculate_monthly_returns(df_strategy)
+    monthly_returns, monthly_returns_raw = calculate_monthly_returns(df_strategy)
+    
+    # Calculate average monthly return (in percentage)
+    avg_monthly_return_pct = round(monthly_returns_raw.mean() * 100, 2) if len(monthly_returns_raw) > 0 else 0.0
+    
+    # Create monthly returns plot
+    monthly_plot_url = create_monthly_plot(monthly_returns_raw)
     
     # Prepare template data
     template_data = {
         'plot_url': plot_url,
+        'monthly_plot_url': monthly_plot_url,
         'total_return_pct': total_return_pct,
         'final_cum_return': final_cum_return,
+        'avg_monthly_return_pct': avg_monthly_return_pct,
         'positive_days': int(positive_days),
         'negative_days': int(negative_days),
         'monthly_returns': monthly_returns,
