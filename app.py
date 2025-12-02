@@ -321,9 +321,9 @@ def calculate_strategy_returns(df, leverage=1.5, stop_loss_pct=0.10):
         # Apply stop loss if triggered
         if stop_loss_triggered:
             # Apply stop loss percentage scaled by leverage
-            df_clean['strategy_returns'].iloc[i] = -stop_loss_pct * leverage
+            df_clean.loc[df_clean.index[i], 'strategy_returns'] = -stop_loss_pct * leverage
         else:
-            df_clean['strategy_returns'].iloc[i] = leveraged_signal
+            df_clean.loc[df_clean.index[i], 'strategy_returns'] = leveraged_signal
     
     # Calculate cumulative returns
     df_clean['cumulative_returns'] = (1 + df_clean['strategy_returns']).cumprod() - 1
