@@ -348,9 +348,9 @@ def calculate_strategy_returns(df, leverage=1.5, stop_loss_pct=0.05):
 
 def grid_search_optimal_params(df):
     """Perform grid search to find optimal leverage and stop loss parameters for maximum Sharpe ratio"""
-    # Define parameter ranges
-    leverage_range = [1, 2, 3, 4, 5]
-    stop_loss_range = [0.01, 0.02, 0.03, 0.04, 0.05, 0.06, 0.07, 0.08, 0.09, 0.10]  # 1% to 10%
+    # Define parameter ranges with smaller steps of 0.1
+    leverage_range = np.arange(1.0, 5.1, 0.1).round(1).tolist()  # 1.0 to 5.0 in 0.1 increments
+    stop_loss_range = np.arange(0.01, 0.101, 0.01).round(2).tolist()  # 1% to 10% in 0.01 increments
     
     best_sharpe = -float('inf')
     best_params = {'leverage': 1.5, 'stop_loss_pct': 0.05}
@@ -385,12 +385,12 @@ def grid_search_optimal_params(df):
                 best_sharpe = sharpe_ratio
                 best_params = {'leverage': leverage, 'stop_loss_pct': stop_loss_pct}
             
-            print(f"  Leverage: {leverage}, Stop Loss: {stop_loss_pct*100:.1f}%, Sharpe: {sharpe_ratio:.3f}, Total Return: {total_return*100:.2f}%")
+            print(f"  Leverage: {leverage:.1f}, Stop Loss: {stop_loss_pct*100:.1f}%, Sharpe: {sharpe_ratio:.3f}, Total Return: {total_return*100:.2f}%")
     
     # Sort results by Sharpe ratio (descending)
     results_sorted = sorted(results, key=lambda x: x['sharpe_ratio'], reverse=True)
     
-    print(f"\nGrid search complete. Best parameters: Leverage={best_params['leverage']}, Stop Loss={best_params['stop_loss_pct']*100:.1f}%")
+    print(f"\nGrid search complete. Best parameters: Leverage={best_params['leverage']:.1f}, Stop Loss={best_params['stop_loss_pct']*100:.1f}%")
     print(f"Best Sharpe ratio: {best_sharpe:.3f}")
     
     return best_params, results_sorted
@@ -604,8 +604,8 @@ def grid_search():
                 <h3>Grid Search Details</h3>
                 <p>Parameter ranges tested:</p>
                 <ul>
-                    <li><strong>Leverage:</strong> 1, 2, 3, 4, 5</li>
-                    <li><strong>Stop Loss:</strong> 1%, 2%, 3%, 4%, 5%, 6%, 7%, 8%, 9%, 10%</li>
+                    <li><strong>Leverage:</strong> 1.0 to 5.0 in 0.1 increments</li>
+                    <li><strong>Stop Loss:</strong> 1% to 10% in 0.1% increments</li>
                 </ul>
                 <p>Total combinations tested: {len(results)}</p>
             </div>
