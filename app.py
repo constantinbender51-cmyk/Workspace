@@ -130,7 +130,7 @@ HTML_TEMPLATE = """
 """
 
 def fetch_binance_data():
-    """Fetch OHLCV data from Binance starting from 2018"""
+    """Fetch OHLCV data from Binance starting from 2018 to present"""
     try:
         exchange = ccxt.binance({
             'enableRateLimit': True,
@@ -140,19 +140,43 @@ def fetch_binance_data():
         start_date = datetime(2018, 1, 1)
         since = exchange.parse8601(start_date.isoformat() + 'Z')
         
-        # Fetch all OHLCV data
-        print("Fetching BTC/USDT data from Binance...")
-        ohlcv = exchange.fetch_ohlcv('BTC/USDT', '1d', since=since)
+        # Fetch all OHLCV data with pagination
+        print("Fetching BTC/USDT data from Binance (2018 to present)...")
+        all_ohlcv = []
+        
+        while True:
+            ohlcv = exchange.fetch_ohlcv('BTC/USDT', '1d', since=since, limit=1000)
+            
+            if not ohlcv:
+                break
+                
+            all_ohlcv.extend(ohlcv)
+            
+            # Update since to the last timestamp + 1 day (in milliseconds)
+            last_timestamp = ohlcv[-1][0]
+            since = last_timestamp + (24 * 60 * 60 * 1000)
+            
+            # Check if we've reached current date
+            last_date = pd.to_datetime(last_timestamp, unit='ms')
+            if last_date.date() >= datetime.now().date():
+                break
+            
+            # Rate limiting
+            exchange.sleep(1000)
         
         # Convert to DataFrame
         df = pd.DataFrame(
-            ohlcv, 
+            all_ohlcv, 
             columns=['timestamp', 'open', 'high', 'low', 'close', 'volume']
         )
         
         # Convert timestamp to datetime
         df['date'] = pd.to_datetime(df['timestamp'], unit='ms')
         df.set_index('date', inplace=True)
+        
+        # Remove duplicates and sort
+        df = df[~df.index.duplicated(keep='first')]
+        df = df.sort_index()
         
         print(f"Fetched {len(df)} days of data from {df.index[0].date()} to {df.index[-1].date()}")
         return df
