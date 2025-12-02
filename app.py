@@ -153,7 +153,18 @@ HTML_TEMPLATE = """
             </p>
         </div>
         
+        
         <div class="info-box">
+            <h3>Grid Search for Optimal Parameters</h3>
+            <p>A grid search has been implemented to find the optimal leverage and stop loss parameters.</p>
+            <p><strong>Current Parameters:</strong> Leverage = 1.5x, Stop Loss = 5.1%</p>
+            <p><a href="/grid_search" style="color: #007bff; text-decoration: none; font-weight: bold;">
+                → Click here to run grid search and find optimal parameters
+            </a></p>
+            <p style="font-size: 14px; color: #666; margin-top: 10px;">
+                The grid search tests leverage from 1 to 5 and stop loss from 1% to 10% to maximize Sharpe ratio.
+            </p>
+        </div>        <div class="info-box">
             <h3>Data Information</h3>
             <p><strong>Symbol:</strong> BTC/USDT</p>
             <p><strong>Exchange:</strong> Binance</p>
@@ -250,8 +261,8 @@ def create_sample_data():
     
     return df
 
-def calculate_strategy_returns(df):
-    """Calculate strategy returns based on SMA crossover rules with 1.5x leverage, 0.04% daily fee, and 5% stop loss"""
+def calculate_strategy_returns(df, leverage=1.5, stop_loss_pct=0.051):
+    """Calculate strategy returns based on SMA crossover rules with customizable leverage and stop loss"""
     # Calculate daily returns
     df['returns'] = df['close'].pct_change()
     
@@ -288,7 +299,6 @@ def calculate_strategy_returns(df):
             raw_signal = 0.0
         
         # Apply leverage
-        leverage = 1.5
         leveraged_signal = raw_signal * leverage
         
         # Apply fee only on days with non-zero signal
@@ -298,20 +308,19 @@ def calculate_strategy_returns(df):
         
         # Check for stop loss conditions
         stop_loss_triggered = False
-        stop_loss_pct = 0.051  # 5.1% stop loss
         
-        # Condition 1: Price above both SMAs and low is 5.1% or more below open
+        # Condition 1: Price above both SMAs and low is stop_loss_pct or more below open
         if close_price > sma_120 and close_price > sma_365:
             if low_price <= open_price * (1 - stop_loss_pct):
                 stop_loss_triggered = True
-        # Condition 2: Price below both SMAs and high is 5.1% or more above open
+        # Condition 2: Price below both SMAs and high is stop_loss_pct or more above open
         elif close_price < sma_120 and close_price < sma_365:
             if high_price >= open_price * (1 + stop_loss_pct):
                 stop_loss_triggered = True
         
         # Apply stop loss if triggered
         if stop_loss_triggered:
-            df_clean['strategy_returns'].iloc[i] = -0.051  # 5.1% loss
+            df_clean['strategy_returns'].iloc[i] = -stop_loss_pct  # Apply stop loss percentage
         else:
             df_clean['strategy_returns'].iloc[i] = leveraged_signal
     
@@ -334,6 +343,56 @@ def calculate_strategy_returns(df):
     df_clean['sharpe_ratio'] = sharpe_ratio
     
     return df_clean
+
+
+def grid_search_optimal_params(df):
+    """Perform grid search to find optimal leverage and stop loss parameters for maximum Sharpe ratio"""
+    # Define parameter ranges
+    leverage_range = [1, 2, 3, 4, 5]
+    stop_loss_range = [0.01, 0.02, 0.03, 0.04, 0.05, 0.06, 0.07, 0.08, 0.09, 0.10]  # 1% to 10%
+    
+    best_sharpe = -float('inf')
+    best_params = {'leverage': 1.5, 'stop_loss_pct': 0.051}
+    results = []
+    
+    print(f"Starting grid search over {len(leverage_range)} leverage values and {len(stop_loss_range)} stop loss values...")
+    print(f"Total combinations: {len(leverage_range) * len(stop_loss_range)}")
+    
+    for leverage in leverage_range:
+        for stop_loss_pct in stop_loss_range:
+            # Calculate strategy returns with current parameters
+            df_strategy = calculate_strategy_returns(df, leverage=leverage, stop_loss_pct=stop_loss_pct)
+            
+            # Get Sharpe ratio
+            sharpe_ratio = df_strategy['sharpe_ratio'].iloc[0]
+            
+            # Calculate total return
+            total_return = df_strategy['cumulative_returns'].iloc[-1] if len(df_strategy) > 0 else 0
+            
+            # Store results
+            result = {
+                'leverage': leverage,
+                'stop_loss_pct': stop_loss_pct,
+                'sharpe_ratio': sharpe_ratio,
+                'total_return': total_return,
+                'total_return_pct': total_return * 100
+            }
+            results.append(result)
+            
+            # Update best parameters if current Sharpe is better
+            if sharpe_ratio > best_sharpe:
+                best_sharpe = sharpe_ratio
+                best_params = {'leverage': leverage, 'stop_loss_pct': stop_loss_pct}
+            
+            print(f"  Leverage: {leverage}, Stop Loss: {stop_loss_pct*100:.1f}%, Sharpe: {sharpe_ratio:.3f}, Total Return: {total_return*100:.2f}%")
+    
+    # Sort results by Sharpe ratio (descending)
+    results_sorted = sorted(results, key=lambda x: x['sharpe_ratio'], reverse=True)
+    
+    print(f"\nGrid search complete. Best parameters: Leverage={best_params['leverage']}, Stop Loss={best_params['stop_loss_pct']*100:.1f}%")
+    print(f"Best Sharpe ratio: {best_sharpe:.3f}")
+    
+    return best_params, results_sorted
 
 def create_plot(df):
     """Create a plot of cumulative returns"""
@@ -430,7 +489,153 @@ def calculate_monthly_returns(df):
     
     return monthly_data, monthly_returns_raw
 
-@app.route('/')
+
+
+@app.route('/grid_search')
+def grid_search():
+    """Route to display grid search results"""
+    # Fetch data
+    df = fetch_binance_data()
+    
+    # Perform grid search
+    best_params, results = grid_search_optimal_params(df)
+    
+    # Calculate strategy with best parameters
+    df_best = calculate_strategy_returns(df, 
+                                         leverage=best_params['leverage'], 
+                                         stop_loss_pct=best_params['stop_loss_pct'])
+    
+    # Create HTML for results table
+    results_html = ""
+    for i, result in enumerate(results[:20]):  # Show top 20 results
+        results_html += f"""
+        <tr style="border-bottom: 1px solid #ddd;">
+            <td style="padding: 8px 10px; text-align: center;">{i+1}</td>
+            <td style="padding: 8px 10px; text-align: center;">{result['leverage']}</td>
+            <td style="padding: 8px 10px; text-align: center;">{result['stop_loss_pct']*100:.1f}%</td>
+            <td style="padding: 8px 10px; text-align: right;">{result['sharpe_ratio']:.3f}</td>
+            <td style="padding: 8px 10px; text-align: right; color: {'#28a745' if result['total_return'] >= 0 else '#dc3545'};">
+                {result['total_return_pct']:.2f}%
+            </td>
+        </tr>
+        """
+    
+    # Create HTML template for grid search results
+    grid_search_html = f"""
+    <!DOCTYPE html>
+    <html>
+    <head>
+        <title>Grid Search Results - Optimal Parameters</title>
+        <style>
+            body {{
+                font-family: Arial, sans-serif;
+                margin: 40px;
+                background-color: #f5f5f5;
+            }}
+            .container {{
+                max-width: 1200px;
+                margin: 0 auto;
+                background-color: white;
+                padding: 30px;
+                border-radius: 10px;
+                box-shadow: 0 2px 10px rgba(0,0,0,0.1);
+            }}
+            h1 {{
+                color: #333;
+                text-align: center;
+            }}
+            .info-box {{
+                background-color: #f8f9fa;
+                padding: 20px;
+                border-radius: 5px;
+                margin: 20px 0;
+                border-left: 4px solid #007bff;
+            }}
+            .best-params {{
+                background-color: #d4edda;
+                border-left: 4px solid #28a745;
+                padding: 20px;
+                border-radius: 5px;
+                margin: 20px 0;
+            }}
+            table {{
+                width: 100%;
+                border-collapse: collapse;
+                margin-top: 20px;
+            }}
+            th {{
+                background-color: #f2f2f2;
+                padding: 12px 10px;
+                text-align: center;
+                border-bottom: 2px solid #ddd;
+            }}
+            td {{
+                padding: 10px;
+                border-bottom: 1px solid #ddd;
+            }}
+            .back-link {{
+                display: inline-block;
+                margin-top: 20px;
+                padding: 10px 20px;
+                background-color: #007bff;
+                color: white;
+                text-decoration: none;
+                border-radius: 5px;
+            }}
+            .back-link:hover {{
+                background-color: #0056b3;
+            }}
+        </style>
+    </head>
+    <body>
+        <div class="container">
+            <h1>Grid Search Results - Optimal Parameters</h1>
+            
+            <div class="best-params">
+                <h3>🎯 Best Parameters Found</h3>
+                <p><strong>Leverage:</strong> {best_params['leverage']}x</p>
+                <p><strong>Stop Loss:</strong> {best_params['stop_loss_pct']*100:.1f}%</p>
+                <p><strong>Sharpe Ratio:</strong> {results[0]['sharpe_ratio']:.3f}</p>
+                <p><strong>Total Return:</strong> {results[0]['total_return_pct']:.2f}%</p>
+            </div>
+            
+            <div class="info-box">
+                <h3>Grid Search Details</h3>
+                <p>Parameter ranges tested:</p>
+                <ul>
+                    <li><strong>Leverage:</strong> 1, 2, 3, 4, 5</li>
+                    <li><strong>Stop Loss:</strong> 1%, 2%, 3%, 4%, 5%, 6%, 7%, 8%, 9%, 10%</li>
+                </ul>
+                <p>Total combinations tested: {len(results)}</p>
+            </div>
+            
+            <div class="info-box">
+                <h3>Top 20 Parameter Combinations by Sharpe Ratio</h3>
+                <div style="max-height: 600px; overflow-y: auto; margin-top: 15px;">
+                    <table>
+                        <thead>
+                            <tr>
+                                <th>Rank</th>
+                                <th>Leverage</th>
+                                <th>Stop Loss</th>
+                                <th>Sharpe Ratio</th>
+                                <th>Total Return</th>
+                            </tr>
+                        </thead>
+                        <tbody>
+                            {results_html}
+                        </tbody>
+                    </table>
+                </div>
+            </div>
+            
+            <a href="/" class="back-link">← Back to Main Strategy</a>
+        </div>
+    </body>
+    </html>
+    """
+    
+    return grid_search_html@app.route('/')
 def index():
     """Main route that displays the strategy returns plot"""
     # Fetch and process data
