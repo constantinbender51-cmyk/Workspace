@@ -294,20 +294,20 @@ def calculate_strategy_returns(df):
         
         # Check for stop loss conditions
         stop_loss_triggered = False
-        stop_loss_pct = 0.05  # 5% stop loss
+        stop_loss_pct = 0.001  # 0.1% stop loss
         
-        # Condition 1: Price above both SMAs and low is 5% or more below open
+        # Condition 1: Price above both SMAs and low is 0.1% or more below open
         if close_price > sma_120 and close_price > sma_365:
             if low_price <= open_price * (1 - stop_loss_pct):
                 stop_loss_triggered = True
-        # Condition 2: Price below both SMAs and high is 5% or more above open
+        # Condition 2: Price below both SMAs and high is 0.1% or more above open
         elif close_price < sma_120 and close_price < sma_365:
             if high_price >= open_price * (1 + stop_loss_pct):
                 stop_loss_triggered = True
         
         # Apply stop loss if triggered
         if stop_loss_triggered:
-            df_clean['strategy_returns'].iloc[i] = -0.05  # 5% loss
+            df_clean['strategy_returns'].iloc[i] = -0.001  # 0.1% loss
         else:
             df_clean['strategy_returns'].iloc[i] = leveraged_signal
     
