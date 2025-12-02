@@ -17,8 +17,22 @@ if os.path.exists(output_file):
     
     # Load the CSV file
     try:
+        # First try reading with default settings
         df = pd.read_csv(output_file)
         print(f'Loaded CSV with {len(df)} rows and {len(df.columns)} columns')
+    except pd.errors.ParserError as e:
+        print(f'Parser error with default settings: {e}')
+        print('Trying with error handling and different parameters...')
+        
+        # Try reading with error handling for bad lines
+        df = pd.read_csv(output_file, on_bad_lines='skip')
+        print(f'Loaded CSV with error handling: {len(df)} rows and {len(df.columns)} columns')
+        
+        # If still problematic, try with engine='python' which is more flexible
+        if len(df) == 0 or len(df.columns) == 0:
+            print('Trying with python engine...')
+            df = pd.read_csv(output_file, engine='python', on_bad_lines='skip')
+            print(f'Loaded CSV with python engine: {len(df)} rows and {len(df.columns)} columns')
         
         # Check if 'sy_dist' column exists
         if 'sy_dist' in df.columns:
