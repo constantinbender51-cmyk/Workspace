@@ -1,1 +1,1 @@
-web: python fetch_stars.py
+web: python app.py
