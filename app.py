@@ -100,6 +100,10 @@ HTML_TEMPLATE = """
                 <div class="stat-label">Final Cumulative Return</div>
             </div>
             <div class="stat-card">
+                <div class="stat-value">{{ sharpe_ratio }}</div>
+                <div class="stat-label">Annualized Sharpe Ratio</div>
+            </div>
+            <div class="stat-card">
                 <div class="stat-value">{{ positive_days }}</div>
                 <div class="stat-label">Positive Signal Days</div>
             </div>
@@ -314,6 +318,21 @@ def calculate_strategy_returns(df):
     # Calculate cumulative returns
     df_clean['cumulative_returns'] = (1 + df_clean['strategy_returns']).cumprod() - 1
     
+    # Calculate Sharpe ratio (annualized, assuming 365 trading days per year)
+    # Using risk-free rate of 0 for simplicity
+    if len(df_clean) > 1:
+        daily_mean = df_clean['strategy_returns'].mean()
+        daily_std = df_clean['strategy_returns'].std()
+        if daily_std != 0:
+            sharpe_ratio = (daily_mean / daily_std) * np.sqrt(365)
+        else:
+            sharpe_ratio = 0.0
+    else:
+        sharpe_ratio = 0.0
+    
+    # Add Sharpe ratio to dataframe for easy access
+    df_clean['sharpe_ratio'] = sharpe_ratio
+    
     return df_clean
 
 def create_plot(df):
@@ -426,6 +445,9 @@ def index():
     total_return_pct = round(total_return * 100, 2)
     final_cum_return = round(total_return, 4)
     
+    # Get Sharpe ratio from dataframe
+    sharpe_ratio = round(df_strategy['sharpe_ratio'].iloc[0] if len(df_strategy) > 0 else 0.0, 3)
+    
     # Count signal days
     positive_mask = (df_strategy['close'] > df_strategy['sma_120']) & (df_strategy['close'] > df_strategy['sma_365'])
     negative_mask = (df_strategy['close'] < df_strategy['sma_120']) & (df_strategy['close'] < df_strategy['sma_365'])
@@ -448,6 +470,7 @@ def index():
         'monthly_plot_url': monthly_plot_url,
         'total_return_pct': total_return_pct,
         'final_cum_return': final_cum_return,
+        'sharpe_ratio': sharpe_ratio,
         'avg_monthly_return_pct': avg_monthly_return_pct,
         'positive_days': int(positive_days),
         'negative_days': int(negative_days),
