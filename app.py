@@ -157,7 +157,7 @@ HTML_TEMPLATE = """
         <div class="info-box">
             <h3>Grid Search for Optimal Parameters</h3>
             <p>A grid search has been implemented to find the optimal leverage and stop loss parameters.</p>
-            <p><strong>Current Parameters:</strong> Leverage = 2x, Stop Loss = 2.0%</p>
+            <p><strong>Current Parameters:</strong> Leverage = 3x, Stop Loss = 2.0%</p>
             <p><a href="/grid_search" style="color: #007bff; text-decoration: none; font-weight: bold;">
                 → Click here to run grid search and find optimal parameters
             </a></p>
@@ -261,7 +261,7 @@ def create_sample_data():
     
     return df
 
-def calculate_strategy_returns(df, leverage=2, stop_loss_pct=0.02):
+def calculate_strategy_returns(df, leverage=3, stop_loss_pct=0.02):
     """Calculate strategy returns based on SMA crossover rules with customizable leverage and stop loss"""
     # Calculate daily returns
     df['returns'] = df['close'].pct_change()
@@ -352,7 +352,7 @@ def grid_search_optimal_params(df):
     stop_loss_range = [0.01, 0.02, 0.03, 0.04, 0.05, 0.06, 0.07, 0.08, 0.09, 0.10]  # 1% to 10%
     
     best_sharpe = -float('inf')
-    best_params = {'leverage': 2, 'stop_loss_pct': 0.02}
+    best_params = {'leverage': 3, 'stop_loss_pct': 0.02}
     results = []
     
     print(f"Starting grid search over {len(leverage_range)} leverage values and {len(stop_loss_range)} stop loss values...")
