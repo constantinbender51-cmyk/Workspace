@@ -17,22 +17,42 @@ if os.path.exists(output_file):
     
     # Load the CSV file
     try:
-        # First try reading with default settings
-        df = pd.read_csv(output_file)
+        # First try reading with comment handling to skip the first 96 comment lines
+        # Common comment characters in CSV files: '#', ';', '//', '!'
+        df = pd.read_csv(output_file, comment='#')
         print(f'Loaded CSV with {len(df)} rows and {len(df.columns)} columns')
+        
+        # If still getting parsing errors, try with other comment characters
+        if len(df) == 0 or len(df.columns) == 0:
+            print('Trying with different comment characters...')
+            for comment_char in [';', '!', '//', '%', '*']:
+                try:
+                    df = pd.read_csv(output_file, comment=comment_char)
+                    if len(df) > 0 and len(df.columns) > 0:
+                        print(f'Successfully loaded with comment={comment_char}: {len(df)} rows, {len(df.columns)} columns')
+                        break
+                except:
+                    continue
+        
+        # If still problematic, try skipping rows
+        if len(df) == 0 or len(df.columns) == 0:
+            print('Trying to skip first 96 rows...')
+            df = pd.read_csv(output_file, skiprows=96)
+            print(f'Loaded CSV by skipping 96 rows: {len(df)} rows and {len(df.columns)} columns')
+        
+        # Final fallback with flexible parsing
+        if len(df) == 0 or len(df.columns) == 0:
+            print('Using flexible parsing with python engine...')
+            df = pd.read_csv(output_file, engine='python', on_bad_lines='skip')
+            print(f'Loaded CSV with flexible parsing: {len(df)} rows and {len(df.columns)} columns')
+            
     except pd.errors.ParserError as e:
-        print(f'Parser error with default settings: {e}')
+        print(f'Parser error: {e}')
         print('Trying with error handling and different parameters...')
         
         # Try reading with error handling for bad lines
         df = pd.read_csv(output_file, on_bad_lines='skip')
         print(f'Loaded CSV with error handling: {len(df)} rows and {len(df.columns)} columns')
-        
-        # If still problematic, try with engine='python' which is more flexible
-        if len(df) == 0 or len(df.columns) == 0:
-            print('Trying with python engine...')
-            df = pd.read_csv(output_file, engine='python', on_bad_lines='skip')
-            print(f'Loaded CSV with python engine: {len(df)} rows and {len(df.columns)} columns')
         
         # Check if 'sy_dist' column exists
         if 'sy_dist' in df.columns:
