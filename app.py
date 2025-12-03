@@ -135,7 +135,7 @@ def generate_plot(df):
             atr_yesterday = atr_values[i-1] if not np.isnan(atr_values[i-1]) else 0
         
         # Determine color based on ATR threshold
-        if atr_yesterday > 4000:
+        if atr_yesterday > 3900:
             color = 'grey'
         else:
             color = 'white'
@@ -166,7 +166,7 @@ def generate_plot(df):
     ax2.tick_params(axis='y', labelcolor='orange')
     
     # Title and legends
-    plt.title('Strategy Cumulative Returns and Price with Leverage (1x), Stop Loss (5%), and ATR 29-based Background (Grey if ATR > 2500, White otherwise)')
+    plt.title('Strategy Cumulative Returns and Price with Leverage (1x), Stop Loss (5%), and ATR 29-based Background (Grey if ATR > 3900, White otherwise)')
     lines1, labels1 = ax1.get_legend_handles_labels()
     lines2, labels2 = ax2.get_legend_handles_labels()
     ax1.legend(lines1 + lines2, labels1 + labels2, loc='upper left')
@@ -214,7 +214,7 @@ def index():
         <body>
             <h1>Strategy Results: BTC/USDT from 2018</h1>
             <p>Strategy: Long when open > 365 SMA and 120 SMA of open, short when open < both SMAs, flat otherwise.</p>
-            <p>Stop loss: 5%, Leverage: 1x. ATR 29 calculated and plotted. Background: grey if yesterday's ATR 29 > 2500, white otherwise.</p>
+            <p>Stop loss: 5%, Leverage: 1x. ATR 29 calculated and plotted. Background: grey if yesterday's ATR 29 > 3900, white otherwise.</p>
             <img src="data:image/png;base64,{plot_img}" alt="Cumulative Returns Plot">
             <div class="info">
                 <p>Data fetched from Binance. Last updated: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}</p>
