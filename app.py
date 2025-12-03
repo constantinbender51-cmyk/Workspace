@@ -116,7 +116,7 @@ HTML_TEMPLATE = """
                 <div class="stat-label">Avg Monthly Return</div>
             </div>
             <div class="stat-card">
-                <div class="stat-value">4.0x</div>
+                <div class="stat-value">3.0x</div>
                 <div class="stat-label">Leverage</div>
             </div>
         </div>
@@ -265,8 +265,8 @@ def create_sample_data():
     
     return df
 
-def calculate_strategy_returns(df, leverage=4.0, stop_loss_pct=0.07):
-    """Calculate strategy returns based on SMA crossover rules with static 4x leverage and stop loss"""
+def calculate_strategy_returns(df, leverage=3.0, stop_loss_pct=0.07):
+    """Calculate strategy returns based on SMA crossover rules with static 3x leverage and stop loss"""
     # Calculate daily returns
     df['returns'] = df['close'].pct_change()
     
@@ -296,8 +296,8 @@ def calculate_strategy_returns(df, leverage=4.0, stop_loss_pct=0.07):
         sma_365_close = df_clean['sma_365_close'].iloc[i]
         daily_return = df_clean['returns'].iloc[i]
         
-        # Use static 4x leverage
-        adjusted_leverage = 4.0
+        # Use static 3x leverage
+        adjusted_leverage = 3.0
         
         # Calculate raw strategy signal using close price vs SMAs on close for return calculation
         raw_signal = 0.0
