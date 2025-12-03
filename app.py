@@ -142,11 +142,13 @@ def generate_plot(df):
     if short_start is not None:
         ax1.axvspan(short_start, dates[-1], alpha=0.3, color='red', label='Short Days' if len(dates) == 1 else '')
     
-    # Plot cumulative returns on primary y-axis
-    ax1.plot(df.index, df['cumulative_return'] * 100, label='Cumulative Return (%)', color='blue')
+    # Plot cumulative returns on primary y-axis with log scale
+    cumulative_returns_percent = df['cumulative_return'] * 100
+    ax1.plot(df.index, cumulative_returns_percent, label='Cumulative Return (%)', color='blue')
     ax1.set_xlabel('Date')
     ax1.set_ylabel('Cumulative Return (%)', color='blue')
     ax1.tick_params(axis='y', labelcolor='blue')
+    ax1.set_yscale('log')
     ax1.grid(True)
     
     # Create secondary y-axis for price
