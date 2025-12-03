@@ -269,7 +269,7 @@ def calculate_strategy_returns(df, leverage=3.8, stop_loss_pct=0.05):
     # Calculate SMAs
     df['sma_120'] = df['close'].rolling(window=120).mean()
     df['sma_365'] = df['close'].rolling(window=365).mean()
-    df['sma_14'] = df['close'].rolling(window=14).mean()
+    df['sma_30'] = df['close'].rolling(window=30).mean()
     
     # Drop NaN values (first 365 days won't have SMA_365)
     df_clean = df.dropna().copy()
@@ -285,11 +285,11 @@ def calculate_strategy_returns(df, leverage=3.8, stop_loss_pct=0.05):
         low_price = df_clean['low'].iloc[i]
         sma_120 = df_clean['sma_120'].iloc[i]
         sma_365 = df_clean['sma_365'].iloc[i]
-        sma_14 = df_clean['sma_14'].iloc[i]
+        sma_30 = df_clean['sma_30'].iloc[i]
         daily_return = df_clean['returns'].iloc[i]
         
-        # Calculate risk category based on open vs 14-day SMA
-        risk_category = 1 if open_price > sma_14 else 2
+        # Calculate risk category based on open vs 30-day SMA
+        risk_category = 1 if open_price > sma_30 else 2
         adjusted_leverage = 4.0 / (risk_category ** 2)
         
         # Calculate raw strategy signal
@@ -406,8 +406,8 @@ def create_plot(df):
     plt.figure(figsize=(14, 7))
     
     # Calculate risk categories for the plot
-    # Risk category is 1 when open > 14-day SMA, 2 when open <= 14-day SMA
-    risk_categories = np.where(df['open'] > df['sma_14'], 1, 2)
+    # Risk category is 1 when open > 30-day SMA, 2 when open <= 30-day SMA
+    risk_categories = np.where(df['open'] > df['sma_30'], 1, 2)
     
     # Plot cumulative returns with log scale
     plt.plot(df.index, df['cumulative_returns'] + 1,  # Add 1 for log scale
@@ -428,7 +428,7 @@ def create_plot(df):
                    color='green', 
                    s=20, 
                    alpha=0.6,
-                   label='Risk Category 1 (Open > 14-day SMA)',
+                   label='Risk Category 1 (Open > 30-day SMA)',
                    zorder=5)
     
     # Plot risk category 2 points (open <= SMA) - orange
@@ -438,7 +438,7 @@ def create_plot(df):
                    color='orange', 
                    s=20, 
                    alpha=0.6,
-                   label='Risk Category 2 (Open ≤ 14-day SMA)',
+                   label='Risk Category 2 (Open ≤ 30-day SMA)',
                    zorder=5)
     
     # Set y-axis to log scale
@@ -465,7 +465,7 @@ def create_plot(df):
     plt.legend(fontsize=10, loc='upper left')
     
     # Add text box with risk category explanation
-    risk_text = 'Risk Categories:\n• Category 1 (Green): Open > 14-day SMA\n• Category 2 (Orange): Open ≤ 14-day SMA\n• Red dotted lines: Risk category changes'
+    risk_text = 'Risk Categories:\n• Category 1 (Green): Open > 30-day SMA\n• Category 2 (Orange): Open ≤ 30-day SMA\n• Red dotted lines: Risk category changes'
     plt.text(0.02, 0.98, risk_text,
              transform=plt.gca().transAxes,
              fontsize=9,
@@ -728,8 +728,8 @@ def index():
     monthly_plot_url = create_monthly_plot(monthly_returns_raw)    
     # Calculate risk category and adjusted leverage for the latest day
     latest_open = df_strategy['open'].iloc[-1] if len(df_strategy) > 0 else 0
-    latest_sma_14 = df_strategy['sma_14'].iloc[-1] if len(df_strategy) > 0 else 0
-    risk_category = 1 if latest_open > latest_sma_14 else 2
+    latest_sma_30 = df_strategy['sma_30'].iloc[-1] if len(df_strategy) > 0 else 0
+    risk_category = 1 if latest_open > latest_sma_30 else 2
     adjusted_leverage = round(4.0 / (risk_category ** 2), 2)
     
     # Prepare template data
