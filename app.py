@@ -144,7 +144,7 @@ def generate_plot(df):
             ratio = range_yesterday / atr_yesterday
         
         # Determine color based on ratio threshold
-        if ratio < 0.6:
+        if ratio < 0.7:
             color = 'green'
         else:
             color = 'red'
@@ -175,7 +175,7 @@ def generate_plot(df):
     ax2.tick_params(axis='y', labelcolor='orange')
     
     # Title and legends
-    plt.title('Strategy Cumulative Returns and Price with Leverage (1x), Stop Loss (5%), and ATR 14-based Background (Green if range/ATR < 0.6, Red if >= 0.6)')
+    plt.title('Strategy Cumulative Returns and Price with Leverage (1x), Stop Loss (5%), and ATR 14-based Background (Green if range/ATR < 0.7, Red if >= 0.7)')
     lines1, labels1 = ax1.get_legend_handles_labels()
     lines2, labels2 = ax2.get_legend_handles_labels()
     ax1.legend(lines1 + lines2, labels1 + labels2, loc='upper left')
@@ -223,7 +223,7 @@ def index():
         <body>
             <h1>Strategy Results: BTC/USDT from 2018</h1>
             <p>Strategy: Long when open > 365 SMA and 120 SMA of open, short when open < both SMAs, flat otherwise.</p>
-            <p>Stop loss: 5%, Leverage: 1x. ATR 14 calculated and plotted. Background: green if yesterday's range/ATR 14 < 0.6, red if >= 0.6.</p>
+            <p>Stop loss: 5%, Leverage: 1x. ATR 14 calculated and plotted. Background: green if yesterday's range/ATR 14 < 0.7, red if >= 0.7.</p>
             <img src="data:image/png;base64,{plot_img}" alt="Cumulative Returns Plot">
             <div class="info">
                 <p>Data fetched from Binance. Last updated: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}</p>
