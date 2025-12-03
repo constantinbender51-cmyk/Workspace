@@ -52,7 +52,7 @@ def calculate_strategy_returns(df):
     - Long when open > 365 SMA and open > 120 SMA of open.
     - Short when open < 365 SMA and open < 120 SMA of open.
     - Flat otherwise.
-    - Apply 2% stop loss: if long and low <= open * 0.98, return -2%; if short and high >= open * 1.02, return -2%.
+    - Apply 5% stop loss: if long and low <= open * 0.95, return -5%; if short and high >= open * 1.05, return -5%.
     - Apply 1x leverage to daily returns.
     Returns a DataFrame with strategy returns.
     """
@@ -81,14 +81,14 @@ def calculate_strategy_returns(df):
         
         if position == 1:  # Long
             # Check stop loss
-            if low_price <= open_price * 0.98:
-                daily_return = -0.02  # -2%
+            if low_price <= open_price * 0.95:
+                daily_return = -0.05  # -5%
             else:
                 daily_return = (close_price - open_price) / open_price
         elif position == -1:  # Short
             # Check stop loss
-            if high_price >= open_price * 1.02:
-                daily_return = -0.02  # -2%
+            if high_price >= open_price * 1.05:
+                daily_return = -0.05  # -5%
             else:
                 daily_return = (open_price - close_price) / open_price
         else:  # Flat
@@ -144,12 +144,12 @@ def generate_plot(df):
     if short_start is not None:
         ax1.axvspan(short_start, dates[-1], alpha=0.3, color='red', label='Short Days' if len(dates) == 1 else '')
     
-    # Add background colors for stop loss days (daily_return == -0.02)
+    # Add background colors for stop loss days (daily_return == -0.05)
     stop_loss_start = None
     for i in range(len(dates)):
-        if daily_returns[i] == -0.02 and stop_loss_start is None:
+        if daily_returns[i] == -0.05 and stop_loss_start is None:
             stop_loss_start = dates[i]
-        elif daily_returns[i] != -0.02 and stop_loss_start is not None:
+        elif daily_returns[i] != -0.05 and stop_loss_start is not None:
             ax1.axvspan(stop_loss_start, dates[i-1], alpha=0.2, color='purple', label='Stop Loss Days' if i == 1 else '')
             stop_loss_start = None
     if stop_loss_start is not None:
@@ -173,7 +173,7 @@ def generate_plot(df):
     ax2.tick_params(axis='y', labelcolor='orange')
     
     # Title and legends
-    plt.title('Strategy Cumulative Returns and Price with Leverage (1x) and Stop Loss (2%)')
+    plt.title('Strategy Cumulative Returns and Price with Leverage (1x) and Stop Loss (5%)')
     lines1, labels1 = ax1.get_legend_handles_labels()
     lines2, labels2 = ax2.get_legend_handles_labels()
     ax1.legend(lines1 + lines2, labels1 + labels2, loc='upper left')
@@ -221,7 +221,7 @@ def index():
         <body>
             <h1>Strategy Results: BTC/USDT from 2018</h1>
             <p>Strategy: Long when open > 365 SMA and 120 SMA of open, short when open < both SMAs, flat otherwise.</p>
-            <p>Stop loss: 2%, Leverage: 1x.</p>
+            <p>Stop loss: 5%, Leverage: 1x.</p>
             <img src="data:image/png;base64,{plot_img}" alt="Cumulative Returns Plot">
             <div class="info">
                 <p>Data fetched from Binance. Last updated: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}</p>
