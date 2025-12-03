@@ -116,11 +116,7 @@ HTML_TEMPLATE = """
                 <div class="stat-label">Avg Monthly Return</div>
             </div>
             <div class="stat-card">
-                <div class="stat-value">{{ position_type }}</div>
-                <div class="stat-label">Current Position</div>
-            </div>
-            <div class="stat-card">
-                <div class="stat-value">{{ adjusted_leverage }}x</div>
+                <div class="stat-value">4.0x</div>
                 <div class="stat-label">Leverage</div>
             </div>
         </div>
@@ -269,8 +265,8 @@ def create_sample_data():
     
     return df
 
-def calculate_strategy_returns(df, leverage=3.8, stop_loss_pct=0.05):
-    """Calculate strategy returns based on SMA crossover rules with customizable leverage and stop loss"""
+def calculate_strategy_returns(df, leverage=4.0, stop_loss_pct=0.05):
+    """Calculate strategy returns based on SMA crossover rules with static 4x leverage and stop loss"""
     # Calculate daily returns
     df['returns'] = df['close'].pct_change()
     
