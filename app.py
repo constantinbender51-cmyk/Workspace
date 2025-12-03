@@ -409,68 +409,77 @@ def create_plot(df):
     # Risk category is 1 when open > 30-day SMA, 2 when open <= 30-day SMA
     risk_categories = np.where(df['open'] > df['sma_30'], 1, 2)
     
+    # Find indices where risk category changes
+    risk_changes = np.where(np.diff(risk_categories) != 0)[0]
+    
+    # Create shaded regions for risk categories
+    # Start with the first category
+    current_category = risk_categories[0]
+    start_idx = 0
+    
+    # Add shaded background for each continuous risk category period
+    for change_idx in risk_changes:
+        end_idx = change_idx + 1
+        
+        # Determine color based on risk category
+        if current_category == 1:
+            # Light blue for risk category 1 (open > 30-day SMA)
+            color = 'lightblue'
+            label = 'Risk Category 1 (Open > 30-day SMA)'
+        else:
+            # Light red for risk category 2 (open ≤ 30-day SMA)
+            color = 'lightcoral'
+            label = 'Risk Category 2 (Open ≤ 30-day SMA)'
+        
+        # Add shaded region
+        plt.axvspan(df.index[start_idx], df.index[end_idx], 
+                   alpha=0.3, color=color, label=label if start_idx == 0 else '')
+        
+        # Update for next region
+        start_idx = end_idx
+        current_category = risk_categories[end_idx]
+    
+    # Add final region
+    if start_idx < len(df):
+        if current_category == 1:
+            color = 'lightblue'
+            label = 'Risk Category 1 (Open > 30-day SMA)'
+        else:
+            color = 'lightcoral'
+            label = 'Risk Category 2 (Open ≤ 30-day SMA)'
+        
+        plt.axvspan(df.index[start_idx], df.index[-1], 
+                   alpha=0.3, color=color, label=label if start_idx == 0 else '')
+    
     # Plot cumulative returns with log scale
     plt.plot(df.index, df['cumulative_returns'] + 1,  # Add 1 for log scale
              label='Cumulative Strategy Returns', 
              linewidth=2, 
              color='blue',
-             alpha=0.7)
-    
-    # Add scatter points to indicate risk categories
-    # Use different colors for risk categories
-    risk_1_mask = risk_categories == 1
-    risk_2_mask = risk_categories == 2
-    
-    # Plot risk category 1 points (open > SMA) - green
-    if np.any(risk_1_mask):
-        plt.scatter(df.index[risk_1_mask], 
-                   df['cumulative_returns'].iloc[risk_1_mask] + 1,
-                   color='green', 
-                   s=20, 
-                   alpha=0.6,
-                   label='Risk Category 1 (Open > 30-day SMA)',
-                   zorder=5)
-    
-    # Plot risk category 2 points (open <= SMA) - orange
-    if np.any(risk_2_mask):
-        plt.scatter(df.index[risk_2_mask], 
-                   df['cumulative_returns'].iloc[risk_2_mask] + 1,
-                   color='orange', 
-                   s=20, 
-                   alpha=0.6,
-                   label='Risk Category 2 (Open ≤ 30-day SMA)',
-                   zorder=5)
+             alpha=0.9,
+             zorder=5)
     
     # Set y-axis to log scale
     plt.yscale('log')
     
     # Add horizontal line at 1 (0 returns in log scale)
-    plt.axhline(y=1, color='gray', linestyle='--', alpha=0.5)
-    
-    # Add vertical lines to show risk category changes
-    risk_changes = np.where(np.diff(risk_categories) != 0)[0]
-    for change_idx in risk_changes:
-        if change_idx + 1 < len(df):
-            plt.axvline(x=df.index[change_idx + 1], 
-                       color='red', 
-                       linestyle=':', 
-                       alpha=0.3,
-                       linewidth=0.8)
+    plt.axhline(y=1, color='gray', linestyle='--', alpha=0.5, zorder=4)
     
     # Formatting
     plt.title('Cumulative Returns with Risk Categories (Log Scale)', fontsize=16, pad=20)
     plt.xlabel('Date', fontsize=12)
     plt.ylabel('Cumulative Returns (Log Scale)', fontsize=12)
-    plt.grid(True, alpha=0.3, which='both')
+    plt.grid(True, alpha=0.3, which='both', zorder=1)
     plt.legend(fontsize=10, loc='upper left')
     
     # Add text box with risk category explanation
-    risk_text = 'Risk Categories:\n• Category 1 (Green): Open > 30-day SMA\n• Category 2 (Orange): Open ≤ 30-day SMA\n• Red dotted lines: Risk category changes'
+    risk_text = 'Risk Categories:\n• Light Blue: Open > 30-day SMA\n• Light Red: Open ≤ 30-day SMA'
     plt.text(0.02, 0.98, risk_text,
              transform=plt.gca().transAxes,
              fontsize=9,
              verticalalignment='top',
-             bbox=dict(boxstyle='round', facecolor='wheat', alpha=0.8))
+             bbox=dict(boxstyle='round', facecolor='wheat', alpha=0.8),
+             zorder=6)
     
     plt.tight_layout()
     
