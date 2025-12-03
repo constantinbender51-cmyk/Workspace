@@ -290,7 +290,7 @@ def calculate_strategy_returns(df, leverage=3.8, stop_loss_pct=0.05):
         
         # Calculate risk category based on open vs 14-day SMA
         risk_category = 1 if open_price > sma_14 else 2
-        adjusted_leverage = 4.0 / risk_category
+        adjusted_leverage = 4.0 / (risk_category ** 2)
         
         # Calculate raw strategy signal
         raw_signal = 0.0
@@ -681,7 +681,7 @@ def index():
     latest_open = df_strategy['open'].iloc[-1] if len(df_strategy) > 0 else 0
     latest_sma_14 = df_strategy['sma_14'].iloc[-1] if len(df_strategy) > 0 else 0
     risk_category = 1 if latest_open > latest_sma_14 else 2
-    adjusted_leverage = round(4.0 / risk_category, 2)
+    adjusted_leverage = round(4.0 / (risk_category ** 2), 2)
     
     # Prepare template data
     template_data = {
