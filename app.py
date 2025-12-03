@@ -269,7 +269,7 @@ def calculate_strategy_returns(df, leverage=3.8, stop_loss_pct=0.05):
     # Calculate SMAs
     df['sma_120'] = df['close'].rolling(window=120).mean()
     df['sma_365'] = df['close'].rolling(window=365).mean()
-    df['sma_90'] = df['close'].rolling(window=90).mean()
+    df['sma_90'] = df['open'].rolling(window=90).mean()
     
     # Drop NaN values (first 365 days won't have SMA_365)
     df_clean = df.dropna().copy()
