@@ -84,9 +84,9 @@ HTML_TEMPLATE = """
             <h3>Strategy Description</h3>
             <p>This strategy analyzes BTC/USDT data from Binance starting from 2018:</p>
             <ul>
-                <li><strong>Add returns</strong> when price is above both 365-day Simple Moving Average (SMA) and 120-day Simple Moving Average (SMA)</li>
-                <li><strong>Subtract returns</strong> when price is below both 365-day SMA and 120-day SMA</li>
-                <li><strong>Add 0 return</strong> otherwise (when price is between the averages or above one but below the other)</li>
+                <li><strong>Add returns</strong> when price is above both 365-day and 120-day Simple Moving Averages (SMAs)</li>
+                <li><strong>Subtract returns</strong> when price is below both 365-day and 120-day SMAs</li>
+                <li><strong>Add 0 return</strong> otherwise (when price is between SMAs or above one but below the other)</li>
             </ul>
         </div>
         
@@ -114,10 +114,6 @@ HTML_TEMPLATE = """
             <div class="stat-card">
                 <div class="stat-value">{{ avg_monthly_return_pct }}%</div>
                 <div class="stat-label">Avg Monthly Return</div>
-            </div>
-            <div class="stat-card">
-                <div class="stat-value">2.5x</div>
-                <div class="stat-label">Leverage</div>
             </div>
         </div>
         
@@ -161,16 +157,12 @@ HTML_TEMPLATE = """
         <div class="info-box">
             <h3>Grid Search for Optimal Parameters</h3>
             <p>A grid search has been implemented to find the optimal leverage and stop loss parameters.</p>
-            <p><strong>Current Parameters:</strong> Leverage = 2.5x, Stop Loss = 3.0%</p>
+            <p><strong>Current Parameters:</strong> Leverage = 3.8x, Stop Loss = 5.0%</p>
             <p><a href="/grid_search" style="color: #007bff; text-decoration: none; font-weight: bold;">
-                → Click here to run grid search for leverage and stop loss
-            </a></p>
-            <p><a href="/sma_grid_search" style="color: #28a745; text-decoration: none; font-weight: bold;">
-                → Click here to run grid search for 120-day SMA parameter
+                → Click here to run grid search and find optimal parameters
             </a></p>
             <p style="font-size: 14px; color: #666; margin-top: 10px;">
                 The grid search tests leverage from 1 to 5 and stop loss from 1% to 10% to maximize Sharpe ratio.
-                The SMA grid search tests SMA values from 1 to 300 days in 5-day steps.
             </p>
         </div>        <div class="info-box">
             <h3>Data Information</h3>
@@ -269,18 +261,14 @@ def create_sample_data():
     
     return df
 
-def calculate_strategy_returns(df, leverage=3.0, stop_loss_pct=0.03, sma_window=120):
-    """Calculate strategy returns based on SMA crossover rules with static 3x leverage and stop loss"""
+def calculate_strategy_returns(df, leverage=3.8, stop_loss_pct=0.05):
+    """Calculate strategy returns based on SMA crossover rules with customizable leverage and stop loss"""
     # Calculate daily returns
     df['returns'] = df['close'].pct_change()
     
-    # Calculate averages on close (for return calculation)
-    df['sma_120_close'] = df['close'].rolling(window=sma_window).mean()
-    df['sma_365_close'] = df['close'].rolling(window=365).mean()
-    
-    # Calculate averages on open (for position determination - no look-ahead)
-    df['sma_120_open'] = df['open'].rolling(window=sma_window).mean()
-    df['sma_365_open'] = df['open'].rolling(window=365).mean()
+    # Calculate SMAs
+    df['sma_120'] = df['close'].rolling(window=120).mean()
+    df['sma_365'] = df['close'].rolling(window=365).mean()
     
     # Drop NaN values (first 365 days won't have SMA_365)
     df_clean = df.dropna().copy()
@@ -294,29 +282,24 @@ def calculate_strategy_returns(df, leverage=3.0, stop_loss_pct=0.03, sma_window=
         open_price = df_clean['open'].iloc[i]
         high_price = df_clean['high'].iloc[i]
         low_price = df_clean['low'].iloc[i]
-        sma_120_open = df_clean['sma_120_open'].iloc[i]
-        sma_365_open = df_clean['sma_365_open'].iloc[i]
-        sma_120_close = df_clean['sma_120_close'].iloc[i]
-        sma_365_close = df_clean['sma_365_close'].iloc[i]
+        sma_120 = df_clean['sma_120'].iloc[i]
+        sma_365 = df_clean['sma_365'].iloc[i]
         daily_return = df_clean['returns'].iloc[i]
         
-        # Use static 2.5x leverage
-        adjusted_leverage = 2.5
-        
-        # Calculate raw strategy signal using close price vs averages on close for return calculation
+        # Calculate raw strategy signal
         raw_signal = 0.0
-        # Rule 1: Add returns when price is above both averages on close
-        if close_price > sma_120_close and close_price > sma_365_close:
+        # Rule 1: Add returns when price is above both SMAs
+        if close_price > sma_120 and close_price > sma_365:
             raw_signal = daily_return
-        # Rule 2: Subtract returns when price is below both averages on close
-        elif close_price < sma_120_close and close_price < sma_365_close:
+        # Rule 2: Subtract returns when price is below both SMAs
+        elif close_price < sma_120 and close_price < sma_365:
             raw_signal = -daily_return
         # Rule 3: Add 0 return otherwise
         else:
             raw_signal = 0.0
         
-        # Apply adjusted leverage
-        leveraged_signal = raw_signal * adjusted_leverage
+        # Apply leverage
+        leveraged_signal = raw_signal * leverage
         
         # Apply fee only on days with non-zero signal
         fee_rate = 0.0004  # 0.04%
@@ -326,19 +309,19 @@ def calculate_strategy_returns(df, leverage=3.0, stop_loss_pct=0.03, sma_window=
         # Check for stop loss conditions
         stop_loss_triggered = False
         
-        # Condition 1: Price above both averages on open and low is stop_loss_pct or more below open
-        if open_price > sma_120_open and open_price > sma_365_open:
+        # Condition 1: Price above both SMAs and low is stop_loss_pct or more below open
+        if close_price > sma_120 and close_price > sma_365:
             if low_price <= open_price * (1 - stop_loss_pct):
                 stop_loss_triggered = True
-        # Condition 2: Price below both averages on open and high is stop_loss_pct or more above open
-        elif open_price < sma_120_open and open_price < sma_365_open:
+        # Condition 2: Price below both SMAs and high is stop_loss_pct or more above open
+        elif close_price < sma_120 and close_price < sma_365:
             if high_price >= open_price * (1 + stop_loss_pct):
                 stop_loss_triggered = True
         
         # Apply stop loss if triggered
         if stop_loss_triggered:
             # Apply stop loss percentage scaled by leverage
-            df_clean.loc[df_clean.index[i], 'strategy_returns'] = -stop_loss_pct * adjusted_leverage
+            df_clean.loc[df_clean.index[i], 'strategy_returns'] = -stop_loss_pct * leverage
         else:
             df_clean.loc[df_clean.index[i], 'strategy_returns'] = leveraged_signal
     
@@ -362,53 +345,6 @@ def calculate_strategy_returns(df, leverage=3.0, stop_loss_pct=0.03, sma_window=
     
     return df_clean
 
-
-
-
-def sma_grid_search(df):
-    """Perform grid search to find optimal SMA window parameter from 1 to 300 days in 5-day steps"""
-    # Define SMA parameter range: 1 to 300 days in 5-day steps
-    sma_range = list(range(1, 301, 5))
-    
-    best_sharpe = -float('inf')
-    best_sma = 120
-    results = []
-    
-    print(f"Starting SMA grid search over {len(sma_range)} SMA values from 1 to 300 days in 5-day steps...")
-    
-    for sma_window in sma_range:
-        # Calculate strategy returns with current SMA parameter
-        df_strategy = calculate_strategy_returns(df, sma_window=sma_window)
-        
-        # Get Sharpe ratio
-        sharpe_ratio = df_strategy['sharpe_ratio'].iloc[0]
-        
-        # Calculate total return
-        total_return = df_strategy['cumulative_returns'].iloc[-1] if len(df_strategy) > 0 else 0
-        
-        # Store results
-        result = {
-            'sma_window': sma_window,
-            'sharpe_ratio': sharpe_ratio,
-            'total_return': total_return,
-            'total_return_pct': total_return * 100
-        }
-        results.append(result)
-        
-        # Update best parameters if current Sharpe is better
-        if sharpe_ratio > best_sharpe:
-            best_sharpe = sharpe_ratio
-            best_sma = sma_window
-        
-        print(f"  SMA Window: {sma_window} days, Sharpe: {sharpe_ratio:.3f}, Total Return: {total_return*100:.2f}%")
-    
-    # Sort results by Sharpe ratio (descending)
-    results_sorted = sorted(results, key=lambda x: x['sharpe_ratio'], reverse=True)
-    
-    print(f"\nSMA grid search complete. Best SMA window: {best_sma} days")
-    print(f"Best Sharpe ratio: {best_sharpe:.3f}")
-    
-    return best_sma, results_sorted
 
 def grid_search_optimal_params(df):
     """Perform grid search to find optimal leverage and stop loss parameters for maximum Sharpe ratio"""
@@ -460,108 +396,27 @@ def grid_search_optimal_params(df):
     return best_params, results_sorted
 
 def create_plot(df):
-    """Create a plot of cumulative returns with position type indication"""
-    plt.figure(figsize=(14, 7))
-    
-    # Calculate position types for the plot based on open price vs averages on open
-    position_types = []
-    for i in range(len(df)):
-        open_price = df['open'].iloc[i]
-        sma_120_open = df['sma_120_open'].iloc[i]
-        sma_365_open = df['sma_365_open'].iloc[i]
-        
-        # Determine position type using open price vs averages on open (no look-ahead)
-        if open_price > sma_120_open and open_price > sma_365_open:
-            # Long position
-            position_type = 'long'
-        elif open_price < sma_120_open and open_price < sma_365_open:
-            # Short position
-            position_type = 'short'
-        else:
-            # Neutral position
-            position_type = 'neutral'
-        
-        position_types.append(position_type)
-    
-    # Find indices where position type changes
-    position_changes = []
-    for i in range(1, len(position_types)):
-        if position_types[i] != position_types[i-1]:
-            position_changes.append(i)
-    
-    # Create shaded regions for position types
-    # Start with the first position type
-    current_position = position_types[0]
-    start_idx = 0
-    
-    # Add shaded background for each continuous position period
-    for change_idx in position_changes:
-        end_idx = change_idx
-        
-        # Determine color based on position type
-        if current_position == 'long':
-            color = 'lightgreen'
-            label = 'Long Position'
-        elif current_position == 'short':
-            color = 'lightcoral'
-            label = 'Short Position'
-        else:
-            color = 'lightgray'
-            label = 'Neutral Position'
-        
-        # Add shaded region
-        plt.axvspan(df.index[start_idx], df.index[end_idx], 
-                   alpha=0.3, color=color, label=label if start_idx == 0 else '')
-        
-        # Update for next region
-        start_idx = end_idx
-        current_position = position_types[end_idx]
-    
-    # Add final region
-    if start_idx < len(df):
-        if current_position == 'long':
-            color = 'lightgreen'
-            label = 'Long Position'
-        elif current_position == 'short':
-            color = 'lightcoral'
-            label = 'Short Position'
-        else:
-            color = 'lightgray'
-            label = 'Neutral Position'
-        
-        plt.axvspan(df.index[start_idx], df.index[-1], 
-                   alpha=0.3, color=color, label=label if start_idx == 0 else '')
+    """Create a plot of cumulative returns"""
+    plt.figure(figsize=(12, 6))
     
     # Plot cumulative returns with log scale
     plt.plot(df.index, df['cumulative_returns'] + 1,  # Add 1 for log scale
              label='Cumulative Strategy Returns', 
              linewidth=2, 
-             color='blue',
-             alpha=0.9,
-             zorder=5)
+             color='blue')
     
     # Set y-axis to log scale
     plt.yscale('log')
     
     # Add horizontal line at 1 (0 returns in log scale)
-    plt.axhline(y=1, color='gray', linestyle='--', alpha=0.5, zorder=4)
+    plt.axhline(y=1, color='gray', linestyle='--', alpha=0.5)
     
     # Formatting
-    plt.title('Cumulative Returns with Position Types (Log Scale)', fontsize=16, pad=20)
+    plt.title('Cumulative Returns of SMA Crossover Strategy (Log Scale)', fontsize=16, pad=20)
     plt.xlabel('Date', fontsize=12)
     plt.ylabel('Cumulative Returns (Log Scale)', fontsize=12)
-    plt.grid(True, alpha=0.3, which='both', zorder=1)
-    plt.legend(fontsize=10, loc='upper left')
-    
-    # Add text box with position type explanation
-    position_text = 'Position Types:\n• Light Green: Long Position (Open > both 120-day SMA and 365-day SMA on open)\n• Light Red: Short Position (Open < both 120-day SMA and 365-day SMA on open)\n• Light Gray: Neutral Position (Open between averages)'
-    plt.text(0.02, 0.98, position_text,
-             transform=plt.gca().transAxes,
-             fontsize=9,
-             verticalalignment='top',
-             bbox=dict(boxstyle='round', facecolor='wheat', alpha=0.8),
-             zorder=6)
-    
+    plt.grid(True, alpha=0.3, which='both')
+    plt.legend(fontsize=12)
     plt.tight_layout()
     
     # Convert plot to base64 string
@@ -636,149 +491,6 @@ def calculate_monthly_returns(df):
     return monthly_data, monthly_returns_raw
 
 
-
-
-
-@app.route('/sma_grid_search')
-def sma_grid_search_page():
-    """Route to display SMA grid search results"""
-    # Fetch data
-    df = fetch_binance_data()
-    
-    # Perform SMA grid search
-    best_sma, results = sma_grid_search(df)
-    
-    # Calculate strategy with best SMA parameter
-    df_best = calculate_strategy_returns(df, sma_window=best_sma)
-    
-    # Create HTML for results table
-    results_html = ""
-    for i, result in enumerate(results[:20]):  # Show top 20 results
-        results_html += f"""
-        <tr style="border-bottom: 1px solid #ddd;">
-            <td style="padding: 8px 10px; text-align: center;">{i+1}</td>
-            <td style="padding: 8px 10px; text-align: center;">{result['sma_window']}</td>
-            <td style="padding: 8px 10px; text-align: right;">{result['sharpe_ratio']:.3f}</td>
-            <td style="padding: 8px 10px; text-align: right; color: {'#28a745' if result['total_return'] >= 0 else '#dc3545'};">
-                {result['total_return_pct']:.2f}%
-            </td>
-        </tr>
-        """
-    
-    # Create HTML template for SMA grid search results
-    sma_grid_search_html = f"""
-    <!DOCTYPE html>
-    <html>
-    <head>
-        <title>SMA Grid Search Results - Optimal SMA Window</title>
-        <style>
-            body {{
-                font-family: Arial, sans-serif;
-                margin: 40px;
-                background-color: #f5f5f5;
-            }}
-            .container {{
-                max-width: 1200px;
-                margin: 0 auto;
-                background-color: white;
-                padding: 30px;
-                border-radius: 10px;
-                box-shadow: 0 2px 10px rgba(0,0,0,0.1);
-            }}
-            h1 {{
-                color: #333;
-                text-align: center;
-            }}
-            .info-box {{
-                background-color: #f8f9fa;
-                padding: 20px;
-                border-radius: 5px;
-                margin: 20px 0;
-                border-left: 4px solid #007bff;
-            }}
-            .best-params {{
-                background-color: #d4edda;
-                border-left: 4px solid #28a745;
-                padding: 20px;
-                border-radius: 5px;
-                margin: 20px 0;
-            }}
-            table {{
-                width: 100%;
-                border-collapse: collapse;
-                margin-top: 20px;
-            }}
-            th {{
-                background-color: #f2f2f2;
-                padding: 12px 10px;
-                text-align: center;
-                border-bottom: 2px solid #ddd;
-            }}
-            td {{
-                padding: 10px;
-                border-bottom: 1px solid #ddd;
-            }}
-            .back-link {{
-                display: inline-block;
-                margin-top: 20px;
-                padding: 10px 20px;
-                background-color: #007bff;
-                color: white;
-                text-decoration: none;
-                border-radius: 5px;
-            }}
-            .back-link:hover {{
-                background-color: #0056b3;
-            }}
-        </style>
-    </head>
-    <body>
-        <div class="container">
-            <h1>SMA Grid Search Results - Optimal SMA Window</h1>
-            
-            <div class="best-params">
-                <h3>🎯 Best SMA Window Found</h3>
-                <p><strong>SMA Window:</strong> {best_sma} days</p>
-                <p><strong>Sharpe Ratio:</strong> {results[0]['sharpe_ratio']:.3f}</p>
-                <p><strong>Total Return:</strong> {results[0]['total_return_pct']:.2f}%</p>
-            </div>
-            
-            <div class="info-box">
-                <h3>Grid Search Details</h3>
-                <p>Parameter range tested:</p>
-                <ul>
-                    <li><strong>SMA Window:</strong> 1 to 300 days in 5-day steps</li>
-                </ul>
-                <p>Total combinations tested: {len(results)}</p>
-                <p><strong>Note:</strong> The 365-day SMA is kept fixed while searching for the optimal 120-day SMA window.</p>
-            </div>
-            
-            <div class="info-box">
-                <h3>Top 20 SMA Windows by Sharpe Ratio</h3>
-                <div style="max-height: 600px; overflow-y: auto; margin-top: 15px;">
-                    <table>
-                        <thead>
-                            <tr>
-                                <th>Rank</th>
-                                <th>SMA Window (days)</th>
-                                <th>Sharpe Ratio</th>
-                                <th>Total Return</th>
-                            </tr>
-                        </thead>
-                        <tbody>
-                            {results_html}
-                        </tbody>
-                    </table>
-                </div>
-            </div>
-            
-            <a href="/" class="back-link">← Back to Main Strategy</a>
-        </div>
-    </body>
-    </html>
-    """
-    
-    return sma_grid_search_html
 
 @app.route('/grid_search')
 def grid_search():
@@ -931,7 +643,7 @@ def index():
     """Main route that displays the strategy returns plot"""
     # Fetch and process data
     df = fetch_binance_data()
-    df_strategy = calculate_strategy_returns(df, sma_window=120)
+    df_strategy = calculate_strategy_returns(df)
     
     # Create plot
     plot_url = create_plot(df_strategy)
@@ -944,9 +656,9 @@ def index():
     # Get Sharpe ratio from dataframe
     sharpe_ratio = round(df_strategy['sharpe_ratio'].iloc[0] if len(df_strategy) > 0 else 0.0, 3)
     
-    # Count signal days based on open price vs averages on open
-    positive_mask = (df_strategy['open'] > df_strategy['sma_120_open']) & (df_strategy['open'] > df_strategy['sma_365_open'])
-    negative_mask = (df_strategy['open'] < df_strategy['sma_120_open']) & (df_strategy['open'] < df_strategy['sma_365_open'])
+    # Count signal days
+    positive_mask = (df_strategy['close'] > df_strategy['sma_120']) & (df_strategy['close'] > df_strategy['sma_365'])
+    negative_mask = (df_strategy['close'] < df_strategy['sma_120']) & (df_strategy['close'] < df_strategy['sma_365'])
     
     positive_days = positive_mask.sum()
     negative_days = negative_mask.sum()
@@ -958,7 +670,8 @@ def index():
     avg_monthly_return_pct = round(monthly_returns_raw.mean() * 100, 2) if len(monthly_returns_raw) > 0 else 0.0
     
     # Create monthly returns plot
-    monthly_plot_url = create_monthly_plot(monthly_returns_raw)    
+    monthly_plot_url = create_monthly_plot(monthly_returns_raw)
+    
     # Prepare template data
     template_data = {
         'plot_url': plot_url,
