@@ -108,10 +108,40 @@ def calculate_strategy_returns(df):
 
 def generate_plot(df):
     """
-    Generate a Matplotlib plot showing cumulative returns.
+    Generate a Matplotlib plot showing cumulative returns with background colors:
+    - Green for long days (position == 1)
+    - Red for short days (position == -1)
     Returns a base64 encoded image string.
     """
     plt.figure(figsize=(12, 6))
+    
+    # Add background colors for long and short days
+    dates = df.index
+    positions = df['position'].values
+    
+    # Find intervals for long days (position == 1)
+    long_start = None
+    for i in range(len(dates)):
+        if positions[i] == 1 and long_start is None:
+            long_start = dates[i]
+        elif positions[i] != 1 and long_start is not None:
+            plt.axvspan(long_start, dates[i-1], alpha=0.3, color='green', label='Long Days' if i == 1 else '')
+            long_start = None
+    if long_start is not None:
+        plt.axvspan(long_start, dates[-1], alpha=0.3, color='green', label='Long Days' if len(dates) == 1 else '')
+    
+    # Find intervals for short days (position == -1)
+    short_start = None
+    for i in range(len(dates)):
+        if positions[i] == -1 and short_start is None:
+            short_start = dates[i]
+        elif positions[i] != -1 and short_start is not None:
+            plt.axvspan(short_start, dates[i-1], alpha=0.3, color='red', label='Short Days' if i == 1 else '')
+            short_start = None
+    if short_start is not None:
+        plt.axvspan(short_start, dates[-1], alpha=0.3, color='red', label='Short Days' if len(dates) == 1 else '')
+    
+    # Plot cumulative returns
     plt.plot(df.index, df['cumulative_return'] * 100, label='Cumulative Return (%)', color='blue')
     plt.title('Strategy Cumulative Returns with Leverage (3.5x) and Stop Loss (2%)')
     plt.xlabel('Date')
