@@ -111,6 +111,7 @@ def generate_plot(df):
     Generate a Matplotlib plot showing cumulative returns with background colors:
     - Green for long days (position == 1)
     - Red for short days (position == -1)
+    - Purple for stop loss days (daily_return == -0.02)
     - Price plotted on secondary y-axis.
     Returns a base64 encoded image string.
     """
@@ -119,6 +120,7 @@ def generate_plot(df):
     # Add background colors for long and short days
     dates = df.index
     positions = df['position'].values
+    daily_returns = df['daily_return'].values
     
     # Find intervals for long days (position == 1)
     long_start = None
@@ -141,6 +143,17 @@ def generate_plot(df):
             short_start = None
     if short_start is not None:
         ax1.axvspan(short_start, dates[-1], alpha=0.3, color='red', label='Short Days' if len(dates) == 1 else '')
+    
+    # Add background colors for stop loss days (daily_return == -0.02)
+    stop_loss_start = None
+    for i in range(len(dates)):
+        if daily_returns[i] == -0.02 and stop_loss_start is None:
+            stop_loss_start = dates[i]
+        elif daily_returns[i] != -0.02 and stop_loss_start is not None:
+            ax1.axvspan(stop_loss_start, dates[i-1], alpha=0.2, color='purple', label='Stop Loss Days' if i == 1 else '')
+            stop_loss_start = None
+    if stop_loss_start is not None:
+        ax1.axvspan(stop_loss_start, dates[-1], alpha=0.2, color='purple', label='Stop Loss Days' if len(dates) == 1 else '')
     
     # Plot cumulative returns on primary y-axis with log scale
     cumulative_returns_percent = df['cumulative_return'] * 100
