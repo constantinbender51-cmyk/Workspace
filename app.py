@@ -288,18 +288,18 @@ def calculate_strategy_returns(df, leverage=3.8, stop_loss_pct=0.05):
         sma_120_open = df_clean['sma_120_open'].iloc[i]
         daily_return = df_clean['returns'].iloc[i]
         
-        # Calculate risk category based on position type and open vs risk SMA (120-day SMA on open)
-        # When long (price above both SMAs): risk category 1 if open > risk SMA, else 2
-        # When short (price below both SMAs): risk category 1 if open < risk SMA, else 2
-        # When neutral (price between SMAs): default to risk category 2
+        # Calculate risk category based on position type and open vs all SMAs
+        # Long with risk 1 if open above all SMAs (120-day, 365-day, and 120-day on open)
+        # Short with risk 1 if open below all SMAs
+        # Risk 2 otherwise
         
         # Determine position type
         if close_price > sma_120 and close_price > sma_365:
             # Long position
-            risk_category = 1 if open_price > sma_120_open else 2
+            risk_category = 1 if (open_price > sma_120 and open_price > sma_365 and open_price > sma_120_open) else 2
         elif close_price < sma_120 and close_price < sma_365:
             # Short position
-            risk_category = 1 if open_price < sma_120_open else 2
+            risk_category = 1 if (open_price < sma_120 and open_price < sma_365 and open_price < sma_120_open) else 2
         else:
             # Neutral position
             risk_category = 2
@@ -419,7 +419,7 @@ def create_plot(df):
     """Create a plot of cumulative returns with risk category indication"""
     plt.figure(figsize=(14, 7))
     
-    # Calculate risk categories for the plot based on position type and open vs risk SMA
+    # Calculate risk categories for the plot based on position type and open vs all SMAs
     risk_categories = []
     for i in range(len(df)):
         open_price = df['open'].iloc[i]
@@ -431,10 +431,10 @@ def create_plot(df):
         # Determine position type
         if close_price > sma_120 and close_price > sma_365:
             # Long position
-            risk_category = 1 if open_price > sma_120_open else 2
+            risk_category = 1 if (open_price > sma_120 and open_price > sma_365 and open_price > sma_120_open) else 2
         elif close_price < sma_120 and close_price < sma_365:
             # Short position
-            risk_category = 1 if open_price < sma_120_open else 2
+            risk_category = 1 if (open_price < sma_120 and open_price < sma_365 and open_price < sma_120_open) else 2
         else:
             # Neutral position
             risk_category = 2
@@ -506,7 +506,7 @@ def create_plot(df):
     plt.legend(fontsize=10, loc='upper left')
     
     # Add text box with risk category explanation
-    risk_text = 'Risk Categories:\n• Light Blue (Category 1): Favorable condition\n  - Long position: Open > 120-day SMA on open\n  - Short position: Open < 120-day SMA on open\n• Light Red (Category 2): Unfavorable condition\n  - Long position: Open ≤ 120-day SMA on open\n  - Short position: Open ≥ 120-day SMA on open'
+    risk_text = 'Risk Categories:\n• Light Blue (Category 1): Favorable condition\n  - Long position: Open > all SMAs (120-day, 365-day, and 120-day on open)\n  - Short position: Open < all SMAs\n• Light Red (Category 2): Unfavorable condition\n  - Long position: Open ≤ any SMA\n  - Short position: Open ≥ any SMA'
     plt.text(0.02, 0.98, risk_text,
              transform=plt.gca().transAxes,
              fontsize=9,
