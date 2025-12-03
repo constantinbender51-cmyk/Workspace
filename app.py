@@ -65,14 +65,14 @@ def calculate_strategy_returns(df):
     long_condition = (
         (df['open'] > df['sma_365']) &
         (df['open'] >= df['sma_120']) &
-        (df['open'] <= df['sma_120'] * 1.10) # Changed from 1.05 to 1.10
+        (df['open'] <= df['sma_120'] * 1.15) # Changed from 1.10 to 1.15
     )
     
     # New Short Condition: open < 365 SMA AND (open <= 120 SMA AND open >= 90% of 120 SMA)
     short_condition = (
         (df['open'] < df['sma_365']) &
         (df['open'] <= df['sma_120']) &
-        (df['open'] >= df['sma_120'] * 0.90) # Changed from 0.95 to 0.90
+        (df['open'] >= df['sma_120'] * 0.85) # Changed from 0.90 to 0.85
     )
     df.loc[long_condition, 'position'] = 1
     df.loc[short_condition, 'position'] = -1
