@@ -769,25 +769,6 @@ def index():
     
     # Create monthly returns plot
     monthly_plot_url = create_monthly_plot(monthly_returns_raw)    
-    # Calculate risk category and adjusted leverage for the latest day
-    latest_open = df_strategy['open'].iloc[-1] if len(df_strategy) > 0 else 0
-    latest_sma_120_open = df_strategy['sma_120_open'].iloc[-1] if len(df_strategy) > 0 else 0
-    latest_sma_365_open = df_strategy['sma_365_open'].iloc[-1] if len(df_strategy) > 0 else 0
-    latest_sma_30_open = df_strategy['sma_30_open'].iloc[-1] if len(df_strategy) > 0 else 0
-    
-    # Determine risk category based on position type
-    if latest_open > latest_sma_120_open and latest_open > latest_sma_365_open:
-        # Long position
-        risk_category = 1 if (latest_open > latest_sma_120_open and latest_open > latest_sma_365_open and latest_open > latest_sma_30_open) else 2
-    elif latest_open < latest_sma_120_open and latest_open < latest_sma_365_open:
-        # Short position
-        risk_category = 1 if (latest_open < latest_sma_120_open and latest_open < latest_sma_365_open and latest_open < latest_sma_30_open) else 2
-    else:
-        # Neutral position
-        risk_category = 2
-    
-    adjusted_leverage = round(4.0 / (risk_category ** 2), 2)
-    
     # Prepare template data
     template_data = {
         'plot_url': plot_url,
@@ -795,10 +776,6 @@ def index():
         'total_return_pct': total_return_pct,
         'final_cum_return': final_cum_return,
         'sharpe_ratio': sharpe_ratio,
-        'avg_monthly_return_pct': avg_monthly_return_pct,
-        'positive_days': int(positive_days),
-        'negative_days': int(negative_days),        'risk_category': risk_category,
-        'adjusted_leverage': adjusted_leverage,
         'avg_monthly_return_pct': avg_monthly_return_pct,
         'positive_days': int(positive_days),
         'negative_days': int(negative_days),
