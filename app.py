@@ -135,7 +135,7 @@ def generate_plot(df):
             atr_yesterday = atr_values[i-1] if not np.isnan(atr_values[i-1]) else 0
         
         # Determine color based on ATR threshold
-        if atr_yesterday > 2500:
+        if atr_yesterday > 4000:
             color = 'grey'
         else:
             color = 'white'
