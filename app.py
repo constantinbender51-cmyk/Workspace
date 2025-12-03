@@ -97,7 +97,7 @@ def calculate_strategy_returns(df):
         df.iloc[i, df.columns.get_loc('daily_return')] = daily_return
     
     # Apply leverage
-    df['leveraged_return'] = df['daily_return'] * 3.5
+    df['leveraged_return'] = df['daily_return'] * 1
     
     # Calculate cumulative returns
     df['cumulative_return'] = (1 + df['leveraged_return']).cumprod() - 1
@@ -161,7 +161,7 @@ def generate_plot(df):
     ax1.set_xlabel('Date')
     ax1.set_ylabel('Cumulative Return (%)', color='blue')
     ax1.tick_params(axis='y', labelcolor='blue')
-    ax1.set_yscale('log')
+    ax1.set_yscale('linear')
     ax1.grid(True)
     
     # Create secondary y-axis for price
@@ -171,7 +171,7 @@ def generate_plot(df):
     ax2.tick_params(axis='y', labelcolor='orange')
     
     # Title and legends
-    plt.title('Strategy Cumulative Returns and Price with Leverage (3.5x) and Stop Loss (2%)')
+    plt.title('Strategy Cumulative Returns and Price with Leverage (1x) and Stop Loss (2%)')
     lines1, labels1 = ax1.get_legend_handles_labels()
     lines2, labels2 = ax2.get_legend_handles_labels()
     ax1.legend(lines1 + lines2, labels1 + labels2, loc='upper left')
