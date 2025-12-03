@@ -402,14 +402,44 @@ def grid_search_optimal_params(df):
     return best_params, results_sorted
 
 def create_plot(df):
-    """Create a plot of cumulative returns"""
-    plt.figure(figsize=(12, 6))
+    """Create a plot of cumulative returns with risk category indication"""
+    plt.figure(figsize=(14, 7))
+    
+    # Calculate risk categories for the plot
+    # Risk category is 1 when open > 14-day SMA, 2 when open <= 14-day SMA
+    risk_categories = np.where(df['open'] > df['sma_14'], 1, 2)
     
     # Plot cumulative returns with log scale
     plt.plot(df.index, df['cumulative_returns'] + 1,  # Add 1 for log scale
              label='Cumulative Strategy Returns', 
              linewidth=2, 
-             color='blue')
+             color='blue',
+             alpha=0.7)
+    
+    # Add scatter points to indicate risk categories
+    # Use different colors for risk categories
+    risk_1_mask = risk_categories == 1
+    risk_2_mask = risk_categories == 2
+    
+    # Plot risk category 1 points (open > SMA) - green
+    if np.any(risk_1_mask):
+        plt.scatter(df.index[risk_1_mask], 
+                   df['cumulative_returns'].iloc[risk_1_mask] + 1,
+                   color='green', 
+                   s=20, 
+                   alpha=0.6,
+                   label='Risk Category 1 (Open > 14-day SMA)',
+                   zorder=5)
+    
+    # Plot risk category 2 points (open <= SMA) - orange
+    if np.any(risk_2_mask):
+        plt.scatter(df.index[risk_2_mask], 
+                   df['cumulative_returns'].iloc[risk_2_mask] + 1,
+                   color='orange', 
+                   s=20, 
+                   alpha=0.6,
+                   label='Risk Category 2 (Open ≤ 14-day SMA)',
+                   zorder=5)
     
     # Set y-axis to log scale
     plt.yscale('log')
@@ -417,12 +447,31 @@ def create_plot(df):
     # Add horizontal line at 1 (0 returns in log scale)
     plt.axhline(y=1, color='gray', linestyle='--', alpha=0.5)
     
+    # Add vertical lines to show risk category changes
+    risk_changes = np.where(np.diff(risk_categories) != 0)[0]
+    for change_idx in risk_changes:
+        if change_idx + 1 < len(df):
+            plt.axvline(x=df.index[change_idx + 1], 
+                       color='red', 
+                       linestyle=':', 
+                       alpha=0.3,
+                       linewidth=0.8)
+    
     # Formatting
-    plt.title('Cumulative Returns of SMA Crossover Strategy (Log Scale)', fontsize=16, pad=20)
+    plt.title('Cumulative Returns with Risk Categories (Log Scale)', fontsize=16, pad=20)
     plt.xlabel('Date', fontsize=12)
     plt.ylabel('Cumulative Returns (Log Scale)', fontsize=12)
     plt.grid(True, alpha=0.3, which='both')
-    plt.legend(fontsize=12)
+    plt.legend(fontsize=10, loc='upper left')
+    
+    # Add text box with risk category explanation
+    risk_text = 'Risk Categories:\n• Category 1 (Green): Open > 14-day SMA\n• Category 2 (Orange): Open ≤ 14-day SMA\n• Red dotted lines: Risk category changes'
+    plt.text(0.02, 0.98, risk_text,
+             transform=plt.gca().transAxes,
+             fontsize=9,
+             verticalalignment='top',
+             bbox=dict(boxstyle='round', facecolor='wheat', alpha=0.8))
+    
     plt.tight_layout()
     
     # Convert plot to base64 string
