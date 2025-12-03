@@ -84,9 +84,9 @@ HTML_TEMPLATE = """
             <h3>Strategy Description</h3>
             <p>This strategy analyzes BTC/USDT data from Binance starting from 2018:</p>
             <ul>
-                <li><strong>Add returns</strong> when price is above both 365-day and 120-day Simple Moving Averages (SMAs)</li>
-                <li><strong>Subtract returns</strong> when price is below both 365-day and 120-day SMAs</li>
-                <li><strong>Add 0 return</strong> otherwise (when price is between SMAs or above one but below the other)</li>
+                <li><strong>Add returns</strong> when price is above both 365-day Simple Moving Average (SMA) and 120-day Exponential Moving Average (EMA)</li>
+                <li><strong>Subtract returns</strong> when price is below both 365-day SMA and 120-day EMA</li>
+                <li><strong>Add 0 return</strong> otherwise (when price is between the averages or above one but below the other)</li>
             </ul>
         </div>
         
@@ -270,12 +270,12 @@ def calculate_strategy_returns(df, leverage=3.0, stop_loss_pct=0.03):
     # Calculate daily returns
     df['returns'] = df['close'].pct_change()
     
-    # Calculate SMAs on close (for return calculation)
-    df['sma_120_close'] = df['close'].rolling(window=120).mean()
+    # Calculate averages on close (for return calculation)
+    df['ema_120_close'] = df['close'].ewm(span=120, adjust=False).mean()
     df['sma_365_close'] = df['close'].rolling(window=365).mean()
     
-    # Calculate SMAs on open (for position determination - no look-ahead)
-    df['sma_120_open'] = df['open'].rolling(window=120).mean()
+    # Calculate averages on open (for position determination - no look-ahead)
+    df['ema_120_open'] = df['open'].ewm(span=120, adjust=False).mean()
     df['sma_365_open'] = df['open'].rolling(window=365).mean()
     
     # Drop NaN values (first 365 days won't have SMA_365)
@@ -290,22 +290,22 @@ def calculate_strategy_returns(df, leverage=3.0, stop_loss_pct=0.03):
         open_price = df_clean['open'].iloc[i]
         high_price = df_clean['high'].iloc[i]
         low_price = df_clean['low'].iloc[i]
-        sma_120_open = df_clean['sma_120_open'].iloc[i]
+        ema_120_open = df_clean['ema_120_open'].iloc[i]
         sma_365_open = df_clean['sma_365_open'].iloc[i]
-        sma_120_close = df_clean['sma_120_close'].iloc[i]
+        ema_120_close = df_clean['ema_120_close'].iloc[i]
         sma_365_close = df_clean['sma_365_close'].iloc[i]
         daily_return = df_clean['returns'].iloc[i]
         
         # Use static 2.5x leverage
         adjusted_leverage = 2.5
         
-        # Calculate raw strategy signal using close price vs SMAs on close for return calculation
+        # Calculate raw strategy signal using close price vs averages on close for return calculation
         raw_signal = 0.0
-        # Rule 1: Add returns when price is above both SMAs on close
-        if close_price > sma_120_close and close_price > sma_365_close:
+        # Rule 1: Add returns when price is above both averages on close
+        if close_price > ema_120_close and close_price > sma_365_close:
             raw_signal = daily_return
-        # Rule 2: Subtract returns when price is below both SMAs on close
-        elif close_price < sma_120_close and close_price < sma_365_close:
+        # Rule 2: Subtract returns when price is below both averages on close
+        elif close_price < ema_120_close and close_price < sma_365_close:
             raw_signal = -daily_return
         # Rule 3: Add 0 return otherwise
         else:
@@ -322,12 +322,12 @@ def calculate_strategy_returns(df, leverage=3.0, stop_loss_pct=0.03):
         # Check for stop loss conditions
         stop_loss_triggered = False
         
-        # Condition 1: Price above both SMAs on open and low is stop_loss_pct or more below open
-        if open_price > sma_120_open and open_price > sma_365_open:
+        # Condition 1: Price above both averages on open and low is stop_loss_pct or more below open
+        if open_price > ema_120_open and open_price > sma_365_open:
             if low_price <= open_price * (1 - stop_loss_pct):
                 stop_loss_triggered = True
-        # Condition 2: Price below both SMAs on open and high is stop_loss_pct or more above open
-        elif open_price < sma_120_open and open_price < sma_365_open:
+        # Condition 2: Price below both averages on open and high is stop_loss_pct or more above open
+        elif open_price < ema_120_open and open_price < sma_365_open:
             if high_price >= open_price * (1 + stop_loss_pct):
                 stop_loss_triggered = True
         
@@ -412,18 +412,18 @@ def create_plot(df):
     """Create a plot of cumulative returns with position type indication"""
     plt.figure(figsize=(14, 7))
     
-    # Calculate position types for the plot based on open price vs SMAs on open
+    # Calculate position types for the plot based on open price vs averages on open
     position_types = []
     for i in range(len(df)):
         open_price = df['open'].iloc[i]
-        sma_120_open = df['sma_120_open'].iloc[i]
+        ema_120_open = df['ema_120_open'].iloc[i]
         sma_365_open = df['sma_365_open'].iloc[i]
         
-        # Determine position type using open price vs SMAs on open (no look-ahead)
-        if open_price > sma_120_open and open_price > sma_365_open:
+        # Determine position type using open price vs averages on open (no look-ahead)
+        if open_price > ema_120_open and open_price > sma_365_open:
             # Long position
             position_type = 'long'
-        elif open_price < sma_120_open and open_price < sma_365_open:
+        elif open_price < ema_120_open and open_price < sma_365_open:
             # Short position
             position_type = 'short'
         else:
@@ -503,7 +503,7 @@ def create_plot(df):
     plt.legend(fontsize=10, loc='upper left')
     
     # Add text box with position type explanation
-    position_text = 'Position Types:\n• Light Green: Long Position (Open > both 120-day and 365-day SMAs on open)\n• Light Red: Short Position (Open < both 120-day and 365-day SMAs on open)\n• Light Gray: Neutral Position (Open between SMAs)'
+    position_text = 'Position Types:\n• Light Green: Long Position (Open > both 120-day EMA and 365-day SMA on open)\n• Light Red: Short Position (Open < both 120-day EMA and 365-day SMA on open)\n• Light Gray: Neutral Position (Open between averages)'
     plt.text(0.02, 0.98, position_text,
              transform=plt.gca().transAxes,
              fontsize=9,
@@ -750,9 +750,9 @@ def index():
     # Get Sharpe ratio from dataframe
     sharpe_ratio = round(df_strategy['sharpe_ratio'].iloc[0] if len(df_strategy) > 0 else 0.0, 3)
     
-    # Count signal days based on open price vs SMAs on open
-    positive_mask = (df_strategy['open'] > df_strategy['sma_120_open']) & (df_strategy['open'] > df_strategy['sma_365_open'])
-    negative_mask = (df_strategy['open'] < df_strategy['sma_120_open']) & (df_strategy['open'] < df_strategy['sma_365_open'])
+    # Count signal days based on open price vs averages on open
+    positive_mask = (df_strategy['open'] > df_strategy['ema_120_open']) & (df_strategy['open'] > df_strategy['sma_365_open'])
+    negative_mask = (df_strategy['open'] < df_strategy['ema_120_open']) & (df_strategy['open'] < df_strategy['sma_365_open'])
     
     positive_days = positive_mask.sum()
     negative_days = negative_mask.sum()
