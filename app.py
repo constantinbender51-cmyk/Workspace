@@ -265,7 +265,7 @@ def create_sample_data():
     
     return df
 
-def calculate_strategy_returns(df, leverage=4.0, stop_loss_pct=0.05):
+def calculate_strategy_returns(df, leverage=4.0, stop_loss_pct=0.07):
     """Calculate strategy returns based on SMA crossover rules with static 4x leverage and stop loss"""
     # Calculate daily returns
     df['returns'] = df['close'].pct_change()
