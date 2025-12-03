@@ -116,7 +116,7 @@ HTML_TEMPLATE = """
                 <div class="stat-label">Avg Monthly Return</div>
             </div>
             <div class="stat-card">
-                <div class="stat-value">3.0x</div>
+                <div class="stat-value">2.5x</div>
                 <div class="stat-label">Leverage</div>
             </div>
         </div>
@@ -161,7 +161,7 @@ HTML_TEMPLATE = """
         <div class="info-box">
             <h3>Grid Search for Optimal Parameters</h3>
             <p>A grid search has been implemented to find the optimal leverage and stop loss parameters.</p>
-            <p><strong>Current Parameters:</strong> Leverage = 3.0x, Stop Loss = 4.0%</p>
+            <p><strong>Current Parameters:</strong> Leverage = 2.5x, Stop Loss = 4.0%</p>
             <p><a href="/grid_search" style="color: #007bff; text-decoration: none; font-weight: bold;">
                 → Click here to run grid search and find optimal parameters
             </a></p>
@@ -296,8 +296,8 @@ def calculate_strategy_returns(df, leverage=3.0, stop_loss_pct=0.04):
         sma_365_close = df_clean['sma_365_close'].iloc[i]
         daily_return = df_clean['returns'].iloc[i]
         
-        # Use static 3x leverage
-        adjusted_leverage = 3.0
+        # Use static 2.5x leverage
+        adjusted_leverage = 2.5
         
         # Calculate raw strategy signal using close price vs SMAs on close for return calculation
         raw_signal = 0.0
