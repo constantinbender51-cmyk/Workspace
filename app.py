@@ -84,8 +84,8 @@ HTML_TEMPLATE = """
             <h3>Strategy Description</h3>
             <p>This strategy analyzes BTC/USDT data from Binance starting from 2018:</p>
             <ul>
-                <li><strong>Add returns</strong> when price is above both 365-day Simple Moving Average (SMA) and 120-day Exponential Moving Average (EMA)</li>
-                <li><strong>Subtract returns</strong> when price is below both 365-day SMA and 120-day EMA</li>
+                <li><strong>Add returns</strong> when price is above both 365-day Simple Moving Average (SMA) and 120-day Simple Moving Average (SMA)</li>
+                <li><strong>Subtract returns</strong> when price is below both 365-day SMA and 120-day SMA</li>
                 <li><strong>Add 0 return</strong> otherwise (when price is between the averages or above one but below the other)</li>
             </ul>
         </div>
@@ -163,10 +163,14 @@ HTML_TEMPLATE = """
             <p>A grid search has been implemented to find the optimal leverage and stop loss parameters.</p>
             <p><strong>Current Parameters:</strong> Leverage = 2.5x, Stop Loss = 3.0%</p>
             <p><a href="/grid_search" style="color: #007bff; text-decoration: none; font-weight: bold;">
-                → Click here to run grid search and find optimal parameters
+                → Click here to run grid search for leverage and stop loss
+            </a></p>
+            <p><a href="/sma_grid_search" style="color: #28a745; text-decoration: none; font-weight: bold;">
+                → Click here to run grid search for 120-day SMA parameter
             </a></p>
             <p style="font-size: 14px; color: #666; margin-top: 10px;">
                 The grid search tests leverage from 1 to 5 and stop loss from 1% to 10% to maximize Sharpe ratio.
+                The SMA grid search tests SMA values from 1 to 300 days in 5-day steps.
             </p>
         </div>        <div class="info-box">
             <h3>Data Information</h3>
@@ -265,17 +269,17 @@ def create_sample_data():
     
     return df
 
-def calculate_strategy_returns(df, leverage=3.0, stop_loss_pct=0.03):
+def calculate_strategy_returns(df, leverage=3.0, stop_loss_pct=0.03, sma_window=120):
     """Calculate strategy returns based on SMA crossover rules with static 3x leverage and stop loss"""
     # Calculate daily returns
     df['returns'] = df['close'].pct_change()
     
     # Calculate averages on close (for return calculation)
-    df['ema_120_close'] = df['close'].ewm(span=120, adjust=False).mean()
+    df['sma_120_close'] = df['close'].rolling(window=sma_window).mean()
     df['sma_365_close'] = df['close'].rolling(window=365).mean()
     
     # Calculate averages on open (for position determination - no look-ahead)
-    df['ema_120_open'] = df['open'].ewm(span=120, adjust=False).mean()
+    df['sma_120_open'] = df['open'].rolling(window=sma_window).mean()
     df['sma_365_open'] = df['open'].rolling(window=365).mean()
     
     # Drop NaN values (first 365 days won't have SMA_365)
@@ -290,9 +294,9 @@ def calculate_strategy_returns(df, leverage=3.0, stop_loss_pct=0.03):
         open_price = df_clean['open'].iloc[i]
         high_price = df_clean['high'].iloc[i]
         low_price = df_clean['low'].iloc[i]
-        ema_120_open = df_clean['ema_120_open'].iloc[i]
+        sma_120_open = df_clean['sma_120_open'].iloc[i]
         sma_365_open = df_clean['sma_365_open'].iloc[i]
-        ema_120_close = df_clean['ema_120_close'].iloc[i]
+        sma_120_close = df_clean['sma_120_close'].iloc[i]
         sma_365_close = df_clean['sma_365_close'].iloc[i]
         daily_return = df_clean['returns'].iloc[i]
         
@@ -302,10 +306,10 @@ def calculate_strategy_returns(df, leverage=3.0, stop_loss_pct=0.03):
         # Calculate raw strategy signal using close price vs averages on close for return calculation
         raw_signal = 0.0
         # Rule 1: Add returns when price is above both averages on close
-        if close_price > ema_120_close and close_price > sma_365_close:
+        if close_price > sma_120_close and close_price > sma_365_close:
             raw_signal = daily_return
         # Rule 2: Subtract returns when price is below both averages on close
-        elif close_price < ema_120_close and close_price < sma_365_close:
+        elif close_price < sma_120_close and close_price < sma_365_close:
             raw_signal = -daily_return
         # Rule 3: Add 0 return otherwise
         else:
@@ -323,11 +327,11 @@ def calculate_strategy_returns(df, leverage=3.0, stop_loss_pct=0.03):
         stop_loss_triggered = False
         
         # Condition 1: Price above both averages on open and low is stop_loss_pct or more below open
-        if open_price > ema_120_open and open_price > sma_365_open:
+        if open_price > sma_120_open and open_price > sma_365_open:
             if low_price <= open_price * (1 - stop_loss_pct):
                 stop_loss_triggered = True
         # Condition 2: Price below both averages on open and high is stop_loss_pct or more above open
-        elif open_price < ema_120_open and open_price < sma_365_open:
+        elif open_price < sma_120_open and open_price < sma_365_open:
             if high_price >= open_price * (1 + stop_loss_pct):
                 stop_loss_triggered = True
         
@@ -359,7 +363,52 @@ def calculate_strategy_returns(df, leverage=3.0, stop_loss_pct=0.03):
     return df_clean
 
 
-def grid_search_optimal_params(df):
+
+
+def sma_grid_search(df):
+    """Perform grid search to find optimal SMA window parameter from 1 to 300 days in 5-day steps"""
+    # Define SMA parameter range: 1 to 300 days in 5-day steps
+    sma_range = list(range(1, 301, 5))
+    
+    best_sharpe = -float('inf')
+    best_sma = 120
+    results = []
+    
+    print(f"Starting SMA grid search over {len(sma_range)} SMA values from 1 to 300 days in 5-day steps...")
+    
+    for sma_window in sma_range:
+        # Calculate strategy returns with current SMA parameter
+        df_strategy = calculate_strategy_returns(df, sma_window=sma_window)
+        
+        # Get Sharpe ratio
+        sharpe_ratio = df_strategy['sharpe_ratio'].iloc[0]
+        
+        # Calculate total return
+        total_return = df_strategy['cumulative_returns'].iloc[-1] if len(df_strategy) > 0 else 0
+        
+        # Store results
+        result = {
+            'sma_window': sma_window,
+            'sharpe_ratio': sharpe_ratio,
+            'total_return': total_return,
+            'total_return_pct': total_return * 100
+        }
+        results.append(result)
+        
+        # Update best parameters if current Sharpe is better
+        if sharpe_ratio > best_sharpe:
+            best_sharpe = sharpe_ratio
+            best_sma = sma_window
+        
+        print(f"  SMA Window: {sma_window} days, Sharpe: {sharpe_ratio:.3f}, Total Return: {total_return*100:.2f}%")
+    
+    # Sort results by Sharpe ratio (descending)
+    results_sorted = sorted(results, key=lambda x: x['sharpe_ratio'], reverse=True)
+    
+    print(f"\nSMA grid search complete. Best SMA window: {best_sma} days")
+    print(f"Best Sharpe ratio: {best_sharpe:.3f}")
+    
+    return best_sma, results_sorteddef grid_search_optimal_params(df):
     """Perform grid search to find optimal leverage and stop loss parameters for maximum Sharpe ratio"""
     # Define parameter ranges with smaller steps of 0.1
     leverage_range = np.arange(1.0, 5.1, 0.1).round(1).tolist()  # 1.0 to 5.0 in 0.1 increments
@@ -416,14 +465,14 @@ def create_plot(df):
     position_types = []
     for i in range(len(df)):
         open_price = df['open'].iloc[i]
-        ema_120_open = df['ema_120_open'].iloc[i]
+        sma_120_open = df['sma_120_open'].iloc[i]
         sma_365_open = df['sma_365_open'].iloc[i]
         
         # Determine position type using open price vs averages on open (no look-ahead)
-        if open_price > ema_120_open and open_price > sma_365_open:
+        if open_price > sma_120_open and open_price > sma_365_open:
             # Long position
             position_type = 'long'
-        elif open_price < ema_120_open and open_price < sma_365_open:
+        elif open_price < sma_120_open and open_price < sma_365_open:
             # Short position
             position_type = 'short'
         else:
@@ -503,7 +552,7 @@ def create_plot(df):
     plt.legend(fontsize=10, loc='upper left')
     
     # Add text box with position type explanation
-    position_text = 'Position Types:\n• Light Green: Long Position (Open > both 120-day EMA and 365-day SMA on open)\n• Light Red: Short Position (Open < both 120-day EMA and 365-day SMA on open)\n• Light Gray: Neutral Position (Open between averages)'
+    position_text = 'Position Types:\n• Light Green: Long Position (Open > both 120-day SMA and 365-day SMA on open)\n• Light Red: Short Position (Open < both 120-day SMA and 365-day SMA on open)\n• Light Gray: Neutral Position (Open between averages)'
     plt.text(0.02, 0.98, position_text,
              transform=plt.gca().transAxes,
              fontsize=9,
@@ -586,7 +635,148 @@ def calculate_monthly_returns(df):
 
 
 
-@app.route('/grid_search')
+
+
+@app.route('/sma_grid_search')
+def sma_grid_search_page():
+    """Route to display SMA grid search results"""
+    # Fetch data
+    df = fetch_binance_data()
+    
+    # Perform SMA grid search
+    best_sma, results = sma_grid_search(df)
+    
+    # Calculate strategy with best SMA parameter
+    df_best = calculate_strategy_returns(df, sma_window=best_sma)
+    
+    # Create HTML for results table
+    results_html = ""
+    for i, result in enumerate(results[:20]):  # Show top 20 results
+        results_html += f"""
+        <tr style="border-bottom: 1px solid #ddd;">
+            <td style="padding: 8px 10px; text-align: center;">{i+1}</td>
+            <td style="padding: 8px 10px; text-align: center;">{result['sma_window']}</td>
+            <td style="padding: 8px 10px; text-align: right;">{result['sharpe_ratio']:.3f}</td>
+            <td style="padding: 8px 10px; text-align: right; color: {'#28a745' if result['total_return'] >= 0 else '#dc3545'};">
+                {result['total_return_pct']:.2f}%
+            </td>
+        </tr>
+        """
+    
+    # Create HTML template for SMA grid search results
+    sma_grid_search_html = f"""
+    <!DOCTYPE html>
+    <html>
+    <head>
+        <title>SMA Grid Search Results - Optimal SMA Window</title>
+        <style>
+            body {{
+                font-family: Arial, sans-serif;
+                margin: 40px;
+                background-color: #f5f5f5;
+            }}
+            .container {{
+                max-width: 1200px;
+                margin: 0 auto;
+                background-color: white;
+                padding: 30px;
+                border-radius: 10px;
+                box-shadow: 0 2px 10px rgba(0,0,0,0.1);
+            }}
+            h1 {{
+                color: #333;
+                text-align: center;
+            }}
+            .info-box {{
+                background-color: #f8f9fa;
+                padding: 20px;
+                border-radius: 5px;
+                margin: 20px 0;
+                border-left: 4px solid #007bff;
+            }}
+            .best-params {{
+                background-color: #d4edda;
+                border-left: 4px solid #28a745;
+                padding: 20px;
+                border-radius: 5px;
+                margin: 20px 0;
+            }}
+            table {{
+                width: 100%;
+                border-collapse: collapse;
+                margin-top: 20px;
+            }}
+            th {{
+                background-color: #f2f2f2;
+                padding: 12px 10px;
+                text-align: center;
+                border-bottom: 2px solid #ddd;
+            }}
+            td {{
+                padding: 10px;
+                border-bottom: 1px solid #ddd;
+            }}
+            .back-link {{
+                display: inline-block;
+                margin-top: 20px;
+                padding: 10px 20px;
+                background-color: #007bff;
+                color: white;
+                text-decoration: none;
+                border-radius: 5px;
+            }}
+            .back-link:hover {{
+                background-color: #0056b3;
+            }}
+        </style>
+    </head>
+    <body>
+        <div class="container">
+            <h1>SMA Grid Search Results - Optimal SMA Window</h1>
+            
+            <div class="best-params">
+                <h3>🎯 Best SMA Window Found</h3>
+                <p><strong>SMA Window:</strong> {best_sma} days</p>
+                <p><strong>Sharpe Ratio:</strong> {results[0]['sharpe_ratio']:.3f}</p>
+                <p><strong>Total Return:</strong> {results[0]['total_return_pct']:.2f}%</p>
+            </div>
+            
+            <div class="info-box">
+                <h3>Grid Search Details</h3>
+                <p>Parameter range tested:</p>
+                <ul>
+                    <li><strong>SMA Window:</strong> 1 to 300 days in 5-day steps</li>
+                </ul>
+                <p>Total combinations tested: {len(results)}</p>
+                <p><strong>Note:</strong> The 365-day SMA is kept fixed while searching for the optimal 120-day SMA window.</p>
+            </div>
+            
+            <div class="info-box">
+                <h3>Top 20 SMA Windows by Sharpe Ratio</h3>
+                <div style="max-height: 600px; overflow-y: auto; margin-top: 15px;">
+                    <table>
+                        <thead>
+                            <tr>
+                                <th>Rank</th>
+                                <th>SMA Window (days)</th>
+                                <th>Sharpe Ratio</th>
+                                <th>Total Return</th>
+                            </tr>
+                        </thead>
+                        <tbody>
+                            {results_html}
+                        </tbody>
+                    </table>
+                </div>
+            </div>
+            
+            <a href="/" class="back-link">← Back to Main Strategy</a>
+        </div>
+    </body>
+    </html>
+    """
+    
+    return sma_grid_search_html@app.route('/grid_search')
 def grid_search():
     """Route to display grid search results"""
     # Fetch data
@@ -737,7 +927,7 @@ def index():
     """Main route that displays the strategy returns plot"""
     # Fetch and process data
     df = fetch_binance_data()
-    df_strategy = calculate_strategy_returns(df)
+    df_strategy = calculate_strategy_returns(df, sma_window=120)
     
     # Create plot
     plot_url = create_plot(df_strategy)
@@ -751,8 +941,8 @@ def index():
     sharpe_ratio = round(df_strategy['sharpe_ratio'].iloc[0] if len(df_strategy) > 0 else 0.0, 3)
     
     # Count signal days based on open price vs averages on open
-    positive_mask = (df_strategy['open'] > df_strategy['ema_120_open']) & (df_strategy['open'] > df_strategy['sma_365_open'])
-    negative_mask = (df_strategy['open'] < df_strategy['ema_120_open']) & (df_strategy['open'] < df_strategy['sma_365_open'])
+    positive_mask = (df_strategy['open'] > df_strategy['sma_120_open']) & (df_strategy['open'] > df_strategy['sma_365_open'])
+    negative_mask = (df_strategy['open'] < df_strategy['sma_120_open']) & (df_strategy['open'] < df_strategy['sma_365_open'])
     
     positive_days = positive_mask.sum()
     negative_days = negative_mask.sum()
