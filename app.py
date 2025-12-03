@@ -162,7 +162,8 @@ def generate_plot(df):
     ax2.plot(df.index, df['sma_365'], label='365 SMA', color='green', linestyle='--', alpha=0.7)
     ax2.plot(df.index, df['sma_120'], label='120 SMA', color='red', linestyle=':', alpha=0.7)
     ax2.plot(df.index, df['atr_29'], label='ATR 29', color='purple', linestyle='-', alpha=0.7)
-    ax2.plot(df.index, df['sma_7_range'], label='SMA 7 Range', color='brown', linestyle='--', alpha=0.7)    ax2.plot(df.index, df['sma_14_range'], label='SMA 14 Range', color='black', linestyle='-.', alpha=0.7)
+    ax2.plot(df.index, df['sma_7_range'], label='SMA 7 Range', color='brown', linestyle='--', alpha=0.7)
+    ax2.plot(df.index, df['sma_14_range'], label='SMA 14 Range', color='black', linestyle='-.', alpha=0.7)
     ax2.set_ylabel('Price (USD) / ATR / Range SMA', color='orange')
     ax2.tick_params(axis='y', labelcolor='orange')
     
