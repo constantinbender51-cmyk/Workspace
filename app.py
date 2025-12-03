@@ -66,7 +66,8 @@ def calculate_strategy_returns(df):
                                     abs(df['low'] - df['close'].shift(1))))
     df['atr_29'] = df['tr'].rolling(window=14).mean()
     df['range'] = df['high'] - df['low']
-    df['sma_7_range'] = df['range'].rolling(window=7).mean()    df['sma_14_range'] = df['range'].rolling(window=14).mean()
+    df['sma_7_range'] = df['range'].rolling(window=7).mean()
+    df['sma_14_range'] = df['range'].rolling(window=14).mean()
     
     # Determine position: 1 for long, -1 for short, 0 for flat
     df['position'] = 0
