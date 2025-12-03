@@ -65,14 +65,14 @@ def calculate_strategy_returns(df):
     long_condition = (
         (df['open'] > df['sma_365']) &
         (df['open'] >= df['sma_120']) &
-        (df['open'] <= df['sma_120'] * 1.15) # Changed from 1.10 to 1.15
+        (df['open'] <= df['sma_120'] * 1.40) # Changed from 1.15 to 1.40
     )
     
     # New Short Condition: open < 365 SMA AND (open <= 120 SMA AND open >= 90% of 120 SMA)
     short_condition = (
         (df['open'] < df['sma_365']) &
         (df['open'] <= df['sma_120']) &
-        (df['open'] >= df['sma_120'] * 0.85) # Changed from 0.90 to 0.85
+        (df['open'] >= df['sma_120'] * 0.60) # Changed from 0.85 to 0.60
     )
     df.loc[long_condition, 'position'] = 1
     df.loc[short_condition, 'position'] = -1
@@ -219,7 +219,7 @@ def index():
         </head>
         <body>
             <h1>Strategy Results: BTC/USDT from 2018</h1>
-            <p>Strategy: Long when open > 365 SMA and 120 SMA of open, short when open < both SMAs, flat otherwise.</p>
+            <p>Strategy: Long when open > 365 SMA and between 100% and 140% of 120 SMA, short when open < 365 SMA and between 60% and 100% of 120 SMA, flat otherwise.</p>
             <p>Stop loss: 5%, Leverage: 1x.</p>
             <img src="data:image/png;base64,{plot_img}" alt="Cumulative Returns Plot">
             <div class="info">
