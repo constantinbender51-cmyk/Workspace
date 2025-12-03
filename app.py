@@ -1,5 +1,4 @@
 import pandas as pd
-import numpy as np
 import requests
 from datetime import datetime, timedelta
 import matplotlib.pyplot as plt
@@ -60,30 +59,12 @@ def calculate_strategy_returns(df):
     # Calculate SMAs
     df['sma_365'] = df['open'].rolling(window=365).mean()
     df['sma_120'] = df['open'].rolling(window=120).mean()
-    # Calculate ATR 29 and range
-    df['tr'] = np.maximum(df['high'] - df['low'], 
-                         np.maximum(abs(df['high'] - df['close'].shift(1)), 
-                                    abs(df['low'] - df['close'].shift(1))))
-    df['atr_29'] = df['tr'].rolling(window=14).mean()
-    df['range'] = df['high'] - df['low']
-    df['sma_7_range'] = df['range'].rolling(window=7).mean()
-    df['sma_14_range'] = df['range'].rolling(window=14).mean()
-    
-    # Calculate SMA 14 of range for yesterday and day before
-    df['sma_14_range_yesterday'] = df['sma_14_range'].shift(1)
-    df['sma_14_range_day_before'] = df['sma_14_range'].shift(2)
-
     # Determine position: 1 for long, -1 for short, 0 for flat
     df['position'] = 0
     long_condition = (df['open'] > df['sma_365']) & (df['open'] > df['sma_120'])
     short_condition = (df['open'] < df['sma_365']) & (df['open'] < df['sma_120'])
     df.loc[long_condition, 'position'] = 1
     df.loc[short_condition, 'position'] = -1
-
-    # Override position to flat (0) if yesterday's SMA 14 of range / the day before's SMA 14 of range is above 1
-    # This implies that the strategy stays flat if the SMA 14 of range is growing.
-    flat_due_to_range_condition = (df['sma_14_range_yesterday'] / df['sma_14_range_day_before'] > 1)
-    df.loc[flat_due_to_range_condition, 'position'] = 0
     
     # Calculate daily returns based on position
     df['daily_return'] = 0.0
@@ -133,30 +114,7 @@ def generate_plot(df):
     """
     fig, ax1 = plt.subplots(figsize=(12, 6))
     
-    # Add background colors based on yesterday's ATR 29
-    dates = df.index
-    sma_14_range_values = df['sma_14_range'].values
     
-    # Iterate through dates to apply shading
-    for i in range(len(dates)):
-        # Get yesterday's and day before's SMA 14 of range for plotting, handle NaNs
-        sma_14_range_yesterday_for_plot = sma_14_range_values[i-1] if i > 0 else np.nan
-        sma_14_range_day_before_for_plot = sma_14_range_values[i-2] if i > 1 else np.nan
-        
-        color = 'white' # Default background color
-        
-        # Determine color based on the condition: yesterday's SMA 14 of range / day before's SMA 14 of range is above 1
-        if not pd.isna(sma_14_range_yesterday_for_plot) and not pd.isna(sma_14_range_day_before_for_plot):
-            if sma_14_range_day_before_for_plot != 0: # Avoid division by zero
-                if (sma_14_range_yesterday_for_plot / sma_14_range_day_before_for_plot) > 1:
-                    color = 'grey'
-        
-        # Apply shading for the current day
-        if i < len(dates) - 1:
-            ax1.axvspan(dates[i], dates[i+1], alpha=0.3, color=color, edgecolor='none')
-        else:
-            # For the last day, shade to the end of the plot
-            ax1.axvspan(dates[i], dates[i], alpha=0.3, color=color, edgecolor='none')
     
     # Plot cumulative returns on primary y-axis with log scale
     cumulative_returns_percent = df['cumulative_return'] * 100
@@ -172,14 +130,12 @@ def generate_plot(df):
     ax2.plot(df.index, df['close'], label='Price (USD)', color='orange', alpha=0.7)
     ax2.plot(df.index, df['sma_365'], label='365 SMA', color='green', linestyle='--', alpha=0.7)
     ax2.plot(df.index, df['sma_120'], label='120 SMA', color='red', linestyle=':', alpha=0.7)
-    ax2.plot(df.index, df['atr_29'], label='ATR 29', color='purple', linestyle='-', alpha=0.7)
-    ax2.plot(df.index, df['sma_7_range'], label='SMA 7 Range', color='brown', linestyle='--', alpha=0.7)
-    ax2.plot(df.index, df['sma_14_range'], label='SMA 14 Range', color='black', linestyle='-.', alpha=0.7)
-    ax2.set_ylabel('Price (USD) / ATR / Range SMA', color='orange')
+
+    ax2.set_ylabel('Price (USD)', color='orange')
     ax2.tick_params(axis='y', labelcolor='orange')
     
     # Title and legends
-    plt.title('Strategy Cumulative Returns and Price with Leverage (1x), Stop Loss (5%), and Background (Grey if Yesterday\'s SMA 14 of Range / Day Before\'s SMA 14 of Range is Above 1, White otherwise)')
+    plt.title('Strategy Cumulative Returns and Price with Leverage (1x), Stop Loss (5%)')
     lines1, labels1 = ax1.get_legend_handles_labels()
     lines2, labels2 = ax2.get_legend_handles_labels()
     ax1.legend(lines1 + lines2, labels1 + labels2, loc='upper left')
@@ -227,7 +183,7 @@ def index():
         <body>
             <h1>Strategy Results: BTC/USDT from 2018</h1>
             <p>Strategy: Long when open > 365 SMA and 120 SMA of open, short when open < both SMAs, flat otherwise.</p>
-            <p>Stop loss: 5%, Leverage: 1x. ATR 29, SMA 7 of daily range, and SMA 14 of daily range calculated and plotted. Background: grey if yesterday's SMA 14 of Range / Day Before's SMA 14 of Range is Above 1, white otherwise.</p>
+            <p>Stop loss: 5%, Leverage: 1x.</p>
             <img src="data:image/png;base64,{plot_img}" alt="Cumulative Returns Plot">
             <div class="info">
                 <p>Data fetched from Binance. Last updated: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}</p>
