@@ -114,51 +114,37 @@ def calculate_strategy_returns(df):
 def generate_plot(df):
     """
     Generate a Matplotlib plot showing cumulative returns with background colors:
-    - Green for long days (position == 1)
-    - Red for short days (position == -1)
-    - Purple for stop loss days (daily_return == -0.02)
+    - White if yesterday's ATR 14 <= 2000
+    - Grey if yesterday's ATR 14 > 2000
     - Price plotted on secondary y-axis.
     Returns a base64 encoded image string.
     """
     fig, ax1 = plt.subplots(figsize=(12, 6))
     
-    # Add background colors for long and short days
+    # Add background colors based on yesterday's ATR 14
     dates = df.index
-    positions = df['position'].values
-    daily_returns = df['daily_return'].values
+    atr_values = df['atr_14'].values
     
-    # Find intervals for long days (position == 1)
-    long_start = None
+    # Iterate through dates to apply shading
     for i in range(len(dates)):
-        if positions[i] == 1 and long_start is None:
-            long_start = dates[i]
-        elif positions[i] != 1 and long_start is not None:
-            ax1.axvspan(long_start, dates[i-1], alpha=0.3, color='green', label='Long Days' if i == 1 else '')
-            long_start = None
-    if long_start is not None:
-        ax1.axvspan(long_start, dates[-1], alpha=0.3, color='green', label='Long Days' if len(dates) == 1 else '')
-    
-    # Find intervals for short days (position == -1)
-    short_start = None
-    for i in range(len(dates)):
-        if positions[i] == -1 and short_start is None:
-            short_start = dates[i]
-        elif positions[i] != -1 and short_start is not None:
-            ax1.axvspan(short_start, dates[i-1], alpha=0.3, color='red', label='Short Days' if i == 1 else '')
-            short_start = None
-    if short_start is not None:
-        ax1.axvspan(short_start, dates[-1], alpha=0.3, color='red', label='Short Days' if len(dates) == 1 else '')
-    
-    # Add background colors for stop loss days (daily_return == -0.05)
-    stop_loss_start = None
-    for i in range(len(dates)):
-        if daily_returns[i] == -0.05 and stop_loss_start is None:
-            stop_loss_start = dates[i]
-        elif daily_returns[i] != -0.05 and stop_loss_start is not None:
-            ax1.axvspan(stop_loss_start, dates[i-1], alpha=0.2, color='purple', label='Stop Loss Days' if i == 1 else '')
-            stop_loss_start = None
-    if stop_loss_start is not None:
-        ax1.axvspan(stop_loss_start, dates[-1], alpha=0.2, color='purple', label='Stop Loss Days' if len(dates) == 1 else '')
+        if i == 0:
+            # For the first day, use current ATR (or default to white if NaN)
+            atr_yesterday = atr_values[i] if not np.isnan(atr_values[i]) else 0
+        else:
+            atr_yesterday = atr_values[i-1] if not np.isnan(atr_values[i-1]) else 0
+        
+        # Determine color based on ATR threshold
+        if atr_yesterday <= 2000:
+            color = 'white'
+        else:
+            color = 'grey'
+        
+        # Apply shading for the current day
+        if i < len(dates) - 1:
+            ax1.axvspan(dates[i], dates[i+1], alpha=0.3, color=color, edgecolor='none')
+        else:
+            # For the last day, shade to the end of the plot
+            ax1.axvspan(dates[i], dates[i], alpha=0.3, color=color, edgecolor='none')
     
     # Plot cumulative returns on primary y-axis with log scale
     cumulative_returns_percent = df['cumulative_return'] * 100
@@ -179,7 +165,7 @@ def generate_plot(df):
     ax2.tick_params(axis='y', labelcolor='orange')
     
     # Title and legends
-    plt.title('Strategy Cumulative Returns and Price with Leverage (1x) and Stop Loss (5%)')
+    plt.title('Strategy Cumulative Returns and Price with Leverage (1x), Stop Loss (5%), and ATR-based Background')
     lines1, labels1 = ax1.get_legend_handles_labels()
     lines2, labels2 = ax2.get_legend_handles_labels()
     ax1.legend(lines1 + lines2, labels1 + labels2, loc='upper left')
@@ -227,7 +213,7 @@ def index():
         <body>
             <h1>Strategy Results: BTC/USDT from 2018</h1>
             <p>Strategy: Long when open > 365 SMA and 120 SMA of open, short when open < both SMAs, flat otherwise.</p>
-            <p>Stop loss: 5%, Leverage: 1x. ATR 14 calculated and plotted.</p>
+            <p>Stop loss: 5%, Leverage: 1x. ATR 14 calculated and plotted. Background: white if yesterday's ATR 14 <= 2000, grey if > 2000.</p>
             <img src="data:image/png;base64,{plot_img}" alt="Cumulative Returns Plot">
             <div class="info">
                 <p>Data fetched from Binance. Last updated: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}</p>
