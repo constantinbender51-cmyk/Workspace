@@ -69,12 +69,19 @@ def calculate_strategy_returns(df):
     df['sma_7_range'] = df['range'].rolling(window=7).mean()
     df['sma_14_range'] = df['range'].rolling(window=14).mean()
     
+    # Calculate SMA 14 of range for yesterday
+    df['sma_14_range_yesterday'] = df['sma_14_range'].shift(1)
+
     # Determine position: 1 for long, -1 for short, 0 for flat
     df['position'] = 0
     long_condition = (df['open'] > df['sma_365']) & (df['open'] > df['sma_120'])
     short_condition = (df['open'] < df['sma_365']) & (df['open'] < df['sma_120'])
     df.loc[long_condition, 'position'] = 1
     df.loc[short_condition, 'position'] = -1
+
+    # Override position to flat (0) if yesterday's SMA 14 of range is above 3000
+    flat_due_to_range_condition = (df['sma_14_range_yesterday'] > 3000)
+    df.loc[flat_due_to_range_condition, 'position'] = 0
     
     # Calculate daily returns based on position
     df['daily_return'] = 0.0
