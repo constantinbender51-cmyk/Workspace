@@ -61,15 +61,19 @@ def calculate_strategy_returns(df):
     df['sma_120'] = df['open'].rolling(window=120).mean()
     # Determine position: 1 for long, -1 for short, 0 for flat
     df['position'] = 0
-    # Define the 5% threshold for SMA 120 for flat conditions
-    sma_120_upper_bound = df['sma_120'] * 1.05
-    sma_120_lower_bound = df['sma_120'] * 0.95
-
-    # New Long Condition: open > 365 SMA AND open > (120 SMA + 3%)
-    long_condition = (df['open'] > df['sma_365']) & (df['open'] > sma_120_upper_bound)
+    # New Long Condition: open > 365 SMA AND (open >= 120 SMA AND open <= 105% of 120 SMA)
+    long_condition = (
+        (df['open'] > df['sma_365']) &
+        (df['open'] >= df['sma_120']) &
+        (df['open'] <= df['sma_120'] * 1.05)
+    )
     
-    # New Short Condition: open < 365 SMA AND open < (120 SMA - 3%)
-    short_condition = (df['open'] < df['sma_365']) & (df['open'] < sma_120_lower_bound)
+    # New Short Condition: open < 365 SMA AND (open <= 120 SMA AND open >= 95% of 120 SMA)
+    short_condition = (
+        (df['open'] < df['sma_365']) &
+        (df['open'] <= df['sma_120']) &
+        (df['open'] >= df['sma_120'] * 0.95)
+    )
     df.loc[long_condition, 'position'] = 1
     df.loc[short_condition, 'position'] = -1
     
