@@ -84,9 +84,11 @@ HTML_TEMPLATE = """
             <h3>Strategy Description</h3>
             <p>This strategy analyzes BTC/USDT data from Binance starting from 2018:</p>
             <ul>
-                <li><strong>Add returns</strong> when price is above both 365-day and 120-day Simple Moving Averages (SMAs)</li>
-                <li><strong>Subtract returns</strong> when price is below both 365-day and 120-day SMAs</li>
-                <li><strong>Add 0 return</strong> otherwise (when price is between SMAs or above one but below the other)</li>
+                <li><strong>Position determined at open:</strong> Uses OPEN price and SMAs of OPEN prices</li>
+                <li><strong>Add returns</strong> when OPEN price is above both 365-day and 120-day Simple Moving Averages of OPEN</li>
+                <li><strong>Subtract returns</strong> when OPEN price is below both 365-day and 120-day SMAs of OPEN</li>
+                <li><strong>Add 0 return</strong> otherwise (when OPEN price is between SMAs or above one but below the other)</li>
+                <li><strong>Returns calculated:</strong> Using daily returns from CLOSE prices</li>
             </ul>
         </div>
         
@@ -263,14 +265,14 @@ def create_sample_data():
 
 def calculate_strategy_returns(df, leverage=3.8, stop_loss_pct=0.05):
     """Calculate strategy returns based on SMA crossover rules with customizable leverage and stop loss"""
-    # Calculate daily returns
+    # Calculate daily returns using close prices
     df['returns'] = df['close'].pct_change()
     
-    # Calculate SMAs
-    df['sma_120'] = df['close'].rolling(window=120).mean()
-    df['sma_365'] = df['close'].rolling(window=365).mean()
+    # Calculate SMAs of OPEN prices for position determination
+    df['sma_120_open'] = df['open'].rolling(window=120).mean()
+    df['sma_365_open'] = df['open'].rolling(window=365).mean()
     
-    # Drop NaN values (first 365 days won't have SMA_365)
+    # Drop NaN values (first 365 days won't have SMA_365_open)
     df_clean = df.dropna().copy()
     
     # Initialize strategy returns column
@@ -282,17 +284,17 @@ def calculate_strategy_returns(df, leverage=3.8, stop_loss_pct=0.05):
         open_price = df_clean['open'].iloc[i]
         high_price = df_clean['high'].iloc[i]
         low_price = df_clean['low'].iloc[i]
-        sma_120 = df_clean['sma_120'].iloc[i]
-        sma_365 = df_clean['sma_365'].iloc[i]
+        sma_120_open = df_clean['sma_120_open'].iloc[i]
+        sma_365_open = df_clean['sma_365_open'].iloc[i]
         daily_return = df_clean['returns'].iloc[i]
         
-        # Calculate raw strategy signal
+        # Calculate raw strategy signal based on OPEN price vs SMAs of OPEN
         raw_signal = 0.0
-        # Rule 1: Add returns when price is above both SMAs
-        if close_price > sma_120 and close_price > sma_365:
+        # Rule 1: Add returns when OPEN is above both SMAs of OPEN
+        if open_price > sma_120_open and open_price > sma_365_open:
             raw_signal = daily_return
-        # Rule 2: Subtract returns when price is below both SMAs
-        elif close_price < sma_120 and close_price < sma_365:
+        # Rule 2: Subtract returns when OPEN is below both SMAs of OPEN
+        elif open_price < sma_120_open and open_price < sma_365_open:
             raw_signal = -daily_return
         # Rule 3: Add 0 return otherwise
         else:
@@ -309,12 +311,12 @@ def calculate_strategy_returns(df, leverage=3.8, stop_loss_pct=0.05):
         # Check for stop loss conditions
         stop_loss_triggered = False
         
-        # Condition 1: Price above both SMAs and low is stop_loss_pct or more below open
-        if close_price > sma_120 and close_price > sma_365:
+        # Condition 1: OPEN above both SMAs of OPEN and low is stop_loss_pct or more below open
+        if open_price > sma_120_open and open_price > sma_365_open:
             if low_price <= open_price * (1 - stop_loss_pct):
                 stop_loss_triggered = True
-        # Condition 2: Price below both SMAs and high is stop_loss_pct or more above open
-        elif close_price < sma_120 and close_price < sma_365:
+        # Condition 2: OPEN below both SMAs of OPEN and high is stop_loss_pct or more above open
+        elif open_price < sma_120_open and open_price < sma_365_open:
             if high_price >= open_price * (1 + stop_loss_pct):
                 stop_loss_triggered = True
         
@@ -656,9 +658,9 @@ def index():
     # Get Sharpe ratio from dataframe
     sharpe_ratio = round(df_strategy['sharpe_ratio'].iloc[0] if len(df_strategy) > 0 else 0.0, 3)
     
-    # Count signal days
-    positive_mask = (df_strategy['close'] > df_strategy['sma_120']) & (df_strategy['close'] > df_strategy['sma_365'])
-    negative_mask = (df_strategy['close'] < df_strategy['sma_120']) & (df_strategy['close'] < df_strategy['sma_365'])
+    # Count signal days based on OPEN price vs SMAs of OPEN
+    positive_mask = (df_strategy['open'] > df_strategy['sma_120_open']) & (df_strategy['open'] > df_strategy['sma_365_open'])
+    negative_mask = (df_strategy['open'] < df_strategy['sma_120_open']) & (df_strategy['open'] < df_strategy['sma_365_open'])
     
     positive_days = positive_mask.sum()
     negative_days = negative_mask.sum()
