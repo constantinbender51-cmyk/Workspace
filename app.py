@@ -60,6 +60,11 @@ def calculate_strategy_returns(df):
     # Calculate SMAs
     df['sma_365'] = df['open'].rolling(window=365).mean()
     df['sma_120'] = df['open'].rolling(window=120).mean()
+    # Calculate ATR 14
+    df['tr'] = np.maximum(df['high'] - df['low'], 
+                         np.maximum(abs(df['high'] - df['close'].shift(1)), 
+                                    abs(df['low'] - df['close'].shift(1))))
+    df['atr_14'] = df['tr'].rolling(window=14).mean()
     
     # Determine position: 1 for long, -1 for short, 0 for flat
     df['position'] = 0
@@ -164,12 +169,13 @@ def generate_plot(df):
     ax1.set_yscale('linear')
     ax1.grid(True)
     
-    # Create secondary y-axis for price and SMAs
+    # Create secondary y-axis for price, SMAs, and ATR 14
     ax2 = ax1.twinx()
     ax2.plot(df.index, df['close'], label='Price (USD)', color='orange', alpha=0.7)
     ax2.plot(df.index, df['sma_365'], label='365 SMA', color='green', linestyle='--', alpha=0.7)
     ax2.plot(df.index, df['sma_120'], label='120 SMA', color='red', linestyle=':', alpha=0.7)
-    ax2.set_ylabel('Price (USD)', color='orange')
+    ax2.plot(df.index, df['atr_14'], label='ATR 14', color='purple', linestyle='-', alpha=0.7)
+    ax2.set_ylabel('Price (USD) / ATR', color='orange')
     ax2.tick_params(axis='y', labelcolor='orange')
     
     # Title and legends
@@ -221,7 +227,7 @@ def index():
         <body>
             <h1>Strategy Results: BTC/USDT from 2018</h1>
             <p>Strategy: Long when open > 365 SMA and 120 SMA of open, short when open < both SMAs, flat otherwise.</p>
-            <p>Stop loss: 5%, Leverage: 1x.</p>
+            <p>Stop loss: 5%, Leverage: 1x. ATR 14 calculated and plotted.</p>
             <img src="data:image/png;base64,{plot_img}" alt="Cumulative Returns Plot">
             <div class="info">
                 <p>Data fetched from Binance. Last updated: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}</p>
