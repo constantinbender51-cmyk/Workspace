@@ -120,9 +120,35 @@ def generate_plot(df):
     Returns a base64 encoded image string.
     """
     fig, ax1 = plt.subplots(figsize=(12, 6))
+
+    # Add background colors for long (green) and short (red) positions
+    long_start = None
+    short_start = None
+
+    for i in range(1, len(df)):
+        current_pos = df['position'].iloc[i]
+        prev_pos = df['position'].iloc[i-1]
+        current_date = df.index[i]
+        prev_date = df.index[i-1]
+
+        if current_pos == 1 and prev_pos != 1:
+            long_start = current_date
+        elif current_pos != 1 and prev_pos == 1 and long_start is not None:
+            ax1.axvspan(long_start, prev_date, color='green', alpha=0.1, label='Long Position' if 'Long Position' not in [l.get_label() for l in ax1.lines] else "")
+            long_start = None
+        
+        if current_pos == -1 and prev_pos != -1:
+            short_start = current_date
+        elif current_pos != -1 and prev_pos == -1 and short_start is not None:
+            ax1.axvspan(short_start, prev_date, color='red', alpha=0.1, label='Short Position' if 'Short Position' not in [l.get_label() for l in ax1.lines] else "")
+            short_start = None
     
-    
-    
+    # Handle case where position extends to the end of the data
+    if long_start is not None:
+        ax1.axvspan(long_start, df.index[-1], color='green', alpha=0.1, label='Long Position' if 'Long Position' not in [l.get_label() for l in ax1.lines] else "")
+    if short_start is not None:
+        ax1.axvspan(short_start, df.index[-1], color='red', alpha=0.1, label='Short Position' if 'Short Position' not in [l.get_label() for l in ax1.lines] else "")
+
     # Plot cumulative returns on primary y-axis with log scale
     cumulative_returns_percent = df['cumulative_return'] * 100
     ax1.plot(df.index, cumulative_returns_percent, label='Cumulative Return (%)', color='blue')
