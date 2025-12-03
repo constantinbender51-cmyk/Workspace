@@ -49,22 +49,22 @@ def fetch_ohlcv(symbol='BTCUSDT', interval='1d', start_date='2018-01-01'):
 def calculate_strategy_returns(df):
     """
     Calculate daily returns based on the strategy:
-    - Long when open > 40 SMA and open > 120 SMA of open.
-    - Short when open < 40 SMA and open < 120 SMA of open.
+    - Long when open > 365 SMA and open > 120 SMA of open.
+    - Short when open < 365 SMA and open < 120 SMA of open.
     - Flat otherwise.
     - Apply 2% stop loss: if long and low <= open * 0.98, return -2%; if short and high >= open * 1.02, return -2%.
-    - Apply 3.5x leverage to daily returns.
+    - Apply 1x leverage to daily returns.
     Returns a DataFrame with strategy returns.
     """
     df = df.copy()
     # Calculate SMAs
-    df['sma_40'] = df['open'].rolling(window=40).mean()
+    df['sma_365'] = df['open'].rolling(window=365).mean()
     df['sma_120'] = df['open'].rolling(window=120).mean()
     
     # Determine position: 1 for long, -1 for short, 0 for flat
     df['position'] = 0
-    long_condition = (df['open'] > df['sma_40']) & (df['open'] > df['sma_120'])
-    short_condition = (df['open'] < df['sma_40']) & (df['open'] < df['sma_120'])
+    long_condition = (df['open'] > df['sma_365']) & (df['open'] > df['sma_120'])
+    short_condition = (df['open'] < df['sma_365']) & (df['open'] < df['sma_120'])
     df.loc[long_condition, 'position'] = 1
     df.loc[short_condition, 'position'] = -1
     
@@ -164,9 +164,11 @@ def generate_plot(df):
     ax1.set_yscale('linear')
     ax1.grid(True)
     
-    # Create secondary y-axis for price
+    # Create secondary y-axis for price and SMAs
     ax2 = ax1.twinx()
     ax2.plot(df.index, df['close'], label='Price (USD)', color='orange', alpha=0.7)
+    ax2.plot(df.index, df['sma_365'], label='365 SMA', color='green', linestyle='--', alpha=0.7)
+    ax2.plot(df.index, df['sma_120'], label='120 SMA', color='red', linestyle=':', alpha=0.7)
     ax2.set_ylabel('Price (USD)', color='orange')
     ax2.tick_params(axis='y', labelcolor='orange')
     
@@ -218,8 +220,8 @@ def index():
         </head>
         <body>
             <h1>Strategy Results: BTC/USDT from 2018</h1>
-            <p>Strategy: Long when open > 40 SMA and 120 SMA of open, short when open < both SMAs, flat otherwise.</p>
-            <p>Stop loss: 2%, Leverage: 3.5x.</p>
+            <p>Strategy: Long when open > 365 SMA and 120 SMA of open, short when open < both SMAs, flat otherwise.</p>
+            <p>Stop loss: 2%, Leverage: 1x.</p>
             <img src="data:image/png;base64,{plot_img}" alt="Cumulative Returns Plot">
             <div class="info">
                 <p>Data fetched from Binance. Last updated: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}</p>
