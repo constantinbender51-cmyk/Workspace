@@ -65,14 +65,14 @@ def calculate_strategy_returns(df):
     long_condition = (
         (df['open'] > df['sma_365']) &
         (df['open'] >= df['sma_120']) &
-        (df['open'] <= df['sma_120'] * 1.05)
+        (df['open'] <= df['sma_120'] * 1.10) # Changed from 1.05 to 1.10
     )
     
-    # New Short Condition: open < 365 SMA AND (open <= 120 SMA AND open >= 95% of 120 SMA)
+    # New Short Condition: open < 365 SMA AND (open <= 120 SMA AND open >= 90% of 120 SMA)
     short_condition = (
         (df['open'] < df['sma_365']) &
         (df['open'] <= df['sma_120']) &
-        (df['open'] >= df['sma_120'] * 0.95)
+        (df['open'] >= df['sma_120'] * 0.90) # Changed from 0.95 to 0.90
     )
     df.loc[long_condition, 'position'] = 1
     df.loc[short_condition, 'position'] = -1
@@ -90,14 +90,14 @@ def calculate_strategy_returns(df):
         
         if position == 1:  # Long
             # Check stop loss
-            if low_price <= open_price * 0.95:
-                daily_return = -0.05  # -5%
+            if low_price <= open_price * 0.90: # Changed from 0.95 to 0.90
+                daily_return = -0.10  # -10% # Changed from -0.05 to -0.10
             else:
                 daily_return = (close_price - open_price) / open_price
         elif position == -1:  # Short
             # Check stop loss
-            if high_price >= open_price * 1.05:
-                daily_return = -0.05  # -5%
+            if high_price >= open_price * 1.10: # Changed from 1.05 to 1.10
+                daily_return = -0.10  # -10% # Changed from -0.05 to -0.10
             else:
                 daily_return = (open_price - close_price) / open_price
         else:  # Flat
@@ -220,7 +220,7 @@ def index():
         <body>
             <h1>Strategy Results: BTC/USDT from 2018</h1>
             <p>Strategy: Long when open > 365 SMA and 120 SMA of open, short when open < both SMAs, flat otherwise.</p>
-            <p>Stop loss: 5%, Leverage: 1x.</p>
+            <p>Stop loss: 10%, Leverage: 1x.</p>
             <img src="data:image/png;base64,{plot_img}" alt="Cumulative Returns Plot">
             <div class="info">
                 <p>Data fetched from Binance. Last updated: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}</p>
