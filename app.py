@@ -266,9 +266,13 @@ def calculate_strategy_returns(df, leverage=3.8, stop_loss_pct=0.05):
     # Calculate daily returns
     df['returns'] = df['close'].pct_change()
     
-    # Calculate SMAs
-    df['sma_120'] = df['close'].rolling(window=120).mean()
-    df['sma_365'] = df['close'].rolling(window=365).mean()
+    # Calculate SMAs on close (for return calculation)
+    df['sma_120_close'] = df['close'].rolling(window=120).mean()
+    df['sma_365_close'] = df['close'].rolling(window=365).mean()
+    
+    # Calculate SMAs on open (for position determination - no look-ahead)
+    df['sma_120_open'] = df['open'].rolling(window=120).mean()
+    df['sma_365_open'] = df['open'].rolling(window=365).mean()
     df['sma_30_open'] = df['open'].rolling(window=30).mean()
     
     # Drop NaN values (first 365 days won't have SMA_365)
@@ -283,36 +287,38 @@ def calculate_strategy_returns(df, leverage=3.8, stop_loss_pct=0.05):
         open_price = df_clean['open'].iloc[i]
         high_price = df_clean['high'].iloc[i]
         low_price = df_clean['low'].iloc[i]
-        sma_120 = df_clean['sma_120'].iloc[i]
-        sma_365 = df_clean['sma_365'].iloc[i]
+        sma_120_open = df_clean['sma_120_open'].iloc[i]
+        sma_365_open = df_clean['sma_365_open'].iloc[i]
         sma_30_open = df_clean['sma_30_open'].iloc[i]
+        sma_120_close = df_clean['sma_120_close'].iloc[i]
+        sma_365_close = df_clean['sma_365_close'].iloc[i]
         daily_return = df_clean['returns'].iloc[i]
         
-        # Calculate risk category based on position type and open vs all SMAs
-        # Long with risk 1 if open above all SMAs (120-day, 365-day, and 200-day on open)
-        # Short with risk 1 if open below all SMAs
+        # Calculate risk category based on position type and open vs all SMAs on open
+        # Long with risk 1 if open above all SMAs on open (120-day, 365-day, and 30-day)
+        # Short with risk 1 if open below all SMAs on open
         # Risk 2 otherwise
         
-        # Determine position type
-        if close_price > sma_120 and close_price > sma_365:
+        # Determine position type using open price vs SMAs on open (no look-ahead)
+        if open_price > sma_120_open and open_price > sma_365_open:
             # Long position
-            risk_category = 1 if (open_price > sma_120 and open_price > sma_365 and open_price > sma_30_open) else 2
-        elif close_price < sma_120 and close_price < sma_365:
+            risk_category = 1 if (open_price > sma_120_open and open_price > sma_365_open and open_price > sma_30_open) else 2
+        elif open_price < sma_120_open and open_price < sma_365_open:
             # Short position
-            risk_category = 1 if (open_price < sma_120 and open_price < sma_365 and open_price < sma_30_open) else 2
+            risk_category = 1 if (open_price < sma_120_open and open_price < sma_365_open and open_price < sma_30_open) else 2
         else:
             # Neutral position
             risk_category = 2
         
         adjusted_leverage = 4.0 / (risk_category ** 2)
         
-        # Calculate raw strategy signal
+        # Calculate raw strategy signal using close price vs SMAs on close for return calculation
         raw_signal = 0.0
-        # Rule 1: Add returns when price is above both SMAs
-        if close_price > sma_120 and close_price > sma_365:
+        # Rule 1: Add returns when price is above both SMAs on close
+        if close_price > sma_120_close and close_price > sma_365_close:
             raw_signal = daily_return
-        # Rule 2: Subtract returns when price is below both SMAs
-        elif close_price < sma_120 and close_price < sma_365:
+        # Rule 2: Subtract returns when price is below both SMAs on close
+        elif close_price < sma_120_close and close_price < sma_365_close:
             raw_signal = -daily_return
         # Rule 3: Add 0 return otherwise
         else:
@@ -329,12 +335,12 @@ def calculate_strategy_returns(df, leverage=3.8, stop_loss_pct=0.05):
         # Check for stop loss conditions
         stop_loss_triggered = False
         
-        # Condition 1: Price above both SMAs and low is stop_loss_pct or more below open
-        if close_price > sma_120 and close_price > sma_365:
+        # Condition 1: Price above both SMAs on open and low is stop_loss_pct or more below open
+        if open_price > sma_120_open and open_price > sma_365_open:
             if low_price <= open_price * (1 - stop_loss_pct):
                 stop_loss_triggered = True
-        # Condition 2: Price below both SMAs and high is stop_loss_pct or more above open
-        elif close_price < sma_120 and close_price < sma_365:
+        # Condition 2: Price below both SMAs on open and high is stop_loss_pct or more above open
+        elif open_price < sma_120_open and open_price < sma_365_open:
             if high_price >= open_price * (1 + stop_loss_pct):
                 stop_loss_triggered = True
         
@@ -419,22 +425,21 @@ def create_plot(df):
     """Create a plot of cumulative returns with risk category indication"""
     plt.figure(figsize=(14, 7))
     
-    # Calculate risk categories for the plot based on position type and open vs all SMAs
+    # Calculate risk categories for the plot based on position type and open vs all SMAs on open
     risk_categories = []
     for i in range(len(df)):
         open_price = df['open'].iloc[i]
-        close_price = df['close'].iloc[i]
-        sma_120 = df['sma_120'].iloc[i]
-        sma_365 = df['sma_365'].iloc[i]
+        sma_120_open = df['sma_120_open'].iloc[i]
+        sma_365_open = df['sma_365_open'].iloc[i]
         sma_30_open = df['sma_30_open'].iloc[i]
         
-        # Determine position type
-        if close_price > sma_120 and close_price > sma_365:
+        # Determine position type using open price vs SMAs on open (no look-ahead)
+        if open_price > sma_120_open and open_price > sma_365_open:
             # Long position
-            risk_category = 1 if (open_price > sma_120 and open_price > sma_365 and open_price > sma_30_open) else 2
-        elif close_price < sma_120 and close_price < sma_365:
+            risk_category = 1 if (open_price > sma_120_open and open_price > sma_365_open and open_price > sma_30_open) else 2
+        elif open_price < sma_120_open and open_price < sma_365_open:
             # Short position
-            risk_category = 1 if (open_price < sma_120 and open_price < sma_365 and open_price < sma_30_open) else 2
+            risk_category = 1 if (open_price < sma_120_open and open_price < sma_365_open and open_price < sma_30_open) else 2
         else:
             # Neutral position
             risk_category = 2
@@ -506,7 +511,7 @@ def create_plot(df):
     plt.legend(fontsize=10, loc='upper left')
     
     # Add text box with risk category explanation
-    risk_text = 'Risk Categories:\n• Light Blue (Category 1): Favorable condition\n  - Long position: Open > all SMAs (120-day, 365-day, and 120-day on open)\n  - Short position: Open < all SMAs\n• Light Red (Category 2): Unfavorable condition\n  - Long position: Open ≤ any SMA\n  - Short position: Open ≥ any SMA'
+    risk_text = 'Risk Categories:\n• Light Blue (Category 1): Favorable condition\n  - Long position: Open > all SMAs on open (120-day, 365-day, and 30-day)\n  - Short position: Open < all SMAs on open\n• Light Red (Category 2): Unfavorable condition\n  - Long position: Open ≤ any SMA on open\n  - Short position: Open ≥ any SMA on open'
     plt.text(0.02, 0.98, risk_text,
              transform=plt.gca().transAxes,
              fontsize=9,
@@ -753,9 +758,9 @@ def index():
     # Get Sharpe ratio from dataframe
     sharpe_ratio = round(df_strategy['sharpe_ratio'].iloc[0] if len(df_strategy) > 0 else 0.0, 3)
     
-    # Count signal days
-    positive_mask = (df_strategy['close'] > df_strategy['sma_120']) & (df_strategy['close'] > df_strategy['sma_365'])
-    negative_mask = (df_strategy['close'] < df_strategy['sma_120']) & (df_strategy['close'] < df_strategy['sma_365'])
+    # Count signal days based on open price vs SMAs on open
+    positive_mask = (df_strategy['open'] > df_strategy['sma_120_open']) & (df_strategy['open'] > df_strategy['sma_365_open'])
+    negative_mask = (df_strategy['open'] < df_strategy['sma_120_open']) & (df_strategy['open'] < df_strategy['sma_365_open'])
     
     positive_days = positive_mask.sum()
     negative_days = negative_mask.sum()
@@ -770,8 +775,21 @@ def index():
     monthly_plot_url = create_monthly_plot(monthly_returns_raw)    
     # Calculate risk category and adjusted leverage for the latest day
     latest_open = df_strategy['open'].iloc[-1] if len(df_strategy) > 0 else 0
+    latest_sma_120_open = df_strategy['sma_120_open'].iloc[-1] if len(df_strategy) > 0 else 0
+    latest_sma_365_open = df_strategy['sma_365_open'].iloc[-1] if len(df_strategy) > 0 else 0
     latest_sma_30_open = df_strategy['sma_30_open'].iloc[-1] if len(df_strategy) > 0 else 0
-    risk_category = 1 if latest_open > latest_sma_30_open else 2
+    
+    # Determine risk category based on position type
+    if latest_open > latest_sma_120_open and latest_open > latest_sma_365_open:
+        # Long position
+        risk_category = 1 if (latest_open > latest_sma_120_open and latest_open > latest_sma_365_open and latest_open > latest_sma_30_open) else 2
+    elif latest_open < latest_sma_120_open and latest_open < latest_sma_365_open:
+        # Short position
+        risk_category = 1 if (latest_open < latest_sma_120_open and latest_open < latest_sma_365_open and latest_open < latest_sma_30_open) else 2
+    else:
+        # Neutral position
+        risk_category = 2
+    
     adjusted_leverage = round(4.0 / (risk_category ** 2), 2)
     
     # Prepare template data
