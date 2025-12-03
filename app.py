@@ -111,9 +111,10 @@ def generate_plot(df):
     Generate a Matplotlib plot showing cumulative returns with background colors:
     - Green for long days (position == 1)
     - Red for short days (position == -1)
+    - Price plotted on secondary y-axis.
     Returns a base64 encoded image string.
     """
-    plt.figure(figsize=(12, 6))
+    fig, ax1 = plt.subplots(figsize=(12, 6))
     
     # Add background colors for long and short days
     dates = df.index
@@ -125,10 +126,10 @@ def generate_plot(df):
         if positions[i] == 1 and long_start is None:
             long_start = dates[i]
         elif positions[i] != 1 and long_start is not None:
-            plt.axvspan(long_start, dates[i-1], alpha=0.3, color='green', label='Long Days' if i == 1 else '')
+            ax1.axvspan(long_start, dates[i-1], alpha=0.3, color='green', label='Long Days' if i == 1 else '')
             long_start = None
     if long_start is not None:
-        plt.axvspan(long_start, dates[-1], alpha=0.3, color='green', label='Long Days' if len(dates) == 1 else '')
+        ax1.axvspan(long_start, dates[-1], alpha=0.3, color='green', label='Long Days' if len(dates) == 1 else '')
     
     # Find intervals for short days (position == -1)
     short_start = None
@@ -136,18 +137,29 @@ def generate_plot(df):
         if positions[i] == -1 and short_start is None:
             short_start = dates[i]
         elif positions[i] != -1 and short_start is not None:
-            plt.axvspan(short_start, dates[i-1], alpha=0.3, color='red', label='Short Days' if i == 1 else '')
+            ax1.axvspan(short_start, dates[i-1], alpha=0.3, color='red', label='Short Days' if i == 1 else '')
             short_start = None
     if short_start is not None:
-        plt.axvspan(short_start, dates[-1], alpha=0.3, color='red', label='Short Days' if len(dates) == 1 else '')
+        ax1.axvspan(short_start, dates[-1], alpha=0.3, color='red', label='Short Days' if len(dates) == 1 else '')
     
-    # Plot cumulative returns
-    plt.plot(df.index, df['cumulative_return'] * 100, label='Cumulative Return (%)', color='blue')
-    plt.title('Strategy Cumulative Returns with Leverage (3.5x) and Stop Loss (2%)')
-    plt.xlabel('Date')
-    plt.ylabel('Cumulative Return (%)')
-    plt.legend()
-    plt.grid(True)
+    # Plot cumulative returns on primary y-axis
+    ax1.plot(df.index, df['cumulative_return'] * 100, label='Cumulative Return (%)', color='blue')
+    ax1.set_xlabel('Date')
+    ax1.set_ylabel('Cumulative Return (%)', color='blue')
+    ax1.tick_params(axis='y', labelcolor='blue')
+    ax1.grid(True)
+    
+    # Create secondary y-axis for price
+    ax2 = ax1.twinx()
+    ax2.plot(df.index, df['close'], label='Price (USD)', color='orange', alpha=0.7)
+    ax2.set_ylabel('Price (USD)', color='orange')
+    ax2.tick_params(axis='y', labelcolor='orange')
+    
+    # Title and legends
+    plt.title('Strategy Cumulative Returns and Price with Leverage (3.5x) and Stop Loss (2%)')
+    lines1, labels1 = ax1.get_legend_handles_labels()
+    lines2, labels2 = ax2.get_legend_handles_labels()
+    ax1.legend(lines1 + lines2, labels1 + labels2, loc='upper left')
     
     # Save plot to a bytes buffer
     buf = io.BytesIO()
