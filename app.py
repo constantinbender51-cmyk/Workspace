@@ -288,8 +288,13 @@ def calculate_strategy_returns(df, leverage=3.8, stop_loss_pct=0.05):
         sma_120_open = df_clean['sma_120_open'].iloc[i]
         daily_return = df_clean['returns'].iloc[i]
         
-        # Calculate risk category based on open vs 120-day SMA
-        risk_category = 1 if open_price > sma_120_open else 2
+        # Calculate risk category based on open vs strategy SMAs (120-day, 365-day) and risk SMA (120-day open)
+        if open_price > sma_120 and open_price > sma_365 and open_price > sma_120_open:
+            risk_category = 1  # Open above all three SMAs
+        elif open_price < sma_120 and open_price < sma_365 and open_price < sma_120_open:
+            risk_category = 1  # Open below all three SMAs
+        else:
+            risk_category = 2  # Other cases (e.g., open between SMAs or above risk SMA but below strategy SMAs)
         adjusted_leverage = 4.0 / (risk_category ** 2)
         
         # Calculate raw strategy signal
@@ -405,9 +410,20 @@ def create_plot(df):
     """Create a plot of cumulative returns with risk category indication"""
     plt.figure(figsize=(14, 7))
     
-    # Calculate risk categories for the plot
-    # Risk category is 1 when open > 120-day SMA, 2 when open <= 120-day SMA
-    risk_categories = np.where(df['open'] > df['sma_120_open'], 1, 2)
+    # Calculate risk categories for the plot based on open vs strategy SMAs and risk SMA
+    risk_categories = []
+    for i in range(len(df)):
+        open_price = df['open'].iloc[i]
+        sma_120 = df['sma_120'].iloc[i]
+        sma_365 = df['sma_365'].iloc[i]
+        sma_120_open = df['sma_120_open'].iloc[i]
+        if open_price > sma_120 and open_price > sma_365 and open_price > sma_120_open:
+            risk_categories.append(1)  # Open above all three SMAs
+        elif open_price < sma_120 and open_price < sma_365 and open_price < sma_120_open:
+            risk_categories.append(1)  # Open below all three SMAs
+        else:
+            risk_categories.append(2)  # Other cases
+    risk_categories = np.array(risk_categories)
     
     # Find indices where risk category changes
     risk_changes = np.where(np.diff(risk_categories) != 0)[0]
@@ -423,13 +439,13 @@ def create_plot(df):
         
         # Determine color based on risk category
         if current_category == 1:
-            # Light blue for risk category 1 (open > 120-day SMA)
+            # Light blue for risk category 1 (open above/below all three SMAs)
             color = 'lightblue'
-            label = 'Risk Category 1 (Open > 120-day SMA)'
+            label = 'Risk Category 1 (Open above/below all SMAs)'
         else:
-            # Light red for risk category 2 (open ≤ 120-day SMA)
+            # Light red for risk category 2 (other cases)
             color = 'lightcoral'
-            label = 'Risk Category 2 (Open ≤ 120-day SMA)'
+            label = 'Risk Category 2 (Other)'
         
         # Add shaded region
         plt.axvspan(df.index[start_idx], df.index[end_idx], 
@@ -473,7 +489,7 @@ def create_plot(df):
     plt.legend(fontsize=10, loc='upper left')
     
     # Add text box with risk category explanation
-    risk_text = 'Risk Categories:\n• Light Blue: Open > 120-day SMA\n• Light Red: Open ≤ 120-day SMA'
+    risk_text = 'Risk Categories:\n• Light Blue: Open above all three SMAs OR below all three SMAs\n• Light Red: Other cases (e.g., between SMAs)'
     plt.text(0.02, 0.98, risk_text,
              transform=plt.gca().transAxes,
              fontsize=9,
