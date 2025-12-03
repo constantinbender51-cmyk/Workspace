@@ -408,7 +408,9 @@ def sma_grid_search(df):
     print(f"\nSMA grid search complete. Best SMA window: {best_sma} days")
     print(f"Best Sharpe ratio: {best_sharpe:.3f}")
     
-    return best_sma, results_sorteddef grid_search_optimal_params(df):
+    return best_sma, results_sorted
+
+def grid_search_optimal_params(df):
     """Perform grid search to find optimal leverage and stop loss parameters for maximum Sharpe ratio"""
     # Define parameter ranges with smaller steps of 0.1
     leverage_range = np.arange(1.0, 5.1, 0.1).round(1).tolist()  # 1.0 to 5.0 in 0.1 increments
