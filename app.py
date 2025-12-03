@@ -778,7 +778,9 @@ def sma_grid_search_page():
     </html>
     """
     
-    return sma_grid_search_html@app.route('/grid_search')
+    return sma_grid_search_html
+
+@app.route('/grid_search')
 def grid_search():
     """Route to display grid search results"""
     # Fetch data
