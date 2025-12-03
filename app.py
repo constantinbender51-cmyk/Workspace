@@ -87,6 +87,7 @@ HTML_TEMPLATE = """
                 <li><strong>Add returns</strong> when price is above both 365-day and 120-day Simple Moving Averages (SMAs)</li>
                 <li><strong>Subtract returns</strong> when price is below both 365-day and 120-day SMAs</li>
                 <li><strong>Add 0 return</strong> otherwise (when price is between SMAs or above one but below the other)</li>
+                <li><strong>Dynamic Leverage:</strong> The applied leverage is determined by a base leverage divided by a risk category. If the 'open' price is above the 14-day SMA, the risk category is 1 (lower risk, higher leverage); otherwise, it's 2 (higher risk, lower leverage). For example, a base leverage of 4x results in 4x leverage for risk category 1 and 2x leverage for risk category 2.</li>
             </ul>
         </div>
         
@@ -157,7 +158,7 @@ HTML_TEMPLATE = """
         <div class="info-box">
             <h3>Grid Search for Optimal Parameters</h3>
             <p>A grid search has been implemented to find the optimal leverage and stop loss parameters.</p>
-            <p><strong>Current Parameters:</strong> Leverage = 3.8x, Stop Loss = 5.0%</p>
+            <p><strong>Current Parameters:</strong> Base Leverage = 4.0x, Stop Loss = 5.0%</p>
             <p><a href="/grid_search" style="color: #007bff; text-decoration: none; font-weight: bold;">
                 → Click here to run grid search and find optimal parameters
             </a></p>
@@ -261,14 +262,14 @@ def create_sample_data():
     
     return df
 
-def calculate_strategy_returns(df, leverage=3.8, stop_loss_pct=0.05):
+def calculate_strategy_returns(df, leverage=4.0, stop_loss_pct=0.05):
     """Calculate strategy returns based on SMA crossover rules with customizable leverage and stop loss"""
     # Calculate daily returns
     df['returns'] = df['close'].pct_change()
     
     # Calculate SMAs
     df['sma_120'] = df['close'].rolling(window=120).mean()
-    df['sma_365'] = df['close'].rolling(window=365).mean()
+    df['sma_365'] = df['close'].rolling(window=365).mean()    df['sma_14'] = df['close'].rolling(window=14).mean()
     
     # Drop NaN values (first 365 days won't have SMA_365)
     df_clean = df.dropna().copy()
@@ -298,8 +299,13 @@ def calculate_strategy_returns(df, leverage=3.8, stop_loss_pct=0.05):
         else:
             raw_signal = 0.0
         
-        # Apply leverage
-        leveraged_signal = raw_signal * leverage
+        # Calculate 14-day SMA, risk category, and dynamic leverage
+        sma_14 = df_clean['sma_14'].iloc[i]
+        risk_category = 1 if open_price > sma_14 else 2
+        dynamic_leverage = leverage / risk_category # 'leverage' from function param is now base leverage
+
+        # Apply dynamic leverage
+        leveraged_signal = raw_signal * dynamic_leverage
         
         # Apply fee only on days with non-zero signal
         fee_rate = 0.0004  # 0.04%
