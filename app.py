@@ -115,6 +115,14 @@ HTML_TEMPLATE = """
                 <div class="stat-value">{{ avg_monthly_return_pct }}%</div>
                 <div class="stat-label">Avg Monthly Return</div>
             </div>
+            <div class="stat-card">
+                <div class="stat-value">{{ position_type }}</div>
+                <div class="stat-label">Current Position</div>
+            </div>
+            <div class="stat-card">
+                <div class="stat-value">{{ adjusted_leverage }}x</div>
+                <div class="stat-label">Leverage</div>
+            </div>
         </div>
         
         <div class="plot-container">
@@ -273,7 +281,6 @@ def calculate_strategy_returns(df, leverage=3.8, stop_loss_pct=0.05):
     # Calculate SMAs on open (for position determination - no look-ahead)
     df['sma_120_open'] = df['open'].rolling(window=120).mean()
     df['sma_365_open'] = df['open'].rolling(window=365).mean()
-    df['sma_30_open'] = df['open'].rolling(window=30).mean()
     
     # Drop NaN values (first 365 days won't have SMA_365)
     df_clean = df.dropna().copy()
@@ -289,28 +296,12 @@ def calculate_strategy_returns(df, leverage=3.8, stop_loss_pct=0.05):
         low_price = df_clean['low'].iloc[i]
         sma_120_open = df_clean['sma_120_open'].iloc[i]
         sma_365_open = df_clean['sma_365_open'].iloc[i]
-        sma_30_open = df_clean['sma_30_open'].iloc[i]
         sma_120_close = df_clean['sma_120_close'].iloc[i]
         sma_365_close = df_clean['sma_365_close'].iloc[i]
         daily_return = df_clean['returns'].iloc[i]
         
-        # Calculate risk category based on position type and open vs all SMAs on open
-        # Long with risk 1 if open above all SMAs on open (120-day, 365-day, and 30-day)
-        # Short with risk 1 if open below all SMAs on open
-        # Risk 2 otherwise
-        
-        # Determine position type using open price vs SMAs on open (no look-ahead)
-        if open_price > sma_120_open and open_price > sma_365_open:
-            # Long position
-            risk_category = 1 if (open_price > sma_120_open and open_price > sma_365_open and open_price > sma_30_open) else 2
-        elif open_price < sma_120_open and open_price < sma_365_open:
-            # Short position
-            risk_category = 1 if (open_price < sma_120_open and open_price < sma_365_open and open_price < sma_30_open) else 2
-        else:
-            # Neutral position
-            risk_category = 2
-        
-        adjusted_leverage = 4.0 / (risk_category ** 2)
+        # Use static 4x leverage
+        adjusted_leverage = 4.0
         
         # Calculate raw strategy signal using close price vs SMAs on close for return calculation
         raw_signal = 0.0
@@ -346,7 +337,7 @@ def calculate_strategy_returns(df, leverage=3.8, stop_loss_pct=0.05):
         
         # Apply stop loss if triggered
         if stop_loss_triggered:
-            # Apply stop loss percentage scaled by adjusted leverage
+            # Apply stop loss percentage scaled by leverage
             df_clean.loc[df_clean.index[i], 'strategy_returns'] = -stop_loss_pct * adjusted_leverage
         else:
             df_clean.loc[df_clean.index[i], 'strategy_returns'] = leveraged_signal
@@ -422,52 +413,54 @@ def grid_search_optimal_params(df):
     return best_params, results_sorted
 
 def create_plot(df):
-    """Create a plot of cumulative returns with risk category indication"""
+    """Create a plot of cumulative returns with position type indication"""
     plt.figure(figsize=(14, 7))
     
-    # Calculate risk categories for the plot based on position type and open vs all SMAs on open
-    risk_categories = []
+    # Calculate position types for the plot based on open price vs SMAs on open
+    position_types = []
     for i in range(len(df)):
         open_price = df['open'].iloc[i]
         sma_120_open = df['sma_120_open'].iloc[i]
         sma_365_open = df['sma_365_open'].iloc[i]
-        sma_30_open = df['sma_30_open'].iloc[i]
         
         # Determine position type using open price vs SMAs on open (no look-ahead)
         if open_price > sma_120_open and open_price > sma_365_open:
             # Long position
-            risk_category = 1 if (open_price > sma_120_open and open_price > sma_365_open and open_price > sma_30_open) else 2
+            position_type = 'long'
         elif open_price < sma_120_open and open_price < sma_365_open:
             # Short position
-            risk_category = 1 if (open_price < sma_120_open and open_price < sma_365_open and open_price < sma_30_open) else 2
+            position_type = 'short'
         else:
             # Neutral position
-            risk_category = 2
+            position_type = 'neutral'
         
-        risk_categories.append(risk_category)
-    risk_categories = np.array(risk_categories)
+        position_types.append(position_type)
     
-    # Find indices where risk category changes
-    risk_changes = np.where(np.diff(risk_categories) != 0)[0]
+    # Find indices where position type changes
+    position_changes = []
+    for i in range(1, len(position_types)):
+        if position_types[i] != position_types[i-1]:
+            position_changes.append(i)
     
-    # Create shaded regions for risk categories
-    # Start with the first category
-    current_category = risk_categories[0]
+    # Create shaded regions for position types
+    # Start with the first position type
+    current_position = position_types[0]
     start_idx = 0
     
-    # Add shaded background for each continuous risk category period
-    for change_idx in risk_changes:
-        end_idx = change_idx + 1
+    # Add shaded background for each continuous position period
+    for change_idx in position_changes:
+        end_idx = change_idx
         
-        # Determine color based on risk category
-        if current_category == 1:
-            # Light blue for risk category 1 (favorable condition)
-            color = 'lightblue'
-            label = 'Risk Category 1 (Favorable)'
-        else:
-            # Light red for risk category 2 (unfavorable condition)
+        # Determine color based on position type
+        if current_position == 'long':
+            color = 'lightgreen'
+            label = 'Long Position'
+        elif current_position == 'short':
             color = 'lightcoral'
-            label = 'Risk Category 2 (Unfavorable)'
+            label = 'Short Position'
+        else:
+            color = 'lightgray'
+            label = 'Neutral Position'
         
         # Add shaded region
         plt.axvspan(df.index[start_idx], df.index[end_idx], 
@@ -475,16 +468,19 @@ def create_plot(df):
         
         # Update for next region
         start_idx = end_idx
-        current_category = risk_categories[end_idx]
+        current_position = position_types[end_idx]
     
     # Add final region
     if start_idx < len(df):
-        if current_category == 1:
-            color = 'lightblue'
-            label = 'Risk Category 1 (Favorable)'
-        else:
+        if current_position == 'long':
+            color = 'lightgreen'
+            label = 'Long Position'
+        elif current_position == 'short':
             color = 'lightcoral'
-            label = 'Risk Category 2 (Unfavorable)'
+            label = 'Short Position'
+        else:
+            color = 'lightgray'
+            label = 'Neutral Position'
         
         plt.axvspan(df.index[start_idx], df.index[-1], 
                    alpha=0.3, color=color, label=label if start_idx == 0 else '')
@@ -504,15 +500,15 @@ def create_plot(df):
     plt.axhline(y=1, color='gray', linestyle='--', alpha=0.5, zorder=4)
     
     # Formatting
-    plt.title('Cumulative Returns with Risk Categories (Log Scale)', fontsize=16, pad=20)
+    plt.title('Cumulative Returns with Position Types (Log Scale)', fontsize=16, pad=20)
     plt.xlabel('Date', fontsize=12)
     plt.ylabel('Cumulative Returns (Log Scale)', fontsize=12)
     plt.grid(True, alpha=0.3, which='both', zorder=1)
     plt.legend(fontsize=10, loc='upper left')
     
-    # Add text box with risk category explanation
-    risk_text = 'Risk Categories:\n• Light Blue (Category 1): Favorable condition\n  - Long position: Open > all SMAs on open (120-day, 365-day, and 30-day)\n  - Short position: Open < all SMAs on open\n• Light Red (Category 2): Unfavorable condition\n  - Long position: Open ≤ any SMA on open\n  - Short position: Open ≥ any SMA on open'
-    plt.text(0.02, 0.98, risk_text,
+    # Add text box with position type explanation
+    position_text = 'Position Types:\n• Light Green: Long Position (Open > both 120-day and 365-day SMAs on open)\n• Light Red: Short Position (Open < both 120-day and 365-day SMAs on open)\n• Light Gray: Neutral Position (Open between SMAs)'
+    plt.text(0.02, 0.98, position_text,
              transform=plt.gca().transAxes,
              fontsize=9,
              verticalalignment='top',
