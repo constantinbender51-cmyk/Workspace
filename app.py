@@ -269,7 +269,7 @@ def calculate_strategy_returns(df, leverage=3.8, stop_loss_pct=0.05):
     # Calculate SMAs
     df['sma_120'] = df['close'].rolling(window=120).mean()
     df['sma_365'] = df['close'].rolling(window=365).mean()
-    df['sma_90'] = df['open'].rolling(window=90).mean()
+    df['sma_120_open'] = df['open'].rolling(window=120).mean()
     
     # Drop NaN values (first 365 days won't have SMA_365)
     df_clean = df.dropna().copy()
@@ -285,11 +285,11 @@ def calculate_strategy_returns(df, leverage=3.8, stop_loss_pct=0.05):
         low_price = df_clean['low'].iloc[i]
         sma_120 = df_clean['sma_120'].iloc[i]
         sma_365 = df_clean['sma_365'].iloc[i]
-        sma_90 = df_clean['sma_90'].iloc[i]
+        sma_120_open = df_clean['sma_120_open'].iloc[i]
         daily_return = df_clean['returns'].iloc[i]
         
-        # Calculate risk category based on open vs 90-day SMA
-        risk_category = 1 if open_price > sma_90 else 2
+        # Calculate risk category based on open vs 120-day SMA
+        risk_category = 1 if open_price > sma_120_open else 2
         adjusted_leverage = 4.0 / (risk_category ** 2)
         
         # Calculate raw strategy signal
@@ -406,8 +406,8 @@ def create_plot(df):
     plt.figure(figsize=(14, 7))
     
     # Calculate risk categories for the plot
-    # Risk category is 1 when open > 90-day SMA, 2 when open <= 90-day SMA
-    risk_categories = np.where(df['open'] > df['sma_90'], 1, 2)
+    # Risk category is 1 when open > 120-day SMA, 2 when open <= 120-day SMA
+    risk_categories = np.where(df['open'] > df['sma_120_open'], 1, 2)
     
     # Find indices where risk category changes
     risk_changes = np.where(np.diff(risk_categories) != 0)[0]
@@ -423,13 +423,13 @@ def create_plot(df):
         
         # Determine color based on risk category
         if current_category == 1:
-            # Light blue for risk category 1 (open > 90-day SMA)
+            # Light blue for risk category 1 (open > 120-day SMA)
             color = 'lightblue'
-            label = 'Risk Category 1 (Open > 90-day SMA)'
+            label = 'Risk Category 1 (Open > 120-day SMA)'
         else:
-            # Light red for risk category 2 (open ≤ 90-day SMA)
+            # Light red for risk category 2 (open ≤ 120-day SMA)
             color = 'lightcoral'
-            label = 'Risk Category 2 (Open ≤ 90-day SMA)'
+            label = 'Risk Category 2 (Open ≤ 120-day SMA)'
         
         # Add shaded region
         plt.axvspan(df.index[start_idx], df.index[end_idx], 
@@ -443,10 +443,10 @@ def create_plot(df):
     if start_idx < len(df):
         if current_category == 1:
             color = 'lightblue'
-            label = 'Risk Category 1 (Open > 90-day SMA)'
+            label = 'Risk Category 1 (Open > 120-day SMA)'
         else:
             color = 'lightcoral'
-            label = 'Risk Category 2 (Open ≤ 90-day SMA)'
+            label = 'Risk Category 2 (Open ≤ 120-day SMA)'
         
         plt.axvspan(df.index[start_idx], df.index[-1], 
                    alpha=0.3, color=color, label=label if start_idx == 0 else '')
@@ -473,7 +473,7 @@ def create_plot(df):
     plt.legend(fontsize=10, loc='upper left')
     
     # Add text box with risk category explanation
-    risk_text = 'Risk Categories:\n• Light Blue: Open > 90-day SMA\n• Light Red: Open ≤ 90-day SMA'
+    risk_text = 'Risk Categories:\n• Light Blue: Open > 120-day SMA\n• Light Red: Open ≤ 120-day SMA'
     plt.text(0.02, 0.98, risk_text,
              transform=plt.gca().transAxes,
              fontsize=9,
@@ -737,8 +737,8 @@ def index():
     monthly_plot_url = create_monthly_plot(monthly_returns_raw)    
     # Calculate risk category and adjusted leverage for the latest day
     latest_open = df_strategy['open'].iloc[-1] if len(df_strategy) > 0 else 0
-    latest_sma_90 = df_strategy['sma_90'].iloc[-1] if len(df_strategy) > 0 else 0
-    risk_category = 1 if latest_open > latest_sma_90 else 2
+    latest_sma_120_open = df_strategy['sma_120_open'].iloc[-1] if len(df_strategy) > 0 else 0
+    risk_category = 1 if latest_open > latest_sma_120_open else 2
     adjusted_leverage = round(4.0 / (risk_category ** 2), 2)
     
     # Prepare template data
