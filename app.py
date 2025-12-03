@@ -269,6 +269,7 @@ def calculate_strategy_returns(df, leverage=3.8, stop_loss_pct=0.05):
     # Calculate SMAs
     df['sma_120'] = df['close'].rolling(window=120).mean()
     df['sma_365'] = df['close'].rolling(window=365).mean()
+    df['sma_14'] = df['close'].rolling(window=14).mean()
     
     # Drop NaN values (first 365 days won't have SMA_365)
     df_clean = df.dropna().copy()
@@ -284,7 +285,12 @@ def calculate_strategy_returns(df, leverage=3.8, stop_loss_pct=0.05):
         low_price = df_clean['low'].iloc[i]
         sma_120 = df_clean['sma_120'].iloc[i]
         sma_365 = df_clean['sma_365'].iloc[i]
+        sma_14 = df_clean['sma_14'].iloc[i]
         daily_return = df_clean['returns'].iloc[i]
+        
+        # Calculate risk category based on open vs 14-day SMA
+        risk_category = 1 if open_price > sma_14 else 2
+        adjusted_leverage = 4.0 / risk_category
         
         # Calculate raw strategy signal
         raw_signal = 0.0
@@ -298,8 +304,8 @@ def calculate_strategy_returns(df, leverage=3.8, stop_loss_pct=0.05):
         else:
             raw_signal = 0.0
         
-        # Apply leverage
-        leveraged_signal = raw_signal * leverage
+        # Apply adjusted leverage
+        leveraged_signal = raw_signal * adjusted_leverage
         
         # Apply fee only on days with non-zero signal
         fee_rate = 0.0004  # 0.04%
@@ -320,8 +326,8 @@ def calculate_strategy_returns(df, leverage=3.8, stop_loss_pct=0.05):
         
         # Apply stop loss if triggered
         if stop_loss_triggered:
-            # Apply stop loss percentage scaled by leverage
-            df_clean.loc[df_clean.index[i], 'strategy_returns'] = -stop_loss_pct * leverage
+            # Apply stop loss percentage scaled by adjusted leverage
+            df_clean.loc[df_clean.index[i], 'strategy_returns'] = -stop_loss_pct * adjusted_leverage
         else:
             df_clean.loc[df_clean.index[i], 'strategy_returns'] = leveraged_signal
     
@@ -670,7 +676,12 @@ def index():
     avg_monthly_return_pct = round(monthly_returns_raw.mean() * 100, 2) if len(monthly_returns_raw) > 0 else 0.0
     
     # Create monthly returns plot
-    monthly_plot_url = create_monthly_plot(monthly_returns_raw)
+    monthly_plot_url = create_monthly_plot(monthly_returns_raw)    
+    # Calculate risk category and adjusted leverage for the latest day
+    latest_open = df_strategy['open'].iloc[-1] if len(df_strategy) > 0 else 0
+    latest_sma_14 = df_strategy['sma_14'].iloc[-1] if len(df_strategy) > 0 else 0
+    risk_category = 1 if latest_open > latest_sma_14 else 2
+    adjusted_leverage = round(4.0 / risk_category, 2)
     
     # Prepare template data
     template_data = {
@@ -679,6 +690,10 @@ def index():
         'total_return_pct': total_return_pct,
         'final_cum_return': final_cum_return,
         'sharpe_ratio': sharpe_ratio,
+        'avg_monthly_return_pct': avg_monthly_return_pct,
+        'positive_days': int(positive_days),
+        'negative_days': int(negative_days),        'risk_category': risk_category,
+        'adjusted_leverage': adjusted_leverage,
         'avg_monthly_return_pct': avg_monthly_return_pct,
         'positive_days': int(positive_days),
         'negative_days': int(negative_days),
