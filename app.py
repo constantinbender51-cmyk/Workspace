@@ -64,7 +64,7 @@ def calculate_strategy_returns(df):
     df['tr'] = np.maximum(df['high'] - df['low'], 
                          np.maximum(abs(df['high'] - df['close'].shift(1)), 
                                     abs(df['low'] - df['close'].shift(1))))
-    df['atr_29'] = df['tr'].rolling(window=29).mean()
+    df['atr_29'] = df['tr'].rolling(window=14).mean()
     df['range'] = df['high'] - df['low']
     
     # Determine position: 1 for long, -1 for short, 0 for flat
