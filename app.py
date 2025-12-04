@@ -66,11 +66,31 @@ class TradingEnvironment:
         return state
     
     def _get_state(self):
-        """Get current state representation using only open price."""
-        # Normalize open price to [0, 1] range based on min/max of entire open series
+        """Get current state representation using lookback window of 10 previous open prices."""
+        # Use lookback window of 10 previous open prices (t-10 to t-1)
+        lookback = 10
+        
+        # Get indices for lookback window
+        start_idx = max(0, self.current_step - lookback)
+        end_idx = self.current_step  # Exclude current price at time t
+        
+        # Extract lookback window of open prices
+        if end_idx > start_idx:
+            lookback_prices = self.open_prices[start_idx:end_idx]
+            # Pad with zeros if we don't have enough history
+            if len(lookback_prices) < lookback:
+                lookback_prices = np.concatenate([
+                    np.zeros(lookback - len(lookback_prices)),
+                    lookback_prices
+                ])
+        else:
+            # At the beginning, use zeros for missing history
+            lookback_prices = np.zeros(lookback)
+        
+        # Normalize lookback prices to [0, 1] range based on min/max of entire open series
         open_min = np.min(self.open_prices)
         open_max = np.max(self.open_prices)
-        normalized_open = (self.open_prices[self.current_step] - open_min) / (open_max - open_min)
+        normalized_lookback = (lookback_prices - open_min) / (open_max - open_min)
         
         # Normalize balance
         normalized_balance = self.balance / (self.initial_balance * 2)
@@ -78,7 +98,10 @@ class TradingEnvironment:
         # Position is already in [-1, 1] range
         normalized_position = (self.position + 1) / 2  # Map to [0, 1]
         
-        return (normalized_open, normalized_position, normalized_balance)
+        # Combine all features into a single state tuple
+        state_features = tuple(normalized_lookback) + (normalized_position, normalized_balance)
+        
+        return state_features
     
     def step(self, action):
         """Take a step in the environment with exclusive actions."""
@@ -153,7 +176,8 @@ class QLearningAgent:
         self.min_exploration = min_exploration
         
         # Discretize state space for Q-table
-        self.state_bins = 10
+        # State now has 12 dimensions: 10 lookback prices + position + balance
+        self.state_bins = 5  # Reduce bins due to larger state space
         self.q_table = defaultdict(lambda: np.zeros(len(env.action_space)))
         
     def discretize_state(self, state):
