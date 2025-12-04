@@ -290,14 +290,27 @@ def plot_results(prices, positions, balances, actions_taken, total_return):
     axes[1].set_xlabel('Step')
     axes[1].legend()
     
-    # Plot 3: Actions taken
+    # Plot 3: Actions taken with clear markers
     action_names = ['flat', 'long', 'short', 'half_long', 'half_short']
-    axes[2].bar(range(len(actions_taken)), actions_taken, alpha=0.7)
+    action_colors = ['gray', 'green', 'red', 'lightgreen', 'lightcoral']
+    
+    # Plot each action type with different markers
+    for action_idx in range(5):
+        # Find all steps where this action was taken
+        action_steps = [i for i, a in enumerate(actions_taken) if a == action_idx]
+        if action_steps:
+            # Plot points for this action
+            axes[2].scatter(action_steps, [action_idx] * len(action_steps), 
+                          color=action_colors[action_idx], s=50, 
+                          label=action_names[action_idx], alpha=0.8)
+    
     axes[2].set_ylabel('Action')
     axes[2].set_xlabel('Step')
     axes[2].set_yticks(range(5))
     axes[2].set_yticklabels(action_names)
-    axes[2].set_title('Actions Taken')
+    axes[2].set_title('Actions Taken Over Time')
+    axes[2].legend(loc='upper right', fontsize='small')
+    axes[2].grid(True, alpha=0.3)
     
     plt.tight_layout()
     
