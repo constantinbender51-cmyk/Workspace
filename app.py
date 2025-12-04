@@ -3,6 +3,9 @@ import pandas as pd
 import random
 from collections import defaultdict
 import matplotlib.pyplot as plt
+import io
+import base64
+from flask import Flask, render_template_string, request
 
 class TradingEnvironment:
     """
@@ -244,7 +247,7 @@ class QLearningAgent:
 
 
 def plot_results(prices, positions, balances, actions_taken, total_return):
-    """Plot trading results."""
+    """Plot trading results and return base64 encoded image."""
     fig, axes = plt.subplots(3, 1, figsize=(12, 10))
     
     # Plot 1: Price and positions
@@ -275,12 +278,20 @@ def plot_results(prices, positions, balances, actions_taken, total_return):
     axes[2].set_title('Actions Taken')
     
     plt.tight_layout()
-    plt.savefig('trading_results.png')
-    plt.show()
+    
+    # Save plot to bytes buffer
+    buf = io.BytesIO()
+    plt.savefig(buf, format='png')
+    plt.close(fig)
+    buf.seek(0)
+    
+    # Encode to base64 for HTML display
+    img_base64 = base64.b64encode(buf.read()).decode('utf-8')
+    return img_base64
 
 
-def main():
-    """Main function to run the RL trading system."""
+def run_training():
+    """Run the RL training and return results."""
     print("=== Reinforcement Learning Trading System ===")
     print("Generating synthetic sine-shaped data with 1000 points...")
     
@@ -296,38 +307,197 @@ def main():
     print("\nTesting trained agent...")
     actions_taken, prices, positions, balances, total_return = agent.test()
     
-    # Print summary
-    print("\n=== Training Summary ===")
-    print(f"Final exploration rate: {agent.exploration_rate:.4f}")
-    print(f"Number of states in Q-table: {len(agent.q_table)}")
-    print(f"Final test total return: {total_return:.2f}")
-    print(f"Final balance: {balances[-1]:.2f}")
-    
     # Action distribution
     action_names = ['flat', 'long', 'short', 'half_long', 'half_short']
     action_counts = {name: 0 for name in action_names}
     for action in actions_taken:
         action_counts[action_names[action]] += 1
     
-    print("\nAction distribution:")
-    for action_name, count in action_counts.items():
-        percentage = (count / len(actions_taken)) * 100
-        print(f"  {action_name}: {count} times ({percentage:.1f}%)")
+    # Generate visualization
+    img_base64 = plot_results(prices, positions, balances, actions_taken, total_return)
     
-    # Plot results
-    print("\nGenerating visualization...")
-    plot_results(prices, positions, balances, actions_taken, total_return)
+    # Prepare summary data
+    summary = {
+        'total_return': total_return,
+        'final_balance': balances[-1],
+        'exploration_rate': agent.exploration_rate,
+        'q_table_size': len(agent.q_table),
+        'action_distribution': action_counts,
+        'total_steps': len(actions_taken),
+        'image': img_base64
+    }
     
-    # Save Q-table for future use
-    print("\nSaving Q-table to file...")
-    q_table_dict = {str(k): v.tolist() for k, v in agent.q_table.items()}
-    import json
-    with open('q_table.json', 'w') as f:
-        json.dump(q_table_dict, f)
+    return summary
+
+
+# Flask web application
+app = Flask(__name__)
+
+HTML_TEMPLATE = '''
+<!DOCTYPE html>
+<html>
+<head>
+    <title>RL Trading System Visualization</title>
+    <style>
+        body {
+            font-family: Arial, sans-serif;
+            margin: 20px;
+            background-color: #f5f5f5;
+        }
+        .container {
+            max-width: 1200px;
+            margin: 0 auto;
+            background-color: white;
+            padding: 20px;
+            border-radius: 10px;
+            box-shadow: 0 2px 10px rgba(0,0,0,0.1);
+        }
+        h1 {
+            color: #333;
+            text-align: center;
+        }
+        .summary {
+            background-color: #f9f9f9;
+            padding: 15px;
+            border-radius: 5px;
+            margin-bottom: 20px;
+        }
+        .summary-grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+            gap: 15px;
+            margin-top: 15px;
+        }
+        .summary-item {
+            background-color: white;
+            padding: 10px;
+            border-radius: 5px;
+            border-left: 4px solid #4CAF50;
+        }
+        .summary-item h3 {
+            margin-top: 0;
+            color: #555;
+        }
+        .visualization {
+            text-align: center;
+            margin-top: 20px;
+        }
+        img {
+            max-width: 100%;
+            height: auto;
+            border: 1px solid #ddd;
+            border-radius: 5px;
+        }
+        .action-distribution {
+            margin-top: 20px;
+        }
+        .action-bar {
+            display: flex;
+            margin-bottom: 5px;
+            align-items: center;
+        }
+        .action-name {
+            width: 100px;
+            font-weight: bold;
+        }
+        .action-bar-inner {
+            height: 20px;
+            background-color: #4CAF50;
+            border-radius: 3px;
+        }
+        .action-count {
+            margin-left: 10px;
+        }
+        .btn {
+            background-color: #4CAF50;
+            color: white;
+            padding: 10px 20px;
+            border: none;
+            border-radius: 5px;
+            cursor: pointer;
+            font-size: 16px;
+            margin: 10px 0;
+        }
+        .btn:hover {
+            background-color: #45a049;
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <h1>Reinforcement Learning Trading System</h1>
+        <p style="text-align: center;">Optimizing returns on synthetic sine-shaped data (1000 training examples)</p>
+        
+        <div style="text-align: center;">
+            <form method="POST">
+                <button type="submit" class="btn">Run New Training Session</button>
+            </form>
+        </div>
+        
+        {% if summary %}
+        <div class="summary">
+            <h2>Training Summary</h2>
+            <div class="summary-grid">
+                <div class="summary-item">
+                    <h3>Total Return</h3>
+                    <p style="font-size: 24px; font-weight: bold; color: {% if summary.total_return > 0 %}#4CAF50{% else %}#f44336{% endif %};">
+                        {{ "%.2f"|format(summary.total_return) }}
+                    </p>
+                </div>
+                <div class="summary-item">
+                    <h3>Final Balance</h3>
+                    <p style="font-size: 24px; font-weight: bold;">{{ "%.2f"|format(summary.final_balance) }}</p>
+                </div>
+                <div class="summary-item">
+                    <h3>Exploration Rate</h3>
+                    <p style="font-size: 24px; font-weight: bold;">{{ "%.4f"|format(summary.exploration_rate) }}</p>
+                </div>
+                <div class="summary-item">
+                    <h3>Q-table Size</h3>
+                    <p style="font-size: 24px; font-weight: bold;">{{ summary.q_table_size }} states</p>
+                </div>
+            </div>
+            
+            <div class="action-distribution">
+                <h3>Action Distribution</h3>
+                {% for action_name, count in summary.action_distribution.items() %}
+                {% set percentage = (count / summary.total_steps * 100) %}
+                <div class="action-bar">
+                    <div class="action-name">{{ action_name }}</div>
+                    <div class="action-bar-inner" style="width: {{ percentage }}%;"></div>
+                    <div class="action-count">{{ count }} ({{ "%.1f"|format(percentage) }}%)</div>
+                </div>
+                {% endfor %}
+            </div>
+        </div>
+        
+        <div class="visualization">
+            <h2>Trading Visualization</h2>
+            <img src="data:image/png;base64,{{ summary.image }}" alt="Trading Results Visualization">
+        </div>
+        {% else %}
+        <div style="text-align: center; padding: 40px;">
+            <h2>Click the button above to run a training session</h2>
+            <p>The system will train a Q-learning agent on synthetic sine-shaped data and display the results.</p>
+        </div>
+        {% endif %}
+    </div>
+</body>
+</html>
+'''
+
+@app.route('/', methods=['GET', 'POST'])
+def index():
+    summary = None
     
-    print("\n=== Program Complete ===")
-    print("Results saved to 'trading_results.png' and 'q_table.json'")
+    if request.method == 'POST':
+        # Run training when form is submitted
+        summary = run_training()
+    
+    return render_template_string(HTML_TEMPLATE, summary=summary)
 
 
 if __name__ == "__main__":
-    main()
+    print("Starting web server on port 8080...")
+    print("Open your browser and navigate to http://localhost:8080")
+    app.run(host='0.0.0.0', port=8080, debug=False)
