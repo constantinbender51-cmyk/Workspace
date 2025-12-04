@@ -251,17 +251,45 @@ def plot_results(prices, positions, balances, actions_taken, total_return):
     """Plot trading results and return base64 encoded image."""
     fig, axes = plt.subplots(3, 1, figsize=(12, 10))
     
-    # Plot 1: Price and positions
+    # Plot 1: Price and positions with different colors
     axes[0].plot(prices, label='Price', color='blue', alpha=0.7)
     axes[0].set_ylabel('Price')
     axes[0].set_title(f'Trading Results - Total Return: {total_return:.2f}')
     axes[0].legend(loc='upper left')
     
-    # Create secondary y-axis for positions
+    # Create secondary y-axis for positions with color coding
     ax2 = axes[0].twinx()
-    ax2.plot(positions, label='Position', color='red', alpha=0.7, linewidth=2)
+    
+    # Define colors for different position types
+    position_colors = {
+        0.0: 'gray',    # flat
+        1.0: 'green',   # long
+        -1.0: 'red',    # short
+        0.5: 'lightgreen',  # half_long
+        -0.5: 'lightcoral'  # half_short
+    }
+    
+    # Plot positions with different colors based on value
+    for i in range(len(positions)):
+        pos = positions[i]
+        color = position_colors.get(pos, 'black')
+        ax2.scatter(i, pos, color=color, s=20, alpha=0.7)
+    
+    # Add a line connecting the positions for better visualization
+    ax2.plot(positions, color='gray', alpha=0.3, linewidth=0.5)
+    
     ax2.set_ylabel('Position')
-    ax2.legend(loc='upper right')
+    
+    # Create custom legend for position colors
+    from matplotlib.lines import Line2D
+    legend_elements = [
+        Line2D([0], [0], marker='o', color='w', markerfacecolor='gray', markersize=8, label='Flat (0.0)'),
+        Line2D([0], [0], marker='o', color='w', markerfacecolor='green', markersize=8, label='Long (1.0)'),
+        Line2D([0], [0], marker='o', color='w', markerfacecolor='red', markersize=8, label='Short (-1.0)'),
+        Line2D([0], [0], marker='o', color='w', markerfacecolor='lightgreen', markersize=8, label='Half Long (0.5)'),
+        Line2D([0], [0], marker='o', color='w', markerfacecolor='lightcoral', markersize=8, label='Half Short (-0.5)')
+    ]
+    ax2.legend(handles=legend_elements, loc='upper right', fontsize='small')
     
     # Plot 2: Balance over time
     axes[1].plot(balances, label='Balance', color='green')
