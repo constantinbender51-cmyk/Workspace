@@ -53,9 +53,9 @@ class TradingEnvironment:
         return state
     
     def _get_state(self):
-        """Get current state representation using lookback window of 10 previous prices."""
-        # Use lookback window of 10 previous prices (t-10 to t-1)
-        lookback = 10
+        """Get current state representation using lookback window of 2 previous prices."""
+        # Use lookback window of 2 previous prices (t-2 to t-1)
+        lookback = 2
         
         # Get indices for lookback window
         start_idx = max(0, self.current_step - lookback)
@@ -162,7 +162,7 @@ class QLearningAgent:
         self.min_exploration = min_exploration
         
         # Discretize state space for Q-table
-        # State now has 12 dimensions: 10 lookback prices + position + balance
+        # State now has 4 dimensions: 2 lookback prices + position + balance
         self.state_bins = 5  # Reduce bins due to larger state space
         self.q_table = defaultdict(lambda: np.zeros(len(env.action_space)))
         
