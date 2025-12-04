@@ -33,8 +33,8 @@ class TradingEnvironment:
     def generate_price_data(self):
         """Generate synthetic sine-shaped price data."""
         t = np.linspace(0, 10 * np.pi, self.data_points)
-        # Generate price series
-        prices = 100 + 20 * np.sin(t) + np.random.normal(0, 2, self.data_points)
+        # Generate price series with reduced noise
+        prices = 100 + 20 * np.sin(t) + np.random.normal(0, 0.5, self.data_points)
         
         return prices
     
