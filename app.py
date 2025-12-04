@@ -53,9 +53,9 @@ class TradingEnvironment:
         return state
     
     def _get_state(self):
-        """Get current state representation using lookback window of 2 previous prices."""
-        # Use lookback window of 2 previous prices (t-2 to t-1)
-        lookback = 2
+        """Get current state representation using lookback window of 1 previous price."""
+        # Use lookback window of 1 previous price (t-1)
+        lookback = 1
         
         # Get indices for lookback window
         start_idx = max(0, self.current_step - lookback)
