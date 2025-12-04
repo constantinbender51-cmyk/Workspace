@@ -31,14 +31,29 @@ class TradingEnvironment:
         }
         
     def generate_sine_data(self):
-        """Generate synthetic sine-shaped price data."""
+        """Generate synthetic sine-shaped price data with open and close prices."""
         t = np.linspace(0, 10 * np.pi, self.data_points)
-        price = 100 + 20 * np.sin(t) + np.random.normal(0, 2, self.data_points)
-        return price
+        # Generate base price series
+        base_price = 100 + 20 * np.sin(t) + np.random.normal(0, 2, self.data_points)
+        
+        # Create open and close prices (open is previous close with small variation)
+        open_prices = np.zeros(self.data_points)
+        close_prices = np.zeros(self.data_points)
+        
+        # First open is the base price
+        open_prices[0] = base_price[0]
+        close_prices[0] = base_price[0] + np.random.normal(0, 1)
+        
+        # Subsequent opens are previous closes with small variation
+        for i in range(1, self.data_points):
+            open_prices[i] = close_prices[i-1] + np.random.normal(0, 0.5)
+            close_prices[i] = base_price[i] + np.random.normal(0, 1)
+        
+        return open_prices, close_prices
     
     def reset(self):
         """Reset the environment to initial state."""
-        self.prices = self.generate_sine_data()
+        self.open_prices, self.close_prices = self.generate_sine_data()
         self.current_step = 0
         self.balance = self.initial_balance
         self.position = 0.0  # Current position multiplier (-1 to 1)
@@ -46,16 +61,16 @@ class TradingEnvironment:
         self.total_return = 0.0
         self.done = False
         
-        # Initial state: normalized price, position, and balance
+        # Initial state: normalized open price, position, and balance
         state = self._get_state()
         return state
     
     def _get_state(self):
-        """Get current state representation."""
-        # Normalize price to [0, 1] range based on min/max of entire series
-        price_min = np.min(self.prices)
-        price_max = np.max(self.prices)
-        normalized_price = (self.prices[self.current_step] - price_min) / (price_max - price_min)
+        """Get current state representation using only open price."""
+        # Normalize open price to [0, 1] range based on min/max of entire open series
+        open_min = np.min(self.open_prices)
+        open_max = np.max(self.open_prices)
+        normalized_open = (self.open_prices[self.current_step] - open_min) / (open_max - open_min)
         
         # Normalize balance
         normalized_balance = self.balance / (self.initial_balance * 2)
@@ -63,15 +78,16 @@ class TradingEnvironment:
         # Position is already in [-1, 1] range
         normalized_position = (self.position + 1) / 2  # Map to [0, 1]
         
-        return (normalized_price, normalized_position, normalized_balance)
+        return (normalized_open, normalized_position, normalized_balance)
     
     def step(self, action):
         """Take a step in the environment with exclusive actions."""
         if self.done:
             raise ValueError("Episode has already terminated")
         
-        # Get current and next price
-        current_price = self.prices[self.current_step]
+        # Get current open price and current close price
+        current_open = self.open_prices[self.current_step]
+        current_close = self.close_prices[self.current_step]
         
         # Update position based on action (exclusive: position set directly from action)
         # Actions are exclusive per time step, so position is not cumulative
@@ -81,14 +97,15 @@ class TradingEnvironment:
         self.current_step += 1
         
         # Check if episode is done
-        if self.current_step >= len(self.prices) - 1:
+        if self.current_step >= len(self.open_prices) - 1:
             self.done = True
-            next_price = current_price  # No price change on last step
+            next_open = current_open  # No price change on last step
         else:
-            next_price = self.prices[self.current_step]
+            next_open = self.open_prices[self.current_step]
         
-        # Calculate return based on position
-        price_change = next_price - current_price
+        # Calculate return based on position (using close to open price change)
+        # Position taken at current open, evaluated at current close
+        price_change = current_close - current_open
         position_return = self.position * price_change
         
         # Update balance (simplified - no transaction costs)
@@ -106,7 +123,7 @@ class TradingEnvironment:
         
         # Additional info
         info = {
-            'price': current_price,
+            'price': current_open,  # Using open price for display
             'position': self.position,
             'balance': self.balance,
             'step_return': position_return,
@@ -117,7 +134,7 @@ class TradingEnvironment:
     
     def render(self):
         """Print current environment status."""
-        print(f"Step: {self.current_step}, Price: {self.prices[self.current_step]:.2f}, "
+        print(f"Step: {self.current_step}, Open: {self.open_prices[self.current_step]:.2f}, Close: {self.close_prices[self.current_step]:.2f}, "
               f"Position: {self.position}, Balance: {self.balance:.2f}, "
               f"Total Return: {self.total_return:.2f}")
 
@@ -252,8 +269,8 @@ def plot_results(prices, positions, balances, actions_taken, total_return):
     fig, axes = plt.subplots(3, 1, figsize=(12, 10))
     
     # Plot 1: Price with background colors based on positions
-    axes[0].plot(prices, label='Price', color='blue', alpha=0.7, linewidth=2)
-    axes[0].set_ylabel('Price')
+    axes[0].plot(prices, label='Open Price', color='blue', alpha=0.7, linewidth=2)
+    axes[0].set_ylabel('Open Price')
     axes[0].set_title(f'Trading Results - Total Return: {total_return:.2f}')
     axes[0].legend(loc='upper left')
     
