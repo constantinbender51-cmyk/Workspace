@@ -66,14 +66,15 @@ class TradingEnvironment:
         return (normalized_price, normalized_position, normalized_balance)
     
     def step(self, action):
-        """Take a step in the environment."""
+        """Take a step in the environment with exclusive actions."""
         if self.done:
             raise ValueError("Episode has already terminated")
         
         # Get current and next price
         current_price = self.prices[self.current_step]
         
-        # Update position based on action
+        # Update position based on action (exclusive: position set directly from action)
+        # Actions are exclusive per time step, so position is not cumulative
         self.position = self.position_multipliers[action]
         
         # Move to next step
