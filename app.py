@@ -328,10 +328,10 @@ def plot_results(prices, positions, balances, actions_taken, total_return):
 def run_training():
     """Run the RL training and return results."""
     print("=== Reinforcement Learning Trading System ===")
-    print("Generating synthetic sine-shaped data with 1000 points...")
+    print("Generating synthetic sine-shaped data with 2000 points...")
     
     # Create environment
-    env = TradingEnvironment(data_points=1000, initial_balance=10000)
+    env = TradingEnvironment(data_points=2000, initial_balance=10000)
     
     # Create and train agent
     print("\nTraining Q-learning agent...")
@@ -461,7 +461,7 @@ HTML_TEMPLATE = '''
 <body>
     <div class="container">
         <h1>Reinforcement Learning Trading System</h1>
-        <p style="text-align: center;">Optimizing returns on synthetic sine-shaped data (1000 training examples)</p>
+        <p style="text-align: center;">Optimizing returns on synthetic sine-shaped data (2000 training examples)</p>
         
         <div style="text-align: center;">
             <form method="POST">
