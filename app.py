@@ -251,16 +251,13 @@ def plot_results(prices, positions, balances, actions_taken, total_return):
     """Plot trading results and return base64 encoded image."""
     fig, axes = plt.subplots(3, 1, figsize=(12, 10))
     
-    # Plot 1: Price and positions with different colors
-    axes[0].plot(prices, label='Price', color='blue', alpha=0.7)
+    # Plot 1: Price with background colors based on positions
+    axes[0].plot(prices, label='Price', color='blue', alpha=0.7, linewidth=2)
     axes[0].set_ylabel('Price')
     axes[0].set_title(f'Trading Results - Total Return: {total_return:.2f}')
     axes[0].legend(loc='upper left')
     
-    # Create secondary y-axis for positions with color coding
-    ax2 = axes[0].twinx()
-    
-    # Define colors for different position types
+    # Define background colors for different position types
     position_colors = {
         0.0: 'gray',    # flat
         1.0: 'green',   # long
@@ -269,27 +266,23 @@ def plot_results(prices, positions, balances, actions_taken, total_return):
         -0.5: 'lightcoral'  # half_short
     }
     
-    # Plot positions with different colors based on value
+    # Add background colors for each position
     for i in range(len(positions)):
         pos = positions[i]
-        color = position_colors.get(pos, 'black')
-        ax2.scatter(i, pos, color=color, s=20, alpha=0.7)
-    
-    # Add a line connecting the positions for better visualization
-    ax2.plot(positions, color='gray', alpha=0.3, linewidth=0.5)
-    
-    ax2.set_ylabel('Position')
+        color = position_colors.get(pos, 'white')
+        # Add colored rectangle for each time step
+        axes[0].axvspan(i - 0.5, i + 0.5, facecolor=color, alpha=0.3)
     
     # Create custom legend for position colors
-    from matplotlib.lines import Line2D
+    from matplotlib.patches import Patch
     legend_elements = [
-        Line2D([0], [0], marker='o', color='w', markerfacecolor='gray', markersize=8, label='Flat (0.0)'),
-        Line2D([0], [0], marker='o', color='w', markerfacecolor='green', markersize=8, label='Long (1.0)'),
-        Line2D([0], [0], marker='o', color='w', markerfacecolor='red', markersize=8, label='Short (-1.0)'),
-        Line2D([0], [0], marker='o', color='w', markerfacecolor='lightgreen', markersize=8, label='Half Long (0.5)'),
-        Line2D([0], [0], marker='o', color='w', markerfacecolor='lightcoral', markersize=8, label='Half Short (-0.5)')
+        Patch(facecolor='gray', alpha=0.3, label='Flat (0.0)'),
+        Patch(facecolor='green', alpha=0.3, label='Long (1.0)'),
+        Patch(facecolor='red', alpha=0.3, label='Short (-1.0)'),
+        Patch(facecolor='lightgreen', alpha=0.3, label='Half Long (0.5)'),
+        Patch(facecolor='lightcoral', alpha=0.3, label='Half Short (-0.5)')
     ]
-    ax2.legend(handles=legend_elements, loc='upper right', fontsize='small')
+    axes[0].legend(handles=legend_elements, loc='upper right', fontsize='small')
     
     # Plot 2: Balance over time
     axes[1].plot(balances, label='Balance', color='green')
