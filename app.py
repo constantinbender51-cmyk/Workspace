@@ -299,7 +299,7 @@ def run_simulation():
             self.check_freq = check_freq
             self.start_time = None
             self.last_log_time = None
-            self.log_interval = 50000  # Log every 50000 steps to further reduce logging frequency
+            self.log_interval = 10000  # Log every 10000 steps
             
         def _on_training_start(self) -> None:
             self.start_time = time.time()
@@ -311,8 +311,17 @@ def run_simulation():
             current_time = time.time()
             
             # Log only at the specified interval (every log_interval steps) and at the start
-            # Remove logging at the last step (n_calls == num_timesteps) to avoid burst at end
-            if self.n_calls % self.log_interval == 0 or self.n_calls == 1:
+            # Also log at the end of training (n_calls == num_timesteps) but only once
+            should_log = False
+            
+            if self.n_calls == 1:
+                should_log = True  # Log at start
+            elif self.n_calls % self.log_interval == 0:
+                should_log = True  # Log at interval
+            elif self.n_calls == self.num_timesteps:
+                should_log = True  # Log at end
+            
+            if should_log:
                 elapsed_time = current_time - self.start_time
                 
                 # Handle division by zero or small num_timesteps
@@ -349,11 +358,6 @@ def run_simulation():
                 bar = '█' * filled_length + '░' * (bar_length - filled_length)
                 
                 logger.info(f"Step {self.n_calls}/{self.num_timesteps} [{bar}] {progress_percent:.1f}% | ETA: {time_str} | Speed: {steps_per_sec:.1f} steps/sec")
-                
-                # Log milestone every 10% (only if num_timesteps >= 10)
-                # Ensure we don't log milestone at the same time as interval log to avoid duplicates
-                if self.num_timesteps >= 10 and self.n_calls % (self.num_timesteps // 10) == 0 and self.n_calls > 0 and self.n_calls % self.log_interval != 0:
-                    logger.info(f"Training milestone: {progress_percent:.0f}% complete ({self.n_calls}/{self.num_timesteps} steps)")
                 
                 self.last_log_time = current_time
             
