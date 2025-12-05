@@ -1,565 +1,291 @@
+import gymnasium as gym
+from gymnasium import spaces
 import numpy as np
 import pandas as pd
-import random
-from collections import defaultdict
 import matplotlib.pyplot as plt
-import io
-import base64
-from flask import Flask, render_template_string, request
+from stable_baselines3 import PPO
+from stable_baselines3.common.vec_env import DummyVecEnv
 
-class TradingEnvironment:
+# ==========================================
+# 1. Synthetic Data Generation
+# ==========================================
+def generate_price_data(n_days=1000, start_price=100, volatility=0.02):
     """
-    A custom trading environment for reinforcement learning.
-    The environment generates synthetic sine-shaped price data.
+    Generates synthetic daily OHLC data with a sine wave trend + random noise.
     """
-    def __init__(self, data_points=1000, initial_balance=10000):
-        self.data_points = data_points
+    np.random.seed(42)
+    
+    # Generate a trend (sine wave + linear trend)
+    x = np.linspace(0, 50, n_days)
+    trend = 10 * np.sin(x) + x * 0.5
+    
+    # Random walk component
+    returns = np.random.normal(0, volatility, n_days)
+    price_curve = start_price * (1 + np.cumsum(returns)) + trend
+    
+    data = []
+    for i in range(n_days):
+        close_price = price_curve[i]
+        # Simulate High/Low/Open based on Close
+        daily_vol = close_price * volatility
+        high_price = close_price + abs(np.random.normal(0, daily_vol/2))
+        low_price = close_price - abs(np.random.normal(0, daily_vol/2))
+        open_price = close_price + np.random.normal(0, daily_vol/4)
+        
+        # Ensure logical consistency
+        high_price = max(high_price, open_price, close_price)
+        low_price = min(low_price, open_price, close_price)
+        
+        data.append([open_price, high_price, low_price, close_price])
+        
+    df = pd.DataFrame(data, columns=['Open', 'High', 'Low', 'Close'])
+    return df
+
+# ==========================================
+# 2. Custom Trading Environment
+# ==========================================
+class TradingEnv(gym.Env):
+    """
+    A custom trading environment for RL.
+    
+    Actions:
+        Box(-1, 1): 
+        -1 = Full Short
+         0 = Flat
+         1 = Full Long
+         
+    Stop Loss:
+        Triggers if High/Low exceeds p% from entry price.
+    """
+    metadata = {'render.modes': ['human']}
+
+    def __init__(self, df, stop_loss_pct=0.02, initial_balance=10000):
+        super(TradingEnv, self).__init__()
+        
+        self.df = df
+        self.stop_loss_pct = stop_loss_pct
         self.initial_balance = initial_balance
-        self.reset()
         
-        # Define action space: 0=flat, 1=long, 2=short, 3=half_long, 4=half_short
-        self.action_space = [0, 1, 2, 3, 4]
-        self.action_names = ['flat', 'long', 'short', 'half_long', 'half_short']
+        # Action space: Continuous value between -1 and 1
+        # We interpret this as the target position ratio (100% long to 100% short)
+        self.action_space = spaces.Box(low=np.array([-1]), high=np.array([1]), dtype=np.float32)
         
-        # Position multipliers for each action
-        self.position_multipliers = {
-            0: 0.0,    # flat: no position
-            1: 1.0,    # long: full long position
-            2: -1.0,   # short: full short position
-            3: 0.5,    # half_long: half long position
-            4: -0.5    # half_short: half short position
-        }
+        # Observation space: 
+        # [Recent Returns, Volatility, Current Position, Unrealized PnL %]
+        # Shape is (6,) for a simple window of 3 returns + 3 state vars
+        self.observation_space = spaces.Box(low=-np.inf, high=np.inf, shape=(6,), dtype=np.float32)
         
-    def generate_price_data(self):
-        """Generate synthetic sine-shaped price data."""
-        t = np.linspace(0, 10 * np.pi, self.data_points)
-        # Generate price series with reduced noise
-        prices = 100 + 20 * np.sin(t) + np.random.normal(0, 0.5, self.data_points)
-        
-        return prices
-    
-    def reset(self):
-        """Reset the environment to initial state."""
-        self.prices = self.generate_price_data()
         self.current_step = 0
+        self.max_steps = len(df) - 1
+        
+    def reset(self, seed=None, options=None):
+        super().reset(seed=seed)
+        
+        self.current_step = 10 # Start at 10 to allow for lag features
         self.balance = self.initial_balance
-        self.position = 0.0  # Current position multiplier (-1 to 1)
-        self.returns = []
-        self.total_return = 0.0
-        self.done = False
+        self.net_worth = self.initial_balance
+        self.position = 0 # Current units held (can be float, but usually integer in real life. We use float for simplicity)
+        self.entry_price = 0
+        self.max_net_worth = self.initial_balance
+        self.history = {'net_worth': []}
         
-        # Initial state: lookback window of previous prices
-        state = self._get_state()
-        return state
-    
-    def _get_state(self):
-        """Get current state representation using lookback window of 100 previous prices."""
-        # Use lookback window of 100 previous prices (t-100 to t-1)
-        lookback = 100
+        return self._next_observation(), {}
+
+    def _next_observation(self):
+        # Get data window
+        frame = self.df.iloc[self.current_step - 5 : self.current_step + 1]
         
-        # Get indices for lookback window
-        start_idx = max(0, self.current_step - lookback)
-        end_idx = self.current_step  # Exclude current price at time t
+        # 1. Log Returns of the last 3 days
+        close_prices = frame['Close'].values
+        returns = np.diff(np.log(close_prices))[-3:]
         
-        # Extract lookback window of prices
-        if end_idx > start_idx:
-            lookback_prices = self.prices[start_idx:end_idx]
-            # Pad with zeros if we don't have enough history
-            if len(lookback_prices) < lookback:
-                lookback_prices = np.concatenate([
-                    np.zeros(lookback - len(lookback_prices)),
-                    lookback_prices
-                ])
+        # 2. Volatility (std dev of last 5 prices normalized)
+        vol = np.std(close_prices) / np.mean(close_prices)
+        
+        # 3. Current State
+        pos_norm = 0
+        if self.entry_price > 0:
+            # Normalize Unrealized PnL roughly
+            unrealized_pnl = (close_prices[-1] - self.entry_price) / self.entry_price
+            if self.position < 0: unrealized_pnl *= -1
         else:
-            # At the beginning, use zeros for missing history
-            lookback_prices = np.zeros(lookback)
+            unrealized_pnl = 0
+            
+        # Normalize current position status (-1 to 1)
+        # We estimate max position size based on balance for normalization
+        current_pos_ratio = 0
+        if self.net_worth > 0:
+            current_pos_ratio = (self.position * close_prices[-1]) / self.net_worth
+
+        obs = np.concatenate((returns, [vol, current_pos_ratio, unrealized_pnl]))
         
-        # Normalize lookback prices to [0, 1] range based on min/max of entire price series
-        price_min = np.min(self.prices)
-        price_max = np.max(self.prices)
-        normalized_lookback = (lookback_prices - price_min) / (price_max - price_min)
-        
-        # Normalize balance
-        normalized_balance = self.balance / (self.initial_balance * 2)
-        
-        # Position is already in [-1, 1] range
-        normalized_position = (self.position + 1) / 2  # Map to [0, 1]
-        
-        # Combine all features into a single state tuple
-        state_features = tuple(normalized_lookback) + (normalized_position, normalized_balance)
-        
-        return state_features
-    
+        # Handle cases where data might be missing or nan (though synthetic data is clean)
+        return np.nan_to_num(obs, nan=0.0).astype(np.float32)
+
     def step(self, action):
-        """Take a step in the environment with exclusive actions."""
-        if self.done:
-            raise ValueError("Episode has already terminated")
+        # Current Market Data
+        current_price = self.df.iloc[self.current_step]['Close']
+        high_price = self.df.iloc[self.current_step]['High']
+        low_price = self.df.iloc[self.current_step]['Low']
         
-        # Get current price (price at time t)
-        current_price = self.prices[self.current_step]
+        # 1. Check Stop Loss on EXISTING position before executing new action
+        sl_triggered = False
         
-        # Update position based on action (exclusive: position set directly from action)
-        # Actions are exclusive per time step, so position is not cumulative
-        self.position = self.position_multipliers[action]
+        if self.position != 0:
+            if self.position > 0: # Long
+                sl_price = self.entry_price * (1 - self.stop_loss_pct)
+                if low_price <= sl_price:
+                    # SL Hit
+                    self.balance += self.position * sl_price
+                    self.position = 0
+                    self.entry_price = 0
+                    sl_triggered = True
+            elif self.position < 0: # Short
+                sl_price = self.entry_price * (1 + self.stop_loss_pct)
+                if high_price >= sl_price:
+                    # SL Hit
+                    self.balance += self.position * sl_price
+                    self.position = 0
+                    self.entry_price = 0
+                    sl_triggered = True
+
+        # 2. Execute Action (if SL didn't trigger this step, or if we want to re-enter)
+        # The action represents the TARGET percentage of portfolio to invest
+        # action is array like [-0.5], extract float
+        target_ratio = float(action[0]) 
         
-        # Move to next step
+        # Clip action
+        target_ratio = np.clip(target_ratio, -1, 1)
+        
+        if not sl_triggered:
+            # Calculate target value
+            current_val = self.balance + (self.position * current_price)
+            target_exposure = current_val * target_ratio
+            
+            # Units needed to reach target
+            units_needed = target_exposure / current_price
+            
+            # Simple transaction cost can be added here (e.g., 0.1%)
+            # We skip explicit transaction costs for this simple example, 
+            # but usually, you subtract cost from balance.
+            
+            # Update Position
+            if abs(units_needed - self.position) > 0.01: # Only trade if significant change
+                
+                # If flipping from Long to Short or vice versa, reset entry price
+                if np.sign(units_needed) != np.sign(self.position) and abs(units_needed) > 0:
+                    self.entry_price = current_price
+                elif self.position == 0 and abs(units_needed) > 0:
+                    self.entry_price = current_price
+                    
+                # Realize PnL on the portion sold/bought (Simulated via balance update)
+                # Mathematical simplification: We just set new position and update cash
+                # Cash = Total Value - (New Position * Price)
+                self.position = units_needed
+                self.balance = current_val - (self.position * current_price)
+
+        # 3. Calculate New Net Worth
+        self.net_worth = self.balance + (self.position * current_price)
+        self.history['net_worth'].append(self.net_worth)
+        
+        # 4. Calculate Reward
+        # Reward is percentage change in Net Worth (to be scale invariant)
+        # Can also add penalty for volatility or holding too long
+        prev_net_worth = self.history['net_worth'][-2] if len(self.history['net_worth']) > 1 else self.initial_balance
+        reward = (self.net_worth - prev_net_worth) / prev_net_worth * 100
+        
+        if sl_triggered:
+            reward -= 0.5 # Penalty for hitting stop loss
+
+        # 5. Advance Step
         self.current_step += 1
+        terminated = self.current_step >= self.max_steps
+        truncated = False
         
-        # Check if episode is done
-        if self.current_step >= len(self.prices) - 1:
-            self.done = True
-            next_price = current_price  # No price change on last step
-        else:
-            next_price = self.prices[self.current_step]
-        
-        # Calculate return based on position (using price change from t to t+1)
-        # Position taken at current price (t), evaluated at next price (t+1)
-        price_change = next_price - current_price
-        position_return = self.position * price_change
-        
-        # Update balance (simplified - no transaction costs)
-        self.balance += position_return
-        
-        # Track returns
-        self.returns.append(position_return)
-        self.total_return = np.sum(self.returns)
-        
-        # Calculate reward (could be return, Sharpe ratio, etc.)
-        reward = position_return
-        
-        # Get next state
-        next_state = self._get_state()
-        
-        # Additional info
-        info = {
-            'price': current_price,
-            'position': self.position,
-            'balance': self.balance,
-            'step_return': position_return,
-            'total_return': self.total_return
-        }
-        
-        return next_state, reward, self.done, info
-    
-    def render(self):
-        """Print current environment status."""
-        print(f"Step: {self.current_step}, Price: {self.prices[self.current_step]:.2f}, "
-              f"Position: {self.position}, Balance: {self.balance:.2f}, "
-              f"Total Return: {self.total_return:.2f}")
+        # Check for bankruptcy
+        if self.net_worth < self.initial_balance * 0.1:
+            terminated = True
+            reward = -10 # Heavy penalty for blowing up account
 
+        return self._next_observation(), reward, terminated, truncated, {}
 
-class QLearningAgent:
-    """
-    Q-learning agent for trading optimization.
-    """
-    def __init__(self, env, learning_rate=0.1, discount_factor=0.95, 
-                 exploration_rate=1.0, exploration_decay=0.995, min_exploration=0.01):
-        self.env = env
-        self.learning_rate = learning_rate
-        self.discount_factor = discount_factor
-        self.exploration_rate = exploration_rate
-        self.exploration_decay = exploration_decay
-        self.min_exploration = min_exploration
-        
-        # Discretize state space for Q-table
-        # State now has 4 dimensions: 2 lookback prices + position + balance
-        self.state_bins = 5  # Reduce bins due to larger state space
-        self.q_table = defaultdict(lambda: np.zeros(len(env.action_space)))
-        
-    def discretize_state(self, state):
-        """Convert continuous state to discrete bins."""
-        discretized = []
-        for value in state:
-            # Clip to [0, 1] and bin
-            clipped = np.clip(value, 0, 1)
-            bin_index = int(clipped * (self.state_bins - 1))
-            discretized.append(bin_index)
-        return tuple(discretized)
-    
-    def choose_action(self, state):
-        """Choose action using epsilon-greedy policy."""
-        discretized_state = self.discretize_state(state)
-        
-        # Exploration vs exploitation
-        if random.random() < self.exploration_rate:
-            # Explore: random action
-            action = random.choice(self.env.action_space)
-        else:
-            # Exploit: best action from Q-table
-            q_values = self.q_table[discretized_state]
-            action = np.argmax(q_values)
-        
-        return action
-    
-    def learn(self, state, action, reward, next_state, done):
-        """Update Q-table using Q-learning algorithm."""
-        discretized_state = self.discretize_state(state)
-        discretized_next_state = self.discretize_state(next_state)
-        
-        # Current Q-value
-        current_q = self.q_table[discretized_state][action]
-        
-        # Next best Q-value
-        if done:
-            next_q = 0
-        else:
-            next_q = np.max(self.q_table[discretized_next_state])
-        
-        # Q-learning update
-        new_q = current_q + self.learning_rate * (reward + self.discount_factor * next_q - current_q)
-        self.q_table[discretized_state][action] = new_q
-        
-        # Decay exploration rate
-        if done:
-            self.exploration_rate = max(self.min_exploration, 
-                                        self.exploration_rate * self.exploration_decay)
-    
-    def train(self, episodes=100):
-        """Train the agent for multiple episodes."""
-        episode_returns = []
-        
-        for episode in range(episodes):
-            state = self.env.reset()
-            total_reward = 0
-            done = False
-            
-            while not done:
-                # Choose and take action
-                action = self.choose_action(state)
-                next_state, reward, done, info = self.env.step(action)
-                
-                # Learn from experience
-                self.learn(state, action, reward, next_state, done)
-                
-                # Update for next iteration
-                state = next_state
-                total_reward += reward
-            
-            episode_returns.append(total_reward)
-            
-            if (episode + 1) % 10 == 0:
-                print(f"Episode {episode + 1}/{episodes}, "
-                      f"Total Return: {total_reward:.2f}, "
-                      f"Exploration Rate: {self.exploration_rate:.3f}")
-        
-        return episode_returns
-    
-    def test(self):
-        """Test the trained agent."""
-        state = self.env.reset()
-        done = False
-        actions_taken = []
-        prices = []
-        positions = []
-        balances = []
-        
-        while not done:
-            # Choose action (no exploration during test)
-            discretized_state = self.discretize_state(state)
-            q_values = self.q_table[discretized_state]
-            action = np.argmax(q_values)
-            
-            # Take action
-            next_state, reward, done, info = self.env.step(action)
-            
-            # Record data for visualization
-            actions_taken.append(action)
-            prices.append(info['price'])
-            positions.append(info['position'])
-            balances.append(info['balance'])
-            
-            # Update state
-            state = next_state
-        
-        return actions_taken, prices, positions, balances, info['total_return']
+    def render(self, mode='human'):
+        print(f'Step: {self.current_step}, Net Worth: {self.net_worth:.2f}, Pos: {self.position:.2f}')
 
+# ==========================================
+# 3. Training and Evaluation
+# ==========================================
 
-def plot_results(prices, positions, balances, actions_taken, total_return):
-    """Plot trading results and return base64 encoded image."""
-    fig, axes = plt.subplots(3, 1, figsize=(12, 10))
+def run_simulation():
+    # 1. Generate Data
+    print("Generating synthetic price data...")
+    df = generate_price_data(n_days=1500, start_price=100, volatility=0.015)
     
-    # Plot 1: Price with background colors based on positions
-    axes[0].plot(prices, label='Open Price', color='blue', alpha=0.7, linewidth=2)
-    axes[0].set_ylabel('Open Price')
-    axes[0].set_title(f'Trading Results - Total Return: {total_return:.2f}')
-    axes[0].legend(loc='upper left')
+    # Split into train and test
+    train_size = int(len(df) * 0.7)
+    train_df = df.iloc[:train_size].reset_index(drop=True)
+    test_df = df.iloc[train_size:].reset_index(drop=True)
     
-    # Define background colors for different position types
-    position_colors = {
-        0.0: 'gray',    # flat
-        1.0: 'green',   # long
-        -1.0: 'red',    # short
-        0.5: 'lightgreen',  # half_long
-        -0.5: 'lightcoral'  # half_short
-    }
+    # 2. Setup Environments
+    # We use DummyVecEnv for SB3 compatibility
+    train_env = DummyVecEnv([lambda: TradingEnv(train_df, stop_loss_pct=0.03)])
+    test_env = TradingEnv(test_df, stop_loss_pct=0.03)
+
+    # 3. Initialize RL Model (PPO)
+    # MLPPolicy is suitable for vector inputs (non-image)
+    print("Training PPO Agent...")
+    model = PPO("MlpPolicy", train_env, verbose=0, learning_rate=0.0003)
     
-    # Add background colors for each position
-    for i in range(len(positions)):
-        pos = positions[i]
-        color = position_colors.get(pos, 'white')
-        # Add colored rectangle for each time step
-        axes[0].axvspan(i - 0.5, i + 0.5, facecolor=color, alpha=0.3)
+    # 4. Train
+    model.learn(total_timesteps=50000)
+    print("Training complete.")
+
+    # 5. Backtest on Unseen Data
+    print("Backtesting on Test Data...")
+    obs, _ = test_env.reset()
+    done = False
     
-    # Create custom legend for position colors
-    from matplotlib.patches import Patch
-    legend_elements = [
-        Patch(facecolor='gray', alpha=0.3, label='Flat (0.0)'),
-        Patch(facecolor='green', alpha=0.3, label='Long (1.0)'),
-        Patch(facecolor='red', alpha=0.3, label='Short (-1.0)'),
-        Patch(facecolor='lightgreen', alpha=0.3, label='Half Long (0.5)'),
-        Patch(facecolor='lightcoral', alpha=0.3, label='Half Short (-0.5)')
-    ]
-    axes[0].legend(handles=legend_elements, loc='upper right', fontsize='small')
+    net_worth_history = []
+    actions_history = []
     
-    # Plot 2: Balance over time
-    axes[1].plot(balances, label='Balance', color='green')
-    axes[1].set_ylabel('Balance')
-    axes[1].set_xlabel('Step')
-    axes[1].legend()
+    while not done:
+        action, _states = model.predict(obs, deterministic=True)
+        obs, reward, done, truncated, info = test_env.step(action)
+        
+        net_worth_history.append(test_env.net_worth)
+        actions_history.append(action[0])
+
+    # 6. Compare with Buy and Hold
+    initial_price = test_df.iloc[10]['Close'] # Environment starts at index 10
+    final_price_dataset = test_df['Close'].values[10:10+len(net_worth_history)]
     
-    # Plot 3: Actions taken with clear markers
-    action_names = ['flat', 'long', 'short', 'half_long', 'half_short']
-    action_colors = ['gray', 'green', 'red', 'lightgreen', 'lightcoral']
+    # Normalize Buy & Hold to start at same amount as Agent
+    buy_hold_performance = (final_price_dataset / initial_price) * 10000
     
-    # Plot each action type with different markers
-    for action_idx in range(5):
-        # Find all steps where this action was taken
-        action_steps = [i for i, a in enumerate(actions_taken) if a == action_idx]
-        if action_steps:
-            # Plot points for this action
-            axes[2].scatter(action_steps, [action_idx] * len(action_steps), 
-                          color=action_colors[action_idx], s=50, 
-                          label=action_names[action_idx], alpha=0.8)
+    # 7. Visualization
+    plt.figure(figsize=(12, 6))
     
-    axes[2].set_ylabel('Action')
-    axes[2].set_xlabel('Step')
-    axes[2].set_yticks(range(5))
-    axes[2].set_yticklabels(action_names)
-    axes[2].set_title('Actions Taken Over Time')
-    axes[2].legend(loc='upper right', fontsize='small')
-    axes[2].grid(True, alpha=0.3)
+    # Plot Net Worth
+    plt.subplot(2, 1, 1)
+    plt.plot(net_worth_history, label='RL Agent (PPO)', color='blue')
+    plt.plot(buy_hold_performance, label='Buy & Hold', color='gray', linestyle='--')
+    plt.title('Agent Performance vs Buy & Hold')
+    plt.ylabel('Net Worth ($)')
+    plt.legend()
+    plt.grid(True, alpha=0.3)
+    
+    # Plot Actions
+    plt.subplot(2, 1, 2)
+    plt.bar(range(len(actions_history)), actions_history, color='orange', alpha=0.5, width=1.0)
+    plt.axhline(0, color='black', linewidth=0.5)
+    plt.title('Agent Actions (Position Sizing)')
+    plt.ylabel('Action (-1 Short to 1 Long)')
+    plt.xlabel('Time Steps')
     
     plt.tight_layout()
-    
-    # Save plot to bytes buffer
-    buf = io.BytesIO()
-    plt.savefig(buf, format='png')
-    plt.close(fig)
-    buf.seek(0)
-    
-    # Encode to base64 for HTML display
-    img_base64 = base64.b64encode(buf.read()).decode('utf-8')
-    return img_base64
-
-
-def run_training():
-    """Run the RL training and return results."""
-    print("=== Reinforcement Learning Trading System ===")
-    print("Generating synthetic sine-shaped data with 1000 points...")
-    
-    # Create environment
-    env = TradingEnvironment(data_points=1000, initial_balance=10000)
-    
-    # Create and train agent
-    print("\nTraining Q-learning agent...")
-    agent = QLearningAgent(env)
-    episode_returns = agent.train(episodes=50)
-    
-    # Test the trained agent
-    print("\nTesting trained agent...")
-    actions_taken, prices, positions, balances, total_return = agent.test()
-    
-    # Action distribution
-    action_names = ['flat', 'long', 'short', 'half_long', 'half_short']
-    action_counts = {name: 0 for name in action_names}
-    for action in actions_taken:
-        action_counts[action_names[action]] += 1
-    
-    # Generate visualization
-    img_base64 = plot_results(prices, positions, balances, actions_taken, total_return)
-    
-    # Prepare summary data
-    summary = {
-        'total_return': total_return,
-        'final_balance': balances[-1],
-        'exploration_rate': agent.exploration_rate,
-        'q_table_size': len(agent.q_table),
-        'action_distribution': action_counts,
-        'total_steps': len(actions_taken),
-        'image': img_base64
-    }
-    
-    return summary
-
-
-# Flask web application
-app = Flask(__name__)
-
-HTML_TEMPLATE = '''
-<!DOCTYPE html>
-<html>
-<head>
-    <title>RL Trading System Visualization</title>
-    <style>
-        body {
-            font-family: Arial, sans-serif;
-            margin: 20px;
-            background-color: #f5f5f5;
-        }
-        .container {
-            max-width: 1200px;
-            margin: 0 auto;
-            background-color: white;
-            padding: 20px;
-            border-radius: 10px;
-            box-shadow: 0 2px 10px rgba(0,0,0,0.1);
-        }
-        h1 {
-            color: #333;
-            text-align: center;
-        }
-        .summary {
-            background-color: #f9f9f9;
-            padding: 15px;
-            border-radius: 5px;
-            margin-bottom: 20px;
-        }
-        .summary-grid {
-            display: grid;
-            grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
-            gap: 15px;
-            margin-top: 15px;
-        }
-        .summary-item {
-            background-color: white;
-            padding: 10px;
-            border-radius: 5px;
-            border-left: 4px solid #4CAF50;
-        }
-        .summary-item h3 {
-            margin-top: 0;
-            color: #555;
-        }
-        .visualization {
-            text-align: center;
-            margin-top: 20px;
-        }
-        img {
-            max-width: 100%;
-            height: auto;
-            border: 1px solid #ddd;
-            border-radius: 5px;
-        }
-        .action-distribution {
-            margin-top: 20px;
-        }
-        .action-bar {
-            display: flex;
-            margin-bottom: 5px;
-            align-items: center;
-        }
-        .action-name {
-            width: 100px;
-            font-weight: bold;
-        }
-        .action-bar-inner {
-            height: 20px;
-            background-color: #4CAF50;
-            border-radius: 3px;
-        }
-        .action-count {
-            margin-left: 10px;
-        }
-        .btn {
-            background-color: #4CAF50;
-            color: white;
-            padding: 10px 20px;
-            border: none;
-            border-radius: 5px;
-            cursor: pointer;
-            font-size: 16px;
-            margin: 10px 0;
-        }
-        .btn:hover {
-            background-color: #45a049;
-        }
-    </style>
-</head>
-<body>
-    <div class="container">
-        <h1>Reinforcement Learning Trading System</h1>
-        <p style="text-align: center;">Optimizing returns on synthetic sine-shaped data (1000 training examples)</p>
-        
-        <div style="text-align: center;">
-            <form method="POST">
-                <button type="submit" class="btn">Run New Training Session</button>
-            </form>
-        </div>
-        
-        {% if summary %}
-        <div class="summary">
-            <h2>Training Summary</h2>
-            <div class="summary-grid">
-                <div class="summary-item">
-                    <h3>Total Return</h3>
-                    <p style="font-size: 24px; font-weight: bold; color: {% if summary.total_return > 0 %}#4CAF50{% else %}#f44336{% endif %};">
-                        {{ "%.2f"|format(summary.total_return) }}
-                    </p>
-                </div>
-                <div class="summary-item">
-                    <h3>Final Balance</h3>
-                    <p style="font-size: 24px; font-weight: bold;">{{ "%.2f"|format(summary.final_balance) }}</p>
-                </div>
-                <div class="summary-item">
-                    <h3>Exploration Rate</h3>
-                    <p style="font-size: 24px; font-weight: bold;">{{ "%.4f"|format(summary.exploration_rate) }}</p>
-                </div>
-                <div class="summary-item">
-                    <h3>Q-table Size</h3>
-                    <p style="font-size: 24px; font-weight: bold;">{{ summary.q_table_size }} states</p>
-                </div>
-            </div>
-            
-            <div class="action-distribution">
-                <h3>Action Distribution</h3>
-                {% for action_name, count in summary.action_distribution.items() %}
-                {% set percentage = (count / summary.total_steps * 100) %}
-                <div class="action-bar">
-                    <div class="action-name">{{ action_name }}</div>
-                    <div class="action-bar-inner" style="width: {{ percentage }}%;"></div>
-                    <div class="action-count">{{ count }} ({{ "%.1f"|format(percentage) }}%)</div>
-                </div>
-                {% endfor %}
-            </div>
-        </div>
-        
-        <div class="visualization">
-            <h2>Trading Visualization</h2>
-            <img src="data:image/png;base64,{{ summary.image }}" alt="Trading Results Visualization">
-        </div>
-        {% else %}
-        <div style="text-align: center; padding: 40px;">
-            <h2>Click the button above to run a training session</h2>
-            <p>The system will train a Q-learning agent on synthetic sine-shaped data and display the results.</p>
-        </div>
-        {% endif %}
-    </div>
-</body>
-</html>
-'''
-
-@app.route('/', methods=['GET', 'POST'])
-def index():
-    summary = None
-    
-    if request.method == 'POST':
-        # Run training when form is submitted
-        summary = run_training()
-    
-    return render_template_string(HTML_TEMPLATE, summary=summary)
-
+    plt.savefig('rl_trading_results.png')
+    print("Results saved to 'rl_trading_results.png'")
+    # plt.show() # Uncomment if running locally with GUI
 
 if __name__ == "__main__":
-    print("Starting web server on port 8080...")
-    print("Open your browser and navigate to http://localhost:8080")
-    app.run(host='0.0.0.0', port=8080, debug=False)
+    run_simulation()
