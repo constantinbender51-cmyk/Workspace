@@ -259,7 +259,9 @@ def start_web_server(port=8080):
     with socketserver.TCPServer(("", port), handler) as httpd:
         print(f"Web server started on port {port}")
         print(f"Open http://localhost:{port} in your browser to view results")
-        httpd.serve_forever()def run_simulation():
+        httpd.serve_forever()
+
+def run_simulation():
     # 1. Generate Data
     print("Generating synthetic price data...")
     df = generate_price_data(n_days=1500, start_price=100, volatility=0.015)
