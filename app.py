@@ -299,7 +299,7 @@ def run_simulation():
             self.check_freq = check_freq
             self.start_time = None
             self.last_log_time = None
-            self.log_interval = 100  # Log every 100 steps to avoid overwhelming output
+            self.log_interval = 1000  # Log every 1000 steps to avoid overwhelming output
             
         def _on_training_start(self) -> None:
             self.start_time = time.time()
