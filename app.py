@@ -267,10 +267,21 @@ def run_simulation():
     train_env = VecNormalize(train_env, norm_obs=True, norm_reward=True, clip_obs=10.)
     
     logger.info("3. Training PPO Agent (MlpPolicy)...")
-    model = PPO("MlpPolicy", train_env, verbose=1, learning_rate=0.0003, ent_coef=0.01)
+    model = PPO("MlpPolicy", train_env, verbose=0, learning_rate=0.0003, ent_coef=0.01)
+    
+    # Custom callback to reduce logging
+    class MinimalLoggingCallback(BaseCallback):
+        def __init__(self, check_freq=10000, verbose=0):
+            super(MinimalLoggingCallback, self).__init__(verbose)
+            self.check_freq = check_freq
+            
+        def _on_step(self):
+            if self.n_calls % self.check_freq == 0:
+                logger.info(f"Training step {self.n_calls}/{self.num_timesteps}")
+            return True
     
     # Train
-    model.learn(total_timesteps=80000)
+    model.learn(total_timesteps=80000, callback=MinimalLoggingCallback(check_freq=10000))
     logger.info("Training complete.")
     
     # Save statistics for normalizing the test environment
