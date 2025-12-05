@@ -299,7 +299,7 @@ def run_simulation():
             self.check_freq = check_freq
             self.start_time = None
             self.last_log_time = None
-            self.log_interval = 10000  # Log every 10000 steps to avoid overwhelming output
+            self.log_interval = 50000  # Log every 50000 steps to further reduce logging frequency
             
         def _on_training_start(self) -> None:
             self.start_time = time.time()
@@ -310,8 +310,9 @@ def run_simulation():
         def _on_step(self) -> bool:
             current_time = time.time()
             
-            # Log every log_interval steps or if it's the first/last step
-            if self.n_calls % self.log_interval == 0 or self.n_calls == 1 or self.n_calls == self.num_timesteps:
+            # Log only at the specified interval (every log_interval steps) and at the start
+            # Remove logging at the last step (n_calls == num_timesteps) to avoid burst at end
+            if self.n_calls % self.log_interval == 0 or self.n_calls == 1:
                 elapsed_time = current_time - self.start_time
                 
                 # Handle division by zero or small num_timesteps
@@ -350,7 +351,8 @@ def run_simulation():
                 logger.info(f"Step {self.n_calls}/{self.num_timesteps} [{bar}] {progress_percent:.1f}% | ETA: {time_str} | Speed: {steps_per_sec:.1f} steps/sec")
                 
                 # Log milestone every 10% (only if num_timesteps >= 10)
-                if self.num_timesteps >= 10 and self.n_calls % (self.num_timesteps // 10) == 0 and self.n_calls > 0:
+                # Ensure we don't log milestone at the same time as interval log to avoid duplicates
+                if self.num_timesteps >= 10 and self.n_calls % (self.num_timesteps // 10) == 0 and self.n_calls > 0 and self.n_calls % self.log_interval != 0:
                     logger.info(f"Training milestone: {progress_percent:.0f}% complete ({self.n_calls}/{self.num_timesteps} steps)")
                 
                 self.last_log_time = current_time
