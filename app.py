@@ -5,6 +5,11 @@ import pandas as pd
 import matplotlib.pyplot as plt
 from stable_baselines3 import PPO
 from stable_baselines3.common.vec_env import DummyVecEnv
+import http.server
+import socketserver
+import os
+import threading
+import time
 
 # ==========================================
 # 1. Synthetic Data Generation
@@ -216,7 +221,45 @@ class TradingEnv(gym.Env):
 # 3. Training and Evaluation
 # ==========================================
 
-def run_simulation():
+
+
+def start_web_server(port=8080):
+    """Start a simple HTTP server to serve the results PNG."""
+    # Change to current directory to serve files from here
+    os.chdir(os.path.dirname(os.path.abspath(__file__)))
+    
+    # Create a simple HTML page that displays the image
+    html_content = '''<!DOCTYPE html>
+<html>
+<head>
+    <title>RL Trading Results</title>
+    <style>
+        body { font-family: Arial, sans-serif; margin: 40px; }
+        h1 { color: #333; }
+        img { max-width: 100%; border: 1px solid #ddd; border-radius: 4px; }
+        .container { max-width: 1200px; margin: 0 auto; }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <h1>RL Trading Agent Results</h1>
+        <p>Performance comparison between RL Agent and Buy & Hold strategy.</p>
+        <img src="rl_trading_results.png" alt="Trading Results">
+        <p>Server running on port {port}. Image generated from simulation.</p>
+    </div>
+</body>
+</html>'''
+    
+    # Write the HTML file
+    with open('index.html', 'w') as f:
+        f.write(html_content.format(port=port))
+    
+    # Start the HTTP server
+    handler = http.server.SimpleHTTPRequestHandler
+    with socketserver.TCPServer(("", port), handler) as httpd:
+        print(f"Web server started on port {port}")
+        print(f"Open http://localhost:{port} in your browser to view results")
+        httpd.serve_forever()def run_simulation():
     # 1. Generate Data
     print("Generating synthetic price data...")
     df = generate_price_data(n_days=1500, start_price=100, volatility=0.015)
@@ -286,6 +329,19 @@ def run_simulation():
     plt.savefig('rl_trading_results.png')
     print("Results saved to 'rl_trading_results.png'")
     # plt.show() # Uncomment if running locally with GUI
+    
+    # Start web server in a separate thread
+    print("Starting web server on port 8080...")
+    server_thread = threading.Thread(target=start_web_server, args=(8080,), daemon=True)
+    server_thread.start()
+    
+    # Keep the main thread alive to serve requests
+    print("Web server is running. Press Ctrl+C to stop.")
+    try:
+        while True:
+            time.sleep(1)
+    except KeyboardInterrupt:
+        print("\nShutting down web server...")
 
 if __name__ == "__main__":
     run_simulation()
