@@ -294,7 +294,7 @@ def run_simulation():
     from stable_baselines3.common.callbacks import BaseCallback
     
     class ProgressCallback(BaseCallback):
-        def __init__(self, check_freq=1, verbose=0):
+        def __init__(self, check_freq=100, verbose=0):
             super(ProgressCallback, self).__init__(verbose)
             self.check_freq = check_freq
             self.start_time = None
