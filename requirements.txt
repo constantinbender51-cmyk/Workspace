@@ -1,4 +1,5 @@
 numpy
 pandas
 matplotlib
-flask
+gymnasium
+stable-baselines3
