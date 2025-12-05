@@ -10,6 +10,7 @@ import socketserver
 import os
 import threading
 import time
+import logging
 
 # ==========================================
 # 1. Synthetic Data Generation
@@ -262,9 +263,13 @@ def start_web_server(port=8080):
         httpd.serve_forever()
 
 def run_simulation():
+    # Configure logging
+    logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
+    logger = logging.getLogger(__name__)
     # 1. Generate Data
-    print("Generating synthetic price data...")
+    logger.info("Generating synthetic price data...")
     df = generate_price_data(n_days=1500, start_price=100, volatility=0.015)
+    logger.info(f"Generated {len(df)} days of price data")
     
     # Split into train and test
     train_size = int(len(df) * 0.7)
@@ -278,20 +283,40 @@ def run_simulation():
 
     # 3. Initialize RL Model (PPO)
     # MLPPolicy is suitable for vector inputs (non-image)
-    print("Training PPO Agent...")
+    logger.info("Training PPO Agent...")
     model = PPO("MlpPolicy", train_env, verbose=0, learning_rate=0.0003)
     
-    # 4. Train
-    model.learn(total_timesteps=50000)
-    print("Training complete.")
+    # 4. Train with progress logging
+    total_timesteps = 50000
+    logger.info(f"Starting training for {total_timesteps} timesteps")
+    
+    # Custom callback for progress logging
+    from stable_baselines3.common.callbacks import BaseCallback
+    
+    class ProgressCallback(BaseCallback):
+        def __init__(self, check_freq=1000, verbose=0):
+            super(ProgressCallback, self).__init__(verbose)
+            self.check_freq = check_freq
+            
+        def _on_step(self) -> bool:
+            if self.n_calls % self.check_freq == 0:
+                logger.info(f"Training progress: {self.n_calls}/{self.num_timesteps} timesteps completed ({self.n_calls/self.num_timesteps*100:.1f}%)")
+            return True
+    
+    callback = ProgressCallback(check_freq=10000)
+    model.learn(total_timesteps=total_timesteps, callback=callback)
+    logger.info("Training complete.")
 
     # 5. Backtest on Unseen Data
-    print("Backtesting on Test Data...")
+    logger.info("Backtesting on Test Data...")
     obs, _ = test_env.reset()
     done = False
     
     net_worth_history = []
     actions_history = []
+    
+    total_steps = len(test_df) - 10  # Environment starts at index 10
+    step_count = 0
     
     while not done:
         action, _states = model.predict(obs, deterministic=True)
@@ -299,6 +324,12 @@ def run_simulation():
         
         net_worth_history.append(test_env.net_worth)
         actions_history.append(action[0])
+        
+        step_count += 1
+        if step_count % 100 == 0:
+            logger.info(f"Backtesting progress: {step_count}/{total_steps} steps ({step_count/total_steps*100:.1f}%)")
+    
+    logger.info(f"Backtesting completed. Total steps: {step_count}")
 
     # 6. Compare with Buy and Hold
     initial_price = test_df.iloc[10]['Close'] # Environment starts at index 10
@@ -329,21 +360,21 @@ def run_simulation():
     
     plt.tight_layout()
     plt.savefig('rl_trading_results.png')
-    print("Results saved to 'rl_trading_results.png'")
+    logger.info("Results saved to 'rl_trading_results.png'")
     # plt.show() # Uncomment if running locally with GUI
     
     # Start web server in a separate thread
-    print("Starting web server on port 8080...")
+    logger.info("Starting web server on port 8080...")
     server_thread = threading.Thread(target=start_web_server, args=(8080,), daemon=True)
     server_thread.start()
     
     # Keep the main thread alive to serve requests
-    print("Web server is running. Press Ctrl+C to stop.")
+    logger.info("Web server is running. Press Ctrl+C to stop.")
     try:
         while True:
             time.sleep(1)
     except KeyboardInterrupt:
-        print("\nShutting down web server...")
+        logger.info("Shutting down web server...")
 
 if __name__ == "__main__":
     run_simulation()
