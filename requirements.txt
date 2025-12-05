@@ -3,5 +3,3 @@ pandas
 matplotlib
 gymnasium
 stable-baselines3
-http.server
-socketserver
