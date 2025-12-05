@@ -141,9 +141,7 @@ class ProTradingEnv(gym.Env):
         
         # Position is scalar, but we need it as a vector to stack or just scalar broadcast?
         # Better: Create a vector of current position repeated (agent needs to know it held this position during this window context)
-        # Using -1*position as requested (inverted position)
-        inverted_position = -1 * self.position
-        pos_arr = np.full(self.window_size, inverted_position)
+        pos_arr = np.full(self.window_size, self.position)
         
         # Stack and Flatten
         # Shape: (Window_Size, Features)
@@ -178,19 +176,8 @@ class ProTradingEnv(gym.Env):
         self.history_net_worth.append(self.net_worth)
         
         # 4. Reward Calculation
-        # Calculate returns based on -1*position (inverted position) instead of position
-        # The net worth already includes the current position, so we need to recalculate
-        # with inverted position to get the inverted returns
-        
-        # Calculate value with inverted position
-        inverted_position = -1 * self.position
-        inverted_net_worth = self.balance + (inverted_position * current_price)
-        
-        # Calculate previous net worth with inverted position from previous step
-        prev_inverted_position = -1 * (self.position * prev_price / current_price)  # Adjust for price change
-        prev_inverted_net_worth = self.balance + (prev_inverted_position * prev_price)
-        
-        step_return = (inverted_net_worth - prev_inverted_net_worth) / prev_inverted_net_worth
+        # Calculate returns based on actual position
+        step_return = (self.net_worth - self.prev_net_worth) / self.prev_net_worth
         market_return = (current_price - prev_price) / prev_price
         
         # A) Alpha Reward
