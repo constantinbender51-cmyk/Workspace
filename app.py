@@ -4,7 +4,8 @@ import numpy as np
 import pandas as pd
 import matplotlib.pyplot as plt
 from stable_baselines3 import PPO
-from stable_baselines3.common.vec_env import DummyVecEnv
+from stable_baselines3.common.vec_env import DummyVecEnv, VecNormalize
+from stable_baselines3.common.callbacks import BaseCallback
 import http.server
 import socketserver
 import os
@@ -13,435 +14,335 @@ import time
 import logging
 
 # ==========================================
-# 1. Synthetic Data Generation
+# 1. Advanced Data Generation (Regimes)
 # ==========================================
-def generate_price_data(n_days=1000, start_price=100, volatility=0.02):
+def generate_complex_data(n_days=2000, start_price=100, volatility=0.02):
     """
-    Generates synthetic daily OHLC data with a sine wave trend + random noise.
+    Generates data with distinct Bull, Bear, and Sideways regimes.
+    This forces the agent to actually learn switching behavior.
     """
     np.random.seed(42)
     
-    # Generate a trend (sine wave + linear trend)
-    x = np.linspace(0, 50, n_days)
-    trend = 10 * np.sin(x) + x * 0.5
+    # Create regimes
+    # 0: Bull, 1: Bear, 2: Sideways
+    regime_len = n_days // 4
+    regimes = [0] * regime_len + [2] * regime_len + [1] * regime_len + [0] * regime_len
     
-    # Random walk component
-    returns = np.random.normal(0, volatility, n_days)
-    price_curve = start_price * (1 + np.cumsum(returns)) + trend
-    
+    # If n_days doesn't divide perfectly, fill the rest
+    if len(regimes) < n_days:
+        regimes.extend([0] * (n_days - len(regimes)))
+        
+    price = start_price
     data = []
+    
     for i in range(n_days):
-        close_price = price_curve[i]
-        # Simulate High/Low/Open based on Close
-        daily_vol = close_price * volatility
-        high_price = close_price + abs(np.random.normal(0, daily_vol/2))
-        low_price = close_price - abs(np.random.normal(0, daily_vol/2))
-        open_price = close_price + np.random.normal(0, daily_vol/4)
+        regime = regimes[i]
         
-        # Ensure logical consistency
-        high_price = max(high_price, open_price, close_price)
-        low_price = min(low_price, open_price, close_price)
+        # Base return noise
+        noise = np.random.normal(0, volatility)
         
-        data.append([open_price, high_price, low_price, close_price])
+        # Trend component based on regime
+        if regime == 0:   # Bull
+            trend = 0.0015 # +0.15% daily drift
+        elif regime == 1: # Bear
+            trend = -0.0015 # -0.15% daily drift
+        else:             # Sideways
+            trend = 0.0
+            
+        ret = trend + noise
+        price = price * (1 + ret)
+        
+        # OHLC Simulation
+        high = price * (1 + abs(np.random.normal(0, volatility/2)))
+        low = price * (1 - abs(np.random.normal(0, volatility/2)))
+        open_p = price * (1 + np.random.normal(0, volatility/4))
+        
+        data.append([open_p, high, low, price])
         
     df = pd.DataFrame(data, columns=['Open', 'High', 'Low', 'Close'])
     return df
 
 # ==========================================
-# 2. Custom Trading Environment
+# 2. Technical Indicators (Feature Engineering)
 # ==========================================
-class TradingEnv(gym.Env):
+def add_indicators(df):
     """
-    A custom trading environment for RL.
+    Manually calculate RSI, MACD, and SMA to avoid external TA-Lib dependency.
+    """
+    df = df.copy()
     
-    Actions:
-        Box(-1, 1): 
-        -1 = Full Short
-         0 = Flat
-         1 = Full Long
-         
-    Stop Loss:
-        Triggers if High/Low exceeds p% from entry price.
-    """
+    # 1. Simple Moving Averages
+    df['SMA_10'] = df['Close'].rolling(window=10).mean()
+    df['SMA_50'] = df['Close'].rolling(window=50).mean()
+    
+    # 2. RSI (Relative Strength Index)
+    delta = df['Close'].diff()
+    gain = (delta.where(delta > 0, 0)).rolling(window=14).mean()
+    loss = (-delta.where(delta < 0, 0)).rolling(window=14).mean()
+    rs = gain / loss
+    df['RSI'] = 100 - (100 / (1 + rs))
+    
+    # 3. MACD
+    exp1 = df['Close'].ewm(span=12, adjust=False).mean()
+    exp2 = df['Close'].ewm(span=26, adjust=False).mean()
+    df['MACD'] = exp1 - exp2
+    df['Signal_Line'] = df['MACD'].ewm(span=9, adjust=False).mean()
+    
+    # Fill NaN from calculations
+    df.fillna(0, inplace=True)
+    return df
+
+# ==========================================
+# 3. Enhanced Trading Environment
+# ==========================================
+class AdvancedTradingEnv(gym.Env):
     metadata = {'render.modes': ['human']}
 
-    def __init__(self, df, stop_loss_pct=0.02, initial_balance=10000):
-        super(TradingEnv, self).__init__()
+    def __init__(self, df, initial_balance=10000):
+        super(AdvancedTradingEnv, self).__init__()
         
         self.df = df
-        self.stop_loss_pct = stop_loss_pct
         self.initial_balance = initial_balance
         
-        # Action space: Continuous value between -1 and 1
-        # We interpret this as the target position ratio (100% long to 100% short)
+        # Actions: Continuous [-1, 1]
         self.action_space = spaces.Box(low=np.array([-1]), high=np.array([1]), dtype=np.float32)
         
-        # Observation space: 
-        # [Recent Returns, Volatility, Current Position, Unrealized PnL %]
-        # Shape is (6,) for a simple window of 3 returns + 3 state vars
-        self.observation_space = spaces.Box(low=-np.inf, high=np.inf, shape=(6,), dtype=np.float32)
+        # Observations:
+        # 1. Returns (Last 5 days)
+        # 2. RSI / 100 (Normalized)
+        # 3. (Price / SMA_50) - 1 (Trend distance)
+        # 4. MACD Histogram (Normalized approx)
+        # 5. Current Position Ratio
+        # Shape = 5 + 4 = 9 inputs
+        self.observation_space = spaces.Box(low=-np.inf, high=np.inf, shape=(9,), dtype=np.float32)
         
-        self.current_step = 0
         self.max_steps = len(df) - 1
         
     def reset(self, seed=None, options=None):
         super().reset(seed=seed)
-        
-        self.current_step = 10 # Start at 10 to allow for lag features
+        self.current_step = 60 # Start after enough data for indicators
         self.balance = self.initial_balance
+        self.position = 0 # Units
         self.net_worth = self.initial_balance
-        self.position = 0 # Current units held (can be float, but usually integer in real life. We use float for simplicity)
-        self.entry_price = 0
-        self.max_net_worth = self.initial_balance
+        self.prev_net_worth = self.initial_balance
         self.history = {'net_worth': []}
-        
         return self._next_observation(), {}
 
     def _next_observation(self):
-        # Get data window
-        frame = self.df.iloc[self.current_step - 5 : self.current_step + 1]
+        # Window of data
+        current_idx = self.current_step
         
-        # 1. Log Returns of the last 3 days
-        close_prices = frame['Close'].values
-        returns = np.diff(np.log(close_prices))[-3:]
+        # 1. Returns history (last 5)
+        closes = self.df['Close'].values[current_idx-5:current_idx+1]
+        returns = np.diff(np.log(closes)) # Length 5
         
-        # 2. Volatility (std dev of last 5 prices normalized)
-        vol = np.std(close_prices) / np.mean(close_prices)
+        # 2. Technical Indicators (Pre-calculated)
+        rsi = self.df.iloc[current_idx]['RSI'] / 100.0 # Normalize 0-1
         
-        # 3. Current State
-        pos_norm = 0
-        if self.entry_price > 0:
-            # Normalize Unrealized PnL roughly
-            unrealized_pnl = (close_prices[-1] - self.entry_price) / self.entry_price
-            if self.position < 0: unrealized_pnl *= -1
-        else:
-            unrealized_pnl = 0
-            
-        # Normalize current position status (-1 to 1)
-        # We estimate max position size based on balance for normalization
-        current_pos_ratio = 0
+        sma_ratio = (self.df.iloc[current_idx]['Close'] / self.df.iloc[current_idx]['SMA_50']) - 1.0
+        
+        macd_hist = self.df.iloc[current_idx]['MACD'] - self.df.iloc[current_idx]['Signal_Line']
+        # Rough normalization for MACD (assuming price ~100)
+        macd_norm = macd_hist 
+        
+        # 3. Position State
+        pos_ratio = 0
         if self.net_worth > 0:
-            current_pos_ratio = (self.position * close_prices[-1]) / self.net_worth
-
-        obs = np.concatenate((returns, [vol, current_pos_ratio, unrealized_pnl]))
+            pos_ratio = (self.position * self.df.iloc[current_idx]['Close']) / self.net_worth
+            
+        obs = np.concatenate((
+            returns, 
+            [rsi, sma_ratio, macd_norm, pos_ratio]
+        ))
         
-        # Handle cases where data might be missing or nan (though synthetic data is clean)
-        return np.nan_to_num(obs, nan=0.0).astype(np.float32)
+        return np.nan_to_num(obs).astype(np.float32)
 
     def step(self, action):
-        # Current Market Data
         current_price = self.df.iloc[self.current_step]['Close']
-        high_price = self.df.iloc[self.current_step]['High']
-        low_price = self.df.iloc[self.current_step]['Low']
+        prev_price = self.df.iloc[self.current_step - 1]['Close']
         
-        # 1. Check Stop Loss on EXISTING position before executing new action
-        sl_triggered = False
-        
-        if self.position != 0:
-            if self.position > 0: # Long
-                sl_price = self.entry_price * (1 - self.stop_loss_pct)
-                if low_price <= sl_price:
-                    # SL Hit
-                    self.balance += self.position * sl_price
-                    self.position = 0
-                    self.entry_price = 0
-                    sl_triggered = True
-            elif self.position < 0: # Short
-                sl_price = self.entry_price * (1 + self.stop_loss_pct)
-                if high_price >= sl_price:
-                    # SL Hit
-                    self.balance += self.position * sl_price
-                    self.position = 0
-                    self.entry_price = 0
-                    sl_triggered = True
-
-        # 2. Execute Action (if SL didn't trigger this step, or if we want to re-enter)
-        # The action represents the TARGET percentage of portfolio to invest
-        # action is array like [-0.5], extract float
-        target_ratio = float(action[0]) 
-        
-        # Clip action
+        # --- EXECUTION ---
+        target_ratio = float(action[0])
         target_ratio = np.clip(target_ratio, -1, 1)
         
-        if not sl_triggered:
-            # Calculate target value
-            current_val = self.balance + (self.position * current_price)
-            target_exposure = current_val * target_ratio
-            
-            # Units needed to reach target
-            units_needed = target_exposure / current_price
-            
-            # Simple transaction cost can be added here (e.g., 0.1%)
-            # We skip explicit transaction costs for this simple example, 
-            # but usually, you subtract cost from balance.
-            
-            # Update Position
-            if abs(units_needed - self.position) > 0.01: # Only trade if significant change
-                
-                # If flipping from Long to Short or vice versa, reset entry price
-                if np.sign(units_needed) != np.sign(self.position) and abs(units_needed) > 0:
-                    self.entry_price = current_price
-                elif self.position == 0 and abs(units_needed) > 0:
-                    self.entry_price = current_price
-                    
-                # Realize PnL on the portion sold/bought (Simulated via balance update)
-                # Mathematical simplification: We just set new position and update cash
-                # Cash = Total Value - (New Position * Price)
-                self.position = units_needed
-                self.balance = current_val - (self.position * current_price)
-
-        # 3. Calculate New Net Worth
+        # Calculate value
+        current_val = self.balance + (self.position * current_price)
+        
+        # Transaction Cost (0.1% per trade to discourage infinite switching)
+        current_exposure = self.position * current_price
+        target_exposure = current_val * target_ratio
+        trade_amount = abs(target_exposure - current_exposure)
+        cost = trade_amount * 0.001
+        
+        # Update Balances
+        # To simplify: We deduct cost from 'current_val' then rebalance
+        current_val -= cost
+        
+        units_needed = (current_val * target_ratio) / current_price
+        self.position = units_needed
+        self.balance = current_val - (self.position * current_price)
+        
+        # --- STATE UPDATE ---
         self.net_worth = self.balance + (self.position * current_price)
         self.history['net_worth'].append(self.net_worth)
         
-        # 4. Calculate Reward
-        # Reward is percentage change in Net Worth (to be scale invariant)
-        # Can also add penalty for volatility or holding too long
-        prev_net_worth = self.history['net_worth'][-2] if len(self.history['net_worth']) > 1 else self.initial_balance
-        reward = (self.net_worth - prev_net_worth) / prev_net_worth * 100
+        # --- REWARD ENGINEERING ---
+        # Calculate Strategy Return
+        strategy_ret = (self.net_worth - self.prev_net_worth) / self.prev_net_worth
         
-        if sl_triggered:
-            reward -= 0.5 # Penalty for hitting stop loss
+        # Calculate Benchmark Return (Buy and Hold)
+        benchmark_ret = (current_price - prev_price) / prev_price
+        
+        # Reward = Alpha (Excess Return) + Small penalty for staying flat?
+        # If we beat the market, positive reward. If we trail it, negative.
+        reward = (strategy_ret - benchmark_ret) * 100
+        
+        # Small penalty for extreme leverage changes to encourage smoothness? 
+        # (Optional, keeping simple for now)
 
-        # 5. Advance Step
+        self.prev_net_worth = self.net_worth
         self.current_step += 1
+        
         terminated = self.current_step >= self.max_steps
         truncated = False
         
-        # Check for bankruptcy
         if self.net_worth < self.initial_balance * 0.1:
             terminated = True
-            reward = -10 # Heavy penalty for blowing up account
+            reward = -100 # Die
 
         return self._next_observation(), reward, terminated, truncated, {}
 
-    def render(self, mode='human'):
-        print(f'Step: {self.current_step}, Net Worth: {self.net_worth:.2f}, Pos: {self.position:.2f}')
-
 # ==========================================
-# 3. Training and Evaluation
+# 4. Web & Training Utils
 # ==========================================
-
-
-
 def start_web_server(port=8080):
-    """Start a simple HTTP server to serve the results PNG."""
-    # Change to current directory to serve files from here
     os.chdir(os.path.dirname(os.path.abspath(__file__)))
-    
-    # Create a simple HTML page that displays the image
     html_content = '''<!DOCTYPE html>
 <html>
 <head>
-    <title>RL Trading Results</title>
+    <title>RL Advanced Trading</title>
     <style>
-        body {{ font-family: Arial, sans-serif; margin: 40px; }}
-        h1 {{ color: #333; }}
-        img {{ max-width: 100%; border: 1px solid #ddd; border-radius: 4px; }}
-        .container {{ max-width: 1200px; margin: 0 auto; }}
+        body { font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif; margin: 40px; background: #f4f4f9; }
+        .container { max-width: 1000px; margin: 0 auto; background: white; padding: 20px; border-radius: 8px; box-shadow: 0 2px 5px rgba(0,0,0,0.1); }
+        h1 { color: #2c3e50; }
+        img { max-width: 100%; height: auto; border: 1px solid #ddd; }
+        .stats { margin-top: 20px; padding: 15px; background: #e8f4f8; border-radius: 5px; }
     </style>
 </head>
 <body>
     <div class="container">
-        <h1>RL Trading Agent Results</h1>
-        <p>Performance comparison between RL Agent and Buy & Hold strategy.</p>
-        <img src="rl_trading_results.png" alt="Trading Results">
-        <p>Server running on port {port}. Image generated from simulation.</p>
+        <h1>Advanced RL Agent Results</h1>
+        <p>This agent uses RSI, MACD, and Moving Averages to trade across Bull, Bear, and Sideways markets.</p>
+        <img src="rl_trading_results_v2.png" alt="Trading Results">
+        <div class="stats">
+            <p><strong>Green Shade:</strong> Bull Market | <strong>Red Shade:</strong> Bear Market | <strong>Grey:</strong> Sideways</p>
+        </div>
     </div>
 </body>
 </html>'''
-    
-    # Write the HTML file
     with open('index.html', 'w') as f:
-        f.write(html_content.format(port=port))
+        f.write(html_content)
     
-    # Start the HTTP server
-    handler = http.server.SimpleHTTPRequestHandler
-    with socketserver.TCPServer(("", port), handler) as httpd:
-        print(f"Web server started on port {port}")
-        print(f"Open http://localhost:{port} in your browser to view results")
+    with socketserver.TCPServer(("", port), http.server.SimpleHTTPRequestHandler) as httpd:
+        print(f"Server started at http://localhost:{port}")
         httpd.serve_forever()
 
 def run_simulation():
-    # Configure logging
-    logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
-    logger = logging.getLogger(__name__)
-    # 1. Generate Data
-    logger.info("Generating synthetic price data...")
-    df = generate_price_data(n_days=1500, start_price=100, volatility=0.015)
-    logger.info(f"Generated {len(df)} days of price data")
+    logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(message)s')
+    logger = logging.getLogger()
     
-    # Split into train and test
-    train_size = int(len(df) * 0.7)
+    logger.info("1. Generating Complex Market Data (Bull/Bear/Chop)...")
+    df = generate_complex_data(n_days=2500, volatility=0.015)
+    df = add_indicators(df) # Add RSI, MACD, SMA
+    
+    train_size = int(len(df) * 0.75)
     train_df = df.iloc[:train_size].reset_index(drop=True)
     test_df = df.iloc[train_size:].reset_index(drop=True)
     
-    # 2. Setup Environments
-    # We use DummyVecEnv for SB3 compatibility
-    train_env = DummyVecEnv([lambda: TradingEnv(train_df, stop_loss_pct=0.03)])
-    test_env = TradingEnv(test_df, stop_loss_pct=0.03)
-
-    # 3. Initialize RL Model (PPO)
-    # MLPPolicy is suitable for vector inputs (non-image)
-    logger.info("Training PPO Agent...")
-    model = PPO("MlpPolicy", train_env, verbose=0, learning_rate=0.0003)
+    logger.info("2. Setting up Vectorized Environment with Normalization...")
+    # VecNormalize is CRITICAL for PPO convergence on financial data
+    # It automatically scales rewards and observations to mean 0, std 1
+    env_maker = lambda: AdvancedTradingEnv(train_df)
+    train_env = DummyVecEnv([env_maker])
+    train_env = VecNormalize(train_env, norm_obs=True, norm_reward=True, clip_obs=10.)
     
-    # 4. Train with progress logging
-    total_timesteps = 50000
-    logger.info(f"Starting training for {total_timesteps} timesteps")
+    logger.info("3. Training PPO Agent (MlpPolicy)...")
+    model = PPO("MlpPolicy", train_env, verbose=1, learning_rate=0.0003, ent_coef=0.01)
     
-    # Custom callback for progress logging
-    from stable_baselines3.common.callbacks import BaseCallback
-    
-    class ProgressCallback(BaseCallback):
-        def __init__(self, check_freq=100, verbose=0):
-            super(ProgressCallback, self).__init__(verbose)
-            self.check_freq = check_freq
-            self.start_time = None
-            self.last_log_time = None
-            self.log_interval = 10000  # Log every 10000 steps
-            
-        def _on_training_start(self) -> None:
-            self.start_time = time.time()
-            self.last_log_time = self.start_time
-            logger.info(f"Training started at {time.strftime('%Y-%m-%d %H:%M:%S')}")
-            logger.info(f"Total timesteps: {self.num_timesteps}")
-            
-        def _on_step(self) -> bool:
-            current_time = time.time()
-            
-            # Log only at the specified interval (every log_interval steps) and at the start
-            # Also log at the end of training (n_calls == num_timesteps) but only once
-            should_log = False
-            
-            if self.n_calls == 1:
-                should_log = True  # Log at start
-            elif self.n_calls % self.log_interval == 0:
-                should_log = True  # Log at interval
-            elif self.n_calls == self.num_timesteps:
-                should_log = True  # Log at end
-            
-            if should_log:
-                elapsed_time = current_time - self.start_time
-                
-                # Handle division by zero or small num_timesteps
-                if self.num_timesteps > 0:
-                    progress_percent = (self.n_calls / self.num_timesteps) * 100
-                else:
-                    progress_percent = 0.0
-                
-                # Calculate estimated time remaining
-                if self.n_calls > 0:
-                    time_per_step = elapsed_time / self.n_calls
-                    remaining_steps = self.num_timesteps - self.n_calls
-                    estimated_remaining = time_per_step * remaining_steps
-                    
-                    # Format time remaining
-                    if estimated_remaining < 60:
-                        time_str = f"{estimated_remaining:.0f}s"
-                    elif estimated_remaining < 3600:
-                        time_str = f"{estimated_remaining/60:.1f}m"
-                    else:
-                        time_str = f"{estimated_remaining/3600:.1f}h"
-                else:
-                    time_str = "calculating..."
-                
-                # Calculate steps per second
-                steps_per_sec = self.n_calls / elapsed_time if elapsed_time > 0 else 0
-                
-                # Create progress bar visualization
-                bar_length = 30
-                if self.num_timesteps > 0:
-                    filled_length = int(bar_length * self.n_calls // self.num_timesteps)
-                else:
-                    filled_length = 0
-                bar = '█' * filled_length + '░' * (bar_length - filled_length)
-                
-                logger.info(f"Step {self.n_calls}/{self.num_timesteps} [{bar}] {progress_percent:.1f}% | ETA: {time_str} | Speed: {steps_per_sec:.1f} steps/sec")
-                
-                self.last_log_time = current_time
-            
-            return True
-        
-        def _on_training_end(self) -> None:
-            total_time = time.time() - self.start_time
-            steps_per_sec = self.num_timesteps / total_time if total_time > 0 else 0
-            logger.info(f"Training completed in {total_time:.2f} seconds ({total_time/60:.2f} minutes)")
-            logger.info(f"Average speed: {steps_per_sec:.2f} steps/second")
-            logger.info(f"Total steps trained: {self.num_timesteps}")
-    
-    callback = ProgressCallback(check_freq=1)
-    model.learn(total_timesteps=total_timesteps, callback=callback)
+    # Train
+    model.learn(total_timesteps=80000)
     logger.info("Training complete.")
+    
+    # Save statistics for normalizing the test environment
+    train_env.save("vec_normalize.pkl")
 
-    # 5. Backtest on Unseen Data
-    logger.info("Backtesting on Test Data...")
-    obs, _ = test_env.reset()
-    done = False
+    # 4. Backtesting
+    logger.info("4. Backtesting on Unseen Data...")
+    
+    # Load the test env but use the stats (mean/std) from training
+    test_env = DummyVecEnv([lambda: AdvancedTradingEnv(test_df)])
+    test_env = VecNormalize.load("vec_normalize.pkl", test_env)
+    test_env.training = False # Do not update stats during test
+    test_env.norm_reward = False # We want actual raw rewards for metric calculation
+    
+    obs = test_env.reset()
+    done = [False]
     
     net_worth_history = []
     actions_history = []
     
-    total_steps = len(test_df) - 10  # Environment starts at index 10
-    step_count = 0
-    
-    while not done:
-        action, _states = model.predict(obs, deterministic=True)
-        obs, reward, done, truncated, info = test_env.step(action)
+    while not done[0]:
+        action, _ = model.predict(obs, deterministic=True)
+        obs, reward, done, _ = test_env.step(action)
         
-        net_worth_history.append(test_env.net_worth)
-        actions_history.append(action[0])
-        
-        step_count += 1
-        if step_count % 100 == 0:
-            logger.info(f"Backtesting progress: {step_count}/{total_steps} steps ({step_count/total_steps*100:.1f}%)")
-    
-    logger.info(f"Backtesting completed. Total steps: {step_count}")
+        # Access the underlying env to get actual net worth
+        net_worth_history.append(test_env.envs[0].net_worth)
+        actions_history.append(action[0][0])
 
-    # 6. Compare with Buy and Hold
-    initial_price = test_df.iloc[10]['Close'] # Environment starts at index 10
-    final_price_dataset = test_df['Close'].values[10:10+len(net_worth_history)]
+    # 5. Visualization
+    start_idx = 60 # Skip indicator warmup
+    closes = test_df['Close'].values[start_idx : start_idx + len(net_worth_history)]
     
-    # Normalize Buy & Hold to start at same amount as Agent
-    buy_hold_performance = (final_price_dataset / initial_price) * 10000
+    # Benchmark
+    initial_balance = 10000
+    buy_hold_qty = initial_balance / closes[0]
+    buy_hold_equity = closes * buy_hold_qty
     
-    # 7. Visualization
-    plt.figure(figsize=(12, 6))
+    plt.figure(figsize=(12, 8))
     
-    # Plot Net Worth
-    plt.subplot(2, 1, 1)
-    plt.plot(net_worth_history, label='RL Agent (PPO)', color='blue')
-    plt.plot(buy_hold_performance, label='Buy & Hold', color='gray', linestyle='--')
-    plt.title('Agent Performance vs Buy & Hold')
-    plt.ylabel('Net Worth ($)')
+    # Top: Performance
+    plt.subplot(3, 1, 1)
+    plt.plot(net_worth_history, label='RL Agent (Alpha-Hunter)', color='blue', linewidth=1.5)
+    plt.plot(buy_hold_equity, label='Buy & Hold', color='gray', linestyle='--', alpha=0.7)
+    plt.title('Agent vs Market (Regime Switching)')
     plt.legend()
     plt.grid(True, alpha=0.3)
     
-    # Plot Actions
-    plt.subplot(2, 1, 2)
-    plt.bar(range(len(actions_history)), actions_history, color='orange', alpha=0.5, width=1.0)
-    plt.axhline(0, color='black', linewidth=0.5)
-    plt.title('Agent Actions (Position Sizing)')
-    plt.ylabel('Action (-1 Short to 1 Long)')
-    plt.xlabel('Time Steps')
+    # Middle: Actions
+    plt.subplot(3, 1, 2)
+    plt.fill_between(range(len(actions_history)), actions_history, color='orange', alpha=0.3)
+    plt.plot(actions_history, color='orange', linewidth=0.5)
+    plt.axhline(0, color='black', linestyle='-')
+    plt.title('Agent Exposure (-1 Short to +1 Long)')
+    plt.ylabel('Position')
+    
+    # Bottom: Underlying Price
+    plt.subplot(3, 1, 3)
+    plt.plot(closes, color='black')
+    plt.title('Market Price')
     
     plt.tight_layout()
-    plt.savefig('rl_trading_results.png')
-    logger.info("Results saved to 'rl_trading_results.png'")
-    # plt.show() # Uncomment if running locally with GUI
-    
-    # Start web server in a separate thread
-    logger.info("Starting web server on port 8080...")
+    plt.savefig('rl_trading_results_v2.png')
+    logger.info("Results saved.")
+
+    # Start Server
     server_thread = threading.Thread(target=start_web_server, args=(8080,), daemon=True)
     server_thread.start()
     
-    # Keep the main thread alive to serve requests
-    logger.info("Web server is running. Press Ctrl+C to stop.")
     try:
-        while True:
-            time.sleep(1)
+        while True: time.sleep(1)
     except KeyboardInterrupt:
-        logger.info("Shutting down web server...")
+        pass
 
 if __name__ == "__main__":
     run_simulation()
