@@ -235,10 +235,10 @@ def start_web_server(port=8080):
 <head>
     <title>RL Trading Results</title>
     <style>
-        body { font-family: Arial, sans-serif; margin: 40px; }
-        h1 { color: #333; }
-        img { max-width: 100%; border: 1px solid #ddd; border-radius: 4px; }
-        .container { max-width: 1200px; margin: 0 auto; }
+        body {{ font-family: Arial, sans-serif; margin: 40px; }}
+        h1 {{ color: #333; }}
+        img {{ max-width: 100%; border: 1px solid #ddd; border-radius: 4px; }}
+        .container {{ max-width: 1200px; margin: 0 auto; }}
     </style>
 </head>
 <body>
