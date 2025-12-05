@@ -313,7 +313,12 @@ def run_simulation():
             # Log every log_interval steps or if it's the first/last step
             if self.n_calls % self.log_interval == 0 or self.n_calls == 1 or self.n_calls == self.num_timesteps:
                 elapsed_time = current_time - self.start_time
-                progress_percent = (self.n_calls / self.num_timesteps) * 100
+                
+                # Handle division by zero or small num_timesteps
+                if self.num_timesteps > 0:
+                    progress_percent = (self.n_calls / self.num_timesteps) * 100
+                else:
+                    progress_percent = 0.0
                 
                 # Calculate estimated time remaining
                 if self.n_calls > 0:
@@ -336,13 +341,16 @@ def run_simulation():
                 
                 # Create progress bar visualization
                 bar_length = 30
-                filled_length = int(bar_length * self.n_calls // self.num_timesteps)
+                if self.num_timesteps > 0:
+                    filled_length = int(bar_length * self.n_calls // self.num_timesteps)
+                else:
+                    filled_length = 0
                 bar = '█' * filled_length + '░' * (bar_length - filled_length)
                 
                 logger.info(f"Step {self.n_calls}/{self.num_timesteps} [{bar}] {progress_percent:.1f}% | ETA: {time_str} | Speed: {steps_per_sec:.1f} steps/sec")
                 
-                # Log milestone every 10%
-                if self.n_calls % (self.num_timesteps // 10) == 0 and self.n_calls > 0:
+                # Log milestone every 10% (only if num_timesteps >= 10)
+                if self.num_timesteps >= 10 and self.n_calls % (self.num_timesteps // 10) == 0 and self.n_calls > 0:
                     logger.info(f"Training milestone: {progress_percent:.0f}% complete ({self.n_calls}/{self.num_timesteps} steps)")
                 
                 self.last_log_time = current_time
