@@ -294,18 +294,25 @@ def run_simulation():
     from stable_baselines3.common.callbacks import BaseCallback
     
     class ProgressCallback(BaseCallback):
-        def __init__(self, check_freq=1000, verbose=0):
+        def __init__(self, check_freq=1, verbose=0):
             super(ProgressCallback, self).__init__(verbose)
             self.check_freq = check_freq
             self.start_time = None
+            self.last_log_time = None
+            self.log_interval = 100  # Log every 100 steps to avoid overwhelming output
             
         def _on_training_start(self) -> None:
             self.start_time = time.time()
+            self.last_log_time = self.start_time
             logger.info(f"Training started at {time.strftime('%Y-%m-%d %H:%M:%S')}")
+            logger.info(f"Total timesteps: {self.num_timesteps}")
             
         def _on_step(self) -> bool:
-            if self.n_calls % self.check_freq == 0:
-                elapsed_time = time.time() - self.start_time
+            current_time = time.time()
+            
+            # Log every log_interval steps or if it's the first/last step
+            if self.n_calls % self.log_interval == 0 or self.n_calls == 1 or self.n_calls == self.num_timesteps:
+                elapsed_time = current_time - self.start_time
                 progress_percent = (self.n_calls / self.num_timesteps) * 100
                 
                 # Calculate estimated time remaining
@@ -324,24 +331,32 @@ def run_simulation():
                 else:
                     time_str = "calculating..."
                 
+                # Calculate steps per second
+                steps_per_sec = self.n_calls / elapsed_time if elapsed_time > 0 else 0
+                
                 # Create progress bar visualization
                 bar_length = 30
                 filled_length = int(bar_length * self.n_calls // self.num_timesteps)
                 bar = '█' * filled_length + '░' * (bar_length - filled_length)
                 
-                logger.info(f"Training: [{bar}] {progress_percent:.1f}% ({self.n_calls}/{self.num_timesteps}) | ETA: {time_str}")
+                logger.info(f"Step {self.n_calls}/{self.num_timesteps} [{bar}] {progress_percent:.1f}% | ETA: {time_str} | Speed: {steps_per_sec:.1f} steps/sec")
                 
-                # Log additional info every 10% progress
+                # Log milestone every 10%
                 if self.n_calls % (self.num_timesteps // 10) == 0 and self.n_calls > 0:
-                    logger.info(f"Training milestone: {progress_percent:.0f}% complete")
+                    logger.info(f"Training milestone: {progress_percent:.0f}% complete ({self.n_calls}/{self.num_timesteps} steps)")
+                
+                self.last_log_time = current_time
             
             return True
         
         def _on_training_end(self) -> None:
             total_time = time.time() - self.start_time
+            steps_per_sec = self.num_timesteps / total_time if total_time > 0 else 0
             logger.info(f"Training completed in {total_time:.2f} seconds ({total_time/60:.2f} minutes)")
+            logger.info(f"Average speed: {steps_per_sec:.2f} steps/second")
+            logger.info(f"Total steps trained: {self.num_timesteps}")
     
-    callback = ProgressCallback(check_freq=5000)
+    callback = ProgressCallback(check_freq=1)
     model.learn(total_timesteps=total_timesteps, callback=callback)
     logger.info("Training complete.")
 
