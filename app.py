@@ -7,8 +7,8 @@ import matplotlib.pyplot as plt
 from flask import Flask, Response
 import io
 import time
+import base64 # Added missing import
 from datetime import datetime
-import base64
 
 # --- Configuration ---
 SYMBOL = 'BTC/USDT'
@@ -81,15 +81,12 @@ def apply_strategy(df):
     ]
     choices = [0.5, 4.5]
     data['leverage'] = np.select(conditions, choices, default=2.45)
-
-    # 5. Determine Trend Signals (Based on Previous Close to avoid lookahead bias on entry)
-    # Long: Price > SMA40 and Price > SMA120
-    # Short: Price < SMA40 and Price < SMA120
-    # Logic: We determine the "Target Position" for the current day based on YESTERDAY's close checks
-    # However, user says "Goes long if price above". Usually implies checking current state. 
-    # To be realistic backtest: check signals based on Open or previous Close. 
-    # Let's use Previous Close comparison to determine the signal for Today.
     
+    # --- FIX LEAKAGE ---
+    # Shift leverage by 1 so we rely on YESTERDAY'S efficiency ratio for TODAY'S trade
+    data['leverage'] = data['leverage'].shift(1)
+
+    # 5. Determine Trend Signals (Based on Previous Close)
     prev_close = data['close'].shift(1)
     prev_sma40 = data['sma_40'].shift(1)
     prev_sma120 = data['sma_120'].shift(1)
@@ -113,7 +110,8 @@ def apply_strategy(df):
         row = data.iloc[i]
         
         # Skip if no signal or data not ready
-        if pd.isna(row['sma_120']) or pd.isna(row['iii']) or row['signal'] == 0:
+        # Also check if leverage is NaN (due to shift)
+        if pd.isna(row['sma_120']) or pd.isna(row['iii']) or pd.isna(row['leverage']) or row['signal'] == 0:
             strategy_returns.append(0.0)
             continue
 
@@ -126,8 +124,6 @@ def apply_strategy(df):
         close_price = row['close']
         
         # Intra-day Logic
-        # We assume SL is hit first if both SL and TP ranges are crossed (pessimistic)
-        
         daily_ret = 0.0
         
         if signal == 1: # Long
@@ -135,13 +131,10 @@ def apply_strategy(df):
             take_profit_price = open_price * (1 + tp_pct)
             
             if low_price <= stop_price:
-                # Stopped out
                 daily_ret = -sl_pct
             elif high_price >= take_profit_price:
-                # Take profit
                 daily_ret = tp_pct
             else:
-                # Hold to close
                 daily_ret = (close_price - open_price) / open_price
                 
         elif signal == -1: # Short
@@ -149,13 +142,10 @@ def apply_strategy(df):
             take_profit_price = open_price * (1 - tp_pct)
             
             if high_price >= stop_price:
-                # Stopped out
                 daily_ret = -sl_pct
             elif low_price <= take_profit_price:
-                # Take profit
                 daily_ret = tp_pct
             else:
-                # Hold to close
                 daily_ret = (open_price - close_price) / open_price
 
         # Apply Leverage
@@ -195,7 +185,7 @@ def index():
     
     plt.title(f'Strategy Backtest: {SYMBOL} (Start: {START_DATE_STR})')
     plt.ylabel('Cumulative Return (Log Scale)')
-    plt.yscale('log') # Log scale often better for crypto
+    plt.yscale('log')
     plt.legend()
     plt.grid(True, which="both", ls="-", alpha=0.2)
     
@@ -206,9 +196,16 @@ def index():
     plot_url = base64.b64encode(img.getvalue()).decode()
     plt.close()
 
-    # Calculate some stats for the HTML
+    # Calculate Stats
     total_ret = df_results['cumulative_ret'].iloc[-1] if not df_results.empty else 0
     max_drawdown = (df_results['cumulative_ret'] / df_results['cumulative_ret'].cummax() - 1).min()
+    
+    # Sharpe Ratio Calculation
+    if not df_results.empty and df_results['strategy_ret'].std() != 0:
+        # Assuming 365 trading days for crypto
+        sharpe_ratio = (df_results['strategy_ret'].mean() / df_results['strategy_ret'].std()) * np.sqrt(365)
+    else:
+        sharpe_ratio = 0.0
 
     html = f"""
     <!DOCTYPE html>
@@ -219,7 +216,8 @@ def index():
             body {{ font-family: sans-serif; text-align: center; padding: 20px; background-color: #f4f4f4; }}
             .container {{ background: white; padding: 20px; border-radius: 8px; box-shadow: 0 0 10px rgba(0,0,0,0.1); display: inline-block; }}
             img {{ max-width: 100%; height: auto; }}
-            .stats {{ margin-top: 20px; font-size: 1.2em; }}
+            .stats {{ margin-top: 20px; font-size: 1.2em; display: flex; justify-content: space-around; }}
+            .stat-box {{ padding: 10px; }}
         </style>
     </head>
     <body>
@@ -228,8 +226,9 @@ def index():
             <p>Parameters: SMA(40, 120) | SL 2% | TP 16% | Dynamic Leverage (0.5x, 2.45x, 4.5x)</p>
             <img src="data:image/png;base64,{plot_url}">
             <div class="stats">
-                <p><strong>Total Return:</strong> {total_ret:.2f}x</p>
-                <p><strong>Max Drawdown:</strong> {max_drawdown:.2%}</p>
+                <div class="stat-box"><strong>Total Return:</strong><br>{total_ret:.2f}x</div>
+                <div class="stat-box"><strong>Max Drawdown:</strong><br>{max_drawdown:.2%}</div>
+                <div class="stat-box"><strong>Sharpe Ratio:</strong><br>{sharpe_ratio:.2f}</div>
             </div>
         </div>
     </body>
