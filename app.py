@@ -106,4 +106,4 @@ app.layout = html.Div([
 
 if __name__ == '__main__':
     print("Server starting on port 8080...")
-    app.run_server(debug=True, port=8080)
+    app.run(debug=True, host='0.0.0.0', port=8080)
