@@ -283,7 +283,8 @@ def plot_price():
     plt.figure(figsize=(10, 5))
     plt.plot(df.index, df['close'], label='BTC/USDT Price', color='blue')
     plt.plot(df.index, df['SMA365'], label='SMA 365', color='orange', alpha=0.7)
-    plt.title('BTC/USDT Price with SMA 365')
+    plt.plot(df.index, df['SMA90'], label='SMA 90', color='purple', alpha=0.7)
+    plt.title('BTC/USDT Price with SMA 365 and SMA 90')
     plt.xlabel('Date')
     plt.ylabel('Price (USDT)')
     plt.legend()
@@ -298,6 +299,7 @@ def plot_price_with_positions():
     plt.figure(figsize=(10, 5))
     plt.plot(df.index, df['close'], label='BTC/USDT Price', color='blue')
     plt.plot(df.index, df['SMA365'], label='SMA 365', color='orange', alpha=0.7)
+    plt.plot(df.index, df['SMA90'], label='SMA 90', color='purple', alpha=0.7)
     
     # Add background colors for long/short positions
     for i in range(len(df)):
@@ -306,7 +308,7 @@ def plot_price_with_positions():
         elif df['position'].iloc[i] == -1:  # Short position
             plt.axvspan(df.index[i], df.index[i] + pd.Timedelta(days=1), color='red', alpha=0.3)
     
-    plt.title('BTC/USDT Price with Long/Short Positions (Green: Long, Red: Short)')
+    plt.title('BTC/USDT Price with Long/Short Positions and SMAs (Green: Long, Red: Short)')
     plt.xlabel('Date')
     plt.ylabel('Price (USDT)')
     plt.legend()
