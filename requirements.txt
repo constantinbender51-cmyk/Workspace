@@ -1,5 +1,5 @@
 numpy
 pandas
 ccxt
-dash
-plotly
+flask
+matplotlib
