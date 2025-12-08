@@ -180,14 +180,7 @@ def run_backtest(df):
         # Determine Leverage for TODAY based on YESTERDAY's III
         lev = get_leverage(prev_row['iii'])
         
-        # Check III condition (using yesterday's III)
-        iii_yesterday = prev_row['iii']
-        if not pd.isna(iii_yesterday):
-            if iii_yesterday > 0.6:
-                iii_above_threshold = True
-            elif iii_yesterday < 0.2 and iii_above_threshold:
-                iii_condition_active = True
-                iii_above_threshold = False
+
         
         # Check Existing Position (SL/TP or Signal Flip)
         if position:
@@ -256,24 +249,7 @@ def run_backtest(df):
             # No streak condition to check
             can_enter = True
             
-            # Check III condition
-            if iii_condition_active:
-                sma_365 = curr_row['sma_365']
-                if pd.isna(sma_365):
-                    can_enter = False  # Not enough data for SMA 365
-                else:
-                    price_deviation = abs(today_close - sma_365) / sma_365
-                    if price_deviation > 0.03:  # Outside ±3%
-                        can_enter = False
-                    else:
-                        # Price within ±3% of SMA 365, reset III condition
-                        iii_condition_active = False
-            
-            if not can_enter:
-                # Skip entry due to streak condition
-                equity_curve.append(capital)
-                history.append({'date': curr_date, 'equity': capital, 'signal': "FLAT", 'leverage': 0})
-                continue
+
             
             # Setup Stops/TP
             if signal == "LONG":
@@ -312,22 +288,10 @@ def run_backtest(df):
                 # We will deduct entry fee upon exit calculation for simplicity, or effectively reduce size.
                 # Actually, standard is: Capital is locked.
                 
-        # Track condition status for plotting
-        condition_active = iii_condition_active
-        condition_status.append(condition_active)
-        
         equity_curve.append(capital)
-        history.append({'date': curr_date, 'equity': capital, 'signal': signal, 'leverage': lev if position else 0, 'condition_active': condition_active})
+        history.append({'date': curr_date, 'equity': capital, 'signal': signal, 'leverage': lev if position else 0})
 
     result_df = pd.DataFrame(history).set_index('date')
-    # Ensure condition_status aligns with result_df length (should match since we append each iteration)
-    if len(result_df) != len(condition_status):
-        # This should not happen, but handle edge case by padding with False
-        if len(result_df) > len(condition_status):
-            condition_status.extend([False] * (len(result_df) - len(condition_status)))
-        else:
-            condition_status = condition_status[:len(result_df)]
-    result_df['condition_active'] = condition_status
     return result_df
 
 def calculate_metrics(df):
@@ -428,10 +392,7 @@ def home():
             <h1>Tumbler Strategy Backtest</h1>
             <p>Symbol: {{ symbol }} | Period: {{ start_date }} to Present</p>
             
-            <div class="condition-note">
-                <strong>Condition Note:</strong> Light pink background on plot indicates when:<br>
-                III > 0.6 then drops below 0.2 (stay out until price within ±3% of SMA 365)
-            </div>
+
             
             <div class="metrics">
                 <h2>Performance Metrics</h2>
@@ -501,29 +462,8 @@ def plot_only():
     return send_file(img, mimetype='image/png')
 
 def generate_plot(res_df, projection, save_to=None):
-    """Generate the equity plot with light pink background when condition is active."""
+    """Generate the equity plot."""
     plt.figure(figsize=(14, 8))
-    
-    # Create background shading for condition active periods
-    condition_active = res_df['condition_active']
-    if condition_active.any():
-        # Find start and end indices of condition active periods
-        active_periods = []
-        start_idx = None
-        for i, active in enumerate(condition_active):
-            if active and start_idx is None:
-                start_idx = i
-            elif not active and start_idx is not None:
-                active_periods.append((start_idx, i-1))
-                start_idx = None
-        if start_idx is not None:
-            active_periods.append((start_idx, len(condition_active)-1))
-        
-        # Shade each active period
-        for start, end in active_periods:
-            start_date = res_df.index[start]
-            end_date = res_df.index[end]
-            plt.axvspan(start_date, end_date, alpha=0.3, color='lightpink', label='Condition Active' if start == active_periods[0][0] else '')
     
     # Historical Equity
     plt.plot(res_df.index, res_df['equity'], label='Historical Equity', color='blue', linewidth=2)
