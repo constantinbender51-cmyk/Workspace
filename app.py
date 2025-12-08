@@ -250,6 +250,7 @@ class PlotHandler(BaseHTTPRequestHandler):
             <body>
                 <h1>Backtest Results: Price and Equity Curve</h1>
                 <img src="/plot_price" alt="Price Chart"><br>
+                <img src="/plot_price_positions" alt="Price with Long/Short Positions"><br>
                 <img src="/plot_equity" alt="Equity Curve">
             </body>
             </html>
@@ -265,6 +266,11 @@ class PlotHandler(BaseHTTPRequestHandler):
             self.send_header('Content-type', 'image/png')
             self.end_headers()
             self.wfile.write(plot_equity())
+        elif self.path == '/plot_price_positions':
+            self.send_response(200)
+            self.send_header('Content-type', 'image/png')
+            self.end_headers()
+            self.wfile.write(plot_price_with_positions())
         else:
             self.send_response(404)
             self.end_headers()
@@ -278,6 +284,29 @@ def plot_price():
     plt.plot(df.index, df['close'], label='BTC/USDT Price', color='blue')
     plt.plot(df.index, df['SMA365'], label='SMA 365', color='orange', alpha=0.7)
     plt.title('BTC/USDT Price with SMA 365')
+    plt.xlabel('Date')
+    plt.ylabel('Price (USDT)')
+    plt.legend()
+    plt.grid(True)
+    buf = io.BytesIO()
+    plt.savefig(buf, format='png')
+    plt.close()
+    buf.seek(0)
+    return buf.read()
+
+def plot_price_with_positions():
+    plt.figure(figsize=(10, 5))
+    plt.plot(df.index, df['close'], label='BTC/USDT Price', color='blue')
+    plt.plot(df.index, df['SMA365'], label='SMA 365', color='orange', alpha=0.7)
+    
+    # Add background colors for long/short positions
+    for i in range(len(df)):
+        if df['position'].iloc[i] == 1:  # Long position
+            plt.axvspan(df.index[i], df.index[i] + pd.Timedelta(days=1), color='green', alpha=0.3)
+        elif df['position'].iloc[i] == -1:  # Short position
+            plt.axvspan(df.index[i], df.index[i] + pd.Timedelta(days=1), color='red', alpha=0.3)
+    
+    plt.title('BTC/USDT Price with Long/Short Positions (Green: Long, Red: Short)')
     plt.xlabel('Date')
     plt.ylabel('Price (USDT)')
     plt.legend()
