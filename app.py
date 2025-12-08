@@ -4,8 +4,14 @@ import numpy as np
 import matplotlib.pyplot as plt
 from datetime import datetime, timedelta
 from scipy.optimize import curve_fit
+from flask import Flask, render_template_string, send_file
+import io
+import base64
 
-# --- Configuration ---
+
+# --- Flask App ---
+app = Flask(__name__)
+PORT = 8080# --- Configuration ---
 SYMBOL = "BTCUSDT"
 START_DATE = "2018-01-01"
 INITIAL_CAPITAL = 1000.0
@@ -121,6 +127,7 @@ def run_backtest(df):
     iii_above_threshold = False 
     
     history = []
+    condition_status = []  # Track when condition is active for plotting
     
     # Iterate row by row to replicate state machine accurately
     # Start loop after enough data for indicators
@@ -332,10 +339,16 @@ def run_backtest(df):
                 # We will deduct entry fee upon exit calculation for simplicity, or effectively reduce size.
                 # Actually, standard is: Capital is locked.
                 
+        # Track condition status for plotting
+        condition_active = streak_active or iii_condition_active
+        condition_status.append(condition_active)
+        
         equity_curve.append(capital)
-        history.append({'date': curr_date, 'equity': capital, 'signal': signal, 'leverage': lev if position else 0})
+        history.append({'date': curr_date, 'equity': capital, 'signal': signal, 'leverage': lev if position else 0, 'condition_active': condition_active})
 
-    return pd.DataFrame(history).set_index('date')
+    result_df = pd.DataFrame(history).set_index('date')
+    result_df['condition_active'] = condition_status
+    return result_df
 
 def calculate_metrics(df):
     """Calculates Sortino, Sharpe, and Quarterly Returns."""
@@ -386,53 +399,182 @@ def project_growth(equity_df, days_forward=365):
     
     return pd.Series(predicted_equity, index=future_dates)
 
-# --- Execution ---
+# --- Flask Routes ---
 
-# 1. Fetch
-df = fetch_binance_data(SYMBOL, START_DATE)
+@app.route('/')
+def home():
+    """Main page with backtest results and plot."""
+    # 1. Fetch
+    df = fetch_binance_data(SYMBOL, START_DATE)
+    
+    # 2. Indicators
+    df = calculate_indicators(df)
+    df.dropna(inplace=True)
+    
+    # 3. Backtest
+    res_df = run_backtest(df)
+    
+    # 4. Metrics
+    metrics = calculate_metrics(res_df)
+    
+    # 5. Projection
+    projection = project_growth(res_df)
+    
+    # Generate plot
+    plot_url = generate_plot(res_df, projection)
+    
+    # HTML template
+    html_template = '''
+    <!DOCTYPE html>
+    <html>
+    <head>
+        <title>Tumbler Strategy Backtest</title>
+        <style>
+            body { font-family: Arial, sans-serif; margin: 40px; }
+            .container { max-width: 1200px; margin: 0 auto; }
+            .metrics { background: #f5f5f5; padding: 20px; border-radius: 8px; margin-bottom: 20px; }
+            .metric-row { display: flex; flex-wrap: wrap; gap: 20px; }
+            .metric-box { background: white; padding: 15px; border-radius: 5px; box-shadow: 0 2px 4px rgba(0,0,0,0.1); flex: 1; min-width: 200px; }
+            .metric-value { font-size: 24px; font-weight: bold; color: #2c3e50; }
+            .metric-label { color: #7f8c8d; font-size: 14px; }
+            .plot-container { text-align: center; margin-top: 30px; }
+            .plot-img { max-width: 100%; height: auto; border: 1px solid #ddd; border-radius: 8px; }
+            h1 { color: #2c3e50; }
+            .condition-note { background: #ffe6e6; padding: 10px; border-radius: 5px; margin: 20px 0; }
+        </style>
+    </head>
+    <body>
+        <div class="container">
+            <h1>Tumbler Strategy Backtest</h1>
+            <p>Symbol: {{ symbol }} | Period: {{ start_date }} to Present</p>
+            
+            <div class="condition-note">
+                <strong>Condition Note:</strong> Light pink background on plot indicates when either:<br>
+                1. 4+ consecutive stop losses triggered (stay out until price within ±3% of SMA 365)<br>
+                2. III > 0.6 then drops below 0.2 (stay out until price within ±3% of SMA 365)
+            </div>
+            
+            <div class="metrics">
+                <h2>Performance Metrics</h2>
+                <div class="metric-row">
+                    <div class="metric-box">
+                        <div class="metric-label">Initial Capital</div>
+                        <div class="metric-value">${{ "%.2f"|format(initial_capital) }}</div>
+                    </div>
+                    <div class="metric-box">
+                        <div class="metric-label">Final Capital</div>
+                        <div class="metric-value">${{ "%.2f"|format(metrics['Final Capital']) }}</div>
+                    </div>
+                    <div class="metric-box">
+                        <div class="metric-label">Total Return</div>
+                        <div class="metric-value">{{ "%.2f"|format(metrics['Total Return']*100) }}%</div>
+                    </div>
+                    <div class="metric-box">
+                        <div class="metric-label">CAGR</div>
+                        <div class="metric-value">{{ "%.2f"|format(metrics['CAGR']*100) }}%</div>
+                    </div>
+                    <div class="metric-box">
+                        <div class="metric-label">Sharpe Ratio</div>
+                        <div class="metric-value">{{ "%.2f"|format(metrics['Sharpe Ratio']) }}</div>
+                    </div>
+                    <div class="metric-box">
+                        <div class="metric-label">Sortino Ratio</div>
+                        <div class="metric-value">{{ "%.2f"|format(metrics['Sortino Ratio']) }}</div>
+                    </div>
+                </div>
+            </div>
+            
+            <div class="plot-container">
+                <h2>Equity Curve with Condition Highlighting</h2>
+                <img src="{{ plot_url }}" alt="Equity Plot" class="plot-img">
+            </div>
+            
+            <div style="margin-top: 30px; font-size: 12px; color: #7f8c8d;">
+                <p>Server running on port {{ port }}. Data fetched from Binance API.</p>
+            </div>
+        </div>
+    </body>
+    </html>
+    '''
+    
+    return render_template_string(html_template,
+                                 symbol=SYMBOL,
+                                 start_date=START_DATE,
+                                 initial_capital=INITIAL_CAPITAL,
+                                 metrics=metrics,
+                                 plot_url=plot_url,
+                                 port=PORT)
 
-# 2. Indicators
-df = calculate_indicators(df)
-df.dropna(inplace=True)
+@app.route('/plot')
+def plot_only():
+    """Direct endpoint to get the plot image."""
+    # Run backtest to get data
+    df = fetch_binance_data(SYMBOL, START_DATE)
+    df = calculate_indicators(df)
+    df.dropna(inplace=True)
+    res_df = run_backtest(df)
+    projection = project_growth(res_df)
+    
+    # Create plot in memory
+    img = io.BytesIO()
+    generate_plot(res_df, projection, save_to=img)
+    img.seek(0)
+    return send_file(img, mimetype='image/png')
 
-# 3. Backtest
-res_df = run_backtest(df)
+def generate_plot(res_df, projection, save_to=None):
+    """Generate the equity plot with light pink background when condition is active."""
+    plt.figure(figsize=(14, 8))
+    
+    # Create background shading for condition active periods
+    condition_active = res_df['condition_active']
+    if condition_active.any():
+        # Find start and end indices of condition active periods
+        active_periods = []
+        start_idx = None
+        for i, active in enumerate(condition_active):
+            if active and start_idx is None:
+                start_idx = i
+            elif not active and start_idx is not None:
+                active_periods.append((start_idx, i-1))
+                start_idx = None
+        if start_idx is not None:
+            active_periods.append((start_idx, len(condition_active)-1))
+        
+        # Shade each active period
+        for start, end in active_periods:
+            start_date = res_df.index[start]
+            end_date = res_df.index[end]
+            plt.axvspan(start_date, end_date, alpha=0.3, color='lightpink', label='Condition Active' if start == active_periods[0][0] else '')
+    
+    # Historical Equity
+    plt.plot(res_df.index, res_df['equity'], label='Historical Equity', color='blue', linewidth=2)
+    
+    # Projection
+    plt.plot(projection.index, projection.values, label='1-Year Projection', color='green', linestyle='--', linewidth=2)
+    
+    plt.title(f"Tumbler Strategy Equity Curve\nSMA({SMA_PERIOD_1}/{SMA_PERIOD_2}) | Dynamic Leverage | Port 8080", fontsize=16)
+    plt.xlabel("Date", fontsize=12)
+    plt.ylabel("Capital (USD) - Log Scale", fontsize=12)
+    plt.yscale("log")
+    plt.legend(loc='upper left', fontsize=10)
+    plt.grid(True, which="both", ls="-", alpha=0.2)
+    plt.tight_layout()
+    
+    if save_to:
+        plt.savefig(save_to, format='png', dpi=100)
+        plt.close()
+        return None
+    else:
+        # Convert plot to base64 for HTML embedding
+        img = io.BytesIO()
+        plt.savefig(img, format='png', dpi=100)
+        plt.close()
+        img.seek(0)
+        plot_url = 'data:image/png;base64,' + base64.b64encode(img.getvalue()).decode('utf-8')
+        return plot_url
 
-# 4. Metrics
-metrics = calculate_metrics(res_df)
-
-# 5. Projection
-projection = project_growth(res_df)
-
-# --- Output & Visualization ---
-print("-" * 40)
-print(f"BACKTEST RESULTS: {SYMBOL} ({START_DATE} to Now)")
-print("-" * 40)
-print(f"Initial Capital: ${INITIAL_CAPITAL:.2f}")
-print(f"Final Capital:   ${metrics['Final Capital']:.2f}")
-print(f"Total Return:    {metrics['Total Return']*100:.2f}%")
-print(f"CAGR:            {metrics['CAGR']*100:.2f}%")
-print(f"Sharpe Ratio:    {metrics['Sharpe Ratio']:.2f}")
-print(f"Sortino Ratio:   {metrics['Sortino Ratio']:.2f}")
-print("-" * 40)
-print("Capital Start of Each Quarter (Last 8):")
-print(metrics['Quarterly'].tail(8))
-print("-" * 40)
-
-# Plotting
-plt.figure(figsize=(12, 6))
-
-# Historical Equity
-plt.plot(res_df.index, res_df['equity'], label='Historical Equity', color='blue')
-
-# Projection
-plt.plot(projection.index, projection.values, label='1-Year Projection', color='green', linestyle='--')
-
-plt.title(f"Tumbler Strategy Backtest & Projection\nSMA({SMA_PERIOD_1}/{SMA_PERIOD_2}) | Dynamic Leverage")
-plt.xlabel("Date")
-plt.ylabel("Capital (USD) - Log Scale")
-plt.yscale("log")
-plt.legend()
-plt.grid(True, which="both", ls="-", alpha=0.2)
-plt.tight_layout()
-plt.show()
+# --- Main Execution ---
+if __name__ == '__main__':
+    print(f"Starting Flask server on port {PORT}...")
+    print(f"Open http://localhost:{PORT} in your browser")
+    app.run(host='0.0.0.0', port=PORT, debug=False)
