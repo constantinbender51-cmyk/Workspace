@@ -3,6 +3,14 @@ import pandas as pd
 import numpy as np
 import time
 from datetime import datetime, timedelta
+import threading
+from http.server import HTTPServer, BaseHTTPRequestHandler
+import json
+import matplotlib
+matplotlib.use('Agg')
+import matplotlib.pyplot as plt
+import io
+import base64
 
 # -----------------------------------------------------------------------------
 # CONFIGURATION
@@ -224,5 +232,97 @@ if __name__ == "__main__":
         df = calculate_performance(df)
         df.to_csv("btc_strict_lag_results.csv")
         print("\nResults saved to btc_strict_lag_results.csv")
+    else:
+        print("Insufficient data.")
+
+# -----------------------------------------------------------------------------
+# WEB SERVER FOR PLOTS
+# -----------------------------------------------------------------------------
+class PlotHandler(BaseHTTPRequestHandler):
+    def do_GET(self):
+        if self.path == '/':
+            self.send_response(200)
+            self.send_header('Content-type', 'text/html')
+            self.end_headers()
+            html_content = """
+            <html>
+            <head><title>Backtest Results</title></head>
+            <body>
+                <h1>Backtest Results: Price and Equity Curve</h1>
+                <img src="/plot_price" alt="Price Chart"><br>
+                <img src="/plot_equity" alt="Equity Curve">
+            </body>
+            </html>
+            """
+            self.wfile.write(html_content.encode())
+        elif self.path == '/plot_price':
+            self.send_response(200)
+            self.send_header('Content-type', 'image/png')
+            self.end_headers()
+            self.wfile.write(plot_price())
+        elif self.path == '/plot_equity':
+            self.send_response(200)
+            self.send_header('Content-type', 'image/png')
+            self.end_headers()
+            self.wfile.write(plot_equity())
+        else:
+            self.send_response(404)
+            self.end_headers()
+            self.wfile.write(b'Not Found')
+
+    def log_message(self, format, *args):
+        pass  # Suppress log messages
+
+def plot_price():
+    plt.figure(figsize=(10, 5))
+    plt.plot(df.index, df['close'], label='BTC/USDT Price', color='blue')
+    plt.plot(df.index, df['SMA365'], label='SMA 365', color='orange', alpha=0.7)
+    plt.title('BTC/USDT Price with SMA 365')
+    plt.xlabel('Date')
+    plt.ylabel('Price (USDT)')
+    plt.legend()
+    plt.grid(True)
+    buf = io.BytesIO()
+    plt.savefig(buf, format='png')
+    plt.close()
+    buf.seek(0)
+    return buf.read()
+
+def plot_equity():
+    plt.figure(figsize=(10, 5))
+    plt.plot(df.index, df['equity_curve'], label='Strategy Equity', color='green')
+    plt.plot(df.index, df['buy_hold_curve'], label='Buy & Hold', color='red', alpha=0.7)
+    plt.title('Equity Curve: Strategy vs Buy & Hold')
+    plt.xlabel('Date')
+    plt.ylabel('Equity (Multiple)')
+    plt.legend()
+    plt.grid(True)
+    buf = io.BytesIO()
+    plt.savefig(buf, format='png')
+    plt.close()
+    buf.seek(0)
+    return buf.read()
+
+def start_server():
+    server = HTTPServer(('', 8080), PlotHandler)
+    print(f"Web server started on port 8080. Open http://localhost:8080 in your browser.")
+    server.serve_forever()
+
+if __name__ == "__main__":
+    df = fetch_historical_data(SYMBOL, TIMEFRAME, START_DATE)
+    if len(df) > SMA_LONG_PERIOD + 10:
+        df = apply_strategy(df)
+        df = calculate_performance(df)
+        df.to_csv("btc_strict_lag_results.csv")
+        print("\nResults saved to btc_strict_lag_results.csv")
+        # Start web server in a separate thread after backtest
+        server_thread = threading.Thread(target=start_server, daemon=True)
+        server_thread.start()
+        print("Server running. Press Ctrl+C to stop.")
+        try:
+            while True:
+                time.sleep(1)
+        except KeyboardInterrupt:
+            print("\nShutting down server.")
     else:
         print("Insufficient data.")
