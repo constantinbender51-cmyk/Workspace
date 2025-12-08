@@ -8,6 +8,7 @@ from flask import Flask, Response
 import io
 import time
 from datetime import datetime
+import base64
 
 # --- Configuration ---
 SYMBOL = 'BTC/USDT'
