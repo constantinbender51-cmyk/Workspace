@@ -347,6 +347,13 @@ def run_backtest(df):
         history.append({'date': curr_date, 'equity': capital, 'signal': signal, 'leverage': lev if position else 0, 'condition_active': condition_active})
 
     result_df = pd.DataFrame(history).set_index('date')
+    # Ensure condition_status aligns with result_df length (should match since we append each iteration)
+    if len(result_df) != len(condition_status):
+        # This should not happen, but handle edge case by padding with False
+        if len(result_df) > len(condition_status):
+            condition_status.extend([False] * (len(result_df) - len(condition_status)))
+        else:
+            condition_status = condition_status[:len(result_df)]
     result_df['condition_active'] = condition_status
     return result_df
 
