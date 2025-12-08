@@ -97,6 +97,7 @@ def apply_strategy(df):
     current_holding = 0 # 0: Flat, 1: Long, -1: Short
     was_extended_bullish = False 
     was_extended_bearish = False 
+    last_entry_date = None  # Track the date of the last entry
     
     # Start loop after we have enough data (Long SMA + 2 days for diffs)
     start_idx = SMA_LONG_PERIOD + 2
@@ -174,9 +175,16 @@ def apply_strategy(df):
         # STEP 5: DETERMINE POSITION FOR TODAY (i)
         # -------------------------------------------------------
         
-        # Priority 1: If Slope Flipped Yesterday -> FLATTEN Today
+        # Priority 1: If Slope Flipped Yesterday -> FLATTEN Today, but ignore if within 1 week of entry
         if slope_flipped:
-            current_holding = 0
+            # Check if we have a recent entry (within 7 days)
+            if last_entry_date is not None:
+                days_since_entry = (df.index[i] - last_entry_date).days
+                if days_since_entry >= 7:
+                    current_holding = 0
+                # If within 7 days, do not flatten (ignore the slope flip)
+            else:
+                current_holding = 0
             
         # Priority 2: If Valid Entry Signal Yesterday -> ENTER Today
         # (Note: An entry signal overrides a slope flip if they happen same day, 
@@ -184,6 +192,7 @@ def apply_strategy(df):
         # but if conflict, Entry takes precedence as per "next signal" instruction).
         if entry_signal != 0:
             current_holding = entry_signal
+            last_entry_date = df.index[i]  # Update entry date to today
             
         # Priority 3: Otherwise, HOLD previous position (Daily compounding logic)
         # The prompt says: "Hold the positions one day then re-enter the next."
