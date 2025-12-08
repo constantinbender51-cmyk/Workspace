@@ -1,109 +1,241 @@
 import ccxt
 import pandas as pd
+import numpy as np
+import matplotlib
+matplotlib.use('Agg') # Use non-interactive backend for server
+import matplotlib.pyplot as plt
+from flask import Flask, Response
+import io
 import time
-from dash import Dash, dcc, html
-import plotly.graph_objects as go
+from datetime import datetime
 
-# --- 1. Fetch Data ---
-def fetch_binance_data(symbol='BTC/USDT', timeframe='1d', since_year=2018):
-    print(f"Fetching {symbol} OHLCV data from {since_year}...")
+# --- Configuration ---
+SYMBOL = 'BTC/USDT'
+TIMEFRAME = '1d' # Daily candles for the 35-day window calculation
+START_DATE_STR = '2018-01-01 00:00:00'
+PORT = 8080
+
+app = Flask(__name__)
+
+def fetch_data(symbol, timeframe, start_str):
+    """Fetches historical OHLCV data from Binance."""
+    print(f"Fetching {symbol} data from Binance starting {start_str}...")
     exchange = ccxt.binance()
-    since = exchange.parse8601(f'{since_year}-01-01T00:00:00Z')
-    all_ohlcv = []
-    limit = 1000 
+    start_ts = exchange.parse8601(start_str)
     
-    while True:
+    ohlcv_list = []
+    current_ts = start_ts
+    now_ts = exchange.milliseconds()
+    
+    # Loop to fetch all data since limit is usually 500/1000 per call
+    while current_ts < now_ts:
         try:
-            ohlcv = exchange.fetch_ohlcv(symbol, timeframe, since, limit)
-            if not ohlcv: break
-            all_ohlcv.extend(ohlcv)
-            last_timestamp = ohlcv[-1][0]
-            since = last_timestamp + 1 
-            time.sleep(exchange.rateLimit / 1000)
-            if last_timestamp >= exchange.milliseconds(): break
+            ohlcvs = exchange.fetch_ohlcv(symbol, timeframe, since=current_ts)
+            if not ohlcvs:
+                break
+            current_ts = ohlcvs[-1][0] + 1  # Move just past the last fetched candle
+            ohlcv_list += ohlcvs
+            # Small sleep to respect rate limits
+            time.sleep(0.1)
         except Exception as e:
-            print(f"Error: {e}")
+            print(f"Error fetching data: {e}")
             break
 
-    df = pd.DataFrame(all_ohlcv, columns=['timestamp', 'open', 'high', 'low', 'close', 'volume'])
+    df = pd.DataFrame(ohlcv_list, columns=['timestamp', 'open', 'high', 'low', 'close', 'volume'])
     df['timestamp'] = pd.to_datetime(df['timestamp'], unit='ms')
     df.set_index('timestamp', inplace=True)
-    print(f"Loaded {len(df)} rows.")
+    
+    # Remove duplicates just in case
+    df = df[~df.index.duplicated(keep='first')]
+    print(f"Fetched {len(df)} rows.")
     return df
 
-df = fetch_binance_data()
+def apply_strategy(df):
+    """Calculates indicators and runs the backtest logic."""
+    data = df.copy()
 
-# --- 2. Generate Plotly Figure ---
-# We use Scattergl because we are plotting ~150 lines with 2000+ points each. 
-# Standard SVG plotting would crash the browser.
+    # 1. Calculate Log Returns
+    data['log_ret'] = np.log(data['close'] / data['close'].shift(1))
 
-fig = go.Figure()
+    # 2. Calculate SMAs
+    data['sma_40'] = data['close'].rolling(window=40).mean()
+    data['sma_120'] = data['close'].rolling(window=120).mean()
 
-print("Generating ribbons...")
+    # 3. Calculate 'iii' (Efficiency Ratio)
+    # iii = abs(sum(log returns)) / sum(abs(log returns)) over 35 days
+    window_35 = 35
+    sum_log_ret = data['log_ret'].rolling(window=window_35).sum()
+    sum_abs_log_ret = data['log_ret'].abs().rolling(window=window_35).sum()
+    
+    # Avoid division by zero
+    data['iii'] = (sum_log_ret.abs() / sum_abs_log_ret).fillna(0)
 
-# Helper to add a ribbon of SMAs
-def add_ribbon(df, start, end, color, name_prefix):
-    # We add the traces in reverse so the smaller SMAs (closer to price) are on top if needed, 
-    # though with opacity it matters less.
-    for x in range(start, end + 1):
-        sma = df['close'].rolling(window=x).mean()
-        fig.add_trace(go.Scattergl(
-            x=df.index, 
-            y=sma, 
-            mode='lines',
-            line=dict(color=color, width=1),
-            opacity=0.3, # Low opacity creates the "Cloud" effect where lines overlap
-            name=f'{name_prefix} SMA {x}',
-            hoverinfo='skip', # Disable hover for individual ribbon lines to save performance
-            showlegend=False
-        ))
-    # Add a dummy trace for the legend
-    fig.add_trace(go.Scattergl(
-        x=[df.index[0]], y=[df['close'].iloc[0]], 
-        mode='lines', line=dict(color=color, width=4), name=f'{name_prefix} Cluster ({start}-{end})'
-    ))
+    # 4. Determine Leverage
+    # < 0.13 -> 0.5
+    # < 0.18 (implied >= 0.13) -> 4.5
+    # Otherwise -> 2.45
+    conditions = [
+        (data['iii'] < 0.13),
+        (data['iii'] < 0.18)
+    ]
+    choices = [0.5, 4.5]
+    data['leverage'] = np.select(conditions, choices, default=2.45)
 
-# 1. Unstable Ribbon (Red) - 241 to 315
-add_ribbon(df, 241, 315, 'rgba(255, 50, 50, 0.4)', 'Unstable')
+    # 5. Determine Trend Signals (Based on Previous Close to avoid lookahead bias on entry)
+    # Long: Price > SMA40 and Price > SMA120
+    # Short: Price < SMA40 and Price < SMA120
+    # Logic: We determine the "Target Position" for the current day based on YESTERDAY's close checks
+    # However, user says "Goes long if price above". Usually implies checking current state. 
+    # To be realistic backtest: check signals based on Open or previous Close. 
+    # Let's use Previous Close comparison to determine the signal for Today.
+    
+    prev_close = data['close'].shift(1)
+    prev_sma40 = data['sma_40'].shift(1)
+    prev_sma120 = data['sma_120'].shift(1)
 
-# 2. Stable Ribbon 1 (Green) - 109 to 150
-add_ribbon(df, 109, 150, 'rgba(0, 255, 100, 0.4)', 'Stable 1')
+    data['signal'] = 0 # 0: Flat, 1: Long, -1: Short
+    
+    long_cond = (prev_close > prev_sma40) & (prev_close > prev_sma120)
+    short_cond = (prev_close < prev_sma40) & (prev_close < prev_sma120)
+    
+    data.loc[long_cond, 'signal'] = 1
+    data.loc[short_cond, 'signal'] = -1
 
-# 3. Stable Ribbon 2 (Blue) - 320 to 344
-add_ribbon(df, 320, 344, 'rgba(50, 100, 255, 0.4)', 'Stable 2')
+    # 6. Calculate PnL with SL/TP logic
+    strategy_returns = []
+    
+    # Parameters
+    sl_pct = 0.02
+    tp_pct = 0.16
+    
+    for i in range(len(data)):
+        row = data.iloc[i]
+        
+        # Skip if no signal or data not ready
+        if pd.isna(row['sma_120']) or pd.isna(row['iii']) or row['signal'] == 0:
+            strategy_returns.append(0.0)
+            continue
 
-# 4. Price (White/Bold)
-fig.add_trace(go.Scattergl(
-    x=df.index, 
-    y=df['close'], 
-    mode='lines',
-    line=dict(color='white', width=2),
-    name='BTC Price'
-))
+        signal = row['signal']
+        leverage = row['leverage']
+        
+        open_price = row['open']
+        high_price = row['high']
+        low_price = row['low']
+        close_price = row['close']
+        
+        # Intra-day Logic
+        # We assume SL is hit first if both SL and TP ranges are crossed (pessimistic)
+        
+        daily_ret = 0.0
+        
+        if signal == 1: # Long
+            stop_price = open_price * (1 - sl_pct)
+            take_profit_price = open_price * (1 + tp_pct)
+            
+            if low_price <= stop_price:
+                # Stopped out
+                daily_ret = -sl_pct
+            elif high_price >= take_profit_price:
+                # Take profit
+                daily_ret = tp_pct
+            else:
+                # Hold to close
+                daily_ret = (close_price - open_price) / open_price
+                
+        elif signal == -1: # Short
+            stop_price = open_price * (1 + sl_pct)
+            take_profit_price = open_price * (1 - tp_pct)
+            
+            if high_price >= stop_price:
+                # Stopped out
+                daily_ret = -sl_pct
+            elif low_price <= take_profit_price:
+                # Take profit
+                daily_ret = tp_pct
+            else:
+                # Hold to close
+                daily_ret = (open_price - close_price) / open_price
 
-fig.update_layout(
-    title="SMA Ribbons: Stable Zones vs Unstable Zones",
-    template="plotly_dark",
-    xaxis_title="Date",
-    yaxis_title="Price (USDT)",
-    hovermode="x unified",
-    height=800,
-    margin=dict(l=50, r=50, t=50, b=50),
-    legend=dict(
-        yanchor="top",
-        y=0.99,
-        xanchor="left",
-        x=0.01,
-        bgcolor="rgba(0,0,0,0.5)"
-    )
-)
+        # Apply Leverage
+        strategy_returns.append(daily_ret * leverage)
 
-# --- 3. Run Server ---
-app = Dash(__name__)
-app.layout = html.Div([
-    dcc.Graph(figure=fig, style={'height': '95vh'})
-])
+    data['strategy_ret'] = strategy_returns
+    
+    # Cumulative Returns
+    data['cumulative_ret'] = (1 + data['strategy_ret']).cumprod()
+    
+    # Buy and Hold (for comparison)
+    data['bnh_ret'] = (1 + data['log_ret']).cumprod()
+    
+    return data
+
+# --- Data Loading (Run once on startup) ---
+try:
+    df_raw = fetch_data(SYMBOL, TIMEFRAME, START_DATE_STR)
+    df_results = apply_strategy(df_raw)
+except Exception as e:
+    print(f"CRITICAL ERROR: {e}")
+    df_results = pd.DataFrame()
+
+# --- Web Server ---
+
+@app.route('/')
+def index():
+    if df_results.empty:
+        return "Error fetching data or calculating strategy."
+    
+    # Create Plot
+    plt.figure(figsize=(12, 6))
+    
+    # Plot Strategy vs Buy & Hold
+    plt.plot(df_results.index, df_results['cumulative_ret'], label='Strategy (Leveraged)', color='blue')
+    plt.plot(df_results.index, df_results['bnh_ret'], label='Buy & Hold (BTC)', color='gray', alpha=0.5)
+    
+    plt.title(f'Strategy Backtest: {SYMBOL} (Start: {START_DATE_STR})')
+    plt.ylabel('Cumulative Return (Log Scale)')
+    plt.yscale('log') # Log scale often better for crypto
+    plt.legend()
+    plt.grid(True, which="both", ls="-", alpha=0.2)
+    
+    # Save to IO buffer
+    img = io.BytesIO()
+    plt.savefig(img, format='png', bbox_inches='tight')
+    img.seek(0)
+    plot_url = base64.b64encode(img.getvalue()).decode()
+    plt.close()
+
+    # Calculate some stats for the HTML
+    total_ret = df_results['cumulative_ret'].iloc[-1] if not df_results.empty else 0
+    max_drawdown = (df_results['cumulative_ret'] / df_results['cumulative_ret'].cummax() - 1).min()
+
+    html = f"""
+    <!DOCTYPE html>
+    <html>
+    <head>
+        <title>Strategy Results</title>
+        <style>
+            body {{ font-family: sans-serif; text-align: center; padding: 20px; background-color: #f4f4f4; }}
+            .container {{ background: white; padding: 20px; border-radius: 8px; box-shadow: 0 0 10px rgba(0,0,0,0.1); display: inline-block; }}
+            img {{ max-width: 100%; height: auto; }}
+            .stats {{ margin-top: 20px; font-size: 1.2em; }}
+        </style>
+    </head>
+    <body>
+        <div class="container">
+            <h1>Algorithmic Trading Strategy Results</h1>
+            <p>Parameters: SMA(40, 120) | SL 2% | TP 16% | Dynamic Leverage (0.5x, 2.45x, 4.5x)</p>
+            <img src="data:image/png;base64,{plot_url}">
+            <div class="stats">
+                <p><strong>Total Return:</strong> {total_ret:.2f}x</p>
+                <p><strong>Max Drawdown:</strong> {max_drawdown:.2%}</p>
+            </div>
+        </div>
+    </body>
+    </html>
+    """
+    return html
 
 if __name__ == '__main__':
-    print("Server starting on port 8080...")
-    app.run(debug=True, host='0.0.0.0', port=8080)
+    print(f"Starting server on port {PORT}...")
+    app.run(host='0.0.0.0', port=PORT)
