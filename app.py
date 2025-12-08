@@ -14,6 +14,7 @@ FEES_PCT = 0.0006  # 0.06% est. taker fee per trade (entry + exit)
 # Strategy Parameters
 SMA_PERIOD_1 = 57
 SMA_PERIOD_2 = 124
+SMA_PERIOD_365 = 365
 BAND_WIDTH = 0.05
 STATIC_STOP_PCT = 0.02
 TAKE_PROFIT_PCT = 0.16
@@ -73,6 +74,7 @@ def calculate_indicators(df):
     # SMAs
     df['sma_1'] = df['close'].rolling(window=SMA_PERIOD_1).mean()
     df['sma_2'] = df['close'].rolling(window=SMA_PERIOD_2).mean()
+    df['sma_365'] = df['close'].rolling(window=SMA_PERIOD_365).mean()
     
     # Bands
     df['upper_band'] = df['sma_1'] * (1 + BAND_WIDTH)
@@ -108,7 +110,11 @@ def run_backtest(df):
     position = None  # {type: 'LONG'/'SHORT', entry_price: float, size: float, stop: float, tp: float}
     
     # State Machine Variables
-    cross_flag = 0 
+    cross_flag = 0
+    
+    # Stop Loss Streak Tracking
+    stop_loss_streak = 0
+    streak_active = False 
     
     history = []
     
@@ -220,6 +226,16 @@ def run_backtest(df):
                 capital = capital * (1 + net_pnl)
                 position = None # Flat
                 
+                # Update stop loss streak
+                if exit_reason == "STOP_LOSS":
+                    stop_loss_streak += 1
+                    if stop_loss_streak >= 4:
+                        streak_active = True
+                else:
+                    # Reset streak on any non-stop-loss exit
+                    stop_loss_streak = 0
+                    streak_active = False
+                
                 # If we exited due to signal change, we might re-enter immediately below
                 # But for simplicity, we trade on Open, so Signal Change exit happens at Open
                 # If signal is reversed, we can enter new position same bar? 
@@ -228,6 +244,27 @@ def run_backtest(df):
         # Entry Logic (If flat)
         if position is None and signal != "FLAT":
             entry_price = today_open
+            
+            # Check stop loss streak condition
+            can_enter = True
+            if streak_active:
+                sma_365 = curr_row['sma_365']
+                if pd.isna(sma_365):
+                    can_enter = False  # Not enough data for SMA 365
+                else:
+                    price_deviation = abs(today_close - sma_365) / sma_365
+                    if price_deviation > 0.03:  # Outside ±3%
+                        can_enter = False
+                    else:
+                        # Price within ±3% of SMA 365, reset streak
+                        stop_loss_streak = 0
+                        streak_active = False
+            
+            if not can_enter:
+                # Skip entry due to streak condition
+                equity_curve.append(capital)
+                history.append({'date': curr_date, 'equity': capital, 'signal': "FLAT", 'leverage': 0})
+                continue
             
             # Setup Stops/TP
             if signal == "LONG":
@@ -251,6 +288,10 @@ def run_backtest(df):
                 pnl_pct = -STATIC_STOP_PCT * lev
                 fee_impact = FEES_PCT * lev
                 capital = capital * (1 + pnl_pct - fee_impact)
+                # Update stop loss streak for immediate stop
+                stop_loss_streak += 1
+                if stop_loss_streak >= 4:
+                    streak_active = True
             else:
                 # Position Established
                 position = {
