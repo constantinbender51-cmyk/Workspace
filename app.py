@@ -1,368 +1,131 @@
 import ccxt
 import pandas as pd
-import numpy as np
+import datetime
 import time
-from datetime import datetime, timedelta
-import threading
-from http.server import HTTPServer, BaseHTTPRequestHandler
-import json
-import matplotlib
-matplotlib.use('Agg')
-import matplotlib.pyplot as plt
-import io
-import base64
+from dash import Dash, dcc, html, Input, Output
+import plotly.graph_objects as go
+from plotly.subplots import make_subplots
 
-# -----------------------------------------------------------------------------
-# CONFIGURATION
-# -----------------------------------------------------------------------------
-SYMBOL = 'BTC/USDT'
-TIMEFRAME = '1d'
-START_DATE = '2018-01-01T00:00:00Z'
-
-# Indicators
-SMA_LONG_PERIOD = 365
-SMA_FILTER_PERIOD = 90
-
-# Strategy Parameters
-PROXIMITY_THRESHOLD = 0.07  # 7% distance from SMA365
-
-# -----------------------------------------------------------------------------
-# DATA FETCHING
-# -----------------------------------------------------------------------------
-def fetch_historical_data(symbol, timeframe, start_str):
-    print(f"Fetching {symbol} data starting from {start_str}...")
-    exchange = ccxt.binance({'enableRateLimit': True})
+# --- 1. Fetch Data from Binance ---
+def fetch_binance_data(symbol='BTC/USDT', timeframe='1d', since_year=2018):
+    print(f"Fetching {symbol} OHLCV data from {since_year}...")
+    exchange = ccxt.binance()
     
-    since = exchange.parse8601(start_str)
+    # Binance requires timestamp in milliseconds
+    since = exchange.parse8601(f'{since_year}-01-01T00:00:00Z')
+    
     all_ohlcv = []
+    limit = 1000  # Binance limit per request
     
     while True:
         try:
-            ohlcv = exchange.fetch_ohlcv(symbol, timeframe, since=since, limit=1000)
+            ohlcv = exchange.fetch_ohlcv(symbol, timeframe, since, limit)
             if not ohlcv:
                 break
             
-            since = ohlcv[-1][0] + 1
-            all_ohlcv += ohlcv
+            all_ohlcv.extend(ohlcv)
             
-            current_date = datetime.fromtimestamp(ohlcv[-1][0] / 1000)
-            if current_date > datetime.now() - timedelta(days=1):
+            # Update 'since' to the last timestamp + 1 timeframe duration to fetch next batch
+            last_timestamp = ohlcv[-1][0]
+            since = last_timestamp + 1 
+            
+            # Rate limit sleep (good practice)
+            time.sleep(exchange.rateLimit / 1000)
+            
+            # Break if we reached current time (roughly)
+            if last_timestamp >= exchange.milliseconds():
                 break
-            
-            time.sleep(exchange.rateLimit / 1000) 
+                
+            print(f"Fetched up to {datetime.datetime.fromtimestamp(last_timestamp/1000)}")
             
         except Exception as e:
             print(f"Error fetching data: {e}")
-            time.sleep(5)
-            continue
+            break
 
     df = pd.DataFrame(all_ohlcv, columns=['timestamp', 'open', 'high', 'low', 'close', 'volume'])
     df['timestamp'] = pd.to_datetime(df['timestamp'], unit='ms')
     df.set_index('timestamp', inplace=True)
-    df = df[~df.index.duplicated(keep='first')]
+    
+    print(f"Data fetch complete. {len(df)} rows loaded.")
     return df
 
-# -----------------------------------------------------------------------------
-# STRATEGY LOGIC (STRICT LOOKBEACK)
-# -----------------------------------------------------------------------------
-def apply_strategy(df):
-    print("Calculating strict 1-day lag signals...")
-    
-    # 1. Indicators
-    df['SMA365'] = df['close'].rolling(window=SMA_LONG_PERIOD).mean()
-    df['SMA90'] = df['close'].rolling(window=SMA_FILTER_PERIOD).mean()
-    
-    # Distance: (Price - SMA) / SMA
-    df['dist_pct'] = (df['close'] - df['SMA365']) / df['SMA365']
-    
-    # Derivative: Change in distance from previous day
-    df['dist_deriv'] = df['dist_pct'].diff()
-    
-    # SMA 90 Slope: Daily change in SMA 90 value
-    df['sma90_change'] = df['SMA90'].diff()
-    
-    # 2. Logic Loop
-    # We use numpy arrays for faster iteration
-    # Indices: i = Today (Execution), i-1 = Yesterday (Signal)
-    
-    close = df['close'].values
-    dist_pct = df['dist_pct'].values
-    dist_deriv = df['dist_deriv'].values
-    sma90_change = df['sma90_change'].values
-    
-    # Output array for ACTUAL positions held Today
-    position = np.zeros(len(df))
-    
-    # State Memory (Persists across days)
-    current_holding = 0 # 0: Flat, 1: Long, -1: Short
-    was_extended_bullish = False 
-    was_extended_bearish = False 
-    last_entry_date = None  # Track the date of the last entry
-    
-    # Start loop after we have enough data (Long SMA + 2 days for diffs)
-    start_idx = SMA_LONG_PERIOD + 2
-    
-    for i in range(start_idx, len(df)):
-        # -------------------------------------------------------
-        # STEP 1: DEFINE TIME INDICES
-        # -------------------------------------------------------
-        # We are at day 'i' (Today). We must decide what to do TODAY.
-        # We can ONLY look at 'i-1' (Yesterday) and 'i-2' (Day Before).
-        
-        idx_yest = i - 1
-        idx_prev = i - 2
-        
-        # -------------------------------------------------------
-        # STEP 2: UPDATE INTERNAL STATE (Based on Yesterday's Close)
-        # -------------------------------------------------------
-        
-        # Update Extension Memory
-        # Did yesterday's close put us in "Extended" territory?
-        if dist_pct[idx_yest] > PROXIMITY_THRESHOLD:
-            was_extended_bullish = True
-            was_extended_bearish = False
-        elif dist_pct[idx_yest] < -PROXIMITY_THRESHOLD:
-            was_extended_bearish = True
-            was_extended_bullish = False
-            
-        # Reset Extension Memory if Yesterday crossed the SMA
-        # (Sign change between DayBefore and Yesterday)
-        if (dist_pct[idx_yest] > 0 and dist_pct[idx_prev] < 0) or \
-           (dist_pct[idx_yest] < 0 and dist_pct[idx_prev] > 0):
-            was_extended_bullish = False
-            was_extended_bearish = False
+# Initialize Data
+# (Fetching data on startup - this might take a few seconds)
+df = fetch_binance_data()
 
-        # -------------------------------------------------------
-        # STEP 3: CHECK "KILL SWITCH" (SMA 90 Slope Flip)
-        # -------------------------------------------------------
-        # Definition: Slope sign switched between DayBefore and Yesterday.
-        slope_yest = sma90_change[idx_yest]
-        slope_prev = sma90_change[idx_prev]
-        
-        # Check strict sign flip
-        slope_flipped = False
-        if (slope_yest > 0 and slope_prev < 0) or \
-           (slope_yest < 0 and slope_prev > 0) or \
-           (slope_yest == 0):
-            slope_flipped = True
-            
-        # -------------------------------------------------------
-        # STEP 4: CHECK ENTRY SIGNALS (Retests)
-        # -------------------------------------------------------
-        entry_signal = 0 # 0: None, 1: Long, -1: Short
-        
-        # Long Entry Logic (Analyzed on Yesterday's data)
-        # 1. Price > SMA
-        # 2. Was Extended > 7%
-        # 3. Yesterday's Distance <= 7%
-        # 4. Derivative switched: DayBefore < 0 (closing in), Yesterday > 0 (bouncing away)
-        if (dist_pct[idx_yest] > 0 and 
-            was_extended_bullish and 
-            dist_pct[idx_yest] <= PROXIMITY_THRESHOLD):
-            
-            if dist_deriv[idx_prev] < 0 and dist_deriv[idx_yest] > 0:
-                entry_signal = 1
-                
-        # Short Entry Logic
-        if (dist_pct[idx_yest] < 0 and 
-            was_extended_bearish and 
-            dist_pct[idx_yest] >= -PROXIMITY_THRESHOLD):
-            
-            if dist_deriv[idx_prev] > 0 and dist_deriv[idx_yest] < 0:
-                entry_signal = -1
+# --- 2. Setup Dash Application ---
+app = Dash(__name__)
 
-        # -------------------------------------------------------
-        # STEP 5: DETERMINE POSITION FOR TODAY (i)
-        # -------------------------------------------------------
-        
-        # Priority 1: If Slope Flipped Yesterday -> FLATTEN Today, but ignore if within 1 week of entry
-        if slope_flipped:
-            # Check if we have a recent entry (within 7 days)
-            if last_entry_date is not None:
-                days_since_entry = (df.index[i] - last_entry_date).days
-                if days_since_entry >= 7:
-                    current_holding = 0
-                # If within 7 days, do not flatten (ignore the slope flip)
-            else:
-                current_holding = 0
-            
-        # Priority 2: If Valid Entry Signal Yesterday -> ENTER Today
-        # (Note: An entry signal overrides a slope flip if they happen same day, 
-        # or implies a new trend starting. Usually, entries happen far from horizontal 90SMA,
-        # but if conflict, Entry takes precedence as per "next signal" instruction).
-        if entry_signal != 0:
-            current_holding = entry_signal
-            last_entry_date = df.index[i]  # Update entry date to today
-            
-        # Priority 3: Otherwise, HOLD previous position (Daily compounding logic)
-        # The prompt says: "Hold the positions one day then re-enter the next."
-        # This means we maintain the state 'current_holding' into Today.
-        
-        position[i] = current_holding
-
-    df['position'] = position
-    return df
-
-# -----------------------------------------------------------------------------
-# BACKTEST EXECUTION
-# -----------------------------------------------------------------------------
-def calculate_performance(df):
-    # Calculate Strategy Returns
-    # Position[i] determines exposure to Market[i] return
-    # No shift needed here because position[i] was already calculated using i-1 data
+app.layout = html.Div([
+    html.H1("Binance Price & SMA Distance Visualizer", style={'textAlign': 'center'}),
     
-    df['market_return'] = df['close'].pct_change()
-    df['strategy_return'] = df['position'] * df['market_return']
-    
-    df.dropna(subset=['strategy_return'], inplace=True)
-    
-    df['equity_curve'] = (1 + df['strategy_return']).cumprod()
-    df['buy_hold_curve'] = (1 + df['market_return']).cumprod()
-    
-    total_ret = df['equity_curve'].iloc[-1] - 1
-    bh_ret = df['buy_hold_curve'].iloc[-1] - 1
-    
-    print("\n---------------------------------------------------")
-    print(f"Backtest Results ({START_DATE} - Now)")
-    print("---------------------------------------------------")
-    print(f"Total Strategy Return: {total_ret * 100:.2f}%")
-    print(f"Buy & Hold Return:     {bh_ret * 100:.2f}%")
-    print(f"Final Equity:          {df['equity_curve'].iloc[-1]:.4f}")
-    
-    trades = df['position'].diff().abs().sum() / 2
-    print(f"Approximate Trades:    {int(trades)}")
-    
-    return df
+    html.Div([
+        html.Label("Select SMA Window (x):"),
+        dcc.Slider(
+            id='sma-slider',
+            min=1,
+            max=360,
+            step=1,
+            value=200,  # Default value
+            marks={i: str(i) for i in range(0, 361, 40)},
+            tooltip={"placement": "bottom", "always_visible": True}
+        ),
+    ], style={'width': '80%', 'margin': 'auto', 'padding': '20px'}),
 
-if __name__ == "__main__":
-    df = fetch_historical_data(SYMBOL, TIMEFRAME, START_DATE)
-    if len(df) > SMA_LONG_PERIOD + 10:
-        df = apply_strategy(df)
-        df = calculate_performance(df)
-        df.to_csv("btc_strict_lag_results.csv")
-        print("\nResults saved to btc_strict_lag_results.csv")
-    else:
-        print("Insufficient data.")
+    dcc.Graph(id='price-graph', style={'height': '80vh'})
+])
 
-# -----------------------------------------------------------------------------
-# WEB SERVER FOR PLOTS
-# -----------------------------------------------------------------------------
-class PlotHandler(BaseHTTPRequestHandler):
-    def do_GET(self):
-        if self.path == '/':
-            self.send_response(200)
-            self.send_header('Content-type', 'text/html')
-            self.end_headers()
-            html_content = """
-            <html>
-            <head><title>Backtest Results</title></head>
-            <body>
-                <h1>Backtest Results: Price and Equity Curve</h1>
-                <img src="/plot_price" alt="Price Chart"><br>
-                <img src="/plot_price_positions" alt="Price with Long/Short Positions"><br>
-                <img src="/plot_equity" alt="Equity Curve">
-            </body>
-            </html>
-            """
-            self.wfile.write(html_content.encode())
-        elif self.path == '/plot_price':
-            self.send_response(200)
-            self.send_header('Content-type', 'image/png')
-            self.end_headers()
-            self.wfile.write(plot_price())
-        elif self.path == '/plot_equity':
-            self.send_response(200)
-            self.send_header('Content-type', 'image/png')
-            self.end_headers()
-            self.wfile.write(plot_equity())
-        elif self.path == '/plot_price_positions':
-            self.send_response(200)
-            self.send_header('Content-type', 'image/png')
-            self.end_headers()
-            self.wfile.write(plot_price_with_positions())
-        else:
-            self.send_response(404)
-            self.end_headers()
-            self.wfile.write(b'Not Found')
-
-    def log_message(self, format, *args):
-        pass  # Suppress log messages
-
-def plot_price():
-    plt.figure(figsize=(10, 5))
-    plt.plot(df.index, df['close'], label='BTC/USDT Price', color='blue')
-    plt.plot(df.index, df['SMA365'], label='SMA 365', color='orange', alpha=0.7)
-    plt.plot(df.index, df['SMA90'], label='SMA 90', color='purple', alpha=0.7)
-    plt.title('BTC/USDT Price with SMA 365 and SMA 90')
-    plt.xlabel('Date')
-    plt.ylabel('Price (USDT)')
-    plt.legend()
-    plt.grid(True)
-    buf = io.BytesIO()
-    plt.savefig(buf, format='png')
-    plt.close()
-    buf.seek(0)
-    return buf.read()
-
-def plot_price_with_positions():
-    plt.figure(figsize=(10, 5))
-    plt.plot(df.index, df['close'], label='BTC/USDT Price', color='blue')
-    plt.plot(df.index, df['SMA365'], label='SMA 365', color='orange', alpha=0.7)
-    plt.plot(df.index, df['SMA90'], label='SMA 90', color='purple', alpha=0.7)
+# --- 3. Callback for Interactivity ---
+@app.callback(
+    Output('price-graph', 'figure'),
+    Input('sma-slider', 'value')
+)
+def update_graph(x):
+    # Calculate SMA (smax) based on slider input
+    dff = df.copy()
+    dff['smax'] = dff['close'].rolling(window=x).mean()
     
-    # Add background colors for long/short positions
-    for i in range(len(df)):
-        if df['position'].iloc[i] == 1:  # Long position
-            plt.axvspan(df.index[i], df.index[i] + pd.Timedelta(days=1), color='green', alpha=0.3)
-        elif df['position'].iloc[i] == -1:  # Short position
-            plt.axvspan(df.index[i], df.index[i] + pd.Timedelta(days=1), color='red', alpha=0.3)
+    # Calculate Distance: (Price - smax) / smax
+    dff['distance'] = (dff['close'] - dff['smax']) / dff['smax']
+
+    # Create Subplots: Row 1 = Price, Row 2 = Distance
+    fig = make_subplots(
+        rows=2, cols=1, 
+        shared_xaxes=True, 
+        vertical_spacing=0.05,
+        row_heights=[0.7, 0.3],
+        subplot_titles=(f"BTC/USDT Price vs SMA({x})", f"Distance: (Price - SMA{x}) / SMA{x}")
+    )
+
+    # Plot Price
+    fig.add_trace(go.Scatter(
+        x=dff.index, y=dff['close'], name='Close Price', line=dict(color='blue')
+    ), row=1, col=1)
+
+    # Plot SMA
+    fig.add_trace(go.Scatter(
+        x=dff.index, y=dff['smax'], name=f'SMA({x})', line=dict(color='orange')
+    ), row=1, col=1)
+
+    # Plot Distance
+    fig.add_trace(go.Scatter(
+        x=dff.index, y=dff['distance'], name='Distance', 
+        line=dict(color='purple'), fill='tozeroy'
+    ), row=2, col=1)
     
-    plt.title('BTC/USDT Price with Long/Short Positions and SMAs (Green: Long, Red: Short)')
-    plt.xlabel('Date')
-    plt.ylabel('Price (USDT)')
-    plt.legend()
-    plt.grid(True)
-    buf = io.BytesIO()
-    plt.savefig(buf, format='png')
-    plt.close()
-    buf.seek(0)
-    return buf.read()
+    # Add a zero line for distance
+    fig.add_hline(y=0, line_dash="dash", line_color="gray", row=2, col=1)
 
-def plot_equity():
-    plt.figure(figsize=(10, 5))
-    plt.plot(df.index, df['equity_curve'], label='Strategy Equity', color='green')
-    plt.plot(df.index, df['buy_hold_curve'], label='Buy & Hold', color='red', alpha=0.7)
-    plt.title('Equity Curve: Strategy vs Buy & Hold')
-    plt.xlabel('Date')
-    plt.ylabel('Equity (Multiple)')
-    plt.legend()
-    plt.grid(True)
-    buf = io.BytesIO()
-    plt.savefig(buf, format='png')
-    plt.close()
-    buf.seek(0)
-    return buf.read()
+    # Update Layout
+    fig.update_layout(
+        template='plotly_dark',
+        hovermode='x unified',
+        margin=dict(l=50, r=50, t=50, b=50)
+    )
 
-def start_server():
-    server = HTTPServer(('', 8080), PlotHandler)
-    print(f"Web server started on port 8080. Open http://localhost:8080 in your browser.")
-    server.serve_forever()
+    return fig
 
-if __name__ == "__main__":
-    df = fetch_historical_data(SYMBOL, TIMEFRAME, START_DATE)
-    if len(df) > SMA_LONG_PERIOD + 10:
-        df = apply_strategy(df)
-        df = calculate_performance(df)
-        df.to_csv("btc_strict_lag_results.csv")
-        print("\nResults saved to btc_strict_lag_results.csv")
-        # Start web server in a separate thread after backtest
-        server_thread = threading.Thread(target=start_server, daemon=True)
-        server_thread.start()
-        print("Server running. Press Ctrl+C to stop.")
-        try:
-            while True:
-                time.sleep(1)
-        except KeyboardInterrupt:
-            print("\nShutting down server.")
-    else:
-        print("Insufficient data.")
+# --- 4. Run Server ---
+if __name__ == '__main__':
+    # Starts server on port 8080
+    app.run_server(debug=True, port=8080)
