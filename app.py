@@ -118,10 +118,6 @@ def run_backtest(df):
     # State Machine Variables
     cross_flag = 0
     
-    # Stop Loss Streak Tracking
-    stop_loss_streak = 0
-    streak_active = False
-    
     # III Condition Tracking
     iii_condition_active = False
     iii_above_threshold = False 
@@ -246,15 +242,7 @@ def run_backtest(df):
                 capital = capital * (1 + net_pnl)
                 position = None # Flat
                 
-                # Update stop loss streak
-                if exit_reason == "STOP_LOSS":
-                    stop_loss_streak += 1
-                    if stop_loss_streak >= 4:
-                        streak_active = True
-                else:
-                    # Reset streak on any non-stop-loss exit
-                    stop_loss_streak = 0
-                    streak_active = False
+                # No streak logic to update
                 
                 # If we exited due to signal change, we might re-enter immediately below
                 # But for simplicity, we trade on Open, so Signal Change exit happens at Open
@@ -265,20 +253,8 @@ def run_backtest(df):
         if position is None and signal != "FLAT":
             entry_price = today_open
             
-            # Check stop loss streak condition
+            # No streak condition to check
             can_enter = True
-            if streak_active:
-                sma_365 = curr_row['sma_365']
-                if pd.isna(sma_365):
-                    can_enter = False  # Not enough data for SMA 365
-                else:
-                    price_deviation = abs(today_close - sma_365) / sma_365
-                    if price_deviation > 0.03:  # Outside ±3%
-                        can_enter = False
-                    else:
-                        # Price within ±3% of SMA 365, reset streak
-                        stop_loss_streak = 0
-                        streak_active = False
             
             # Check III condition
             if iii_condition_active:
@@ -321,10 +297,7 @@ def run_backtest(df):
                 pnl_pct = -STATIC_STOP_PCT * lev
                 fee_impact = FEES_PCT * lev
                 capital = capital * (1 + pnl_pct - fee_impact)
-                # Update stop loss streak for immediate stop
-                stop_loss_streak += 1
-                if stop_loss_streak >= 4:
-                    streak_active = True
+                # No streak logic to update
             else:
                 # Position Established
                 position = {
@@ -340,7 +313,7 @@ def run_backtest(df):
                 # Actually, standard is: Capital is locked.
                 
         # Track condition status for plotting
-        condition_active = streak_active or iii_condition_active
+        condition_active = iii_condition_active
         condition_status.append(condition_active)
         
         equity_curve.append(capital)
@@ -456,9 +429,8 @@ def home():
             <p>Symbol: {{ symbol }} | Period: {{ start_date }} to Present</p>
             
             <div class="condition-note">
-                <strong>Condition Note:</strong> Light pink background on plot indicates when either:<br>
-                1. 4+ consecutive stop losses triggered (stay out until price within ±3% of SMA 365)<br>
-                2. III > 0.6 then drops below 0.2 (stay out until price within ±3% of SMA 365)
+                <strong>Condition Note:</strong> Light pink background on plot indicates when:<br>
+                III > 0.6 then drops below 0.2 (stay out until price within ±3% of SMA 365)
             </div>
             
             <div class="metrics">
