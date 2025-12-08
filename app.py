@@ -114,7 +114,11 @@ def run_backtest(df):
     
     # Stop Loss Streak Tracking
     stop_loss_streak = 0
-    streak_active = False 
+    streak_active = False
+    
+    # III Condition Tracking
+    iii_condition_active = False
+    iii_above_threshold = False 
     
     history = []
     
@@ -172,6 +176,15 @@ def run_backtest(df):
         
         # Determine Leverage for TODAY based on YESTERDAY's III
         lev = get_leverage(prev_row['iii'])
+        
+        # Check III condition (using yesterday's III)
+        iii_yesterday = prev_row['iii']
+        if not pd.isna(iii_yesterday):
+            if iii_yesterday > 0.6:
+                iii_above_threshold = True
+            elif iii_yesterday < 0.2 and iii_above_threshold:
+                iii_condition_active = True
+                iii_above_threshold = False
         
         # Check Existing Position (SL/TP or Signal Flip)
         if position:
@@ -259,6 +272,19 @@ def run_backtest(df):
                         # Price within ±3% of SMA 365, reset streak
                         stop_loss_streak = 0
                         streak_active = False
+            
+            # Check III condition
+            if iii_condition_active:
+                sma_365 = curr_row['sma_365']
+                if pd.isna(sma_365):
+                    can_enter = False  # Not enough data for SMA 365
+                else:
+                    price_deviation = abs(today_close - sma_365) / sma_365
+                    if price_deviation > 0.03:  # Outside ±3%
+                        can_enter = False
+                    else:
+                        # Price within ±3% of SMA 365, reset III condition
+                        iii_condition_active = False
             
             if not can_enter:
                 # Skip entry due to streak condition
