@@ -1,499 +1,253 @@
-import requests
+import ccxt
 import pandas as pd
 import numpy as np
-import matplotlib.pyplot as plt
+import time
 from datetime import datetime, timedelta
-from scipy.optimize import curve_fit
-from flask import Flask, render_template_string, send_file
-import io
-import base64
 
+# -----------------------------------------------------------------------------
+# CONFIGURATION
+# -----------------------------------------------------------------------------
+SYMBOL = 'BTC/USDT'
+TIMEFRAME = '1d'
+START_DATE = '2018-01-01T00:00:00Z'
 
-# --- Flask App ---
-app = Flask(__name__)
-PORT = 8080# --- Configuration ---
-SYMBOL = "BTCUSDT"
-START_DATE = "2018-01-01"
-INITIAL_CAPITAL = 1000.0
-FEES_PCT = 0.0006  # 0.06% est. taker fee per trade (entry + exit)
+# Indicators
+SMA_LONG_PERIOD = 365
+SMA_FILTER_PERIOD = 90
 
 # Strategy Parameters
-SMA_PERIOD_1 = 57
-SMA_PERIOD_2 = 124
-SMA_PERIOD_365 = 365
-BAND_WIDTH = 0.05
-STATIC_STOP_PCT = 0.02
-TAKE_PROFIT_PCT = 0.16
-III_WINDOW = 35
+# "Close is 7% from SMA": We assume this is the 'proximity' threshold. 
+# Price must be within this % distance of SMA365 to be considered a 'retest'.
+PROXIMITY_THRESHOLD = 0.07 
 
-# III Leverage Thresholds
-III_T_LOW = 0.13
-III_T_HIGH = 0.18
-LEV_LOW = 0.5
-LEV_MID = 4.5
-LEV_HIGH = 2.45
+# "Horizontal" definition: If absolute daily slope of SMA90 is less than this, we stay flat.
+# 0.0005 means if SMA changes less than 0.05% in a day, it's horizontal.
+SLOPE_FLAT_THRESHOLD = 0.0005 
 
-def fetch_binance_data(symbol, start_date):
-    """Fetches daily OHLC data from Binance public API."""
-    print(f"Fetching data for {symbol} starting {start_date}...")
-    base_url = "https://api.binance.com/api/v3/klines"
-    start_ts = int(datetime.strptime(start_date, "%Y-%m-%d").timestamp() * 1000)
+# -----------------------------------------------------------------------------
+# DATA FETCHING
+# -----------------------------------------------------------------------------
+def fetch_historical_data(symbol, timeframe, start_str):
+    print(f"Fetching {symbol} data starting from {start_str}...")
+    exchange = ccxt.binance({
+        'enableRateLimit': True,
+        'options': {'defaultType': 'future'} # Using futures for long/short, or spot? Defaulting to spot data for chart.
+    })
     
-    all_data = []
-    limit = 1000
+    # Switch to spot if preferred, usually longer history on spot for backtesting logic
+    exchange = ccxt.binance() 
+
+    since = exchange.parse8601(start_str)
+    all_ohlcv = []
     
     while True:
-        params = {
-            "symbol": symbol,
-            "interval": "1d",
-            "startTime": start_ts,
-            "limit": limit
-        }
-        response = requests.get(base_url, params=params)
-        data = response.json()
-        
-        if not data:
-            break
+        try:
+            ohlcv = exchange.fetch_ohlcv(symbol, timeframe, since=since, limit=1000)
+            if not ohlcv:
+                break
             
-        all_data.extend(data)
-        start_ts = data[-1][0] + 86400000  # Move to next day
-        
-        # Stop if we reached current time
-        if len(data) < limit:
-            break
+            since = ohlcv[-1][0] + 1  # Move to next timestamp
+            all_ohlcv += ohlcv
             
-    df = pd.DataFrame(all_data, columns=[
-        "open_time", "open", "high", "low", "close", "volume",
-        "close_time", "qav", "num_trades", "taker_base_vol", "taker_quote_vol", "ignore"
-    ])
-    
-    df["date"] = pd.to_datetime(df["open_time"], unit="ms")
-    float_cols = ["open", "high", "low", "close", "volume"]
-    df[float_cols] = df[float_cols].astype(float)
-    
-    return df[["date", "open", "high", "low", "close"]].set_index("date")
+            # Progress indicator
+            current_date = datetime.fromtimestamp(ohlcv[-1][0] / 1000)
+            print(f"Fetched up to {current_date.date()}... ({len(all_ohlcv)} candles)")
+            
+            if current_date > datetime.now() - timedelta(days=1):
+                break
+                
+            time.sleep(0.5) # Be nice to API limits
+            
+        except Exception as e:
+            print(f"Error fetching data: {e}")
+            time.sleep(5)
+            continue
 
-def calculate_indicators(df):
-    """Calculates SMAs and III."""
-    df = df.copy()
+    df = pd.DataFrame(all_ohlcv, columns=['timestamp', 'open', 'high', 'low', 'close', 'volume'])
+    df['timestamp'] = pd.to_datetime(df['timestamp'], unit='ms')
+    df.set_index('timestamp', inplace=True)
     
-    # SMAs
-    df['sma_1'] = df['close'].rolling(window=SMA_PERIOD_1).mean()
-    df['sma_2'] = df['close'].rolling(window=SMA_PERIOD_2).mean()
-    df['sma_365'] = df['close'].rolling(window=SMA_PERIOD_365).mean()
-    
-    # Bands
-    df['upper_band'] = df['sma_1'] * (1 + BAND_WIDTH)
-    df['lower_band'] = df['sma_1'] * (1 - BAND_WIDTH)
-    
-    # III Calculation (Rolling 35 days)
-    # III = |Sum(LogReturns)| / Sum(|LogReturns|)
-    df['log_ret'] = np.log(df['close'] / df['close'].shift(1))
-    
-    def calc_rolling_iii(x):
-        abs_net_dir = np.abs(x.sum())
-        path_len = np.abs(x).sum()
-        if path_len == 0: return 0
-        return abs_net_dir / path_len
+    # Drop duplicates just in case
+    df = df[~df.index.duplicated(keep='first')]
+    return df
 
-    # Use rolling apply for III (Note: this can be slow on huge datasets, but fine for daily)
-    df['iii'] = df['log_ret'].rolling(window=III_WINDOW).apply(calc_rolling_iii, raw=True)
+# -----------------------------------------------------------------------------
+# STRATEGY LOGIC
+# -----------------------------------------------------------------------------
+def apply_strategy(df):
+    print("\nCalculating indicators and signals...")
+    
+    # 1. Indicators
+    df['SMA365'] = df['close'].rolling(window=SMA_LONG_PERIOD).mean()
+    df['SMA90'] = df['close'].rolling(window=SMA_FILTER_PERIOD).mean()
+    
+    # 2. Distance Calculations
+    # Positive if price > SMA, Negative if price < SMA
+    df['dist_raw'] = df['close'] - df['SMA365']
+    df['dist_pct'] = df['dist_raw'] / df['SMA365']
+    
+    # 3. Derivative of Distance (1-day rate)
+    # If derivative > 0, price is moving AWAY from SMA (or up towards it if below) relative to yesterday
+    df['dist_deriv'] = df['dist_pct'].diff()
+    
+    # 4. Slope of SMA 90
+    # Normalized slope: (SMA_today - SMA_yesterday) / SMA_yesterday
+    df['sma90_slope'] = df['SMA90'].pct_change()
+    
+    # 5. Logic Loop
+    # We iterate because "Coming from > 7%" implies a state memory
+    
+    positions = [] # 1 for Long, -1 for Short, 0 for Flat
+    
+    # State variables
+    position = 0
+    was_extended_bullish = False # Tracks if we were recently > 7%
+    was_extended_bearish = False # Tracks if we were recently < -7%
+    
+    # Convert to standard python lists/numpy for speed in loop
+    close = df['close'].values
+    dist_pct = df['dist_pct'].values
+    dist_deriv = df['dist_deriv'].values
+    sma90_slope = df['sma90_slope'].values
+    index = df.index
+    
+    out_pos = np.zeros(len(df))
+    
+    for i in range(1, len(df)):
+        # Skip until we have enough data for SMAs
+        if np.isnan(close[i]) or np.isnan(dist_pct[i]) or np.isnan(sma90_slope[i]):
+            out_pos[i] = 0
+            continue
+            
+        # A. Update Extension State
+        # If we are far away, mark as extended
+        if dist_pct[i] > PROXIMITY_THRESHOLD: 
+            was_extended_bullish = True
+            was_extended_bearish = False # Reset opposite
+        elif dist_pct[i] < -PROXIMITY_THRESHOLD:
+            was_extended_bearish = True
+            was_extended_bullish = False
+            
+        # Reset extension if we cross the SMA (trend change invalidates pullback logic)
+        # If sign of distance changes, we crossed the SMA
+        if (dist_pct[i] > 0 and dist_pct[i-1] < 0) or (dist_pct[i] < 0 and dist_pct[i-1] > 0):
+            was_extended_bullish = False
+            was_extended_bearish = False
+            
+        # B. Check for Retest Trigger
+        
+        # LONG SIGNAL CONDITIONS:
+        # 1. Price is above SMA (Positive Distance)
+        # 2. We came from > 7% (was_extended_bullish is True)
+        # 3. We are currently within the retest zone (Distance < 7%)
+        # 4. Derivative switched sign from Negative (getting closer) to Positive (moving away/bouncing)
+        
+        long_trigger = False
+        short_trigger = False
+        
+        # Check Long Retest
+        if (dist_pct[i] > 0 and 
+            was_extended_bullish and 
+            dist_pct[i] <= PROXIMITY_THRESHOLD):
+            
+            # Derivative switch: Yesterday < 0, Today > 0
+            if dist_deriv[i-1] < 0 and dist_deriv[i] > 0:
+                long_trigger = True
+                
+        # Check Short Retest
+        if (dist_pct[i] < 0 and 
+            was_extended_bearish and 
+            dist_pct[i] >= -PROXIMITY_THRESHOLD):
+            
+            # Derivative switch: Yesterday > 0 (getting less negative/closer), Today < 0 (getting more negative/away)
+            if dist_deriv[i-1] > 0 and dist_deriv[i] < 0:
+                short_trigger = True
+
+        # C. Apply SMA 90 Slope Filter
+        is_flat_slope = abs(sma90_slope[i]) < SLOPE_FLAT_THRESHOLD
+        
+        # D. Determine Position for TOMORROW (Simulating entry on next day open/close hold)
+        # The prompt says: "Hold the positions one day then re-enter the next."
+        # This effectively means we re-evaluate daily.
+        
+        if long_trigger:
+            if not is_flat_slope:
+                position = 1
+            else:
+                position = 0 # Stay flat if slope is horizontal
+        elif short_trigger:
+            if not is_flat_slope:
+                position = -1
+            else:
+                position = 0
+        else:
+            # If no NEW signal, do we hold previous?
+            # Prompt: "Hold the positions one day then re-enter the next."
+            # This implies the signal dictates the day's trade. 
+            # If there is NO signal today, what do we do?
+            # Standard "retest" strategies usually hold the trend until invalidated.
+            # HOWEVER, the prompt implies a daily check. 
+            # "If after retest slope... is horizontal stays flat until next signal."
+            # Interpretation: Once a signal hits, we enter. We stay in that state.
+            # BUT, we must check the slope daily.
+            
+            if position != 0 and is_flat_slope:
+                position = 0 # Exit if slope goes flat
+            
+            # If slope is fine, we keep the previous position
+            pass 
+
+        out_pos[i] = position
+
+    df['position'] = out_pos
+    return df
+
+# -----------------------------------------------------------------------------
+# BACKTEST EXECUTION
+# -----------------------------------------------------------------------------
+def calculate_performance(df):
+    # Strategy Returns: Position (yesterday) * Market Return (today)
+    df['market_return'] = df['close'].pct_change()
+    df['strategy_return'] = df['position'].shift(1) * df['market_return']
+    
+    # Cumulative Returns
+    df['equity_curve'] = (1 + df['strategy_return']).cumprod()
+    df['buy_hold_curve'] = (1 + df['market_return']).cumprod()
+    
+    # Stats
+    total_return = df['equity_curve'].iloc[-1] - 1
+    bh_return = df['buy_hold_curve'].iloc[-1] - 1
+    
+    print("\n---------------------------------------------------")
+    print(f"Backtest Results ({START_DATE} to Now)")
+    print("---------------------------------------------------")
+    print(f"Total Strategy Return: {total_return * 100:.2f}%")
+    print(f"Buy & Hold Return:     {bh_return * 100:.2f}%")
+    print(f"Final Equity (Start 1.0): {df['equity_curve'].iloc[-1]:.4f}")
+    
+    # Trade Count (Approximate based on position changes)
+    trades = df['position'].diff().abs().sum() / 2
+    print(f"Approximate Trades:    {int(trades)}")
     
     return df
 
-def get_leverage(iii):
-    if pd.isna(iii): return 1.0
-    if iii < III_T_LOW: return LEV_LOW
-    elif iii < III_T_HIGH: return LEV_MID
-    else: return LEV_HIGH
-
-def run_backtest(df):
-    """Executes the state machine and trade logic."""
-    print("Running backtest strategy logic...")
+# -----------------------------------------------------------------------------
+# MAIN
+# -----------------------------------------------------------------------------
+if __name__ == "__main__":
+    # 1. Get Data
+    df = fetch_historical_data(SYMBOL, TIMEFRAME, START_DATE)
     
-    equity_curve = [INITIAL_CAPITAL]
-    capital = INITIAL_CAPITAL
-    position = None  # {type: 'LONG'/'SHORT', entry_price: float, size: float, stop: float, tp: float}
-    
-    # State Machine Variables
-    cross_flag = 0
-    
-    # III Condition Tracking
-    iii_condition_active = False
-    iii_above_threshold = False 
-    
-    history = []
-    condition_status = []  # Track when condition is active for plotting
-    
-    # Iterate row by row to replicate state machine accurately
-    # Start loop after enough data for indicators
-    start_idx = max(SMA_PERIOD_2, III_WINDOW) + 1
-    
-    for i in range(start_idx, len(df)):
-        curr_date = df.index[i]
-        curr_row = df.iloc[i]
-        prev_row = df.iloc[i-1]
-        
-        # --- 1. UPDATE STATE MACHINE (Based on previous close vs SMA) ---
-        # Note: Strategy Logic generates signal at T based on T-1 Close
-        
-        sma_1 = prev_row['sma_1']
-        sma_2 = prev_row['sma_2']
-        prev_close = df.iloc[i-2]['close'] # Close of T-2
-        last_close = prev_row['close']     # Close of T-1
-        
-        # Detect Crosses (T-2 to T-1)
-        if prev_close < sma_1 and last_close > sma_1:
-            cross_flag = 1
-        elif prev_close > sma_1 and last_close < sma_1:
-            cross_flag = -1
-            
-        # Reset Flag if exited bands
-        upper_band = prev_row['upper_band']
-        lower_band = prev_row['lower_band']
-        
-        if last_close > upper_band or last_close < lower_band:
-            cross_flag = 0
-            
-        # --- 2. GENERATE SIGNAL ---
-        signal = "FLAT"
-        
-        # Long Logic
-        if last_close > upper_band: signal = "LONG"
-        elif last_close > sma_1 and cross_flag == 1: signal = "LONG"
-        
-        # Short Logic
-        elif last_close < lower_band: signal = "SHORT"
-        elif last_close < sma_1 and cross_flag == -1: signal = "SHORT"
-        
-        # Filter Logic (SMA 2)
-        if signal == "LONG" and last_close < sma_2: signal = "FLAT"
-        if signal == "SHORT" and last_close > sma_2: signal = "FLAT"
-        
-        # --- 3. EXECUTE TRADES ---
-        # Today's price action
-        today_open = curr_row['open']
-        today_high = curr_row['high']
-        today_low = curr_row['low']
-        today_close = curr_row['close']
-        
-        # Determine Leverage for TODAY based on YESTERDAY's III
-        lev = get_leverage(prev_row['iii'])
-        
-
-        
-        # Check Existing Position (SL/TP or Signal Flip)
-        if position:
-            # Check SL/TP first (assuming they exist in the market)
-            # Assumption: SL hit first if Low < SL, unless Open gap causes issues (simplified here)
-            
-            pnl_pct = 0
-            exit_price = None
-            exit_reason = None
-            
-            # LONG EXIT CHECKS
-            if position['type'] == 'LONG':
-                if today_low <= position['stop']:
-                    exit_price = position['stop']
-                    exit_reason = "STOP_LOSS"
-                elif today_high >= position['tp']:
-                    exit_price = position['tp']
-                    exit_reason = "TAKE_PROFIT"
-                elif signal != "LONG": # Signal Flip or Flat
-                    exit_price = today_open
-                    exit_reason = "SIGNAL_CHANGE"
-                
-                if exit_price:
-                    # Calculate PnL
-                    # (Exit - Entry) / Entry * Leverage
-                    raw_ret = (exit_price - position['entry_price']) / position['entry_price']
-                    pnl_pct = raw_ret * position['leverage']
-            
-            # SHORT EXIT CHECKS
-            elif position['type'] == 'SHORT':
-                if today_high >= position['stop']:
-                    exit_price = position['stop']
-                    exit_reason = "STOP_LOSS"
-                elif today_low <= position['tp']:
-                    exit_price = position['tp']
-                    exit_reason = "TAKE_PROFIT"
-                elif signal != "SHORT":
-                    exit_price = today_open
-                    exit_reason = "SIGNAL_CHANGE"
-                    
-                if exit_price:
-                    # (Entry - Exit) / Entry * Leverage
-                    raw_ret = (position['entry_price'] - exit_price) / position['entry_price']
-                    pnl_pct = raw_ret * position['leverage']
-
-            # Process Exit
-            if exit_price:
-                # Apply Fees
-                fee_impact = FEES_PCT * position['leverage'] 
-                net_pnl = pnl_pct - fee_impact
-                
-                capital = capital * (1 + net_pnl)
-                position = None # Flat
-                
-                # No streak logic to update
-                
-                # If we exited due to signal change, we might re-enter immediately below
-                # But for simplicity, we trade on Open, so Signal Change exit happens at Open
-                # If signal is reversed, we can enter new position same bar? 
-                # Yes, if we exited at Open, we can enter at Open.
-        
-        # Entry Logic (If flat)
-        if position is None and signal != "FLAT":
-            entry_price = today_open
-            
-            # No streak condition to check
-            can_enter = True
-            
-
-            
-            # Setup Stops/TP
-            if signal == "LONG":
-                sl_price = entry_price * (1 - STATIC_STOP_PCT)
-                tp_price = entry_price * (1 + TAKE_PROFIT_PCT)
-            else:
-                sl_price = entry_price * (1 + STATIC_STOP_PCT)
-                tp_price = entry_price * (1 - TAKE_PROFIT_PCT)
-            
-            # Check if Candle immediately hits SL/TP (Intraday volatility)
-            # Simplified: Assume entry successful, check SL/TP next loop OR same loop?
-            # We must check same loop for validity.
-            
-            # Immediate Stop Check (bad luck entry)
-            hit_sl = False
-            if signal == "LONG" and today_low < sl_price: hit_sl = True
-            if signal == "SHORT" and today_high > sl_price: hit_sl = True
-            
-            if hit_sl:
-                # Immediate loss
-                pnl_pct = -STATIC_STOP_PCT * lev
-                fee_impact = FEES_PCT * lev
-                capital = capital * (1 + pnl_pct - fee_impact)
-                # No streak logic to update
-            else:
-                # Position Established
-                position = {
-                    'type': signal,
-                    'entry_price': entry_price,
-                    'stop': sl_price,
-                    'tp': tp_price,
-                    'leverage': lev,
-                    'entry_date': curr_date
-                }
-                # Apply Entry Fee immediately? usually applied on PnL calc, but let's deduct from 'virtual' equity if we tracked realized.
-                # We will deduct entry fee upon exit calculation for simplicity, or effectively reduce size.
-                # Actually, standard is: Capital is locked.
-                
-        equity_curve.append(capital)
-        history.append({'date': curr_date, 'equity': capital, 'signal': signal, 'leverage': lev if position else 0})
-
-    result_df = pd.DataFrame(history).set_index('date')
-    return result_df
-
-def calculate_metrics(df):
-    """Calculates Sortino, Sharpe, and Quarterly Returns."""
-    df['returns'] = df['equity'].pct_change()
-    
-    # Annualization factor (Crypto trades 365 days)
-    ann_factor = 365
-    
-    total_return = (df['equity'].iloc[-1] / df['equity'].iloc[0]) - 1
-    cagr = (df['equity'].iloc[-1] / df['equity'].iloc[0]) ** (365 / len(df)) - 1
-    
-    daily_std = df['returns'].std()
-    downside_std = df[df['returns'] < 0]['returns'].std()
-    
-    sharpe = (df['returns'].mean() / daily_std) * np.sqrt(ann_factor) if daily_std > 0 else 0
-    sortino = (df['returns'].mean() / downside_std) * np.sqrt(ann_factor) if downside_std > 0 else 0
-    
-    # Quarterly Capital
-    quarterly = df['equity'].resample('QE').last()
-    
-    return {
-        'Total Return': total_return,
-        'CAGR': cagr,
-        'Sharpe Ratio': sharpe,
-        'Sortino Ratio': sortino,
-        'Final Capital': df['equity'].iloc[-1],
-        'Quarterly': quarterly
-    }
-
-def project_growth(equity_df, days_forward=365):
-    """Projects future equity using log-linear regression."""
-    # Fit y = a * e^(bx)  <->  ln(y) = ln(a) + bx
-    
-    y = np.log(equity_df['equity'].values)
-    x = np.arange(len(y))
-    
-    # Linear fit on log equity
-    coeffs = np.polyfit(x, y, 1) # [slope, intercept]
-    
-    # Generate future dates
-    last_date = equity_df.index[-1]
-    future_dates = [last_date + timedelta(days=i) for i in range(1, days_forward + 1)]
-    future_x = np.arange(len(x), len(x) + days_forward)
-    
-    # Project
-    predicted_log_y = coeffs[0] * future_x + coeffs[1]
-    predicted_equity = np.exp(predicted_log_y)
-    
-    return pd.Series(predicted_equity, index=future_dates)
-
-# --- Flask Routes ---
-
-@app.route('/')
-def home():
-    """Main page with backtest results and plot."""
-    # 1. Fetch
-    df = fetch_binance_data(SYMBOL, START_DATE)
-    
-    # 2. Indicators
-    df = calculate_indicators(df)
-    df.dropna(inplace=True)
-    
-    # 3. Backtest
-    res_df = run_backtest(df)
-    
-    # 4. Metrics
-    metrics = calculate_metrics(res_df)
-    
-    # 5. Projection
-    projection = project_growth(res_df)
-    
-    # Generate plot
-    plot_url = generate_plot(res_df, projection)
-    
-    # HTML template
-    html_template = '''
-    <!DOCTYPE html>
-    <html>
-    <head>
-        <title>Tumbler Strategy Backtest</title>
-        <style>
-            body { font-family: Arial, sans-serif; margin: 40px; }
-            .container { max-width: 1200px; margin: 0 auto; }
-            .metrics { background: #f5f5f5; padding: 20px; border-radius: 8px; margin-bottom: 20px; }
-            .metric-row { display: flex; flex-wrap: wrap; gap: 20px; }
-            .metric-box { background: white; padding: 15px; border-radius: 5px; box-shadow: 0 2px 4px rgba(0,0,0,0.1); flex: 1; min-width: 200px; }
-            .metric-value { font-size: 24px; font-weight: bold; color: #2c3e50; }
-            .metric-label { color: #7f8c8d; font-size: 14px; }
-            .plot-container { text-align: center; margin-top: 30px; }
-            .plot-img { max-width: 100%; height: auto; border: 1px solid #ddd; border-radius: 8px; }
-            h1 { color: #2c3e50; }
-            .condition-note { background: #ffe6e6; padding: 10px; border-radius: 5px; margin: 20px 0; }
-        </style>
-    </head>
-    <body>
-        <div class="container">
-            <h1>Tumbler Strategy Backtest</h1>
-            <p>Symbol: {{ symbol }} | Period: {{ start_date }} to Present</p>
-            
-
-            
-            <div class="metrics">
-                <h2>Performance Metrics</h2>
-                <div class="metric-row">
-                    <div class="metric-box">
-                        <div class="metric-label">Initial Capital</div>
-                        <div class="metric-value">${{ "%.2f"|format(initial_capital) }}</div>
-                    </div>
-                    <div class="metric-box">
-                        <div class="metric-label">Final Capital</div>
-                        <div class="metric-value">${{ "%.2f"|format(metrics['Final Capital']) }}</div>
-                    </div>
-                    <div class="metric-box">
-                        <div class="metric-label">Total Return</div>
-                        <div class="metric-value">{{ "%.2f"|format(metrics['Total Return']*100) }}%</div>
-                    </div>
-                    <div class="metric-box">
-                        <div class="metric-label">CAGR</div>
-                        <div class="metric-value">{{ "%.2f"|format(metrics['CAGR']*100) }}%</div>
-                    </div>
-                    <div class="metric-box">
-                        <div class="metric-label">Sharpe Ratio</div>
-                        <div class="metric-value">{{ "%.2f"|format(metrics['Sharpe Ratio']) }}</div>
-                    </div>
-                    <div class="metric-box">
-                        <div class="metric-label">Sortino Ratio</div>
-                        <div class="metric-value">{{ "%.2f"|format(metrics['Sortino Ratio']) }}</div>
-                    </div>
-                </div>
-            </div>
-            
-            <div class="plot-container">
-                <h2>Equity Curve with Condition Highlighting</h2>
-                <img src="{{ plot_url }}" alt="Equity Plot" class="plot-img">
-            </div>
-            
-            <div style="margin-top: 30px; font-size: 12px; color: #7f8c8d;">
-                <p>Server running on port {{ port }}. Data fetched from Binance API.</p>
-            </div>
-        </div>
-    </body>
-    </html>
-    '''
-    
-    return render_template_string(html_template,
-                                 symbol=SYMBOL,
-                                 start_date=START_DATE,
-                                 initial_capital=INITIAL_CAPITAL,
-                                 metrics=metrics,
-                                 plot_url=plot_url,
-                                 port=PORT)
-
-@app.route('/plot')
-def plot_only():
-    """Direct endpoint to get the plot image."""
-    # Run backtest to get data
-    df = fetch_binance_data(SYMBOL, START_DATE)
-    df = calculate_indicators(df)
-    df.dropna(inplace=True)
-    res_df = run_backtest(df)
-    projection = project_growth(res_df)
-    
-    # Create plot in memory
-    img = io.BytesIO()
-    generate_plot(res_df, projection, save_to=img)
-    img.seek(0)
-    return send_file(img, mimetype='image/png')
-
-def generate_plot(res_df, projection, save_to=None):
-    """Generate the equity plot."""
-    plt.figure(figsize=(14, 8))
-    
-    # Historical Equity
-    plt.plot(res_df.index, res_df['equity'], label='Historical Equity', color='blue', linewidth=2)
-    
-    # Projection
-    plt.plot(projection.index, projection.values, label='1-Year Projection', color='green', linestyle='--', linewidth=2)
-    
-    plt.title(f"Tumbler Strategy Equity Curve\nSMA({SMA_PERIOD_1}/{SMA_PERIOD_2}) | Dynamic Leverage | Port 8080", fontsize=16)
-    plt.xlabel("Date", fontsize=12)
-    plt.ylabel("Capital (USD) - Log Scale", fontsize=12)
-    plt.yscale("log")
-    plt.legend(loc='upper left', fontsize=10)
-    plt.grid(True, which="both", ls="-", alpha=0.2)
-    plt.tight_layout()
-    
-    if save_to:
-        plt.savefig(save_to, format='png', dpi=100)
-        plt.close()
-        return None
+    if len(df) < SMA_LONG_PERIOD:
+        print("Not enough data fetched to calculate 365 SMA.")
     else:
-        # Convert plot to base64 for HTML embedding
-        img = io.BytesIO()
-        plt.savefig(img, format='png', dpi=100)
-        plt.close()
-        img.seek(0)
-        plot_url = 'data:image/png;base64,' + base64.b64encode(img.getvalue()).decode('utf-8')
-        return plot_url
-
-# --- Main Execution ---
-if __name__ == '__main__':
-    print(f"Starting Flask server on port {PORT}...")
-    print(f"Open http://localhost:{PORT} in your browser")
-    app.run(host='0.0.0.0', port=PORT, debug=False)
+        # 2. Apply Logic
+        df = apply_strategy(df)
+        
+        # 3. Calculate Performance
+        df = calculate_performance(df)
+        
+        # 4. Export for manual inspection
+        filename = "strategy_results.csv"
+        df.to_csv(filename)
+        print(f"\nDetailed logs saved to {filename}")
