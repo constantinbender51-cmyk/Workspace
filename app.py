@@ -83,8 +83,8 @@ def calculate_indicators(df):
     df['log_ret'] = np.log(df['close'] / df['close'].shift(1))
     
     def calc_rolling_iii(x):
-        abs_net_dir = abs(x.sum())
-        path_len = x.abs().sum()
+        abs_net_dir = np.abs(x.sum())
+        path_len = np.abs(x).sum()
         if path_len == 0: return 0
         return abs_net_dir / path_len
 
