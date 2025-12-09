@@ -10,7 +10,7 @@ import time
 import base64
 
 # --- Configuration ---
-SYMBOL = 'SOL/USDT'
+SYMBOL = 'BTC/USDT'
 TIMEFRAME = '1d' 
 START_DATE_STR = '2018-01-01 00:00:00'
 PORT = 8080
