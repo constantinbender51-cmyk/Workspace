@@ -15,12 +15,15 @@ TIMEFRAME = '1d'
 START_DATE_STR = '2018-01-01 00:00:00'
 PORT = 8080
 
+# --- Strategy Parameters (Fixed) ---
+PARAM_W = 35      # iii window
+PARAM_U = 0.16    # iii threshold for flat regime
+PARAM_Y = 0.045   # Bandwidth (4.5%)
+
 app = Flask(__name__)
 
 # --- Global Storage ---
 global_data = {
-    'df': pd.DataFrame(),
-    'best_params': {},
     'results': pd.DataFrame()
 }
 
@@ -53,10 +56,10 @@ def fetch_data(symbol, timeframe, start_str):
     print(f"Fetched {len(df)} rows.")
     return df
 
-def prepare_arrays(df):
+def run_strategy(df):
     """
-    Pre-calculates everything possible outside the loops.
-    Returns a dictionary of numpy arrays.
+    Runs the strategy with fixed parameters:
+    W=35, U=0.16, Y=0.045
     """
     data = df.copy()
 
@@ -67,194 +70,136 @@ def prepare_arrays(df):
     data['sma_40'] = data['close'].rolling(window=40).mean()
     data['sma_120'] = data['close'].rolling(window=120).mean()
 
-    # 3. Leverage Control (Fixed 35-day window as per original spec)
-    w35 = 35
-    iii_35 = (data['log_ret'].rolling(w35).sum().abs() / 
-              data['log_ret'].abs().rolling(w35).sum()).fillna(0)
-    
-    conditions = [(iii_35 < 0.13), (iii_35 < 0.18)]
-    choices = [0.5, 4.5]
-    data['base_leverage'] = np.select(conditions, choices, default=2.45)
-    data['base_leverage'] = data['base_leverage'].shift(1) # Shift to avoid leakage
-
-    # 4. Pre-calculate 'iii' for ALL windows 1 to 36
-    # We store these in a dictionary: { window_size: numpy_array }
-    iii_dict = {}
-    for w in range(1, 37):
-        iii_val = (data['log_ret'].rolling(w).sum().abs() / 
+    # 3. Calculate iii (Efficiency Ratio) for window W=35
+    # Used for BOTH leverage calculation AND flat regime trigger
+    w = PARAM_W
+    data['iii'] = (data['log_ret'].rolling(w).sum().abs() / 
                    data['log_ret'].abs().rolling(w).sum()).fillna(0)
-        # Shift by 1 because the decision at day 'i' must be based on 'iii' from 'i-1'
-        iii_dict[w] = iii_val.shift(1).values
-
-    # Convert columns to numpy for speed
-    arrays = {
-        'open': data['open'].values,
-        'high': data['high'].values,
-        'low': data['low'].values,
-        'close': data['close'].values,
-        'sma40': data['sma_40'].values,
-        'sma120': data['sma_120'].values,
-        'leverage': data['base_leverage'].values,
-        'iii_dict': iii_dict,
-        'dates': data.index,
-        'log_ret': data['log_ret'].values
-    }
-    return arrays
-
-def run_backtest_fast(arrays, w, u, y):
-    """
-    Optimized backtest loop using numpy arrays.
-    """
-    opens = arrays['open']
-    highs = arrays['high']
-    lows = arrays['low']
-    closes = arrays['close']
-    sma40s = arrays['sma40']
-    sma120s = arrays['sma120']
-    leverages = arrays['leverage']
     
-    # Get the specific pre-shifted iii array for this window w
-    iii_array = arrays['iii_dict'][w]
+    # SHIFT iii by 1: We decide today's trade using yesterday's efficiency
+    data['iii_shifted'] = data['iii'].shift(1)
+
+    # 4. Leverage Logic
+    # < 0.13 -> 0.5, < 0.18 -> 4.5, else 2.45
+    # Uses the shifted iii
+    conditions = [
+        (data['iii_shifted'] < 0.13),
+        (data['iii_shifted'] < 0.18)
+    ]
+    choices = [0.5, 4.5]
+    data['leverage'] = np.select(conditions, choices, default=2.45)
+    
+    # Prepare Numpy Arrays for loop
+    opens = data['open'].values
+    highs = data['high'].values
+    lows = data['low'].values
+    closes = data['close'].values
+    sma40s = data['sma_40'].values
+    sma120s = data['sma_120'].values
+    iii_shifted = data['iii_shifted'].values
+    leverages = data['leverage'].values
     
     n = len(closes)
+    signals = np.zeros(n)
     returns = np.zeros(n)
     
-    # Constants
+    # Strategy Loop State
+    is_flat_regime = False
     sl_pct = 0.02
     tp_pct = 0.16
     
-    # State
-    is_flat_regime = False
-    
-    # Loop
-    # Start at 120 to ensure SMAs are valid
+    # Start at 120 to allow SMAs to populate
     for i in range(120, n):
-        # 1. Update Flat Regime State
-        # Trigger: iii drops below u
-        # Note: iii_array is already shifted by 1 in prepare_arrays
-        current_iii = iii_array[i] 
+        # --- A. Flat Regime Logic ---
         
-        # We need PREVIOUS price/sma for band check to avoid lookahead on the "release" trigger
-        prev_c = closes[i-1]
-        prev_s40 = sma40s[i-1]
-        prev_s120 = sma120s[i-1]
-        
-        if current_iii < u:
+        # 1. Trigger: If iii (yesterday) < U, enter flat regime
+        if iii_shifted[i] < PARAM_U:
             is_flat_regime = True
             
-        # Release: enters band y
+        # 2. Release: If in flat regime, check if price enters band Y around SMAs
         if is_flat_regime:
-            # Check bands
+            # Check bands using YESTERDAY'S price vs SMAs (to avoid lookahead on release)
+            prev_c = closes[i-1]
+            prev_s40 = sma40s[i-1]
+            prev_s120 = sma120s[i-1]
+            
             diff1 = abs(prev_c - prev_s40)
             diff2 = abs(prev_c - prev_s120)
-            threshold1 = prev_s40 * y
-            threshold2 = prev_s120 * y
+            thresh1 = prev_s40 * PARAM_Y
+            thresh2 = prev_s120 * PARAM_Y
             
-            if diff1 <= threshold1 or diff2 <= threshold2:
+            # If price is within Y% of EITHER SMA
+            if diff1 <= thresh1 or diff2 <= thresh2:
                 is_flat_regime = False
         
-        # 2. Determine Signal (if not flat)
-        signal = 0
-        if not is_flat_regime:
+        # --- B. Signal Generation ---
+        
+        if is_flat_regime:
+            signals[i] = 0
+        else:
+            # Standard Trend Logic (Yesterday's close vs SMAs)
+            prev_c = closes[i-1]
+            prev_s40 = sma40s[i-1]
+            prev_s120 = sma120s[i-1]
+            
             if prev_c > prev_s40 and prev_c > prev_s120:
-                signal = 1
+                signals[i] = 1 # Long
             elif prev_c < prev_s40 and prev_c < prev_s120:
-                signal = -1
+                signals[i] = -1 # Short
+            else:
+                signals[i] = 0
         
-        # 3. Calculate Return
+        # --- C. PnL Calculation ---
+        
         lev = leverages[i]
+        signal = signals[i]
         
-        # If no signal or invalid leverage/data
         if signal == 0 or np.isnan(lev):
+            returns[i] = 0.0
             continue
             
         o, h, l, c = opens[i], highs[i], lows[i], closes[i]
+        daily_ret = 0.0
         
         if signal == 1:
             stop = o * (1 - sl_pct)
             take = o * (1 + tp_pct)
             if l <= stop: 
-                ret = -sl_pct
+                daily_ret = -sl_pct
             elif h >= take: 
-                ret = tp_pct
+                daily_ret = tp_pct
             else: 
-                ret = (c - o) / o
-        else:
+                daily_ret = (c - o) / o
+        else: # Short
             stop = o * (1 + sl_pct)
             take = o * (1 - tp_pct)
             if h >= stop: 
-                ret = -sl_pct
+                daily_ret = -sl_pct
             elif l <= take: 
-                ret = tp_pct
+                daily_ret = tp_pct
             else: 
-                ret = (o - c) / o
+                daily_ret = (o - c) / o
                 
-        returns[i] = ret * lev
+        returns[i] = daily_ret * lev
 
-    # Calculate Sharpe
-    std_dev = np.std(returns)
-    if std_dev == 0:
-        sharpe = 0.0
-    else:
-        sharpe = (np.mean(returns) / std_dev) * np.sqrt(365)
-        
-    return sharpe, returns
-
-def optimize_strategy(df):
-    """3D Grid search for w, u, and y."""
-    arrays = prepare_arrays(df)
+    # Store results
+    data['strategy_ret'] = returns
+    data['cumulative_ret'] = (1 + data['strategy_ret']).cumprod()
     
-    print("Starting 3D Grid Search (w, u, y)...")
+    # Buy & Hold for comparison
+    data['bnh_ret'] = (1 + data['log_ret']).cumprod()
     
-    # Parameter Space
-    w_values = range(1, 37) # 1 to 36
-    u_values = np.arange(0.0, 1.01, 0.02) # Step 0.02 to keep total iters manageable (~50 steps)
-    y_values = np.arange(0.0, 0.051, 0.005) # 11 steps
-    
-    # Total iterations approx: 36 * 50 * 11 = ~20,000
-    
-    best_sharpe = -999
-    best_params = {'w': 0, 'u': 0, 'y': 0}
-    best_returns = None
-    
-    start_time = time.time()
-    
-    for w in w_values:
-        # Print progress every window iteration
-        print(f"Scanning Window {w}/36...")
-        for u in u_values:
-            for y in y_values:
-                sharpe, returns = run_backtest_fast(arrays, w, u, y)
-                
-                if sharpe > best_sharpe:
-                    best_sharpe = sharpe
-                    best_params = {'w': w, 'u': u, 'y': y}
-                    best_returns = returns
-
-    elapsed = time.time() - start_time
-    print(f"Optimization finished in {elapsed:.2f}s")
-    print(f"Best Sharpe: {best_sharpe:.4f}")
-    print(f"Best Params: {best_params}")
-    
-    # Reconstruct DataFrame for plotting
-    res_df = df.copy()
-    res_df['strategy_ret'] = best_returns
-    res_df['cumulative_ret'] = (1 + res_df['strategy_ret']).cumprod()
-    res_df['log_ret'] = np.log(res_df['close'] / res_df['close'].shift(1))
-    res_df['bnh_ret'] = (1 + res_df['log_ret']).cumprod()
-    
-    return best_params, res_df
+    return data
 
 # --- Main Execution ---
 try:
     raw_df = fetch_data(SYMBOL, TIMEFRAME, START_DATE_STR)
     
     if not raw_df.empty:
-        b_params, res_df = optimize_strategy(raw_df)
-        
-        global_data['df'] = raw_df
-        global_data['best_params'] = b_params
+        print("Running strategy with fixed parameters...")
+        res_df = run_strategy(raw_df)
         global_data['results'] = res_df
+        print("Strategy calculation complete.")
     else:
         print("No data fetched.")
 
@@ -269,13 +214,12 @@ def index():
     if df_res is None or df_res.empty:
         return "Error: No results available."
     
-    p = global_data['best_params']
-    
     # Create Plot
     plt.figure(figsize=(12, 6))
-    plt.plot(df_res.index, df_res['cumulative_ret'], label=f'Strategy (w={p["w"]}, u={p["u"]:.2f}, y={p["y"]:.1%})', color='blue')
-    plt.plot(df_res.index, df_res['bnh_ret'], label='Buy & Hold', color='gray', alpha=0.5)
-    plt.title(f'Optimized Strategy: {SYMBOL} (Sharpe Optimized)')
+    label_str = f'Strategy (w={PARAM_W}, u={PARAM_U}, y={PARAM_Y:.1%})'
+    plt.plot(df_res.index, df_res['cumulative_ret'], label=label_str, color='blue')
+    plt.plot(df_res.index, df_res['bnh_ret'], label=f'Buy & Hold ({SYMBOL})', color='gray', alpha=0.5)
+    plt.title(f'Strategy Result: {SYMBOL} (Fixed Parameters)')
     plt.ylabel('Cumulative Return (Log Scale)')
     plt.yscale('log')
     plt.legend()
@@ -297,26 +241,25 @@ def index():
     <!DOCTYPE html>
     <html>
     <head>
-        <title>Optimized Strategy Results</title>
+        <title>Strategy Results</title>
         <style>
             body {{ font-family: sans-serif; text-align: center; padding: 20px; background-color: #f4f4f4; }}
             .container {{ background: white; padding: 20px; border-radius: 8px; box-shadow: 0 0 10px rgba(0,0,0,0.1); display: inline-block; }}
             img {{ max-width: 100%; height: auto; }}
             .stats {{ margin-top: 20px; font-size: 1.2em; display: flex; justify-content: space-around; }}
             .stat-box {{ padding: 10px; border: 1px solid #eee; border-radius: 5px; min-width: 150px; }}
-            .highlight {{ color: #2ecc71; font-weight: bold; }}
-            .params {{ margin: 20px 0; background: #f9f9f9; padding: 10px; border-radius: 5px; }}
+            .params {{ margin: 20px 0; background: #e8f4f8; padding: 10px; border-radius: 5px; }}
         </style>
     </head>
     <body>
         <div class="container">
-            <h1>Strategy Results (3D Optimized)</h1>
+            <h1>Strategy Results: {SYMBOL}</h1>
             
             <div class="params">
-                <h3>Optimal Parameters Found:</h3>
-                <p><strong>iii Window (w):</strong> {p['w']} days</p>
-                <p><strong>iii Threshold (u):</strong> {p['u']:.2f}</p>
-                <p><strong>Band Width (y):</strong> {p['y']:.1%}</p>
+                <h3>Fixed Parameters:</h3>
+                <p><strong>iii Window (w):</strong> {PARAM_W} days</p>
+                <p><strong>iii Threshold (u):</strong> {PARAM_U}</p>
+                <p><strong>Band Width (y):</strong> {PARAM_Y:.1%}</p>
             </div>
 
             <img src="data:image/png;base64,{plot_url}">
