@@ -10,7 +10,7 @@ import time
 import base64
 
 # --- Configuration ---
-SYMBOL = 'BTC/USDT'
+SYMBOL = 'ETH/USDT' # Changed to ETH
 TIMEFRAME = '1d' 
 START_DATE_STR = '2018-01-01 00:00:00'
 PORT = 8080
@@ -208,10 +208,8 @@ def optimize_strategy(df):
     
     # Parameter Space
     w_values = range(1, 37) # 1 to 36
-    u_values = np.arange(0.0, 1.01, 0.02) # Step 0.02 to keep total iters manageable (~50 steps)
+    u_values = np.arange(0.0, 1.01, 0.02) # Step 0.02
     y_values = np.arange(0.0, 0.051, 0.005) # 11 steps
-    
-    # Total iterations approx: 36 * 50 * 11 = ~20,000
     
     best_sharpe = -999
     best_params = {'w': 0, 'u': 0, 'y': 0}
@@ -274,7 +272,7 @@ def index():
     # Create Plot
     plt.figure(figsize=(12, 6))
     plt.plot(df_res.index, df_res['cumulative_ret'], label=f'Strategy (w={p["w"]}, u={p["u"]:.2f}, y={p["y"]:.1%})', color='blue')
-    plt.plot(df_res.index, df_res['bnh_ret'], label='Buy & Hold', color='gray', alpha=0.5)
+    plt.plot(df_res.index, df_res['bnh_ret'], label='Buy & Hold (ETH)', color='gray', alpha=0.5)
     plt.title(f'Optimized Strategy: {SYMBOL} (Sharpe Optimized)')
     plt.ylabel('Cumulative Return (Log Scale)')
     plt.yscale('log')
@@ -310,7 +308,7 @@ def index():
     </head>
     <body>
         <div class="container">
-            <h1>Strategy Results (3D Optimized)</h1>
+            <h1>Strategy Results (3D Optimized: ETH/USDT)</h1>
             
             <div class="params">
                 <h3>Optimal Parameters Found:</h3>
