@@ -210,8 +210,7 @@ class Individual:
         key = random.choice(list(self.params.keys()))
         val = self.params[key]
         if isinstance(val, int):
-            # CHANGED: Increased chunks (choices) from 4 to 8 for integer mutation steps
-            change = random.choice([-20, -10, -5, -1, 1, 5, 10, 20])
+            change = random.choice([-5, -1, 1, 5])
             self.params[key] = max(2, val + change)
         else:
             change = random.uniform(0.85, 1.15)
