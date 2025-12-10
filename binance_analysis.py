@@ -11,6 +11,12 @@ from datetime import datetime, timedelta
 import warnings
 warnings.filterwarnings('ignore')
 import time
+import matplotlib
+matplotlib.use('Agg')  # Non-interactive backend for server
+import matplotlib.pyplot as plt
+from flask import Flask, render_template_string
+import io
+import base64
 
 # Configuration
 SYMBOL = 'BTC/USDT'
@@ -21,6 +27,10 @@ LOOKBACK_WINDOW = 400  # days
 FUTURE_DAYS = 10  # for returns of returns weighting
 TRAILING_STOP = 0.02  # 2%
 PROXIMITY_SCALING = 1/0.05  # 1/0.05 = 20
+# Global variables for web server
+analysis_results = None
+ohlcv_data = None
+results_data = None
 
 # Initialize exchange
 exchange = ccxt.binance({
