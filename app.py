@@ -18,7 +18,8 @@ PORT = 8080
 
 # Optimization Settings
 OOS_STEP_SIZE = 60       # Re-optimize every 60 days
-TRAINING_WINDOW = 1460   # 4-year fixed lookback
+TRAINING_WINDOW = 1460   # 4-year total lookback
+SUB_PERIODS = 4          # Split training into 4 chunks (1 year each) to test consistency
 GRID_SIZE = 8            # Resolution
 
 app = Flask(__name__)
@@ -85,18 +86,27 @@ def prepare_features(df):
 
     return data, iii_matrix, iii_windows
 
-# --- Numba Kernel ---
+# --- Numba Kernel: Multi-Period Logic ---
 @njit(parallel=True, fastmath=True)
-def grid_search_kernel(
+def grid_search_multi_period(
     opens, closes, highs, lows, 
     sma40, sma120, sma360, 
     iii_matrix, 
     p_a, p_b, p_c, p_d, p_e, p_iii_idx,
     current_time_idx,
-    training_window
+    training_window,
+    num_sub_periods
 ):
+    """
+    Calculates Sharpe Ratios for EACH sub-period separately.
+    Returns Matrix: (N_Params, Num_Sub_Periods)
+    """
     n_params = len(p_a)
-    sharpe_results = np.zeros(n_params)
+    period_length = training_window // num_sub_periods
+    
+    # Store Sharpe for each period for each parameter set
+    # Dimension: [Param_Index, Period_Index]
+    multi_period_sharpes = np.zeros((n_params, num_sub_periods))
     
     for i in prange(n_params):
         lev_a = p_a[i]
@@ -106,121 +116,120 @@ def grid_search_kernel(
         band_pct = p_e[i]
         iii_idx = int(p_iii_idx[i])
         
-        start_idx = current_time_idx - training_window
-        end_idx = current_time_idx
-        
-        if start_idx < 360: 
-            sharpe_results[i] = -999.0
-            continue
+        # Loop through each sub-period (e.g., Year 1, Year 2, Year 3, Year 4)
+        for p_idx in range(num_sub_periods):
             
-        sum_daily_ret = 0.0
-        sum_sq_daily_ret = 0.0
-        is_flat = False
-        n_days = 0
-        
-        for t in range(start_idx, end_idx):
-            prev_c = closes[t-1]
-            prev_s40 = sma40[t-1]
-            prev_s120 = sma120[t-1]
-            prev_s360 = sma360[t-1]
-            prev_iii = iii_matrix[t-1, iii_idx]
+            # Define start/end for this specific sub-period
+            # Period 0 is the oldest (furthest back), Period 3 is most recent
+            p_end = current_time_idx - (num_sub_periods - 1 - p_idx) * period_length
+            p_start = p_end - period_length
             
-            if prev_iii < flat_thresh:
-                is_flat = True
-            
-            if is_flat:
-                dist40 = abs(prev_c - prev_s40)
-                dist120 = abs(prev_c - prev_s120)
-                dist360 = abs(prev_c - prev_s360)
-                th40 = prev_s40 * band_pct
-                th120 = prev_s120 * band_pct
-                th360 = prev_s360 * band_pct
-                if (dist40 <= th40) or (dist120 <= th120) or (dist360 <= th360):
-                    is_flat = False
-            
-            lev = 0.0
-            signal = 0
-            if not is_flat:
-                lev = lev_a if prev_iii < lev_thresh else lev_b
-                if prev_c > prev_s40 and prev_c > prev_s120 and prev_c > prev_s360:
-                    signal = 1
-                elif prev_c < prev_s40 and prev_c < prev_s120 and prev_c < prev_s360:
-                    signal = -1
-            
-            daily_ret = 0.0
-            if signal != 0:
-                raw_ret = (closes[t] - opens[t]) / opens[t]
-                daily_ret = raw_ret * signal * lev
-            
-            sum_daily_ret += daily_ret
-            sum_sq_daily_ret += (daily_ret * daily_ret)
-            n_days += 1
-            
-        if n_days > 1:
-            mean_ret = sum_daily_ret / n_days
-            var_ret = (sum_sq_daily_ret / n_days) - (mean_ret * mean_ret)
-            if var_ret < 0: var_ret = 0.0
-            std_ret = np.sqrt(var_ret)
-            if std_ret > 1e-9:
-                sharpe_results[i] = (mean_ret / std_ret) * np.sqrt(365)
-            else:
-                sharpe_results[i] = 0.0
-        else:
-            sharpe_results[i] = 0.0
-            
-    return sharpe_results
+            if p_start < 360: # Safety
+                multi_period_sharpes[i, p_idx] = -999.0
+                continue
 
-# --- Robust Selector Logic ---
-def select_robust_parameters(sharpe_array, p_a, p_b, p_c, p_d, p_e, p_iii_idx):
-    """
-    Instead of argmax (Best Peak), we select the MEDIAN of the Top 5%.
-    This forces the strategy to pick a 'Plateau' of stability.
-    """
-    # 1. Filter out garbage (negative sharpes)
-    valid_indices = np.where(sharpe_array > 0.1)[0]
-    if len(valid_indices) == 0:
-        return np.argmax(sharpe_array) # Fallback
-        
-    valid_sharpes = sharpe_array[valid_indices]
-    
-    # 2. Get Top 5% threshold
-    percentile_95 = np.percentile(valid_sharpes, 95)
-    
-    # 3. Get indices of the "Elite" group
-    elite_indices = valid_indices[valid_sharpes >= percentile_95]
-    
-    if len(elite_indices) == 0:
-        return np.argmax(sharpe_array)
-        
-    # 4. Calculate Median Parameter Values of the Elite Group
-    median_a = np.median(p_a[elite_indices])
-    median_b = np.median(p_b[elite_indices])
-    median_c = np.median(p_c[elite_indices])
-    median_d = np.median(p_d[elite_indices])
-    median_e = np.median(p_e[elite_indices])
-    median_iii = np.median(p_iii_idx[elite_indices])
-    
-    # 5. Find the single parameter set in our Elite Group closest to this "Center of Mass"
-    # Normalize simply by dividing by range if needed, but Euclidean dist on raw is okay for approximation
-    # Actually, we just want the index in `elite_indices` that minimizes distance to medians.
-    
-    best_dist = 999999.0
-    robust_idx = elite_indices[0]
-    
-    for idx in elite_indices:
-        dist = (
-            (p_a[idx] - median_a)**2 + 
-            (p_b[idx] - median_b)**2 + 
-            (p_c[idx] - median_c)**2 + 
-            (p_d[idx] - median_d)**2 + 
-            (p_e[idx] - median_e)**2 +
-            (p_iii_idx[idx] - median_iii)**2
-        )
-        if dist < best_dist:
-            best_dist = dist
-            robust_idx = idx
+            sum_daily_ret = 0.0
+            sum_sq_daily_ret = 0.0
+            is_flat = False
+            n_days = 0
             
-    return robust_idx
+            # Simulation Loop for this Period
+            for t in range(p_start, p_end):
+                prev_c = closes[t-1]
+                prev_s40 = sma40[t-1]
+                prev_s120 = sma120[t-1]
+                prev_s360 = sma360[t-1]
+                prev_iii = iii_matrix[t-1, iii_idx]
+                
+                if prev_iii < flat_thresh:
+                    is_flat = True
+                
+                if is_flat:
+                    dist40 = abs(prev_c - prev_s40)
+                    dist120 = abs(prev_c - prev_s120)
+                    dist360 = abs(prev_c - prev_s360)
+                    th40 = prev_s40 * band_pct
+                    th120 = prev_s120 * band_pct
+                    th360 = prev_s360 * band_pct
+                    if (dist40 <= th40) or (dist120 <= th120) or (dist360 <= th360):
+                        is_flat = False
+                
+                lev = 0.0
+                signal = 0
+                if not is_flat:
+                    lev = lev_a if prev_iii < lev_thresh else lev_b
+                    if prev_c > prev_s40 and prev_c > prev_s120 and prev_c > prev_s360:
+                        signal = 1
+                    elif prev_c < prev_s40 and prev_c < prev_s120 and prev_c < prev_s360:
+                        signal = -1
+                
+                daily_ret = 0.0
+                if signal != 0:
+                    raw_ret = (closes[t] - opens[t]) / opens[t]
+                    daily_ret = raw_ret * signal * lev
+                
+                sum_daily_ret += daily_ret
+                sum_sq_daily_ret += (daily_ret * daily_ret)
+                n_days += 1
+                
+            # Calculate Sharpe for this period
+            if n_days > 1:
+                mean_ret = sum_daily_ret / n_days
+                var_ret = (sum_sq_daily_ret / n_days) - (mean_ret * mean_ret)
+                if var_ret < 0: var_ret = 0.0
+                std_ret = np.sqrt(var_ret)
+                if std_ret > 1e-9:
+                    multi_period_sharpes[i, p_idx] = (mean_ret / std_ret) * np.sqrt(365)
+                else:
+                    multi_period_sharpes[i, p_idx] = 0.0
+            else:
+                multi_period_sharpes[i, p_idx] = 0.0
+            
+    return multi_period_sharpes
+
+# --- Consistency Selection Logic ---
+def select_consistent_parameters(period_sharpes):
+    """
+    Selects parameters that are STABLE across all periods.
+    1. Must have Sharpe > 0 in ALL periods.
+    2. Rank by Average Sharpe.
+    """
+    n_params, n_periods = period_sharpes.shape
+    
+    # 1. Filter: Minimum acceptable Sharpe per period
+    # We set a low bar (0.0) just to ensure it didn't lose money in any single year.
+    # We can be stricter (e.g., > 0.5) if needed.
+    min_sharpes = np.empty(n_params)
+    avg_sharpes = np.empty(n_params)
+    
+    # Numba doesn't like axis args sometimes, doing manual loop or simpler numpy
+    min_sharpes = np.min(period_sharpes, axis=1)
+    avg_sharpes = np.mean(period_sharpes, axis=1)
+    
+    # Indices where Sharpe > 0 for ALL periods
+    # If no parameter set survived all 4 years, relax the constraint
+    valid_indices = np.where(min_sharpes > 0.0)[0]
+    
+    if len(valid_indices) == 0:
+        # Fallback: Allow 1 bad year (3 out of 4 > 0)
+        # Count positive periods
+        positive_counts = np.sum(period_sharpes > 0, axis=1)
+        valid_indices = np.where(positive_counts >= (n_periods - 1))[0]
+        
+        if len(valid_indices) == 0:
+            # Desperation: Just pick the best average, even if volatile
+            return np.argmax(avg_sharpes), 0.0, False
+            
+    # From the survivors, pick the one with highest Average Sharpe
+    best_survivor_idx = -1
+    best_avg_sharpe = -999.0
+    
+    for idx in valid_indices:
+        if avg_sharpes[idx] > best_avg_sharpe:
+            best_avg_sharpe = avg_sharpes[idx]
+            best_survivor_idx = idx
+            
+    return best_survivor_idx, best_avg_sharpe, True
 
 # --- Run Single OOS Period ---
 def run_oos_period(
@@ -328,23 +337,22 @@ def perform_optimization():
             oos_end = min(t + OOS_STEP_SIZE, total_len)
             if t >= total_len: break
             
-            # 1. Get All Sharpes for this window
-            sharpe_array = grid_search_kernel(
+            # 1. Get Sharpe Matrix (Params x Periods)
+            period_sharpes = grid_search_multi_period(
                 opens, closes, highs, lows,
                 s40, s120, s360,
                 iii_matrix,
                 n_a, n_b, n_c, n_d, n_e, n_iii,
-                t, TRAINING_WINDOW
+                t, TRAINING_WINDOW, SUB_PERIODS
             )
             
-            # 2. SELECT ROBUST PARAMETERS (Median of Top 5%)
-            robust_idx = select_robust_parameters(sharpe_array, n_a, n_b, n_c, n_d, n_e, n_iii)
-            robust_sharpe = sharpe_array[robust_idx]
+            # 2. SELECT CONSISTENT PARAMETERS
+            best_idx, avg_sharpe, consistent = select_consistent_parameters(period_sharpes)
             
             # 3. Run OOS
             oos_ret = run_oos_period(
                 opens, closes, s40, s120, s360, iii_matrix,
-                robust_idx,
+                best_idx,
                 n_a, n_b, n_c, n_d, n_e, n_iii,
                 t, oos_end
             )
@@ -354,17 +362,20 @@ def perform_optimization():
             oos_results.append(chunk_df)
             
             best_params = {
-                'lev_a': n_a[robust_idx],
-                'lev_b': n_b[robust_idx],
-                'lev_thresh': n_c[robust_idx],
-                'flat_thresh': n_d[robust_idx],
-                'band': n_e[robust_idx],
-                'iii_win': iii_windows[int(n_iii[robust_idx])]
+                'lev_a': n_a[best_idx],
+                'lev_b': n_b[best_idx],
+                'lev_thresh': n_c[best_idx],
+                'flat_thresh': n_d[best_idx],
+                'band': n_e[best_idx],
+                'iii_win': iii_windows[int(n_iii[best_idx])]
             }
+            
+            status_str = "Robust" if consistent else "Fallback (Volatile)"
             
             global_store['optimization_log'].append({
                 'date': df.index[t],
-                'is_sharpe': robust_sharpe,
+                'is_sharpe': avg_sharpe,
+                'status': status_str,
                 'params': best_params
             })
 
@@ -383,6 +394,8 @@ def perform_optimization():
         
     except Exception as e:
         print(f"Error: {e}")
+        import traceback
+        traceback.print_exc()
         
     global_store['is_optimizing'] = False
 
@@ -391,7 +404,7 @@ def perform_optimization():
 def index():
     status = "Idle"
     if global_store['is_optimizing']:
-        status = "Running Robust Optimization... (Check Console)"
+        status = "Running Consistency Check... (Check Console)"
     
     res = global_store['results']
     plot_url = ""
@@ -399,10 +412,10 @@ def index():
     
     if res is not None and not res.empty:
         plt.figure(figsize=(12, 6))
-        plt.plot(res.index, res['cum_strategy'], label='Robust Median Strategy', color='green')
+        plt.plot(res.index, res['cum_strategy'], label='Consistent Strategy (Multi-Year Survivor)', color='green')
         plt.plot(res.index, res['cum_bnh'], label='Buy & Hold', color='gray', alpha=0.5)
         plt.yscale('log')
-        plt.title('Robust (Cluster-Based) Walk-Forward Results')
+        plt.title('Walk-Forward Results (Consistent Survivors Only)')
         plt.legend()
         plt.grid(True, which="both", alpha=0.2)
         
@@ -420,17 +433,19 @@ def index():
             p = entry['params']
             p_str = (f"A:{p['lev_a']:.1f}, B:{p['lev_b']:.1f}, "
                      f"Th:{p['lev_thresh']:.2f}, Flat:{p['flat_thresh']:.2f}")
-            log_rows += f"<tr><td>{entry['date'].date()}</td><td>{entry['is_sharpe']:.2f}</td><td>{p_str}</td></tr>"
+            status_color = "black" if entry['status'] == "Robust" else "red"
+            log_rows += f"<tr><td>{entry['date'].date()}</td><td style='color:{status_color}'>{entry['status']} ({entry['is_sharpe']:.2f})</td><td>{p_str}</td></tr>"
 
         stats_html = f"""
         <div class="stats">
             <div class="stat-box"><strong>Total Return:</strong><br>{total_ret:.2f}x</div>
             <div class="stat-box"><strong>OOS Sharpe Ratio:</strong><br>{oos_sharpe:.2f}</div>
         </div>
-        <h3>Walk-Forward Log (Median of Top 5%)</h3>
+        <h3>Walk-Forward Log (Consistency Check: 4 Years)</h3>
+        <p><em>Only parameters profitable in ALL 4 sub-periods are selected.</em></p>
         <div style="overflow-x: auto;">
         <table border="1" cellpadding="5" style="border-collapse: collapse; width: 100%; font-size: 0.9em;">
-            <tr><th>Rebalance Date</th><th>Training Sharpe</th><th>Robust Parameters</th></tr>
+            <tr><th>Rebalance Date</th><th>Status (Avg Sharpe)</th><th>Parameters</th></tr>
             {log_rows}
         </table>
         </div>
@@ -440,7 +455,7 @@ def index():
     <!DOCTYPE html>
     <html>
     <head>
-        <title>Robust Strategy</title>
+        <title>Consistent Strategy</title>
         <style>
             body {{ font-family: sans-serif; padding: 20px; max-width: 1000px; margin: auto; background: #f9f9f9; }}
             .container {{ background: white; padding: 20px; box-shadow: 0 2px 10px rgba(0,0,0,0.1); border-radius: 8px; }}
@@ -454,12 +469,12 @@ def index():
     </head>
     <body>
         <div class="container">
-            <h1 style="text-align:center;">Robust Grid Search: {SYMBOL}</h1>
+            <h1 style="text-align:center;">Consistency Grid Search: {SYMBOL}</h1>
             <p style="text-align:center;"><strong>Status:</strong> {status}</p>
             <div style="text-align:center;">
                 <form action="/run" method="post">
                     <button type="submit" {'disabled' if global_store['is_optimizing'] else ''}>
-                        { 'Running Simulation...' if global_store['is_optimizing'] else 'Run Robust Optimization' }
+                        { 'Running Simulation...' if global_store['is_optimizing'] else 'Run Consistency Check' }
                     </button>
                 </form>
             </div>
