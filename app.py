@@ -4,51 +4,49 @@ import numpy as np
 import matplotlib
 matplotlib.use('Agg')
 import matplotlib.pyplot as plt
-from flask import Flask, render_template_string, request
+from flask import Flask, jsonify
 import io
-import base64
 import time
-from numba import njit, prange
+import base64
+import random
+import copy
+from threading import Thread
 
 # --- Configuration ---
 SYMBOL = 'BTC/USDT'
-TIMEFRAME = '1d'
-START_DATE_STR = '2017-08-17 00:00:00'
+TIMEFRAME = '1d' 
+START_DATE_STR = '2018-01-01 00:00:00'
 PORT = 8080
-GRID_SIZE = 10  # 10^6 combinations
 
 app = Flask(__name__)
 
 # --- Global Storage ---
-global_store = {
-    'results': None,
-    'best_params': None,
-    'is_optimizing': False
+global_data = {
+    'results': pd.DataFrame(),
+    'best_params': {},
+    'optimization_status': "Idle",
+    'top_performers': []
 }
 
 # --- Data Fetching ---
 def fetch_data(symbol, timeframe, start_str):
     print(f"Fetching {symbol} data from Binance starting {start_str}...")
     exchange = ccxt.binance()
-    try:
-        start_ts = exchange.parse8601(start_str)
-    except:
-        start_ts = int(pd.Timestamp(start_str).timestamp() * 1000)
-        
+    start_ts = exchange.parse8601(start_str)
+    
     ohlcv_list = []
     current_ts = start_ts
     now_ts = exchange.milliseconds()
     
     while current_ts < now_ts:
         try:
-            ohlcvs = exchange.fetch_ohlcv(symbol, timeframe, since=current_ts, limit=1000)
-            if not ohlcvs:
-                break
+            ohlcvs = exchange.fetch_ohlcv(symbol, timeframe, since=current_ts)
+            if not ohlcvs: break
             current_ts = ohlcvs[-1][0] + 1
             ohlcv_list += ohlcvs
-            time.sleep(0.05)
+            time.sleep(0.05) 
         except Exception as e:
-            print(f"Error fetching data: {e}")
+            print(f"Error fetching: {e}")
             break
 
     df = pd.DataFrame(ohlcv_list, columns=['timestamp', 'open', 'high', 'low', 'close', 'volume'])
@@ -57,339 +55,282 @@ def fetch_data(symbol, timeframe, start_str):
     df = df[~df.index.duplicated(keep='first')]
     return df
 
-# --- Pre-Computation ---
-def prepare_features(df):
+# --- Dynamic Strategy Engine ---
+def run_strategy_dynamic(df, params):
+    """
+    Runs the strategy using a dynamic parameter dictionary.
+    """
     data = df.copy()
-    data['log_ret'] = np.log(data['close'] / data['close'].shift(1)).fillna(0)
     
-    # SMAs
-    data['sma_40'] = data['close'].rolling(window=40).mean().fillna(0)
-    data['sma_120'] = data['close'].rolling(window=120).mean().fillna(0)
-    data['sma_360'] = data['close'].rolling(window=360).mean().fillna(0)
+    # Unpack Parameters
+    p_sma_fast = int(params['sma_fast'])
+    p_sma_slow = int(params['sma_slow'])
+    p_w = int(params['w'])
+    p_u = params['u']
+    p_y = params['y']
     
-    # Precompute III matrix
-    iii_windows = np.linspace(5, 50, GRID_SIZE).astype(int)
-    iii_matrix = np.zeros((len(data), GRID_SIZE))
+    p_lev_th_low = params['lev_thresh_low']
+    p_lev_th_high = params['lev_thresh_high']
+    p_lev_low = params['lev_low']
+    p_lev_mid = params['lev_mid']
+    p_lev_high = params['lev_high']
     
-    for idx, w in enumerate(iii_windows):
-        rolling_net = data['log_ret'].rolling(window=w).sum().abs()
-        rolling_abs = data['log_ret'].abs().rolling(window=w).sum()
-        iii = (rolling_net / rolling_abs).fillna(0)
-        iii_matrix[:, idx] = iii.values
+    p_tp = params['tp_pct']
+    p_sl = params['sl_pct']
 
-    return data, iii_matrix, iii_windows
+    # Pre-calc calculations
+    data['log_ret'] = np.log(data['close'] / data['close'].shift(1))
+    data['sma_fast'] = data['close'].rolling(window=p_sma_fast).mean()
+    data['sma_slow'] = data['close'].rolling(window=p_sma_slow).mean()
 
-# --- Numba Kernel: Global Optimization ---
-@njit(parallel=True, fastmath=True)
-def grid_search_global(
-    opens, closes, sma40, sma120, sma360, 
-    iii_matrix, 
-    p_a, p_b, p_c, p_d, p_e, p_iii_idx
-):
-    n_params = len(p_a)
-    n_days = len(closes)
-    
-    # Store Sharpe for every parameter set
-    sharpe_results = np.zeros(n_params)
-    
-    # Start after SMA 360 stabilizes
-    start_idx = 360
-    
-    for i in prange(n_params):
-        lev_a = p_a[i]
-        lev_b = p_b[i]
-        lev_thresh = p_c[i]
-        flat_thresh = p_d[i]
-        band_pct = p_e[i]
-        iii_idx = int(p_iii_idx[i])
-        
-        sum_daily_ret = 0.0
-        sum_sq_daily_ret = 0.0
-        is_flat = False
-        count = 0
-        
-        for t in range(start_idx, n_days):
-            prev_c = closes[t-1]
-            prev_s40 = sma40[t-1]
-            prev_s120 = sma120[t-1]
-            prev_s360 = sma360[t-1]
-            prev_iii = iii_matrix[t-1, iii_idx]
-            
-            # Flat Regime Logic
-            if prev_iii < flat_thresh:
-                is_flat = True
-            
-            # Release Logic
-            if is_flat:
-                dist40 = abs(prev_c - prev_s40)
-                dist120 = abs(prev_c - prev_s120)
-                dist360 = abs(prev_c - prev_s360)
-                th40 = prev_s40 * band_pct
-                th120 = prev_s120 * band_pct
-                th360 = prev_s360 * band_pct
-                
-                if (dist40 <= th40) or (dist120 <= th120) or (dist360 <= th360):
-                    is_flat = False
-            
-            # Leverage Logic
-            lev = 0.0
-            signal = 0
-            if not is_flat:
-                lev = lev_a if prev_iii < lev_thresh else lev_b
-                
-                if prev_c > prev_s40 and prev_c > prev_s120 and prev_c > prev_s360:
-                    signal = 1
-                elif prev_c < prev_s40 and prev_c < prev_s120 and prev_c < prev_s360:
-                    signal = -1
-            
-            # PnL Calculation
-            daily_ret = 0.0
-            if signal != 0:
-                raw_ret = (closes[t] - opens[t]) / opens[t]
-                daily_ret = raw_ret * signal * lev
-            
-            sum_daily_ret += daily_ret
-            sum_sq_daily_ret += (daily_ret * daily_ret)
-            count += 1
-            
-        # Calculate Sharpe
-        if count > 0:
-            mean_ret = sum_daily_ret / count
-            var_ret = (sum_sq_daily_ret / count) - (mean_ret * mean_ret)
-            if var_ret < 0: var_ret = 0.0
-            std_ret = np.sqrt(var_ret)
-            
-            if std_ret > 1e-9:
-                sharpe_results[i] = (mean_ret / std_ret) * np.sqrt(365)
-            else:
-                sharpe_results[i] = 0.0
-        else:
-            sharpe_results[i] = 0.0
-            
-    return sharpe_results
+    # Efficiency Ratio (iii)
+    data['iii'] = (data['log_ret'].rolling(p_w).sum().abs() / 
+                   data['log_ret'].abs().rolling(p_w).sum()).fillna(0)
+    data['iii_shifted'] = data['iii'].shift(1)
 
-def run_backtest(
-    df, best_idx, 
-    p_a, p_b, p_c, p_d, p_e, p_iii_idx, 
-    iii_windows, iii_matrix
-):
-    lev_a = p_a[best_idx]
-    lev_b = p_b[best_idx]
-    lev_thresh = p_c[best_idx]
-    flat_thresh = p_d[best_idx]
-    band_pct = p_e[best_idx]
-    iii_idx = int(p_iii_idx[best_idx])
+    # Leverage Logic
+    conditions = [
+        (data['iii_shifted'] < p_lev_th_low),
+        (data['iii_shifted'] < p_lev_th_high)
+    ]
+    choices = [p_lev_low, p_lev_high] # Note: High volatility (low iii) often implies high trend leverage in your logic? 
+    # Logic Adjustment based on original script:
+    # Original: < 0.13 -> 0.5 (Defensive), < 0.18 -> 4.5 (Aggressive), else 2.45
+    # We maintain this structure:
+    data['leverage'] = np.select(conditions, choices, default=p_lev_mid)
     
-    opens = df['open'].values
-    closes = df['close'].values
-    s40 = df['sma_40'].values
-    s120 = df['sma_120'].values
-    s360 = df['sma_360'].values
+    # Numpy Optimization
+    opens = data['open'].values
+    highs = data['high'].values
+    lows = data['low'].values
+    closes = data['close'].values
+    sma_fasts = data['sma_fast'].values
+    sma_slows = data['sma_slow'].values
+    iii_shifted = data['iii_shifted'].values
+    leverages = data['leverage'].values
     
-    returns = np.zeros(len(closes))
+    n = len(closes)
+    signals = np.zeros(n)
+    returns = np.zeros(n)
     is_flat = False
-    start_idx = 360
     
-    for t in range(start_idx, len(closes)):
-        prev_c = closes[t-1]
-        prev_s40 = s40[t-1]
-        prev_s120 = s120[t-1]
-        prev_s360 = s360[t-1]
-        prev_iii = iii_matrix[t-1, iii_idx]
-        
-        if prev_iii < flat_thresh:
+    start_idx = max(p_sma_slow, p_w) + 1
+    
+    for i in range(start_idx, n):
+        # A. Regime Logic
+        if iii_shifted[i] < p_u:
             is_flat = True
-        
+            
         if is_flat:
-            dist40 = abs(prev_c - prev_s40)
-            dist120 = abs(prev_c - prev_s120)
-            dist360 = abs(prev_c - prev_s360)
-            th40 = prev_s40 * band_pct
-            th120 = prev_s120 * band_pct
-            th360 = prev_s360 * band_pct
-            if (dist40 <= th40) or (dist120 <= th120) or (dist360 <= th360):
+            prev_c = closes[i-1]
+            prev_s_fast = sma_fasts[i-1]
+            prev_s_slow = sma_slows[i-1]
+            
+            diff1 = abs(prev_c - prev_s_fast)
+            diff2 = abs(prev_c - prev_s_slow)
+            
+            if diff1 <= (prev_s_fast * p_y) or diff2 <= (prev_s_slow * p_y):
                 is_flat = False
         
-        lev = 0.0
-        signal = 0
-        if not is_flat:
-            lev = lev_a if prev_iii < lev_thresh else lev_b
-            if prev_c > prev_s40 and prev_c > prev_s120 and prev_c > prev_s360:
-                signal = 1
-            elif prev_c < prev_s40 and prev_c < prev_s120 and prev_c < prev_s360:
-                signal = -1
+        # B. Signal
+        if is_flat:
+            signals[i] = 0
+        else:
+            prev_c = closes[i-1]
+            prev_s_fast = sma_fasts[i-1]
+            prev_s_slow = sma_slows[i-1]
+            if prev_c > prev_s_fast and prev_c > prev_s_slow:
+                signals[i] = 1
+            elif prev_c < prev_s_fast and prev_c < prev_s_slow:
+                signals[i] = -1
+            else:
+                signals[i] = 0
+                
+        # C. PnL
+        lev = leverages[i]
+        sig = signals[i]
         
-        if signal != 0:
-            returns[t] = ((closes[t] - opens[t]) / opens[t]) * signal * lev
+        if sig == 0 or np.isnan(lev):
+            continue
+            
+        o, h, l, c = opens[i], highs[i], lows[i], closes[i]
+        daily_ret = 0.0
+        
+        if sig == 1:
+            stop = o * (1 - p_sl)
+            take = o * (1 + p_tp)
+            if l <= stop: daily_ret = -p_sl
+            elif h >= take: daily_ret = p_tp
+            else: daily_ret = (c - o) / o
+        else:
+            stop = o * (1 + p_sl)
+            take = o * (1 - p_tp)
+            if h >= stop: daily_ret = -p_sl
+            elif l <= take: daily_ret = p_tp
+            else: daily_ret = (o - c) / o
+            
+        returns[i] = daily_ret * lev
 
-    res_df = df.iloc[start_idx:].copy()
-    res_df['strategy_ret'] = returns[start_idx:]
-    res_df['cum_strategy'] = (1 + res_df['strategy_ret']).cumprod()
-    res_df['bnh_ret'] = df['log_ret'].iloc[start_idx:]
-    res_df['cum_bnh'] = (1 + res_df['bnh_ret']).cumprod()
+    # Stats
+    cum_ret = np.cumprod(1 + returns)[-1]
+    sharpe = (np.mean(returns) / np.std(returns) * np.sqrt(365)) if np.std(returns) != 0 else 0
     
-    return res_df
+    return cum_ret, sharpe, returns
 
-# --- Main Driver ---
-def perform_optimization():
-    global global_store
-    global_store['is_optimizing'] = True
+# --- Genetic Algorithm Logic ---
+
+class Individual:
+    def __init__(self):
+        self.params = {}
+        self.sharpe = -999
+        self.ret = 0
     
-    try:
-        df = fetch_data(SYMBOL, TIMEFRAME, START_DATE_STR)
-        if df.empty: return
-
-        df, iii_matrix, iii_windows = prepare_features(df)
-        
-        # Grid Generation (10^6)
-        print("Generating 1M parameter combinations...")
-        g_lev_a = np.linspace(0, 5, GRID_SIZE)
-        g_lev_b = np.linspace(0, 5, GRID_SIZE)
-        g_lev_th = np.linspace(0, 0.6, GRID_SIZE)
-        g_flat_th = np.linspace(0, 0.5, GRID_SIZE)
-        g_band = np.linspace(0, 0.07, GRID_SIZE)
-        g_iii_idx = np.arange(GRID_SIZE)
-        
-        mesh = np.array(np.meshgrid(
-            g_lev_a, g_lev_b, g_lev_th, g_flat_th, g_band, g_iii_idx
-        ))
-        flat_mesh = mesh.reshape(6, -1)
-        
-        n_a = np.ascontiguousarray(flat_mesh[0])
-        n_b = np.ascontiguousarray(flat_mesh[1])
-        n_c = np.ascontiguousarray(flat_mesh[2])
-        n_d = np.ascontiguousarray(flat_mesh[3])
-        n_e = np.ascontiguousarray(flat_mesh[4])
-        n_iii = np.ascontiguousarray(flat_mesh[5])
-
-        print("Starting Global Optimization (This may take 10-20 seconds)...")
-        start_time = time.time()
-        
-        # Run Kernel
-        sharpe_array = grid_search_global(
-            df['open'].values, df['close'].values, 
-            df['sma_40'].values, df['sma_120'].values, df['sma_360'].values,
-            iii_matrix,
-            n_a, n_b, n_c, n_d, n_e, n_iii
-        )
-        
-        print(f"Optimization finished in {time.time() - start_time:.2f}s")
-        
-        # Get Best
-        best_idx = np.argmax(sharpe_array)
-        best_sharpe = sharpe_array[best_idx]
-        
-        best_params = {
-            'lev_a': n_a[best_idx],
-            'lev_b': n_b[best_idx],
-            'lev_thresh': n_c[best_idx],
-            'flat_thresh': n_d[best_idx],
-            'band': n_e[best_idx],
-            'iii_win': iii_windows[int(n_iii[best_idx])],
-            'sharpe': best_sharpe
+    def random_init(self):
+        self.params = {
+            'sma_fast': random.randint(10, 100),
+            'sma_slow': random.randint(50, 300),
+            'w': random.randint(10, 100),
+            'u': random.uniform(0.05, 0.60),
+            'y': random.uniform(0.005, 0.20),
+            'lev_thresh_low': random.uniform(0.05, 0.60),
+            'lev_thresh_high': random.uniform(0.05, 0.60),
+            'lev_low': random.uniform(0.0, 5.0),
+            'lev_mid': random.uniform(0.0, 5.0),
+            'lev_high': random.uniform(0.0, 5.0),
+            'tp_pct': random.uniform(0.05, 0.50),
+            'sl_pct': random.uniform(0.01, 0.20)
         }
-        
-        global_store['best_params'] = best_params
-        print(f"Best Sharpe: {best_sharpe:.2f}")
-        print(f"Params: {best_params}")
-        
-        # Run Backtest with Best Params to get Equity Curve
-        res_df = run_backtest(df, best_idx, n_a, n_b, n_c, n_d, n_e, n_iii, iii_windows, iii_matrix)
-        global_store['results'] = res_df
-        
-    except Exception as e:
-        print(f"Error: {e}")
-        import traceback
-        traceback.print_exc()
-        
-    global_store['is_optimizing'] = False
+        self.fix_constraints()
 
-# --- Web Server ---
+    def fix_constraints(self):
+        # Ensure Logic holds
+        if self.params['sma_fast'] >= self.params['sma_slow']:
+            self.params['sma_fast'] = int(self.params['sma_slow'] * 0.5)
+            
+        if self.params['lev_thresh_low'] > self.params['lev_thresh_high']:
+            self.params['lev_thresh_low'], self.params['lev_thresh_high'] = \
+            self.params['lev_thresh_high'], self.params['lev_thresh_low']
+
+    def mutate(self):
+        key = random.choice(list(self.params.keys()))
+        val = self.params[key]
+        
+        # Mutate by +/- 10-20%
+        mutation_factor = random.uniform(0.8, 1.2)
+        new_val = val * mutation_factor
+        
+        # Clamp ranges roughly
+        if 'sma' in key or 'w' in key:
+            self.params[key] = int(max(5, new_val))
+        elif 'lev' in key and 'thresh' not in key:
+            self.params[key] = min(5.0, max(0.0, new_val))
+        else:
+            self.params[key] = max(0.001, new_val)
+            
+        self.fix_constraints()
+
+def run_genetic_optimization(df):
+    POP_SIZE = 50
+    GENERATIONS = 15
+    TOP_K = 10
+    
+    global_data['optimization_status'] = "Initializing Population..."
+    population = []
+    
+    # 1. Initialize
+    for _ in range(POP_SIZE):
+        ind = Individual()
+        ind.random_init()
+        population.append(ind)
+        
+    for gen in range(GENERATIONS):
+        global_data['optimization_status'] = f"Running Generation {gen+1}/{GENERATIONS}..."
+        print(f"--- Generation {gen+1} ---")
+        
+        # 2. Evaluate
+        for ind in population:
+            # Skip if already calculated
+            if ind.sharpe != -999: continue 
+            
+            ret, sharpe, _ = run_strategy_dynamic(df, ind.params)
+            ind.ret = ret
+            ind.sharpe = sharpe
+        
+        # 3. Sort & Select
+        population.sort(key=lambda x: x.sharpe, reverse=True)
+        best_gen = population[0]
+        print(f"Gen {gen+1} Best: Sharpe={best_gen.sharpe:.2f}, Ret={best_gen.ret:.2f}x")
+        
+        # Save top performers to global
+        global_data['top_performers'] = [
+            {'params': p.params, 'sharpe': p.sharpe, 'ret': p.ret} 
+            for p in population[:5]
+        ]
+        
+        # 4. Evolution (Crossover & Mutation)
+        next_gen = population[:TOP_K] # Elitism: Keep top K
+        
+        while len(next_gen) < POP_SIZE:
+            # Tournament Select
+            parent1 = random.choice(population[:20])
+            parent2 = random.choice(population[:20])
+            
+            child = Individual()
+            # Crossover (Mix genes)
+            for key in child.params:
+                child.params[key] = parent1.params[key] if random.random() > 0.5 else parent2.params[key]
+            
+            # Mutation
+            if random.random() < 0.4: # 40% chance to mutate
+                child.mutate()
+            
+            child.fix_constraints()
+            next_gen.append(child)
+            
+        population = next_gen
+        
+    global_data['optimization_status'] = "Complete"
+    print("Optimization Complete.")
+
+# --- Web Routes ---
+
 @app.route('/')
 def index():
-    status = "Idle"
-    if global_store['is_optimizing']:
-        status = "Running Global Optimization..."
+    status = global_data['optimization_status']
+    top = global_data['top_performers']
     
-    res = global_store['results']
-    best = global_store['best_params']
-    plot_url = ""
-    stats_html = ""
-    
-    if res is not None and not res.empty:
-        plt.figure(figsize=(12, 6))
-        plt.plot(res.index, res['cum_strategy'], label=f'Optimized Strategy (Sharpe {best["sharpe"]:.2f})', color='green')
-        plt.plot(res.index, res['cum_bnh'], label='Buy & Hold', color='gray', alpha=0.5)
-        plt.yscale('log')
-        plt.title('Global Optimization Result (Whole Dataset)')
-        plt.ylabel('Cumulative Return (Log)')
-        plt.legend()
-        plt.grid(True, which="both", alpha=0.2)
-        
-        img = io.BytesIO()
-        plt.savefig(img, format='png', bbox_inches='tight')
-        img.seek(0)
-        plot_url = base64.b64encode(img.getvalue()).decode()
-        plt.close()
-        
-        total_ret = res['cum_strategy'].iloc[-1]
-        
-        stats_html = f"""
-        <div class="stats">
-            <div class="stat-box"><strong>Total Return:</strong><br>{total_ret:.2f}x</div>
-            <div class="stat-box"><strong>Max Sharpe:</strong><br>{best['sharpe']:.2f}</div>
-        </div>
-        <h3>Optimal Parameters (Global Best)</h3>
-        <table border="1" cellpadding="10" style="border-collapse: collapse; margin:auto;">
-            <tr><td>Lev Tier A</td><td>{best['lev_a']:.1f}x</td></tr>
-            <tr><td>Lev Tier B</td><td>{best['lev_b']:.1f}x</td></tr>
-            <tr><td>Lev Threshold</td><td>{best['lev_thresh']:.2f}</td></tr>
-            <tr><td>Flat Threshold</td><td>{best['flat_thresh']:.2f}</td></tr>
-            <tr><td>SMA Band</td><td>{best['band']:.3f}</td></tr>
-            <tr><td>III Window</td><td>{best['iii_win']} days</td></tr>
-        </table>
-        """
-
     html = f"""
-    <!DOCTYPE html>
-    <html>
-    <head>
-        <title>Global Optimization</title>
-        <style>
-            body {{ font-family: sans-serif; padding: 20px; max-width: 1000px; margin: auto; background: #f9f9f9; text-align: center; }}
-            .container {{ background: white; padding: 20px; box-shadow: 0 2px 10px rgba(0,0,0,0.1); border-radius: 8px; }}
-            img {{ max-width: 100%; height: auto; margin-top: 20px; }}
-            .stats {{ display: flex; gap: 20px; margin: 20px 0; justify-content: center; }}
-            .stat-box {{ padding: 20px; background: #eef; border-radius: 8px; min-width: 150px; }}
-            button {{ padding: 12px 24px; font-size: 16px; cursor: pointer; background: #d9534f; color: white; border: none; border-radius: 5px; }}
-            button:disabled {{ background: #ccc; }}
-        </style>
-        <meta http-equiv="refresh" content="10">
-    </head>
-    <body>
-        <div class="container">
-            <h1>Global Strategy Optimization</h1>
-            <p><strong>Status:</strong> {status}</p>
-            <form action="/run" method="post">
-                <button type="submit" {'disabled' if global_store['is_optimizing'] else ''}>
-                    { 'Running...' if global_store['is_optimizing'] else 'Run Global Optimization (Whole History)' }
-                </button>
-            </form>
-            <hr>
-            {'<img src="data:image/png;base64,' + plot_url + '">' if plot_url else '<p>No results available.</p>'}
-            {stats_html}
-        </div>
-    </body>
-    </html>
+    <h1>Optimization Status: {status}</h1>
+    <a href="/start_opt"><button>START GENETIC OPTIMIZATION</button></a>
+    <hr>
+    <h3>Top 5 Found Parameter Sets (by Sharpe)</h3>
     """
+    
+    if top:
+        html += "<table border='1' cellpadding='5'><tr><th>Sharpe</th><th>Return</th><th>Params</th></tr>"
+        for t in top:
+            p_str = "<br>".join([f"<b>{k}:</b> {v:.3f}" for k,v in t['params'].items()])
+            html += f"<tr><td>{t['sharpe']:.2f}</td><td>{t['ret']:.2f}x</td><td>{p_str}</td></tr>"
+        html += "</table>"
+    else:
+        html += "<p>No results yet.</p>"
+        
     return html
 
-@app.route('/run', methods=['POST'])
-def run_opt():
-    if not global_store['is_optimizing']:
-        perform_optimization()
-    return render_template_string("Optimization started. <a href='/'>Return</a>")
+@app.route('/start_opt')
+def start_opt():
+    # Run in background thread
+    df = global_data.get('raw_data')
+    if df is None: return "Error: No Data Loaded"
+    
+    t = Thread(target=run_genetic_optimization, args=(df,))
+    t.start()
+    return "Optimization Started! Go back to <a href='/'>Home</a> and refresh in a minute."
 
 if __name__ == '__main__':
-    print(f"Server starting on {PORT}")
+    # Initial Data Load
+    raw_df = fetch_data(SYMBOL, TIMEFRAME, START_DATE_STR)
+    global_data['raw_data'] = raw_df
+    
+    print(f"Starting server on port {PORT}...")
     app.run(host='0.0.0.0', port=PORT)
