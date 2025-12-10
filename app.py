@@ -231,7 +231,7 @@ def run_genetic_optimization(df):
 
 def run_walk_forward_optimization(df, window_days=120):
     """Run walk-forward optimization using a sliding window approach.
-    For each day starting at day 121 (index 120), optimize on previous 120 days, then test on forward window."""
+    For each day starting at day 121 (index 120), optimize on previous 120 days, then test on that single day."""
     
     global_data['walk_forward_status'] = f"Running walk-forward with {window_days}-day window..."
     print(f"Starting walk-forward optimization with {window_days}-day window")
@@ -247,11 +247,9 @@ def run_walk_forward_optimization(df, window_days=120):
     
     results = []
     
-    # Start at day 121 (index 120) and go through all remaining days with step size
-    # For each day i, train on previous window_days (i-window_days to i-1), test on forward window
-    test_window_size = 30  # Test on next 30 days after optimization
-    
-    for i in range(window_days, total_days - test_window_size):
+    # Start at day 121 (index 120) and go through all remaining days
+    # For each day i, train on previous window_days (i-window_days to i-1), test on day i
+    for i in range(window_days, total_days):
         current_date = df.index[i]
         
         # Training window: previous window_days (indices i-window_days to i-1)
@@ -259,37 +257,35 @@ def run_walk_forward_optimization(df, window_days=120):
         train_end = i  # Exclusive
         train_df = df.iloc[train_start:train_end].copy()
         
-        # Test window: next test_window_size days (indices i to i+test_window_size-1)
-        test_start = i
-        test_end = i + test_window_size
-        test_df = df.iloc[test_start:test_end].copy()
+        # Test on single day: day i
+        test_df = df.iloc[i:i+1].copy()
         
-        if len(train_df) < window_days or len(test_df) < test_window_size:
+        if len(train_df) < window_days:
             continue
         
         step_num = i - window_days + 1
-        total_steps = total_days - window_days - test_window_size
+        total_steps = total_days - window_days
         
         global_data['walk_forward_status'] = f"Optimizing for {current_date.date()} ({step_num}/{total_steps})"
         print(f"\n--- Walk-forward step {step_num}/{total_steps} ---")
         print(f"Date: {current_date.date()}")
         print(f"Training: {len(train_df)} days (indices {train_start} to {train_end-1})")
-        print(f"Testing: {test_window_size} days (indices {test_start} to {test_end-1})")
+        print(f"Testing: 1 day (index {i})")
         
         # Run genetic optimization on training window
         best_params = run_genetic_optimization_on_window(train_df)
         
-        # Test on forward window
+        # Test on the single day
         test_ret, test_sharpe = run_strategy_dynamic(test_df, best_params)
         
-        # Calculate daily return from total return
-        daily_return = test_ret ** (1/test_window_size) - 1 if test_ret > 0 else -1
+        # For single day test, total return is the daily return
+        daily_return = test_ret - 1 if test_ret > 0 else -1
         
         # Store results
         results.append({
             'date': current_date,
             'params': best_params,
-            'test_window_size': test_window_size,
+            'test_window_size': 1,
             'total_return': test_ret,
             'daily_return': daily_return,
             'sharpe': test_sharpe,
@@ -306,8 +302,8 @@ def run_walk_forward_optimization(df, window_days=120):
                 cum_return *= (1 + r['daily_return'])
                 r['cumulative_return'] = cum_return - 1
     
-    global_data['walk_forward_status'] = f"Complete: {len(results)} windows optimized"
-    print(f"\nWalk-forward optimization complete. Processed {len(results)} windows.")
+    global_data['walk_forward_status'] = f"Complete: {len(results)} days optimized"
+    print(f"\nWalk-forward optimization complete. Processed {len(results)} days.")
     
     # Calculate summary statistics
     if results:
@@ -315,8 +311,8 @@ def run_walk_forward_optimization(df, window_days=120):
         cumulative_returns = [r['cumulative_return'] for r in results]
         
         print(f"\nWalk-forward Summary:")
-        print(f"Total windows: {len(results)}")
-        print(f"Test window size: {results[0]['test_window_size']} days")
+        print(f"Total days processed: {len(results)}")
+        print(f"Test window size: 1 day")
         print(f"Final cumulative return: {cumulative_returns[-1]:.4f}")
         print(f"Average daily return: {np.mean(daily_returns):.6f}")
         print(f"Std of daily returns: {np.std(daily_returns):.6f}")
@@ -491,7 +487,7 @@ def index():
     
     <div class="section">
         <h2>Walk-Forward Optimization (Last 120 Days)</h2>
-        <p><strong>Method:</strong> For each day, optimize on previous 120 days, test on next day</p>
+        <p><strong>Method:</strong> For each day starting at day 121, optimize on previous 120 days, test on that single day</p>
         <h3>Walk-forward Status: {global_data['walk_forward_status']}</h3>
         <a href="/start_walkforward" class="btn btn-green">START WALK-FORWARD OPTIMIZATION</a>
     </div>
