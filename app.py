@@ -224,6 +224,9 @@ def run_genetic_optimization(df):
     ELITISM_PCT = 0.2
     # -----------------------
 
+
+
+
 def run_walk_forward_optimization(df, window_days=120):
     """Run walk-forward optimization on the last window_days of data.
     For each day, optimize on previous window_days, then test on next day."""
@@ -569,7 +572,9 @@ def index():
             """
         
         html += "</table>"
-        html += "</div>"    if gen_stats:
+        html += "</div>"
+    
+    if gen_stats:
         html += "<h2>Training History</h2><ul>"
         for g in gen_stats:
             html += f"<li>Gen {g['gen']}: Best Train Sharpe {g['best_sharpe']:.3f}</li>"
