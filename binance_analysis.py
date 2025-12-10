@@ -17,7 +17,7 @@ SYMBOL = 'BTC/USDT'
 TIMEFRAME = '1d' 
 START_DATE = '2018-01-01 00:00:00'
 PORT = 8080
-WINDOW_SIZE = 1600 # Rolling optimization window
+WINDOW_SIZE = 50 # Rolling optimization window
 
 def fetch_data():
     """Fetches historical OHLCV data from Binance."""
@@ -58,99 +58,69 @@ def calculate_efficiency_ratio(df, period=30):
 def walk_forward_optimization(df):
     """
     Performs Vectorized Walk-Forward Optimization.
-    1. Pre-calculates returns for ALL parameter combos (40 SMAs * 10 Thresholds).
-    2. Calculates rolling Sharpe for all combos.
-    3. Selects best combo daily.
+    Now evaluates 800 strategies (40 SMAs x 20 III Thresholds) daily.
     """
-    print("Preparing Vectorized Strategy Matrix...")
+    print("Preparing Vectorized Strategy Matrix (800 strategies)...")
     data = df.copy()
     data['market_return'] = np.log(data['close'] / data['close'].shift(1))
     data['iii'] = calculate_efficiency_ratio(data, period=30)
     
     # 1. Generate Parameter Ranges
-    sma_periods = list(range(10, 410, 10))
-    thresholds = np.arange(0.10, 0.60, 0.05)
+    sma_periods = list(range(10, 410, 10)) # 40 periods
+    # Finer step size (0.025) to increase strategy count
+    thresholds = np.arange(0.10, 0.60, 0.025) # 20 thresholds
     
-    # 2. Build Strategy Returns Matrix (N_days x N_Strategies)
-    # We will use a dictionary to store Series, then concat
+    print(f"Strategies to evaluate: {len(sma_periods)} SMA * {len(thresholds)} Thresholds = {len(sma_periods) * len(thresholds)}")
+    
+    # 2. Build Strategy Returns Matrix (N_days x 800 Strategies)
     strategy_returns = {}
     
-    # Pre-calculate SMA signals (Vectorized)
-    # This might take a moment but is faster than loops for Sharpe calculation
     for period in sma_periods:
         sma = data['close'].rolling(window=period).mean()
-        # Direction: 1 (Long), -1 (Short)
-        # Shifted by 1 later, but we calculate raw signal first
         raw_direction = np.where(data['close'] > sma, 1, -1)
         
         for thresh in thresholds:
-            col_name = f"{period}_{thresh:.2f}"
+            col_name = f"{period}_{thresh:.3f}" # Use 3 decimals for key uniqueness
             
             # Leverage Logic: 0.5 if iii < thresh else 1.0
             leverage = np.where(data['iii'] < thresh, 0.5, 1.0)
-            
-            # Position = Direction * Leverage
-            # Note: We do NOT shift here yet because we want to align Return(t) with Signal(t-1)
-            # But to build the "Strategy Return at time t", we need Pos(t-1) * MktRet(t)
-            
-            # Let's construct the vector:
-            # Pos(t) based on Close(t)
             pos_vector = raw_direction * leverage
             
             # Strategy Return(t) = Pos(t-1) * MarketRet(t)
-            # We can calculate this using shift
             strat_ret = pd.Series(pos_vector, index=data.index).shift(1) * data['market_return']
-            
             strategy_returns[col_name] = strat_ret
 
-    # Convert to DataFrame (N_days x 400 columns)
+    # Convert to DataFrame (N_days x 800 columns)
     strat_df = pd.DataFrame(strategy_returns)
     
     # 3. Calculate Rolling Sharpe (Vectorized)
-    print(f"Calculating Rolling Sharpe ({WINDOW_SIZE} days) for {len(strat_df.columns)} strategies...")
+    print(f"Calculating Rolling Sharpe ({WINDOW_SIZE} days)...")
     
-    # Mean / Std (We can ignore sqrt(365) for ranking purposes)
+    # Mean / Std (Ignoring annualization for ranking)
     rolling_mean = strat_df.rolling(window=WINDOW_SIZE).mean()
     rolling_std = strat_df.rolling(window=WINDOW_SIZE).std()
-    
-    # Avoid division by zero
     rolling_sharpe = rolling_mean / (rolling_std + 1e-9)
     
     # 4. Select Best Strategy Daily
-    # idxmax returns the column name of the max value
-    print("Selecting best strategies...")
+    print("Selecting best strategies daily...")
+    # Select best column name based on Sharpe ending at t-1
     best_strategy_col = rolling_sharpe.idxmax(axis=1)
-    
-    # 5. Construct Walk-Forward Equity Curve
-    # For day t, we use the strategy selected based on window ending at t-1
-    # So we shift the selection signal by 1
     selected_strategy_lagged = best_strategy_col.shift(1)
     
-    # We need to pick the specific return from strat_df based on the column name in selected_strategy_lagged
-    # Pandas 'lookup' is deprecated, using specialized indexing
+    # 5. Construct Walk-Forward Equity Curve
     
-    # Create a Series for the WFO returns
     wfo_returns = pd.Series(0.0, index=data.index)
-    
-    # Optimization: Iterate only where selection changes or just loop (vector lookup is hard with changing cols)
-    # Faster approach: Use numpy indexing
-    
-    # Get integer indices for columns
     col_map = {name: i for i, name in enumerate(strat_df.columns)}
     # Map column names to integers, fill NaNs with 0 (default col)
     col_indices = selected_strategy_lagged.map(col_map).fillna(0).astype(int)
     
-    # Extract numpy array of returns
     returns_arr = strat_df.values
-    # Row indices
     row_indices = np.arange(len(data))
     
-    # Select returns: returns_arr[row, col_selected_for_that_row]
-    # Note: col_indices is based on t-1, which is what we want (decision made yesterday applied today)
+    # Select returns using numpy indexing
     selected_returns = returns_arr[row_indices, col_indices]
     
-    # Handle the warm-up period (first WINDOW_SIZE + 1 days are invalid)
-    # +1 because of the lag
+    # Handle the warm-up period (WINDOW_SIZE + 1 days are invalid)
     selected_returns[:WINDOW_SIZE+1] = 0
     
     data['strategy_return'] = selected_returns
@@ -158,14 +128,16 @@ def walk_forward_optimization(df):
     data['buy_hold_equity'] = data['market_return'].cumsum().apply(np.exp)
     
     # Store dynamic params for plotting
-    # Parse "period_thresh" string back to values
     def parse_params(val):
         if pd.isna(val): return None, None
-        p, t = val.split('_')
-        return int(p), float(t)
+        try:
+            # Splits "period_thresh" string
+            p, t = val.split('_')
+            return int(p), float(t)
+        except ValueError:
+             return None, None
         
     params = selected_strategy_lagged.apply(parse_params)
-    # Create DF from list of tuples
     params_df = pd.DataFrame(params.tolist(), index=params.index, columns=['best_sma', 'best_thresh'])
     data = pd.concat([data, params_df], axis=1)
     
@@ -195,7 +167,6 @@ def generate_plot(df):
 
     # --- PLOT 2: Best SMA Evolution ---
     ax2.scatter(plot_df.index, plot_df['best_sma'], c=plot_df['best_sma'], cmap='turbo', s=10, alpha=0.6)
-    # Add a moving average of the selection to show trend
     ax2.plot(plot_df.index, plot_df['best_sma'].rolling(30).mean(), color='white', linewidth=1.5, alpha=0.8, label='30d Avg Selection')
     
     ax2.set_title('Dynamic SMA Selection (Optimized Daily)', fontsize=12)
@@ -210,7 +181,7 @@ def generate_plot(df):
     ax3.set_title('Dynamic III Threshold Selection', fontsize=12)
     ax3.set_ylabel('Selected III Threshold')
     ax3.set_xlabel('Date')
-    ax3.set_ylim(0, 0.6)
+    ax3.set_ylim(0, 0.6) # Maintain scale consistency
     ax3.grid(True, alpha=0.3)
     
     plt.tight_layout()
@@ -232,10 +203,11 @@ def index():
         result_df = walk_forward_optimization(df)
         
         # 3. Stats
-        # Calculate stats on the WFO period only
         valid_rets = result_df['strategy_return'].iloc[WINDOW_SIZE+1:]
-        total_return = result_df['equity'].iloc[-1]
-        sharpe = np.sqrt(365) * (valid_rets.mean() / valid_rets.std())
+        total_return = result_df['equity'].iloc[-1] if not result_df['equity'].empty else 1.0
+        # Calculate Sharpe only if returns are non-zero
+        sharpe_calc = valid_rets.mean() / (valid_rets.std() + 1e-9)
+        sharpe = np.sqrt(365) * sharpe_calc
         
         # 4. Plot
         plot_data = generate_plot(result_df)
@@ -260,7 +232,7 @@ def index():
         <body>
             <div class="container">
                 <h1>AI Trading Lab: Walk-Forward Optimization</h1>
-                <p>Daily Re-Optimization (Window: {WINDOW_SIZE} days). 400 Parameter Combos/Day.</p>
+                <p>Daily Re-Optimization (Window: {WINDOW_SIZE} days). Evaluating 800 Parameter Combos/Day.</p>
                 
                 <div class="stats">
                     <span>Total Return: <span class="highlight">{total_return:.2f}x</span></span>
@@ -268,7 +240,7 @@ def index():
                 </div>
                 
                 <div style="margin-bottom: 20px; color: #aaa; font-size: 0.9em;">
-                    The strategy recalibrates every single day based on the previous 100 days of data.
+                    The strategy recalibrates every single day based on the previous {WINDOW_SIZE} days of data.
                 </div>
 
                 <img src="data:image/png;base64,{plot_data}" alt="Backtest Plot">
