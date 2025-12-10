@@ -25,7 +25,10 @@ global_data = {
     'raw_data': None,
     'optimization_status': "Idle",
     'top_performers': [],
-    'generation_info': []
+    'generation_info': [],
+    'walk_forward_status': "Idle",
+    'walk_forward_results': None,
+    'walk_forward_equity_curve': None
 }
 
 # --- Data Fetching ---
@@ -425,6 +428,9 @@ def index():
     else:
         html += "<p>No results yet.</p>"
     # Walk-forward section
+    wf_status = global_data['walk_forward_status']
+    wf_results = global_data['walk_forward_results']
+    wf_equity = global_data['walk_forward_equity_curve']
     html += f"""
     <div class="section">
         <h1>Walk-Forward Optimization (14-Day Rolling)</h1>
