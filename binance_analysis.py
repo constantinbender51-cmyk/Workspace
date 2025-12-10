@@ -88,7 +88,7 @@ def grid_search(df):
     
     # 2. Determine Leverage Multiplier based on III (Shifted 1 to avoid lookahead)
     # If iii < 0.3 at time t, leverage for t+1 trade is 0.5
-    leverage_multiplier = np.where(train_df['iii'] < 0.3, 0.5, 1.0)
+    leverage_multiplier = np.where(train_df['iii'] < 0.15, 0.5, 1.0)
     # Shift leverage to align with the return it acts upon
     leverage_series = pd.Series(leverage_multiplier, index=train_df.index).shift(1)
     
@@ -149,7 +149,7 @@ def run_strategy(df, best_period):
     
     # B. Leverage Signal
     # If iii < 0.3, use 0.5x leverage. Else 1.0x
-    data['leverage_mult'] = np.where(data['efficiency_ratio'] < 0.3, 0.5, 1.0)
+    data['leverage_mult'] = np.where(data['efficiency_ratio'] < 0.15, 0.5, 1.0)
     
     # C. Final Position (Shifted 1 for lookahead prevention)
     # Position(t+1) = Direction(t) * Leverage(t)
