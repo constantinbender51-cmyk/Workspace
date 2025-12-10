@@ -230,11 +230,11 @@ def run_genetic_optimization(df):
 
 
 def run_walk_forward_optimization(df, window_days=120):
-    """Run walk-forward optimization on the last window_days of data.
-    For each day, optimize on previous window_days, then test on next day."""
+    """Run walk-forward optimization using a sliding window approach.
+    For each day after the initial training window, optimize on previous window_days, then test on next day."""
     
-    global_data['walk_forward_status'] = f"Running walk-forward on last {window_days} days..."
-    print(f"Starting walk-forward optimization on last {window_days} days")
+    global_data['walk_forward_status'] = f"Running walk-forward with {window_days}-day window..."
+    print(f"Starting walk-forward optimization with {window_days}-day window")
     
     # Ensure we have enough data
     if len(df) < window_days + 10:
@@ -242,38 +242,38 @@ def run_walk_forward_optimization(df, window_days=120):
         global_data['walk_forward_status'] = "Failed: Not enough data"
         return
     
-    # Get last window_days + 1 days (for testing)
-    end_idx = len(df)
-    start_idx = end_idx - window_days - 1
-    
-    if start_idx < 0:
-        start_idx = 0
-    
-    walk_forward_data = df.iloc[start_idx:end_idx].copy()
-    print(f"Walk-forward data: {len(walk_forward_data)} rows from index {start_idx} to {end_idx}")
+    # We'll start from the beginning of the dataset after the initial training window
+    # This gives us more test days
+    total_days = len(df)
+    print(f"Total data: {total_days} rows")
     
     results = []
     
-    # For each day in the walk-forward period (excluding the first window_days for training)
-    # We need to stop at len(walk_forward_data)-1 to avoid index error when testing i+1
-    for i in range(window_days, len(walk_forward_data) - 1):
-        current_date = walk_forward_data.index[i]
+    # For each day after the initial training window
+    # Start at window_days (so we have enough data for training)
+    # End at total_days - 1 (so we have a next day to test)
+    for i in range(window_days, total_days - 1):
+        current_date = df.index[i]
         
         # Training window: previous window_days
         train_start = i - window_days
         train_end = i
-        train_df = walk_forward_data.iloc[train_start:train_end].copy()
+        train_df = df.iloc[train_start:train_end].copy()
         
         # Test window: next day only
-        test_df = walk_forward_data.iloc[i:i+1].copy()
+        test_df = df.iloc[i:i+1].copy()
         
         if len(train_df) < window_days or len(test_df) == 0:
             continue
         
-        global_data['walk_forward_status'] = f"Optimizing for {current_date.date()} ({i-window_days+1}/{len(walk_forward_data)-window_days-1})"
-        print(f"\n--- Walk-forward step {i-window_days+1}/{len(walk_forward_data)-window_days-1} ---")
+        step_num = i - window_days + 1
+        total_steps = total_days - window_days - 1
+        
+        global_data['walk_forward_status'] = f"Optimizing for {current_date.date()} ({step_num}/{total_steps})"
+        print(f"\n--- Walk-forward step {step_num}/{total_steps} ---")
         print(f"Date: {current_date.date()}")
-        print(f"Training: {len(train_df)} days, Testing: 1 day")
+        print(f"Training: {len(train_df)} days (indices {train_start} to {train_end-1})")
+        print(f"Testing: 1 day (index {i})")
         
         # Run genetic optimization on training window
         best_params = run_genetic_optimization_on_window(train_df)
