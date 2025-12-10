@@ -10,6 +10,7 @@ import numpy as np
 from datetime import datetime, timedelta
 import warnings
 warnings.filterwarnings('ignore')
+import time
 
 # Configuration
 SYMBOL = 'BTC/USDT'
@@ -48,6 +49,7 @@ def fetch_ohlcv_data(symbol, timeframe, since):
             # Print progress
             latest_date = exchange.iso8601(ohlcv[-1][0])
             print(f"Fetched up to {latest_date}")
+            time.sleep(0.1)  # Small delay for Railway console
             
             # Break if we've reached current date
             if len(ohlcv) < 1000:  # Binance returns max 1000 candles per request
@@ -312,11 +314,17 @@ def run_analysis():
                            df['close'].iloc[n] * (1 + TRAILING_STOP)
             
             print(f"\nEntry signal on {current_date.date()}:")
+            time.sleep(0.1)
             print(f"  Resistance: {resistance:.6f}")
+            time.sleep(0.1)
             print(f"  Position: {'Long' if position == 1 else 'Short'}")
+            time.sleep(0.1)
             print(f"  Entry cumulative returns: {entry_cum_returns:.6f}")
+            time.sleep(0.1)
             print(f"  Entry price: {df['close'].iloc[n]:.2f}")
+            time.sleep(0.1)
             print(f"  Initial trailing stop: {trailing_stop:.2f}")
+            time.sleep(0.1)
         
         # Position management if in a trade
         if entry_flag and position != 0:
@@ -334,9 +342,13 @@ def run_analysis():
                 # Check stop loss
                 if current_price <= trailing_stop:
                     print(f"\nStop loss hit on {current_date.date()}:")
+                    time.sleep(0.1)
                     print(f"  Exit price: {current_price:.2f}")
+                    time.sleep(0.1)
                     print(f"  Trailing stop: {trailing_stop:.2f}")
+                    time.sleep(0.1)
                     print(f"  Position proximity at exit: {position_proximity:.6f}")
+                    time.sleep(0.1)
                     entry_flag = False
                     position = 0
                     entry_day = None
@@ -385,6 +397,7 @@ def run_analysis():
         # Progress indicator
         if (n - LOOKBACK_WINDOW + 1) % 100 == 0:
             print(f"Processed up to {current_date.date()}")
+            time.sleep(0.1)  # Small delay for Railway console
     
     # Step 6: Create results DataFrame
     results_df = pd.DataFrame(results)
