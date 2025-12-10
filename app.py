@@ -4,12 +4,9 @@ import numpy as np
 import matplotlib
 matplotlib.use('Agg')
 import matplotlib.pyplot as plt
-from flask import Flask, jsonify
-import io
+from flask import Flask
 import time
-import base64
 import random
-import copy
 from threading import Thread
 
 # --- Configuration ---
@@ -22,10 +19,10 @@ app = Flask(__name__)
 
 # --- Global Storage ---
 global_data = {
-    'results': pd.DataFrame(),
-    'best_params': {},
+    'raw_data': None,
     'optimization_status': "Idle",
-    'top_performers': []
+    'top_performers': [],
+    'generation_info': []
 }
 
 # --- Data Fetching ---
@@ -53,15 +50,11 @@ def fetch_data(symbol, timeframe, start_str):
     df['timestamp'] = pd.to_datetime(df['timestamp'], unit='ms')
     df.set_index('timestamp', inplace=True)
     df = df[~df.index.duplicated(keep='first')]
+    print(f"Data loaded: {len(df)} rows.")
     return df
 
-# --- Dynamic Strategy Engine ---
+# --- Optimized Strategy Engine ---
 def run_strategy_dynamic(df, params):
-    """
-    Runs the strategy using a dynamic parameter dictionary.
-    """
-    data = df.copy()
-    
     # Unpack Parameters
     p_sma_fast = int(params['sma_fast'])
     p_sma_slow = int(params['sma_slow'])
@@ -78,41 +71,36 @@ def run_strategy_dynamic(df, params):
     p_tp = params['tp_pct']
     p_sl = params['sl_pct']
 
-    # Pre-calc calculations
-    data['log_ret'] = np.log(data['close'] / data['close'].shift(1))
-    data['sma_fast'] = data['close'].rolling(window=p_sma_fast).mean()
-    data['sma_slow'] = data['close'].rolling(window=p_sma_slow).mean()
-
-    # Efficiency Ratio (iii)
-    data['iii'] = (data['log_ret'].rolling(p_w).sum().abs() / 
-                   data['log_ret'].abs().rolling(p_w).sum()).fillna(0)
-    data['iii_shifted'] = data['iii'].shift(1)
-
-    # Leverage Logic
-    conditions = [
-        (data['iii_shifted'] < p_lev_th_low),
-        (data['iii_shifted'] < p_lev_th_high)
-    ]
-    choices = [p_lev_low, p_lev_high] # Note: High volatility (low iii) often implies high trend leverage in your logic? 
-    # Logic Adjustment based on original script:
-    # Original: < 0.13 -> 0.5 (Defensive), < 0.18 -> 4.5 (Aggressive), else 2.45
-    # We maintain this structure:
-    data['leverage'] = np.select(conditions, choices, default=p_lev_mid)
+    # Vectorized Calculations
+    closes = df['close'].values
+    opens = df['open'].values
+    highs = df['high'].values
+    lows = df['low'].values
     
-    # Numpy Optimization
-    opens = data['open'].values
-    highs = data['high'].values
-    lows = data['low'].values
-    closes = data['close'].values
-    sma_fasts = data['sma_fast'].values
-    sma_slows = data['sma_slow'].values
-    iii_shifted = data['iii_shifted'].values
-    leverages = data['leverage'].values
+    # 1. Indicators
+    log_ret = np.log(closes[1:] / closes[:-1])
+    log_ret = np.insert(log_ret, 0, 0)
     
+    s_fast = df['close'].rolling(window=p_sma_fast).mean().values
+    s_slow = df['close'].rolling(window=p_sma_slow).mean().values
+    
+    # 2. Efficiency Ratio (iii)
+    roll_sum = pd.Series(log_ret).rolling(window=p_w).sum()
+    roll_abs_sum = pd.Series(np.abs(log_ret)).rolling(window=p_w).sum()
+    iii = (roll_sum.abs() / roll_abs_sum).fillna(0).values
+    
+    # 3. Signals Loop
     n = len(closes)
-    signals = np.zeros(n)
     returns = np.zeros(n)
     is_flat = False
+    
+    # Pre-calculate leverage array (shifted)
+    iii_shifted = np.roll(iii, 1)
+    iii_shifted[0] = 0
+    
+    lev_arr = np.full(n, p_lev_mid)
+    lev_arr[iii_shifted < p_lev_th_high] = p_lev_high
+    lev_arr[iii_shifted < p_lev_th_low] = p_lev_low
     
     start_idx = max(p_sma_slow, p_w) + 1
     
@@ -123,214 +111,214 @@ def run_strategy_dynamic(df, params):
             
         if is_flat:
             prev_c = closes[i-1]
-            prev_s_fast = sma_fasts[i-1]
-            prev_s_slow = sma_slows[i-1]
+            prev_sf = s_fast[i-1]
+            prev_ss = s_slow[i-1]
             
-            diff1 = abs(prev_c - prev_s_fast)
-            diff2 = abs(prev_c - prev_s_slow)
-            
-            if diff1 <= (prev_s_fast * p_y) or diff2 <= (prev_s_slow * p_y):
+            if (abs(prev_c - prev_sf) <= prev_sf * p_y) or \
+               (abs(prev_c - prev_ss) <= prev_ss * p_y):
                 is_flat = False
         
         # B. Signal
-        if is_flat:
-            signals[i] = 0
-        else:
-            prev_c = closes[i-1]
-            prev_s_fast = sma_fasts[i-1]
-            prev_s_slow = sma_slows[i-1]
-            if prev_c > prev_s_fast and prev_c > prev_s_slow:
-                signals[i] = 1
-            elif prev_c < prev_s_fast and prev_c < prev_s_slow:
-                signals[i] = -1
-            else:
-                signals[i] = 0
-                
-        # C. PnL
-        lev = leverages[i]
-        sig = signals[i]
+        sig = 0
+        if not is_flat:
+            pc = closes[i-1]
+            pf = s_fast[i-1]
+            ps = s_slow[i-1]
+            if pc > pf and pc > ps: sig = 1
+            elif pc < pf and pc < ps: sig = -1
         
-        if sig == 0 or np.isnan(lev):
-            continue
+        # C. Returns
+        if sig == 0: continue
             
+        lev = lev_arr[i]
         o, h, l, c = opens[i], highs[i], lows[i], closes[i]
-        daily_ret = 0.0
         
+        # SL/TP Logic
+        dr = 0.0
         if sig == 1:
-            stop = o * (1 - p_sl)
-            take = o * (1 + p_tp)
-            if l <= stop: daily_ret = -p_sl
-            elif h >= take: daily_ret = p_tp
-            else: daily_ret = (c - o) / o
+            stop_price = o * (1 - p_sl)
+            take_price = o * (1 + p_tp)
+            if l <= stop_price: dr = -p_sl
+            elif h >= take_price: dr = p_tp
+            else: dr = (c - o) / o
         else:
-            stop = o * (1 + p_sl)
-            take = o * (1 - p_tp)
-            if h >= stop: daily_ret = -p_sl
-            elif l <= take: daily_ret = p_tp
-            else: daily_ret = (o - c) / o
+            stop_price = o * (1 + p_sl)
+            take_price = o * (1 - p_tp)
+            if h >= stop_price: dr = -p_sl
+            elif l <= take_price: dr = p_tp
+            else: dr = (o - c) / o
             
-        returns[i] = daily_ret * lev
+        returns[i] = dr * lev
 
-    # Stats
-    cum_ret = np.cumprod(1 + returns)[-1]
+    # 4. Metrics
+    if np.all(returns == 0): return 0, 0
     sharpe = (np.mean(returns) / np.std(returns) * np.sqrt(365)) if np.std(returns) != 0 else 0
-    
-    return cum_ret, sharpe, returns
+    total_ret = np.prod(1 + returns)
+    return total_ret, sharpe
 
-# --- Genetic Algorithm Logic ---
+# --- Genetic Algorithm Components ---
 
 class Individual:
-    def __init__(self):
-        self.params = {}
+    def __init__(self, params=None):
+        if params:
+            self.params = params.copy()
+        else:
+            self.params = {}
+            self.random_init()
         self.sharpe = -999
         self.ret = 0
     
     def random_init(self):
+        # BLIND INITIALIZATION: No previous knowledge used.
         self.params = {
-            'sma_fast': random.randint(10, 100),
-            'sma_slow': random.randint(50, 300),
+            'sma_fast': random.randint(10, 80),
+            'sma_slow': random.randint(60, 200),
             'w': random.randint(10, 100),
-            'u': random.uniform(0.05, 0.60),
-            'y': random.uniform(0.005, 0.20),
-            'lev_thresh_low': random.uniform(0.05, 0.60),
-            'lev_thresh_high': random.uniform(0.05, 0.60),
-            'lev_low': random.uniform(0.0, 5.0),
-            'lev_mid': random.uniform(0.0, 5.0),
-            'lev_high': random.uniform(0.0, 5.0),
-            'tp_pct': random.uniform(0.05, 0.50),
-            'sl_pct': random.uniform(0.01, 0.20)
+            'u': random.uniform(0.05, 0.40),
+            'y': random.uniform(0.01, 0.10),
+            'lev_thresh_low': random.uniform(0.05, 0.25),
+            'lev_thresh_high': random.uniform(0.15, 0.40),
+            'lev_low': random.choice([0.0, 0.5, 1.0]),
+            'lev_mid': random.uniform(1.0, 3.0),
+            'lev_high': random.uniform(2.0, 5.0),
+            'tp_pct': random.uniform(0.05, 0.30),
+            'sl_pct': random.uniform(0.01, 0.10)
         }
         self.fix_constraints()
 
     def fix_constraints(self):
-        # Ensure Logic holds
+        # Logical Hard Constraints
         if self.params['sma_fast'] >= self.params['sma_slow']:
             self.params['sma_fast'] = int(self.params['sma_slow'] * 0.5)
             
         if self.params['lev_thresh_low'] > self.params['lev_thresh_high']:
-            self.params['lev_thresh_low'], self.params['lev_thresh_high'] = \
-            self.params['lev_thresh_high'], self.params['lev_thresh_low']
+             self.params['lev_thresh_low'] = self.params['lev_thresh_high'] * 0.9
+
+        # Integer enforcement
+        self.params['sma_fast'] = int(self.params['sma_fast'])
+        self.params['sma_slow'] = int(self.params['sma_slow'])
+        self.params['w'] = int(self.params['w'])
 
     def mutate(self):
         key = random.choice(list(self.params.keys()))
         val = self.params[key]
-        
-        # Mutate by +/- 10-20%
-        mutation_factor = random.uniform(0.8, 1.2)
-        new_val = val * mutation_factor
-        
-        # Clamp ranges roughly
-        if 'sma' in key or 'w' in key:
-            self.params[key] = int(max(5, new_val))
-        elif 'lev' in key and 'thresh' not in key:
-            self.params[key] = min(5.0, max(0.0, new_val))
+        if isinstance(val, int):
+            change = random.choice([-5, -1, 1, 5])
+            self.params[key] = max(2, val + change)
         else:
-            self.params[key] = max(0.001, new_val)
-            
+            change = random.uniform(0.85, 1.15)
+            self.params[key] = val * change
         self.fix_constraints()
 
 def run_genetic_optimization(df):
-    POP_SIZE = 50
-    GENERATIONS = 15
-    TOP_K = 10
-    
-    global_data['optimization_status'] = "Initializing Population..."
+    # --- HYPERPARAMETERS ---
+    POP_SIZE = 300
+    GENERATIONS = 50
+    ELITISM_PCT = 0.2
+    # -----------------------
+
+    global_data['optimization_status'] = "Initializing Population (Blind)..."
     population = []
     
-    # 1. Initialize
+    # NO SEEDING - PURE RANDOM START
     for _ in range(POP_SIZE):
-        ind = Individual()
-        ind.random_init()
-        population.append(ind)
+        population.append(Individual())
         
     for gen in range(GENERATIONS):
-        global_data['optimization_status'] = f"Running Generation {gen+1}/{GENERATIONS}..."
-        print(f"--- Generation {gen+1} ---")
+        global_data['optimization_status'] = f"Generation {gen+1}/{GENERATIONS}..."
+        print(f"--- Running Generation {gen+1} ---")
         
-        # 2. Evaluate
+        # Evaluate
         for ind in population:
-            # Skip if already calculated
-            if ind.sharpe != -999: continue 
-            
-            ret, sharpe, _ = run_strategy_dynamic(df, ind.params)
-            ind.ret = ret
-            ind.sharpe = sharpe
+            if ind.sharpe == -999:
+                ret, sharpe = run_strategy_dynamic(df, ind.params)
+                ind.ret = ret
+                ind.sharpe = sharpe
         
-        # 3. Sort & Select
+        # Sort
         population.sort(key=lambda x: x.sharpe, reverse=True)
-        best_gen = population[0]
-        print(f"Gen {gen+1} Best: Sharpe={best_gen.sharpe:.2f}, Ret={best_gen.ret:.2f}x")
+        best = population[0]
+        print(f"Gen {gen+1} Best: Sharpe={best.sharpe:.3f} | Return={best.ret:.2f}x")
         
-        # Save top performers to global
+        # Record
+        global_data['generation_info'].append({
+            'gen': gen+1, 'best_sharpe': best.sharpe, 'best_ret': best.ret
+        })
         global_data['top_performers'] = [
             {'params': p.params, 'sharpe': p.sharpe, 'ret': p.ret} 
             for p in population[:5]
         ]
         
-        # 4. Evolution (Crossover & Mutation)
-        next_gen = population[:TOP_K] # Elitism: Keep top K
+        # Evolution
+        next_gen = []
+        elite_count = int(POP_SIZE * ELITISM_PCT)
+        next_gen.extend(population[:elite_count])
         
         while len(next_gen) < POP_SIZE:
-            # Tournament Select
-            parent1 = random.choice(population[:20])
-            parent2 = random.choice(population[:20])
-            
-            child = Individual()
-            # Crossover (Mix genes)
-            for key in child.params:
-                child.params[key] = parent1.params[key] if random.random() > 0.5 else parent2.params[key]
-            
-            # Mutation
-            if random.random() < 0.4: # 40% chance to mutate
+            p1 = random.choice(population[:int(POP_SIZE/2)])
+            p2 = random.choice(population[:int(POP_SIZE/2)])
+            child = Individual(p1.params)
+            for k in child.params:
+                if random.random() > 0.5:
+                    child.params[k] = p2.params[k]
+            if random.random() < 0.2:
                 child.mutate()
-            
             child.fix_constraints()
             next_gen.append(child)
             
         population = next_gen
-        
-    global_data['optimization_status'] = "Complete"
-    print("Optimization Complete.")
 
-# --- Web Routes ---
+    global_data['optimization_status'] = "Complete"
+    print("Optimization Finished.")
+
+# --- Routes ---
 
 @app.route('/')
 def index():
     status = global_data['optimization_status']
     top = global_data['top_performers']
+    gen_stats = global_data['generation_info']
     
     html = f"""
-    <h1>Optimization Status: {status}</h1>
-    <a href="/start_opt"><button>START GENETIC OPTIMIZATION</button></a>
-    <hr>
-    <h3>Top 5 Found Parameter Sets (by Sharpe)</h3>
+    <style>
+        body {{ font-family: monospace; padding: 20px; }}
+        table {{ border-collapse: collapse; width: 100%; }}
+        th, td {{ border: 1px solid #ddd; padding: 8px; text-align: left; }}
+        tr:nth-child(even) {{ background-color: #f2f2f2; }}
+        th {{ background-color: #4CAF50; color: white; }}
+        .btn {{ padding: 10px 20px; background: blue; color: white; text-decoration: none; border-radius: 5px; }}
+    </style>
+    <h1>Blind Genetic Optimizer (Pop: 300, Gen: 50)</h1>
+    <h3>Status: {status}</h3>
+    <a href="/start" class="btn">START OPTIMIZATION</a>
+    <br><br>
+    <h2>Best Results</h2>
     """
-    
     if top:
-        html += "<table border='1' cellpadding='5'><tr><th>Sharpe</th><th>Return</th><th>Params</th></tr>"
+        html += "<table><tr><th>Sharpe</th><th>Return</th><th>Parameters</th></tr>"
         for t in top:
-            p_str = "<br>".join([f"<b>{k}:</b> {v:.3f}" for k,v in t['params'].items()])
-            html += f"<tr><td>{t['sharpe']:.2f}</td><td>{t['ret']:.2f}x</td><td>{p_str}</td></tr>"
+            p_formatted = ", ".join([f"{k}:{v:.3f}" if isinstance(v, float) else f"{k}:{v}" for k,v in t['params'].items()])
+            html += f"<tr><td>{t['sharpe']:.3f}</td><td>{t['ret']:.2f}x</td><td>{p_formatted}</td></tr>"
         html += "</table>"
     else:
         html += "<p>No results yet.</p>"
-        
+
+    if gen_stats:
+        html += "<h2>History</h2><ul>"
+        for g in gen_stats:
+            html += f"<li>Gen {g['gen']}: Sharpe {g['best_sharpe']:.3f}</li>"
+        html += "</ul>"
     return html
 
-@app.route('/start_opt')
+@app.route('/start')
 def start_opt():
-    # Run in background thread
-    df = global_data.get('raw_data')
-    if df is None: return "Error: No Data Loaded"
-    
-    t = Thread(target=run_genetic_optimization, args=(df,))
+    if global_data['raw_data'] is None: return "Data not loaded."
+    if "Running" in global_data['optimization_status']: return "Running."
+    t = Thread(target=run_genetic_optimization, args=(global_data['raw_data'],))
     t.start()
-    return "Optimization Started! Go back to <a href='/'>Home</a> and refresh in a minute."
+    return "Started! <a href='/'>Back</a>"
 
 if __name__ == '__main__':
-    # Initial Data Load
     raw_df = fetch_data(SYMBOL, TIMEFRAME, START_DATE_STR)
     global_data['raw_data'] = raw_df
-    
-    print(f"Starting server on port {PORT}...")
     app.run(host='0.0.0.0', port=PORT)
