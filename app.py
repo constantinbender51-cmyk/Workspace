@@ -98,6 +98,11 @@ def run_strategy_dynamic(df, params):
     iii_shifted = np.roll(iii, 1)
     iii_shifted[0] = 0
     
+    # LEVERAGE ASSIGNMENT LOGIC:
+    # Tier 1 (Lowest III): lev_low
+    # Tier 2 (Middle III): lev_high
+    # Tier 3 (Highest III): lev_mid (Default)
+    # The variable names refer to the REGIME, not the MAGNITUDE.
     lev_arr = np.full(n, p_lev_mid)
     lev_arr[iii_shifted < p_lev_th_high] = p_lev_high
     lev_arr[iii_shifted < p_lev_th_low] = p_lev_low
@@ -169,7 +174,7 @@ class Individual:
         self.ret = 0
     
     def random_init(self):
-        # BLIND INITIALIZATION
+        # BLIND INITIALIZATION - FULL UNBIASED RANGES
         self.params = {
             'sma_fast': random.randint(10, 80),
             'sma_slow': random.randint(60, 200),
@@ -178,9 +183,13 @@ class Individual:
             'y': random.uniform(0.01, 0.10),
             'lev_thresh_low': random.uniform(0.05, 0.25),
             'lev_thresh_high': random.uniform(0.15, 0.40),
-            'lev_low': random.choice([0.0, 0.5, 1.0]),
-            'lev_mid': random.uniform(1.0, 3.0),
-            'lev_high': random.uniform(2.0, 5.0),
+            
+            # UNBIASED LEVERAGE: Any regime can have any leverage (0x to 5x)
+            # This allows finding "Inverted" structures (e.g. Mid > High)
+            'lev_low': random.uniform(0.0, 5.0),  
+            'lev_mid': random.uniform(0.0, 5.0),
+            'lev_high': random.uniform(0.0, 5.0),
+            
             'tp_pct': random.uniform(0.05, 0.30),
             'sl_pct': random.uniform(0.01, 0.10)
         }
