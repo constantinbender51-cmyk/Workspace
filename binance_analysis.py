@@ -76,53 +76,61 @@ def calculate_efficiency_ratio(df, period=30):
 
 def grid_search(df):
     """
-    Runs a grid search on the first 50% of data.
-    Now includes the Leverage Logic (0.5x if iii < 0.3) in the optimization.
+    Runs a 2D grid search on the first 50% of data.
+    Optimizes:
+    1. SMA Period (10-400)
+    2. III Threshold (0.1 - 0.55) for leverage reduction
     """
     split_idx = int(len(df) * 0.5)
     train_df = df.iloc[:split_idx].copy()
     cutoff_date = train_df.index[-1]
     
-    # 1. Calculate III ONCE for the training set (invariant of SMA)
+    # 1. Calculate III ONCE (invariant of SMA)
     train_df['iii'] = calculate_efficiency_ratio(train_df, period=30)
-    
-    # 2. Determine Leverage Multiplier based on III (Shifted 1 to avoid lookahead)
-    # If iii < 0.3 at time t, leverage for t+1 trade is 0.5
-    leverage_multiplier = np.where(train_df['iii'] < 0.15, 0.5, 1.0)
-    # Shift leverage to align with the return it acts upon
-    leverage_series = pd.Series(leverage_multiplier, index=train_df.index).shift(1)
+    market_return = np.log(train_df['close'] / train_df['close'].shift(1))
     
     best_sharpe = -float('inf')
     best_period = 360
+    best_threshold = 0.3
     
-    print("Running Grid Search (with Leverage Rule)...")
-    
-    market_return = np.log(train_df['close'] / train_df['close'].shift(1))
+    print("Running 2D Grid Search (SMA x III Threshold)...")
     
     sma_range = range(10, 410, 10)
+    # Search thresholds from 0.10 to 0.55 in steps of 0.05
+    threshold_range = np.arange(0.10, 0.60, 0.05)
     
     for period in sma_range:
+        # Calculate SMA Signal for this period
         sma = train_df['close'].rolling(window=period).mean()
         
-        # Raw Direction Signal: 1 (Long) or -1 (Short)
+        # Raw Direction: 1 (Long), -1 (Short)
         direction = np.where(train_df['close'] > sma, 1, -1)
         direction = pd.Series(direction, index=train_df.index).shift(1)
         
-        # Combine Direction * Leverage
-        final_position = direction * leverage_series
-        
-        strategy_return = final_position * market_return
-        
-        sharpe = calculate_sharpe(strategy_return)
-        
-        if sharpe > best_sharpe:
-            best_sharpe = sharpe
-            best_period = period
+        # Inner Loop: Optimize III Threshold
+        for thresh in threshold_range:
+            # Leverage Logic: 0.5 if iii < thresh, else 1.0
+            # Note: We shift leverage 1 step to match execution (decision made on close)
+            leverage_mult = np.where(train_df['iii'] < thresh, 0.5, 1.0)
+            leverage_series = pd.Series(leverage_multiplier_calc(train_df['iii'], thresh), index=train_df.index).shift(1)
             
-    return best_period, best_sharpe, cutoff_date
+            # Combine
+            strategy_return = direction * leverage_series * market_return
+            sharpe = calculate_sharpe(strategy_return)
+            
+            if sharpe > best_sharpe:
+                best_sharpe = sharpe
+                best_period = period
+                best_threshold = thresh
+            
+    return best_period, best_threshold, best_sharpe, cutoff_date
 
-def run_strategy(df, best_period):
-    """Calculates final strategy with chosen SMA and leverage rules."""
+def leverage_multiplier_calc(iii_series, threshold):
+    """Helper for broadcasting numpy comparison"""
+    return np.where(iii_series < threshold, 0.5, 1.0)
+
+def run_strategy(df, best_period, best_threshold):
+    """Calculates final strategy with optimized SMA and Threshold."""
     data = df.copy()
     
     # 1. Calculate Efficiency Ratio (III)
@@ -139,7 +147,6 @@ def run_strategy(df, best_period):
     signal_col = f'SMA_{best_period}'
     
     # A. Directional Signal
-    # Long (1) if Close > SMA, Short (-1) if Close < SMA
     direction_conditions = [
         (data['close'] > data[signal_col]),
         (data['close'] < data[signal_col])
@@ -147,12 +154,10 @@ def run_strategy(df, best_period):
     direction_choices = [1, -1]
     data['raw_direction'] = np.select(direction_conditions, direction_choices, default=0)
     
-    # B. Leverage Signal
-    # If iii < 0.3, use 0.5x leverage. Else 1.0x
-    data['leverage_mult'] = np.where(data['efficiency_ratio'] < 0.15, 0.5, 1.0)
+    # B. Leverage Signal (Using Optimized Threshold)
+    data['leverage_mult'] = np.where(data['efficiency_ratio'] < best_threshold, 0.5, 1.0)
     
     # C. Final Position (Shifted 1 for lookahead prevention)
-    # Position(t+1) = Direction(t) * Leverage(t)
     data['position'] = (data['raw_direction'] * data['leverage_mult']).shift(1)
     
     # Returns
@@ -165,7 +170,7 @@ def run_strategy(df, best_period):
     
     return data, sma_cols
 
-def generate_plot(df, best_period, training_cutoff):
+def generate_plot(df, best_period, best_threshold, training_cutoff):
     """Generates the 3-panel plot."""
     fig, (ax1, ax2, ax3) = plt.subplots(3, 1, figsize=(14, 16), sharex=True, 
                                         gridspec_kw={'height_ratios': [2, 1, 1]})
@@ -195,7 +200,7 @@ def generate_plot(df, best_period, training_cutoff):
     ax1.set_yscale('log') 
 
     # --- PLOT 2: Equity Curve ---
-    ax2.plot(df.index, df['equity'], label='Strategy Equity (w/ Leverage Scaling)', color='lime', linewidth=2)
+    ax2.plot(df.index, df['equity'], label='Strategy Equity', color='lime', linewidth=2)
     ax2.plot(df.index, df['buy_hold_equity'], label='Buy & Hold', color='gray', alpha=0.7, linestyle='--')
     ax2.axvline(training_cutoff, color='red', linestyle='--', linewidth=2)
     
@@ -205,16 +210,14 @@ def generate_plot(df, best_period, training_cutoff):
     ax2.grid(True, alpha=0.3)
 
     # --- PLOT 3: Efficiency Ratio & Leverage Zones ---
-    # Plot III
     ax3.plot(df.index, df['efficiency_ratio'], color='cyan', linewidth=1.5, label='Efficiency Ratio (III)')
     
-    # Plot Threshold
-    ax3.axhline(0.3, color='orange', linestyle='-', linewidth=2, label='Leverage Cutoff (0.3)')
+    # Plot Optimized Threshold
+    ax3.axhline(best_threshold, color='orange', linestyle='-', linewidth=2, label=f'Optimal Threshold ({best_threshold:.2f})')
     
-    # Fill background to show leverage zones
-    # We want to highlight where leverage is reduced (III < 0.3)
-    ax3.fill_between(df.index, 0, 0.3, color='red', alpha=0.1, label='Zone: 0.5x Leverage')
-    ax3.fill_between(df.index, 0.3, 1.0, color='green', alpha=0.1, label='Zone: 1.0x Leverage')
+    # Fill background
+    ax3.fill_between(df.index, 0, best_threshold, color='red', alpha=0.1, label='Zone: 0.5x Leverage')
+    ax3.fill_between(df.index, best_threshold, 1.0, color='green', alpha=0.1, label='Zone: 1.0x Leverage')
     
     ax3.axvline(training_cutoff, color='red', linestyle='--', linewidth=2)
 
@@ -240,14 +243,14 @@ def index():
         # 1. Fetch
         df = fetch_data()
         
-        # 2. Grid Search (Train on 50% - Includes Leverage Logic)
-        best_period, best_sharpe, split_date = grid_search(df)
+        # 2. 2D Grid Search
+        best_period, best_threshold, best_sharpe, split_date = grid_search(df)
         
-        # 3. Run Strategy (Full Data)
-        result_df, _ = run_strategy(df, best_period)
+        # 3. Run Strategy (Full Data with Optimal Params)
+        result_df, _ = run_strategy(df, best_period, best_threshold)
         
         # 4. Plot
-        plot_data = generate_plot(result_df, best_period, split_date)
+        plot_data = generate_plot(result_df, best_period, best_threshold, split_date)
         
         html = f"""
         <!DOCTYPE html>
@@ -268,17 +271,18 @@ def index():
         </head>
         <body>
             <div class="container">
-                <h1>AI Trading Lab: Efficiency & Leverage</h1>
+                <h1>AI Trading Lab: 2D Parameter Optimization</h1>
                 <p>Optimization run on first 50% (In-Sample). Strategy scales leverage based on Efficiency Ratio.</p>
                 
                 <div class="stats">
-                    <span>Best SMA Found: <span class="highlight">{best_period}</span></span>
+                    <span>Best SMA: <span class="highlight">{best_period}</span></span>
+                    <span>Best III Cutoff: <span class="highlight">{best_threshold:.2f}</span></span>
                     <span>Training Sharpe: <span class="highlight">{best_sharpe:.2f}</span></span>
                     <span>Split Date: {split_date.date()}</span>
                 </div>
                 
                 <div style="margin-bottom: 20px; color: #aaa;">
-                    Rule: If <b>III < 0.3</b> (Chop), Leverage = <b>0.5x</b>. Else <b>1.0x</b>.
+                    Rule: If <b>III < {best_threshold:.2f}</b>, Leverage = <b>0.5x</b>. Else <b>1.0x</b>.
                 </div>
 
                 <img src="data:image/png;base64,{plot_data}" alt="Backtest Plot">
