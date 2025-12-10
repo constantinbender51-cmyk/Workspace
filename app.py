@@ -57,6 +57,154 @@ def fetch_data(symbol, timeframe, start_str):
 
 # --- Optimized Strategy Engine ---
 def run_strategy_dynamic(df, params, debug=False):
+
+def run_strategy_dynamic_with_returns(df, params, debug=False):
+    """Run strategy and return total return, sharpe, and the returns array."""
+    # This is a modified version that returns the returns array
+    # Unpack Parameters
+    p_sma_fast = int(params['sma_fast'])
+    p_sma_slow = int(params['sma_slow'])
+    p_w = int(params['w'])
+    p_u = params['u']
+    p_y = params['y']
+    
+    p_lev_th_low = params['lev_thresh_low']
+    p_lev_th_high = params['lev_thresh_high']
+    p_lev_low = params['lev_low']
+    p_lev_mid = params['lev_mid']
+    p_lev_high = params['lev_high']
+    
+    p_tp = params['tp_pct']
+    p_sl = params['sl_pct']
+    
+    if debug:
+        print(f"DEBUG: Strategy parameters: sma_fast={p_sma_fast}, sma_slow={p_sma_slow}, w={p_w}, u={p_u:.3f}, y={p_y:.3f}")
+        print(f"DEBUG: Data shape: {df.shape}, first date: {df.index[0]}, last date: {df.index[-1]}")
+
+    # Vectorized Calculations
+    closes = df['close'].values
+    opens = df['open'].values
+    highs = df['high'].values
+    lows = df['low'].values
+    
+    # 1. Indicators
+    log_ret = np.log(closes[1:] / closes[:-1])
+    log_ret = np.insert(log_ret, 0, 0)
+    
+    s_fast = df['close'].rolling(window=p_sma_fast).mean().values
+    s_slow = df['close'].rolling(window=p_sma_slow).mean().values
+    
+    # 2. Efficiency Ratio (iii)
+    roll_sum = pd.Series(log_ret).rolling(window=p_w).sum()
+    roll_abs_sum = pd.Series(np.abs(log_ret)).rolling(window=p_w).sum()
+    iii = (roll_sum.abs() / roll_abs_sum).fillna(0).values
+    
+    if debug:
+        print(f"DEBUG: iii values (first 10): {iii[:10]}")
+        print(f"DEBUG: s_fast values (first 10): {s_fast[:10]}")
+        print(f"DEBUG: s_slow values (first 10): {s_slow[:10]}")
+    
+    # 3. Signals Loop
+    n = len(closes)
+    returns = np.zeros(n)
+    is_flat = False
+    
+    # Pre-calculate leverage array (shifted)
+    iii_shifted = np.roll(iii, 1)
+    iii_shifted[0] = 0
+    
+    # LEVERAGE ASSIGNMENT LOGIC:
+    # Tier 1 (Lowest III): lev_low
+    # Tier 2 (Middle III): lev_high
+    # Tier 3 (Highest III): lev_mid (Default)
+    # The variable names refer to the REGIME, not the MAGNITUDE.
+    lev_arr = np.full(n, p_lev_mid)
+    lev_arr[iii_shifted < p_lev_th_high] = p_lev_high
+    lev_arr[iii_shifted < p_lev_th_low] = p_lev_low
+    
+    start_idx = max(p_sma_slow, p_w) + 1
+    
+    if debug:
+        print(f"DEBUG: start_idx = {start_idx}, n = {n}")
+        print(f"DEBUG: lev_arr (first 10): {lev_arr[:10]}")
+        print(f"DEBUG: iii_shifted (first 10): {iii_shifted[:10]}")
+    
+    signal_count = 0
+    for i in range(start_idx, n):
+        # A. Regime Logic
+        if iii_shifted[i] < p_u:
+            is_flat = True
+            
+        if is_flat:
+            prev_c = closes[i-1]
+            prev_sf = s_fast[i-1]
+            prev_ss = s_slow[i-1]
+            
+            if (abs(prev_c - prev_sf) <= prev_sf * p_y) or \
+               (abs(prev_c - prev_ss) <= prev_ss * p_y):
+                is_flat = False
+        
+        # B. Signal
+        sig = 0
+        if not is_flat:
+            pc = closes[i-1]
+            pf = s_fast[i-1]
+            ps = s_slow[i-1]
+            if pc > pf and pc > ps: sig = 1
+            elif pc < pf and pc < ps: sig = -1
+        
+        # C. Returns
+        if sig == 0: 
+            continue
+            
+        signal_count += 1
+        lev = lev_arr[i]
+        o, h, l, c = opens[i], highs[i], lows[i], closes[i]
+        
+        # SL/TP Logic
+        dr = 0.0
+        if sig == 1:
+            stop_price = o * (1 - p_sl)
+            take_price = o * (1 + p_tp)
+            if l <= stop_price: dr = -p_sl
+            elif h >= take_price: dr = p_tp
+            else: dr = (c - o) / o
+        else:
+            stop_price = o * (1 + p_sl)
+            take_price = o * (1 - p_tp)
+            if h >= stop_price: dr = -p_sl
+            elif l <= take_price: dr = p_tp
+            else: dr = (o - c) / o
+            
+        returns[i] = dr * lev
+        
+        if debug and signal_count <= 5:
+            print(f"DEBUG: Signal at i={i}, date={df.index[i]}, sig={sig}, lev={lev:.3f}, dr={dr:.6f}, return={returns[i]:.6f}")
+    
+    if debug:
+        print(f"DEBUG: Total signals generated: {signal_count}")
+        print(f"DEBUG: Returns array (non-zero): {returns[returns != 0]}")
+        print(f"DEBUG: Sum of returns: {np.sum(returns)}")
+        print(f"DEBUG: Product of (1+returns): {np.prod(1 + returns)}")
+
+    # 4. Metrics
+    if np.all(returns == 0): 
+        if debug:
+            print(f"DEBUG: All returns are zero, returning 0, 0, []")
+        return 0, 0, returns
+    
+    non_zero_returns = returns[returns != 0]
+    if debug:
+        print(f"DEBUG: Non-zero returns count: {len(non_zero_returns)}")
+        print(f"DEBUG: Non-zero returns values: {non_zero_returns}")
+    
+    sharpe = (np.mean(returns) / np.std(returns) * np.sqrt(365)) if np.std(returns) != 0 else 0
+    total_ret = np.prod(1 + returns)
+    
+    if debug:
+        print(f"DEBUG: Calculated sharpe: {sharpe:.6f}, total_ret: {total_ret:.6f}")
+    
+    return total_ret, sharpe, returns
     # Unpack Parameters
     p_sma_fast = int(params['sma_fast'])
     p_sma_slow = int(params['sma_slow'])
@@ -296,8 +444,21 @@ def run_walk_forward_optimization(df, window_days=120):
         train_end = i  # Exclusive
         train_df = df.iloc[train_start:train_end].copy()
         
-        # Test on single day: day i
-        test_df = df.iloc[i:i+1].copy()
+        # For testing, we need enough historical data to calculate indicators
+        # We need at least max(sma_slow, w) + 1 days for the strategy to work
+        # So we'll test on a window that includes the current day plus enough history
+        # First, we need to know what parameters will be used - we'll get them from optimization
+        best_params = run_genetic_optimization_on_window(train_df)
+        
+        # Calculate the minimum data needed for this parameter set
+        p_sma_slow = int(best_params['sma_slow'])
+        p_w = int(best_params['w'])
+        min_data_needed = max(p_sma_slow, p_w) + 1
+        
+        # Create test window that includes enough historical data
+        test_start = i - min_data_needed + 1
+        test_end = i + 1  # Exclusive, includes current day
+        test_df = df.iloc[test_start:test_end].copy()
         
         if len(train_df) < window_days:
             continue
@@ -309,22 +470,29 @@ def run_walk_forward_optimization(df, window_days=120):
         print(f"\n--- Walk-forward step {step_num}/{total_steps} ---")
         print(f"Date: {current_date.date()}")
         print(f"Training: {len(train_df)} days (indices {train_start} to {train_end-1})")
-        print(f"Testing: 1 day (index {i})")
+        print(f"Testing: {len(test_df)} days (indices {test_start} to {test_end-1}) - includes {min_data_needed} days for indicators")
+        print(f"Parameters: sma_slow={p_sma_slow}, w={p_w}, min_data_needed={min_data_needed}")
         
-        # Run genetic optimization on training window
-        best_params = run_genetic_optimization_on_window(train_df)
-        
-        # Test on the single day
+        # Test on the window (but we only care about the return on the last day)
         test_ret, test_sharpe = run_strategy_dynamic(test_df, best_params, debug=True)
         
-        # For single day test, total return is the daily return
-        daily_return = test_ret - 1 if test_ret > 0 else -1
+        # Extract just the return for the current day (last day in test window)
+        # The strategy returns total return for the entire test window
+        # We need to extract the daily return for just the current day
+        # We'll run the strategy to get the returns array and extract the last value
+        daily_return = 0.0
+        if test_ret > 0:
+            # Run strategy again to get the returns array
+            _, _, returns_array = run_strategy_dynamic_with_returns(test_df, best_params)
+            if len(returns_array) > 0:
+                # Get the return for the last day (current day)
+                daily_return = returns_array[-1]
         
         # Store results
         results.append({
             'date': current_date,
             'params': best_params,
-            'test_window_size': 1,
+            'test_window_size': len(test_df),
             'total_return': test_ret,
             'daily_return': daily_return,
             'sharpe': test_sharpe,
