@@ -7,7 +7,6 @@ import matplotlib.pyplot as plt
 from flask import Flask
 import time
 import random
-import math
 from threading import Thread
 
 # --- Configuration ---
@@ -170,7 +169,7 @@ class Individual:
         self.ret = 0
     
     def random_init(self):
-        # BLIND INITIALIZATION
+        # BLIND INITIALIZATION: No previous knowledge used.
         self.params = {
             'sma_fast': random.randint(10, 80),
             'sma_slow': random.randint(60, 200),
@@ -200,54 +199,34 @@ class Individual:
         self.params['sma_slow'] = int(self.params['sma_slow'])
         self.params['w'] = int(self.params['w'])
 
-    def mutate(self, intensity=1.0):
-        """
-        intensity: 1.0 = high volatility (early gens), 0.1 = fine tuning (late gens)
-        """
+    def mutate(self):
         key = random.choice(list(self.params.keys()))
         val = self.params[key]
-        
-        # --- Gaussian Mutation (Precision) ---
         if isinstance(val, int):
-            # Integers: Add random step based on intensity
-            step = max(1, int(5 * intensity))
-            change = random.randint(-step, step)
-            # 10% chance of big jump (exploration)
-            if random.random() < 0.1: change *= 3
-            self.params[key] = max(5, val + change)
+            change = random.choice([-5, -1, 1, 5])
+            self.params[key] = max(2, val + change)
         else:
-            # Floats: Use Gaussian noise for smoother changes
-            # sigma scales with value size and intensity
-            sigma = val * 0.2 * intensity 
-            change = random.gauss(0, sigma)
-            self.params[key] = max(0.001, val + change)
-            
+            change = random.uniform(0.85, 1.15)
+            self.params[key] = val * change
         self.fix_constraints()
 
 def run_genetic_optimization(df):
     # --- HYPERPARAMETERS ---
-    POP_SIZE = 400       # Larger Pool
-    GENERATIONS = 60     # Longer Runtime
-    ELITISM_PCT = 0.15   # Keep 15% elites
+    POP_SIZE = 300
+    GENERATIONS = 50
+    ELITISM_PCT = 0.2
     # -----------------------
 
     global_data['optimization_status'] = "Initializing Population (Blind)..."
     population = []
     
-    # Random Initialization
+    # NO SEEDING - PURE RANDOM START
     for _ in range(POP_SIZE):
         population.append(Individual())
         
     for gen in range(GENERATIONS):
-        # --- Adaptive Mutation Rate ---
-        # Starts at 1.0, decays to 0.1
-        # This allows early exploration and late fine-tuning
-        progress = gen / GENERATIONS
-        mutation_intensity = 1.0 - (progress * 0.9)
-        mutation_prob = 0.4 - (progress * 0.3) # Starts at 40% prob, drops to 10%
-        
-        global_data['optimization_status'] = f"Gen {gen+1}/{GENERATIONS} [Intensity: {mutation_intensity:.2f}]"
-        print(f"--- Gen {gen+1} (Mut Intensity: {mutation_intensity:.2f}) ---")
+        global_data['optimization_status'] = f"Generation {gen+1}/{GENERATIONS}..."
+        print(f"--- Running Generation {gen+1} ---")
         
         # Evaluate
         for ind in population:
@@ -276,21 +255,14 @@ def run_genetic_optimization(df):
         next_gen.extend(population[:elite_count])
         
         while len(next_gen) < POP_SIZE:
-            # Tournament
             p1 = random.choice(population[:int(POP_SIZE/2)])
             p2 = random.choice(population[:int(POP_SIZE/2)])
-            
             child = Individual(p1.params)
-            
-            # Crossover
             for k in child.params:
                 if random.random() > 0.5:
                     child.params[k] = p2.params[k]
-            
-            # Adaptive Mutation
-            if random.random() < mutation_prob:
-                child.mutate(intensity=mutation_intensity)
-                
+            if random.random() < 0.2:
+                child.mutate()
             child.fix_constraints()
             next_gen.append(child)
             
@@ -316,7 +288,7 @@ def index():
         th {{ background-color: #4CAF50; color: white; }}
         .btn {{ padding: 10px 20px; background: blue; color: white; text-decoration: none; border-radius: 5px; }}
     </style>
-    <h1>Genetic Optimizer Pro (Pop: 400, Gen: 60)</h1>
+    <h1>Blind Genetic Optimizer (Pop: 300, Gen: 50)</h1>
     <h3>Status: {status}</h3>
     <a href="/start" class="btn">START OPTIMIZATION</a>
     <br><br>
@@ -334,7 +306,7 @@ def index():
     if gen_stats:
         html += "<h2>History</h2><ul>"
         for g in gen_stats:
-            html += f"<li>Gen {g['gen']}: Sharpe {g['best_sharpe']:.3f} | Ret {g['best_ret']:.2f}x</li>"
+            html += f"<li>Gen {g['gen']}: Sharpe {g['best_sharpe']:.3f}</li>"
         html += "</ul>"
     return html
 
