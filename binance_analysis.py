@@ -1,376 +1,349 @@
-#!/usr/bin/env python3
-"""
-Binance OHLCV Analysis Script V2.2
-Updates:
-1. Proximity Capped at 1.0 for Resistance (1 / (dist*20)).
-2. Leverage Calculation: dist*20, capped at 5.0.
-3. Daily Position Sizing: Return = Daily_Ret * Leverage.
-4. Added Strategy Equity & Leverage plots.
-"""
-
 import ccxt
 import pandas as pd
 import numpy as np
-import warnings
-warnings.filterwarnings('ignore')
-import time
-import matplotlib
-matplotlib.use('Agg')
 import matplotlib.pyplot as plt
-from flask import Flask, render_template_string
-import io
-import base64
-
-# Configuration
-SYMBOL = 'BTC/USDT'
-TIMEFRAME = '1d'
-START_DATE = '2018-01-01'
-SMA_WINDOWS = list(range(10, 401, 10))  # 10, 20, ..., 400
-LOOKBACK_WINDOW = 400
-FUTURE_DAYS = 10
-TRAILING_STOP = 0.02
-PROXIMITY_FACTOR = 20.0  # 1/0.05
-
-# Global variables
-analysis_results = None
-ohlcv_data = None
-results_data = None
-
-app = Flask(__name__)
+from datetime import datetime, timedelta
 
 # -----------------------------------------------------------------------------
-# Math Helper Functions
+# 1. DATA FETCHING
 # -----------------------------------------------------------------------------
-
-def calculate_inverse_proximity(current, reference):
+def fetch_binance_data(symbol='BTC/USDT', timeframe='1d', since_year=2018):
     """
-    Used for RESISTANCE calculation.
-    Formula: 1 / (distance * 20)
-    Constraint: Max 1.0
-    Logic: If distance < 5%, returns 1.0. If distance > 5%, decays.
+    Fetches OHLCV data from Binance.
     """
-    if reference == 0:
-        return 0
-        
-    dist = abs(current - reference) / abs(reference)
+    print(f"Fetching {symbol} data from Binance starting {since_year}...")
+    exchange = ccxt.binance()
     
-    # Avoid division by zero if dist is exactly 0
-    if dist < 1e-9:
-        return 1.0
-        
-    raw_prox = 1.0 / (dist * PROXIMITY_FACTOR)
-    return min(1.0, raw_prox)
-
-def calculate_leverage(current, reference):
-    """
-    Used for LEVERAGE calculation on active days.
-    Formula: distance * 20
-    Constraint: Max 5.0
-    Logic: Leverage increases as price moves away from entry.
-    """
-    if reference == 0:
-        return 0
-        
-    dist = abs(current - reference) / abs(reference)
-    raw_lev = dist * PROXIMITY_FACTOR
-    return min(5.0, raw_lev)
-
-# -----------------------------------------------------------------------------
-# Data Processing
-# -----------------------------------------------------------------------------
-
-exchange = ccxt.binance({'enableRateLimit': True, 'options': {'defaultType': 'spot'}})
-
-def fetch_ohlcv_data(symbol, timeframe, since):
-    print(f"Fetching {symbol} data from {since}...")
-    all_data = []
-    since_ts = exchange.parse8601(since + 'T00:00:00Z')
-    limit = 1000
+    # Calculate timestamp for Jan 1, 2018
+    since = exchange.parse8601(f'{since_year}-01-01T00:00:00Z')
+    
+    all_ohlcv = []
+    limit = 1000  # Binance limit per request
     
     while True:
         try:
-            ohlcv = exchange.fetch_ohlcv(symbol, timeframe, since_ts, limit=limit)
-            if not ohlcv: 
+            ohlcv = exchange.fetch_ohlcv(symbol, timeframe, since, limit)
+            if not ohlcv:
                 break
             
-            since_ts = ohlcv[-1][0] + 1
-            all_data.extend(ohlcv)
+            all_ohlcv.extend(ohlcv)
+            since = ohlcv[-1][0] + 1 # Move to next timestamp
             
+            # Rate limit safety
+            # time.sleep(0.1) 
+            
+            # Break if we reached near current time (simple check)
             if len(ohlcv) < limit:
                 break
                 
-            time.sleep(0.1)
-            
+            print(f"Fetched {len(all_ohlcv)} candles...", end='\r')
         except Exception as e:
-            print(f"Error fetching data: {e}")
+            print(f"\nError fetching data: {e}")
             break
             
-    df = pd.DataFrame(all_data, columns=['timestamp', 'open', 'high', 'low', 'close', 'volume'])
+    df = pd.DataFrame(all_ohlcv, columns=['timestamp', 'open', 'high', 'low', 'close', 'volume'])
     df['timestamp'] = pd.to_datetime(df['timestamp'], unit='ms')
     df.set_index('timestamp', inplace=True)
-    print(f"Total candles fetched: {len(df)}")
+    print(f"\nTotal data points: {len(df)}")
     return df
 
-def process_indicators(df):
-    # 1. Returns
+# -----------------------------------------------------------------------------
+# 2. STRATEGY CALCULATION CORE
+# -----------------------------------------------------------------------------
+def calculate_metrics(df):
+    """
+    Computes Returns, RoR, SMAs, and Future Decay Sums.
+    """
+    print("Calculating base metrics...")
+    
+    # 1. Intraday Returns: (Close - Open) / Open
     df['returns'] = (df['close'] - df['open']) / df['open']
     
-    # 2. Cumulative Returns
-    df['cumulative_returns'] = df['returns'].cumsum()
+    # 2. Cumulative Returns (for SMAs and Distance calculations)
+    df['sum_returns'] = df['returns'].cumsum()
     
-    # 3. Returns of Returns
-    df['returns_of_returns'] = df['returns'].diff() / df['returns'].shift(1).abs()
-    df['returns_of_returns'].replace([np.inf, -np.inf], 0, inplace=True)
-    df['returns_of_returns'].fillna(0, inplace=True)
+    # 3. Returns of Returns (Rate of Change of Returns)
+    df['ror'] = df['returns'].diff()
     
-    # 4. SMA of Cumulative Returns
-    for w in SMA_WINDOWS:
-        df[f'sma_{w}'] = df['cumulative_returns'].rolling(window=w).mean()
+    # 4. Future Decay Sum (FDS)
+    # The significance of day x depends on RoR for x+1...x+10
+    # Formula: Sum( RoR[t+k] / k ) for k=1 to 10
+    # We use a rolling window looking forward (implemented via shifting backwards)
+    df['fds'] = 0.0
+    for k in range(1, 11):
+        # shift(-k) brings future value to current row
+        df['fds'] += df['ror'].shift(-k) / k
         
+    # 5. Calculate SMAs 10 to 400 (Step 10) on Cumulative Returns
+    sma_cols = []
+    for window in range(10, 410, 10):
+        col_name = f'sma_{window}'
+        df[col_name] = df['sum_returns'].rolling(window=window).mean()
+        sma_cols.append(col_name)
+        
+    return df, sma_cols
+
+def get_proximity_resistance(value, reference):
+    """
+    Proximity for Resistance Calculation.
+    Formula: 1 / ( (distance / reference) * (1/0.05) )
+    Simplified: 1 / ( abs((val-ref)/ref) * 20 )
+    """
+    if reference == 0: return 0 # Avoid div by zero
+    
+    dist_pct = abs((value - reference) / reference)
+    denominator = dist_pct * 20.0
+    
+    # Avoid division by zero if distance is extremely small (perfect match)
+    if denominator < 1e-6:
+        return 100.0 # Cap max proximity
+        
+    return 1.0 / denominator
+
+def backtest_strategy(df, sma_cols, threshold=5.0, lookback=400):
+    """
+    Runs the rolling window logic for Resistance and Trading.
+    """
+    print("Running simulation (this may take a moment)...")
+    
+    # Arrays to store results
+    resistances = []
+    signals = []
+    equity_curve = [10000.0] # Start with $10k
+    position = 0 # 0: None, 1: Long, -1: Short
+    entry_price = 0.0
+    trailing_high = 0.0
+    
+    # Convert to numpy for speed where possible, but loop is logic-heavy
+    timestamps = df.index
+    sum_r = df['sum_returns'].values
+    returns = df['returns'].values
+    fds = df['fds'].values # Future decay sum
+    
+    # Pre-extract SMA data into a matrix (Rows: Time, Cols: SMAs)
+    # shape: (N, 40)
+    sma_matrix = df[sma_cols].values
+    
+    # We need at least lookback + 10 days (for FDS) to start
+    start_idx = lookback + 10
+    
+    # Align results with DataFrame length
+    resistances = [np.nan] * len(df)
+    entry_flags = [0] * len(df) # For visualization
+    
+    # Loop through data
+    for n in range(start_idx, len(df) - 10):
+        
+        # ---------------------------------------
+        # A. CALCULATE RESISTANCE
+        # ---------------------------------------
+        
+        current_sum_r = sum_r[n]
+        
+        # 1. Price Memory Component
+        # Sum over lookback days (n-lookback to n-1)
+        # Proximity(Current, Past) * FDS_of_Past
+        
+        # Slicing history for vectorization
+        hist_start = n - lookback
+        hist_end = n
+        
+        hist_sum_r = sum_r[hist_start:hist_end]
+        hist_fds = fds[hist_start:hist_end]
+        
+        # Vectorized Proximity Calculation for Price Memory
+        # Handle division by zero/small ref safely
+        with np.errstate(divide='ignore', invalid='ignore'):
+            # dist_pct = abs((current - history) / history)
+            # using epsilon to avoid zero division
+            safe_hist_sum_r = np.where(hist_sum_r == 0, 1e-9, hist_sum_r) 
+            dist_pcts = np.abs((current_sum_r - hist_sum_r) / safe_hist_sum_r)
+            denoms = dist_pcts * 20.0
+            # If denom is 0 (match), max proximity 100
+            proximities = np.where(denoms < 1e-6, 100.0, 1.0 / denoms)
+            
+        term1_price_memory = np.sum(proximities * hist_fds)
+        
+        # 2. SMA Influence Component
+        # We need the "Significance" of each SMA.
+        # Significance of SMA w = Average of (Proximity(Past_SumR, Past_SMA_w) * Past_FDS) over lookback
+        
+        term2_sma_influence = 0
+        
+        # We iterate through the 40 SMAs
+        for i, sma_val in enumerate(sma_matrix[n]):
+            if np.isnan(sma_val): continue
+            
+            # Current Proximity to this SMA
+            if sma_val == 0: sma_val = 1e-9
+            curr_dist_pct = abs((current_sum_r - sma_val) / sma_val)
+            curr_denom = curr_dist_pct * 20.0
+            curr_prox = 100.0 if curr_denom < 1e-6 else 1.0 / curr_denom
+            
+            # Historical Significance of this SMA (Rolling calculation)
+            # Slice historical data for this specific SMA column
+            hist_sma_vals = sma_matrix[hist_start:hist_end, i]
+            
+            # Vectorized calculation of historical proximity for this SMA
+            safe_hist_sma = np.where(hist_sma_vals == 0, 1e-9, hist_sma_vals)
+            hist_dists = np.abs((hist_sum_r - safe_hist_sma) / safe_hist_sma)
+            hist_denoms = hist_dists * 20.0
+            hist_proxs = np.where(hist_denoms < 1e-6, 100.0, 1.0 / hist_denoms)
+            
+            # Raw Significance history = Prox * FDS
+            raw_sigs = hist_proxs * hist_fds
+            
+            # SMA Significance = Sum (or Mean) of Raw Sigs. 
+            # Prompt says "sum over all SMAs... * significance". 
+            # Assuming Significance is the accumulated weight.
+            sma_sig = np.sum(raw_sigs) 
+            
+            term2_sma_influence += curr_prox * sma_sig
+            
+        total_resistance = term1_price_memory + term2_sma_influence
+        resistances[n] = total_resistance
+        
+        # ---------------------------------------
+        # B. TRADING LOGIC
+        # ---------------------------------------
+        
+        # Update Equity (Market to Market)
+        current_price = df['close'].iloc[n]
+        prev_price = df['close'].iloc[n-1]
+        
+        if position != 0:
+            # Simple PnL: Position Size * %Change
+            # Note: The logic below is simplified. Real PnL depends on position size scaling.
+            # Assuming full equity is scaled by the "Signal Strength" factor?
+            # Or just tracking % change of underlying asset?
+            # Let's assume standard 1x leverage for PnL calculation to see direction correctness.
+            
+            pct_change = (current_price - prev_price) / prev_price
+            equity_curve.append(equity_curve[-1] * (1 + position * pct_change))
+            
+            # Trailing Stop Logic
+            # "High since entry"
+            if position == 1:
+                trailing_high = max(trailing_high, current_price)
+                drawdown = (trailing_high - current_price) / trailing_high
+                if drawdown >= 0.02: # 2% loss from high
+                    position = 0
+                    # print(f"Stop Loss triggered at {timestamps[n]}")
+                    
+            elif position == -1:
+                # For short, "High" equity means "Low" price
+                trailing_high = min(trailing_high, current_price)
+                # Drawdown for short: (Price - Low) / Low
+                drawdown = (current_price - trailing_high) / trailing_high
+                if drawdown >= 0.02:
+                    position = 0
+                    # print(f"Stop Loss triggered at {timestamps[n]}")
+        else:
+            equity_curve.append(equity_curve[-1])
+
+        # Entry Logic
+        if position == 0 and total_resistance > threshold:
+            # Set Entry Flag
+            entry_flags[n] = 1
+            entry_ref = current_sum_r
+            entry_price_val = current_price
+            
+            # Position Sizing / Direction Logic
+            # "positive and small if return is positive and price is close to entry"
+            # "calculated as distance * 1/0.05" -> distance * 20
+            
+            curr_return = returns[n]
+            
+            # Distance from entry (Sum Returns)
+            # At the exact moment of entry, distance is 0.
+            # The logic implies we adjust position size dynamically? 
+            # OR we determine initial position direction here?
+            # Assuming we take a position immediately upon breach.
+            
+            dist = abs(current_sum_r - entry_ref)
+            # proximity_signal = dist * 20.0
+            # signal_strength = min(proximity_signal, 5.0)
+            
+            # Since distance is 0 at entry, signal is 0? 
+            # This suggests the signal is dynamic. The strategy might be:
+            # "Once threshold breached, stay in market and adjust size/direction daily"
+            # But simpler interpretation: determine direction now.
+            
+            # If return is positive -> Long. Negative -> Short.
+            if curr_return > 0:
+                position = 1
+                trailing_high = current_price
+            else:
+                position = -1
+                trailing_high = current_price
+
+    # Clean up results
+    df['resistance'] = resistances
+    df['entry_signal'] = entry_flags
+    
+    # Pad equity curve
+    equity_curve = equity_curve[:len(df)]
+    while len(equity_curve) < len(df):
+        equity_curve.insert(0, 10000.0)
+        
+    df['equity'] = equity_curve
+    
     return df
 
-def precompute_significance(df):
-    print("Pre-computing SMA significance maps...")
-    sig_map = {}
-    limit = len(df) - FUTURE_DAYS
-    
-    for i in range(limit):
-        future_ror_sum = 0
-        for f in range(1, FUTURE_DAYS + 1):
-            weight = 1 / f
-            future_ror_sum += df['returns_of_returns'].iloc[i + f] * weight
-            
-        cum_ret = df['cumulative_returns'].iloc[i]
-        
-        day_sigs = {}
-        for w in SMA_WINDOWS:
-            sma_val = df[f'sma_{w}'].iloc[i]
-            if pd.isna(sma_val):
-                day_sigs[w] = 0
-                continue
-                
-            prox = calculate_inverse_proximity(cum_ret, sma_val)
-            day_sigs[w] = future_ror_sum * prox
-            
-        sig_map[i] = day_sigs
-        
-    return sig_map
-
-def calculate_resistance_at_n(df, n, sig_map):
-    resistance = 0
-    current_cum_ret = df['cumulative_returns'].iloc[n]
-    start_lookback = max(0, n - LOOKBACK_WINDOW)
-    
-    for x in range(start_lookback, n):
-        # Part 1: Past Cumulative Returns
-        past_cum_ret = df['cumulative_returns'].iloc[x]
-        past_ror = df['returns_of_returns'].iloc[x]
-        prox = calculate_inverse_proximity(current_cum_ret, past_cum_ret)
-        resistance += prox * past_ror
-        
-        # Part 2: SMAs
-        if x in sig_map:
-            x_sigs = sig_map[x]
-            for w in SMA_WINDOWS:
-                sma_at_x = df[f'sma_{w}'].iloc[x]
-                if pd.isna(sma_at_x): continue
-                
-                prox_sma = calculate_inverse_proximity(current_cum_ret, sma_at_x)
-                sig = x_sigs.get(w, 0)
-                
-                resistance += prox_sma * sig
-            
-    return resistance
-
-def run_analysis():
-    global analysis_results, ohlcv_data, results_data
-    
-    df = fetch_ohlcv_data(SYMBOL, TIMEFRAME, START_DATE)
-    if df.empty: return pd.DataFrame()
-
-    df = process_indicators(df)
-    sig_map = precompute_significance(df)
-    
-    results = []
-    
-    # State Variables
-    entry_flag = False
-    entry_cum_ret = 0
-    position = 0          # 1 for Long, -1 for Short
-    trailing_stop_price = 0
-    
-    # Strategy Performance Tracking
-    strategy_equity = 1.0  # Starting at 100%
-    
-    ENTRY_THRESHOLD = 0.5 
-    
-    print("Running main simulation loop...")
-    start_idx = max(LOOKBACK_WINDOW, SMA_WINDOWS[-1])
-    
-    for n in range(start_idx, len(df)):
-        date = df.index[n]
-        price = df['close'].iloc[n]
-        cum_ret = df['cumulative_returns'].iloc[n]
-        day_return = df['returns'].iloc[n]
-        
-        resistance = calculate_resistance_at_n(df, n, sig_map)
-        
-        leverage = 0
-        strat_day_ret = 0
-        
-        # --- Entry Logic ---
-        if not entry_flag:
-            # Check for Entry
-            if abs(resistance) > ENTRY_THRESHOLD:
-                entry_flag = True
-                entry_cum_ret = cum_ret # Store entry reference
-                
-                # Determine Direction
-                if resistance > 0:
-                    position = 1
-                    trailing_stop_price = price * (1 - TRAILING_STOP)
-                else:
-                    position = -1
-                    trailing_stop_price = price * (1 + TRAILING_STOP)
-                    
-        # --- Position Management ---
-        else:
-            # We are in a trade (including the day triggered if we entered at Open, 
-            # but usually we enter next day. For simplicity, we process 'Active' status).
-            
-            # 1. Calculate Leverage based on distance from ENTRY
-            leverage = calculate_leverage(cum_ret, entry_cum_ret)
-            
-            # 2. Calculate Strategy Return
-            strat_day_ret = day_return * position * leverage
-            strategy_equity *= (1 + strat_day_ret)
-            
-            # 3. Check Trailing Stop
-            stop_hit = False
-            
-            if position == 1: # Long
-                new_stop = price * (1 - TRAILING_STOP)
-                if new_stop > trailing_stop_price: trailing_stop_price = new_stop
-                if price < trailing_stop_price: stop_hit = True
-                    
-            elif position == -1: # Short
-                new_stop = price * (1 + TRAILING_STOP)
-                if new_stop < trailing_stop_price: trailing_stop_price = new_stop
-                if price > trailing_stop_price: stop_hit = True
-            
-            if stop_hit:
-                entry_flag = False
-                position = 0
-                leverage = 0 # Leverage drops to 0 on exit
-        
-        # Capture Data
-        results.append({
-            'date': date,
-            'price': price,
-            'resistance': resistance,
-            'position': position,
-            'leverage': leverage,
-            'strategy_equity': strategy_equity,
-            'cumulative_returns': cum_ret,
-            'stop_price': trailing_stop_price if entry_flag else None
-        })
-        
-        if n % 200 == 0:
-            print(f"Processed {date.date()}... Eq: {strategy_equity:.2f}")
-
-    results_df = pd.DataFrame(results)
-    results_df.set_index('date', inplace=True)
-    
-    # Add SMAs for plotting
-    results_df['sma_50'] = df['sma_50'].reindex(results_df.index)
-    results_df['sma_400'] = df['sma_400'].reindex(results_df.index)
-
-    analysis_results = results_df
-    ohlcv_data = df
-    return results_df
-
 # -----------------------------------------------------------------------------
-# Web Server
+# 3. EXECUTION & PLOTTING
 # -----------------------------------------------------------------------------
-
-@app.route('/')
-def display_results():
-    global analysis_results
-    
-    if analysis_results is None:
-        return "Analysis running... please refresh in a minute."
-        
-    # Create 4 Panel Visualization
-    fig, (ax1, ax2, ax3, ax4) = plt.subplots(4, 1, figsize=(14, 22), sharex=True)
-    
-    # 1. Strategy Performance
-    ax1.plot(analysis_results.index, analysis_results['strategy_equity'], 'g', linewidth=2, label='Strategy Equity')
-    # Normalized Buy & Hold for comparison
-    bnh = analysis_results['price'] / analysis_results['price'].iloc[0]
-    ax1.plot(analysis_results.index, bnh, 'gray', alpha=0.5, label='Buy & Hold (Norm)')
-    ax1.set_title('Strategy Performance vs Buy & Hold')
-    ax1.set_yscale('log') # Log scale is often better for equity
-    ax1.legend()
-    ax1.grid(True, alpha=0.3)
-    
-    # 2. Leverage Used
-    ax2.plot(analysis_results.index, analysis_results['leverage'], 'b', label='Daily Leverage')
-    ax2.fill_between(analysis_results.index, analysis_results['leverage'], alpha=0.3, color='blue')
-    ax2.set_title('Leverage (Distance from Entry * 20, Max 5)')
-    ax2.set_ylabel('Leverage Multiplier')
-    ax2.set_ylim(0, 6)
-    ax2.grid(True, alpha=0.3)
-    
-    # 3. Price & Signals
-    ax3.plot(analysis_results.index, analysis_results['price'], 'k', alpha=0.6, label='Price')
-    longs = analysis_results[analysis_results['position'] == 1]
-    shorts = analysis_results[analysis_results['position'] == -1]
-    ax3.scatter(longs.index, longs['price'], c='g', s=10, label='Long Active')
-    ax3.scatter(shorts.index, shorts['price'], c='r', s=10, label='Short Active')
-    ax3.set_title(f'{SYMBOL} Price Action & Position Status')
-    ax3.legend()
-    
-    # 4. Resistance
-    ax4.plot(analysis_results.index, analysis_results['resistance'], 'purple', label='Resistance')
-    ax4.axhline(0, color='gray', linestyle='--')
-    ax4.set_title('Resistance Oscillator (Trigger > 0.5)')
-    ax4.grid(True, alpha=0.3)
-    
-    plt.tight_layout()
-    
-    img = io.BytesIO()
-    plt.savefig(img, format='png')
-    img.seek(0)
-    plot_url = base64.b64encode(img.getvalue()).decode()
-    plt.close()
-    
-    stats = analysis_results.tail(10).to_html()
-    
-    return render_template_string("""
-        <html>
-            <head>
-                <style>
-                    body { font-family: sans-serif; padding: 20px; background: #f0f0f0; }
-                    .container { max-width: 1200px; margin: 0 auto; background: white; padding: 20px; box-shadow: 0 0 10px rgba(0,0,0,0.1); }
-                    img { max-width: 100%; height: auto; border: 1px solid #ddd; }
-                </style>
-            </head>
-            <body>
-                <div class="container">
-                    <h1>Trading Algorithm Results</h1>
-                    <p><strong>Logic:</strong> Proximity capped at 1.0. Leverage = Dist * 20 (Max 5).</p>
-                    <img src="data:image/png;base64,{{ plot_url }}">
-                    <h3>Recent Metrics</h3>
-                    {{ stats|safe }}
-                </div>
-            </body>
-        </html>
-    """, plot_url=plot_url, stats=stats)
-
 if __name__ == "__main__":
+    # 1. Fetch
     try:
-        run_analysis()
-        print("Starting Flask on 8080...")
-        app.run(host='0.0.0.0', port=8080)
+        df = fetch_binance_data('BTC/USDT', '1d', 2018)
     except Exception as e:
-        print(f"CRITICAL ERROR: {e}")
+        print("Could not fetch from Binance (API issues or restriction). Generating Mock Data.")
+        dates = pd.date_range(start="2018-01-01", periods=1000)
+        df = pd.DataFrame(index=dates)
+        df['open'] = 100 + np.cumsum(np.random.randn(1000))
+        df['close'] = df['open'] + np.random.randn(1000)
+        df['high'] = df[['open', 'close']].max(axis=1) + 1
+        df['low'] = df[['open', 'close']].min(axis=1) - 1
+        df['volume'] = 1000
+
+    if not df.empty:
+        # 2. Calc
+        df, sma_cols = calculate_metrics(df)
+        
+        # 3. Backtest
+        # Resistance Threshold set arbitrarily to 0.5 for testing; 
+        # Real values depend heavily on the magnitude of returns of returns.
+        df = backtest_strategy(df, sma_cols, threshold=2.0, lookback=400)
+        
+        # 4. Plot
+        plt.figure(figsize=(12, 10))
+        
+        # Subplot 1: Price & SMAs
+        plt.subplot(3, 1, 1)
+        plt.plot(df.index, df['close'], label='Close Price', color='black', alpha=0.6)
+        # Plot a few SMAs for visual check (rescaled to price for visual? No, SMAs are on SumReturns)
+        plt.title('BTC/USDT Price')
+        plt.legend()
+        
+        # Subplot 2: Resistance
+        plt.subplot(3, 1, 2)
+        plt.plot(df.index, df['resistance'], label='Calculated Resistance', color='orange')
+        plt.axhline(y=2.0, color='r', linestyle='--', label='Threshold')
+        plt.title('Algorithmic Resistance')
+        plt.legend()
+        
+        # Subplot 3: Equity
+        plt.subplot(3, 1, 3)
+        plt.plot(df.index, df['equity'], label='Strategy Equity', color='green')
+        plt.title('Equity Curve (Start $10k)')
+        plt.legend()
+        
+        plt.tight_layout()
+        plt.show()
+        
+        # Output Stats
+        total_return = (df['equity'].iloc[-11] - 10000) / 10000 * 100
+        print(f"\nBacktest Complete.")
+        print(f"Final Equity: ${df['equity'].iloc[-11]:.2f}") # -11 to account for lookahead cutoff
+        print(f"Total Return: {total_return:.2f}%")
