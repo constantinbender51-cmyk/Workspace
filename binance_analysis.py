@@ -93,19 +93,19 @@ def generate_plot(df):
     fig, (ax1, ax2) = plt.subplots(2, 1, figsize=(12, 10), sharex=True, gridspec_kw={'height_ratios': [2, 1]})
     
     # Plot 1: Price and SMAs
-    # Plotting only a subset of SMAs to avoid clutter, or all if preferred.
-    # User asked for 10, 20...400. That's 40 lines. We'll plot them thin/transparent.
     
     for col in df.columns:
         if 'SMA_' in col:
             # Highlight SMA 360 specifically
             if col == 'SMA_360':
-                ax1.plot(df.index, df[col], label='SMA 360 (Signal)', color='orange', linewidth=2)
+                # INCREASED PROMINENCE
+                ax1.plot(df.index, df[col], label='SMA 360 (Signal)', color='gold', linewidth=3)
             else:
-                # Plot others faintly
-                ax1.plot(df.index, df[col], color='gray', alpha=0.1, linewidth=0.5)
+                # Increased visibility for other SMAs
+                ax1.plot(df.index, df[col], color='gray', alpha=0.2, linewidth=1.0)
                 
-    ax1.plot(df.index, df['close'], label='Price', color='black', linewidth=1)
+    # Increased visibility for Price
+    ax1.plot(df.index, df['close'], label='Price', color='black', linewidth=1.5)
     ax1.set_title(f'{SYMBOL} Price & SMAs (10-400) | Signal: SMA 360')
     ax1.set_ylabel('Price (USDT)')
     ax1.legend(loc='upper left')
