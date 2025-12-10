@@ -100,6 +100,7 @@ def run_strategy_dynamic(df, params, debug=False):
         print(f"DEBUG: iii values (first 10): {iii[:10]}")
         print(f"DEBUG: s_fast values (first 10): {s_fast[:10]}")
         print(f"DEBUG: s_slow values (first 10): {s_slow[:10]}")
+        print(f"DEBUG: Note: First {p_sma_slow-1} s_slow values are NaN due to rolling window. Strategy starts at index {start_idx} where valid values exist.")
     
     # 3. Signals Loop
     n = len(closes)
@@ -125,6 +126,8 @@ def run_strategy_dynamic(df, params, debug=False):
         print(f"DEBUG: start_idx = {start_idx}, n = {n}")
         print(f"DEBUG: lev_arr (first 10): {lev_arr[:10]}")
         print(f"DEBUG: iii_shifted (first 10): {iii_shifted[:10]}")
+        print(f"DEBUG: s_fast at start_idx-1: {s_fast[start_idx-1] if start_idx > 0 else 'N/A'}")
+        print(f"DEBUG: s_slow at start_idx-1: {s_slow[start_idx-1] if start_idx > 0 else 'N/A'}")
     
     signal_count = 0
     for i in range(start_idx, n):
