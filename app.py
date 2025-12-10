@@ -98,6 +98,11 @@ def run_strategy_dynamic(df, params):
     iii_shifted = np.roll(iii, 1)
     iii_shifted[0] = 0
     
+    # LEVERAGE ASSIGNMENT LOGIC:
+    # Tier 1 (Lowest III): lev_low
+    # Tier 2 (Middle III): lev_high
+    # Tier 3 (Highest III): lev_mid (Default)
+    # The variable names refer to the REGIME, not the MAGNITUDE.
     lev_arr = np.full(n, p_lev_mid)
     lev_arr[iii_shifted < p_lev_th_high] = p_lev_high
     lev_arr[iii_shifted < p_lev_th_low] = p_lev_low
@@ -165,10 +170,11 @@ class Individual:
         else:
             self.params = {}
             self.random_init()
-        self.sharpe = -999 # Stability Score
+        self.sharpe = -999
         self.ret = 0
     
     def random_init(self):
+        # BLIND INITIALIZATION - FULL UNBIASED RANGES
         self.params = {
             'sma_fast': random.randint(10, 80),
             'sma_slow': random.randint(60, 200),
@@ -177,9 +183,13 @@ class Individual:
             'y': random.uniform(0.01, 0.10),
             'lev_thresh_low': random.uniform(0.05, 0.25),
             'lev_thresh_high': random.uniform(0.15, 0.40),
+            
+            # UNBIASED LEVERAGE: Any regime can have any leverage (0x to 5x)
+            # This allows finding "Inverted" structures (e.g. Mid > High)
             'lev_low': random.uniform(0.0, 5.0),  
             'lev_mid': random.uniform(0.0, 5.0),
             'lev_high': random.uniform(0.0, 5.0),
+            
             'tp_pct': random.uniform(0.05, 0.30),
             'sl_pct': random.uniform(0.01, 0.10)
         }
@@ -200,48 +210,19 @@ class Individual:
         key = random.choice(list(self.params.keys()))
         val = self.params[key]
         if isinstance(val, int):
-            change = random.choice([-5, -1, 1, 5])
+            # CHANGED: Increased chunks (choices) from 4 to 8 for integer mutation steps
+            change = random.choice([-20, -10, -5, -1, 1, 5, 10, 20])
             self.params[key] = max(2, val + change)
         else:
             change = random.uniform(0.85, 1.15)
             self.params[key] = val * change
         self.fix_constraints()
 
-def calculate_stability_fitness(df_chunks, params):
-    """
-    Calculates fitness based on consistency across 8 chunks.
-    Fitness = Mean(Sharpes) - (1.5 * StdDev(Sharpes))
-    """
-    sharpes = []
-    rets = []
-    
-    for chunk in df_chunks:
-        # Reduced min length requirement since we have 8 chunks now
-        if len(chunk) < 50: continue 
-        
-        ret, sharpe = run_strategy_dynamic(chunk, params)
-        sharpes.append(sharpe)
-        rets.append(ret)
-    
-    if not sharpes: return 0, 0
-    
-    # Core Logic: Penalize Variance
-    avg_sharpe = np.mean(sharpes)
-    std_sharpe = np.std(sharpes)
-    
-    # REVERTED TO PREVIOUS FORMULA (1.5x)
-    stability_score = avg_sharpe - (1.5 * std_sharpe)
-    
-    total_ret = np.prod(rets)
-    
-    return total_ret, stability_score
-
 def run_genetic_optimization(df):
     # --- HYPERPARAMETERS ---
     POP_SIZE = 300
     GENERATIONS = 50
     ELITISM_PCT = 0.2
-    CHUNKS = 8 # INCREASED TO 8
     # -----------------------
 
     # SPLIT DATA (IS / OOS)
@@ -249,35 +230,32 @@ def run_genetic_optimization(df):
     train_df = df.iloc[:cutoff].copy() # First Half
     test_df = df.iloc[cutoff:].copy()  # Second Half
     
-    # SPLIT TRAINING DATA INTO CHUNKS FOR ROBUSTNESS CHECK
-    chunk_size = len(train_df) // CHUNKS
-    train_chunks = [train_df.iloc[i:i+chunk_size].copy() for i in range(0, len(train_df), chunk_size)]
-    
-    print(f"Split Data: Training on first {len(train_df)} rows ({CHUNKS} Chunks), Testing on last {len(test_df)} rows.")
+    print(f"Split Data: Training on first {len(train_df)} rows, Testing on last {len(test_df)} rows.")
 
     global_data['optimization_status'] = "Initializing (Training on 1st Half)..."
     population = []
     
-    # Init Population
+    # Init Population (Blind)
     for _ in range(POP_SIZE):
         population.append(Individual())
         
     for gen in range(GENERATIONS):
-        global_data['optimization_status'] = f"Generation {gen+1}/{GENERATIONS} (8-Chunk Robustness)..."
+        global_data['optimization_status'] = f"Generation {gen+1}/{GENERATIONS} (In-Sample)..."
         print(f"--- Running Generation {gen+1} ---")
         
-        # Evaluate on TRAIN CHUNKS
+        # Evaluate on TRAIN set
         for ind in population:
             if ind.sharpe == -999:
-                ret, stability_score = calculate_stability_fitness(train_chunks, ind.params)
+                ret, sharpe = run_strategy_dynamic(train_df, ind.params)
                 ind.ret = ret
-                ind.sharpe = stability_score 
+                ind.sharpe = sharpe
         
-        # Sort by Stability Score
+        # Sort by Train Sharpe
         population.sort(key=lambda x: x.sharpe, reverse=True)
         best = population[0]
         
-        print(f"Gen {gen+1} Best (Stability Score): {best.sharpe:.3f}")
+        # Report (Showing Train Metrics)
+        print(f"Gen {gen+1} Best (Train): Sharpe={best.sharpe:.3f}")
         
         global_data['generation_info'].append({
             'gen': gen+1, 'best_sharpe': best.sharpe
@@ -286,16 +264,13 @@ def run_genetic_optimization(df):
         # Calculate OOS Stats for Top 5
         top_performers_snapshot = []
         for p in population[:5]:
+             # Run on Test Set
              test_ret, test_sharpe = run_strategy_dynamic(test_df, p.params)
-             
-             # Calculate pure Train Sharpe for reference
-             full_train_ret, full_train_sharpe = run_strategy_dynamic(train_df, p.params)
-             
              top_performers_snapshot.append({
                  'params': p.params, 
-                 'stability_score': p.sharpe,
-                 'train_sharpe': full_train_sharpe,
-                 'test_sharpe': test_sharpe,
+                 'train_sharpe': p.sharpe, 
+                 'train_ret': p.ret,
+                 'test_sharpe': test_sharpe, # The "Future" result
                  'test_ret': test_ret
              })
              
@@ -339,9 +314,10 @@ def index():
         tr:nth-child(even) {{ background-color: #f2f2f2; }}
         th {{ background-color: #4CAF50; color: white; }}
         .btn {{ padding: 10px 20px; background: blue; color: white; text-decoration: none; border-radius: 5px; }}
+        .highlight {{ color: red; font-weight: bold; }}
     </style>
-    <h1>Genetic Optimizer (8 Chunks)</h1>
-    <p>Optimization Metric: <strong>Stability Score</strong> (Mean - 1.5 * Std) across 8 periods.</p>
+    <h1>Genetic Optimizer (IS/OOS Split)</h1>
+    <p><strong>Training Data:</strong> First 50% | <strong>Test Data:</strong> Second 50%</p>
     <h3>Status: {status}</h3>
     <a href="/start" class="btn">START OPTIMIZATION</a>
     <br><br>
@@ -351,25 +327,23 @@ def index():
         html += """
         <table>
             <tr>
-                <th>Stability Score</th>
-                <th>Full Train Sharpe</th>
+                <th>Train Sharpe (IS)</th>
                 <th>Test Sharpe (OOS)</th>
+                <th>Train Return</th>
                 <th>Test Return</th>
                 <th>Parameters</th>
             </tr>
         """
         for t in top:
-            # Highlight if Test Sharpe is bad (< 1.5)
-            # GREEN if > 1.5, RED if <= 1.5 (Untradable)
-            test_style = "color: green; font-weight: bold;" if t['test_sharpe'] > 1.5 else "color: red; font-weight: bold;"
-            
+            # Highlight if Test Sharpe is also good (> 1.5)
+            test_style = "color: green; font-weight: bold;" if t['test_sharpe'] > 1.5 else ""
             p_formatted = ", ".join([f"{k}:{v:.3f}" if isinstance(v, float) else f"{k}:{v}" for k,v in t['params'].items()])
             
             html += f"""
             <tr>
-                <td>{t['stability_score']:.3f}</td>
                 <td>{t['train_sharpe']:.3f}</td>
                 <td style="{test_style}">{t['test_sharpe']:.3f}</td>
+                <td>{t['train_ret']:.2f}x</td>
                 <td>{t['test_ret']:.2f}x</td>
                 <td style="font-size: 0.8em">{p_formatted}</td>
             </tr>
@@ -381,7 +355,7 @@ def index():
     if gen_stats:
         html += "<h2>Training History</h2><ul>"
         for g in gen_stats:
-            html += f"<li>Gen {g['gen']}: Best Stability Score {g['best_sharpe']:.3f}</li>"
+            html += f"<li>Gen {g['gen']}: Best Train Sharpe {g['best_sharpe']:.3f}</li>"
         html += "</ul>"
     return html
 
