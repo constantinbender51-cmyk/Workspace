@@ -106,9 +106,11 @@ def calculate_proximity(current_value, reference_value, debug=False):
         print(f"  DEBUG proximity: current={current_value:.6f}, reference={reference_value:.6f}, distance={distance:.6f}")
     
     if distance == 0:
+        # Instead of returning infinity, return a large finite value
+        # This represents a perfect match without breaking calculations
         if debug:
-            print(f"  DEBUG proximity: distance is 0, returning np.inf")
-        return np.inf  # Perfect match
+            print(f"  DEBUG proximity: distance is 0, returning large finite value (1000)")
+        return 1000.0  # Large finite value for perfect match
     
     proximity = 1 / (distance * PROXIMITY_SCALING)
     
@@ -179,11 +181,24 @@ def calculate_resistance(df, n, debug=False):
     # Part 1: Sum over lookback days
     part1_sum = 0
     part1_debug = []
+    inf_days = []  # Track days that would produce infinite proximity
+    
     for x in range(n - LOOKBACK_WINDOW + 1, n + 1):
         cum_returns_x = df['cumulative_returns'].iloc[x]
         ror_x = df['returns_of_returns'].iloc[x]
         
-        proximity = calculate_proximity(cum_returns_n, cum_returns_x, debug=debug and x % 100 == 0)
+        # Check for exact match before calculating proximity
+        if cum_returns_x == 0:
+            # reference_value is 0, proximity will be 0
+            proximity = 0
+        elif abs(cum_returns_n - cum_returns_x) < 1e-12:  # Very small tolerance for floating point comparison
+            # Exact match or very close - use large finite value
+            proximity = 1000.0
+            if debug:
+                inf_days.append((x, cum_returns_x, ror_x))
+        else:
+            proximity = calculate_proximity(cum_returns_n, cum_returns_x, debug=debug and x % 100 == 0)
+        
         contribution = proximity * ror_x
         part1_sum += contribution
         
@@ -192,6 +207,10 @@ def calculate_resistance(df, n, debug=False):
     
     if debug:
         print(f"  Part1 sum = {part1_sum:.6f}")
+        if inf_days:
+            print(f"  WARNING: Found {len(inf_days)} days with exact cumulative returns match:")
+            for day_idx, cr, ror in inf_days[:5]:  # Show first 5
+                print(f"    Day {day_idx}: cum_returns={cr:.6f}, ror={ror:.6f}")
         if part1_debug:
             print(f"  Part1 sample contributions (every 100th day):")
             for x, cr, ror, prox, contrib in part1_debug[:5]:
