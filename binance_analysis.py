@@ -151,8 +151,8 @@ def calculate_resistance(df, n):
     Resistance = sum(proximities to past cumulative returns * returns_of_returns)
                + sum(proximities to SMAs * SMA significances)
     """
-    if n < LOOKBACK_WINDOW:
-        return 0, {}
+    # We now ensure n >= LOOKBACK_WINDOW before calling this function
+    # No need to check since we start at LOOKBACK_WINDOW
     
     resistance = 0
     cum_returns_n = df['cumulative_returns'].iloc[n]
@@ -218,7 +218,8 @@ def run_analysis():
     print("\nStarting analysis...")
     
     # Step 5: Iterate through days with enough lookback
-    for n in range(LOOKBACK_WINDOW - 1, len(df)):
+    # Start at day 401 (index 400) to have full 400-day lookback window
+    for n in range(LOOKBACK_WINDOW, len(df)):
         current_date = df.index[n]
         
         # Calculate resistance
@@ -326,7 +327,7 @@ def run_analysis():
     print("\n" + "="*60)
     print("ANALYSIS SUMMARY")
     print("="*60)
-    print(f"Total days analyzed: {len(results_df)}")
+    print(f"Total days analyzed: {len(results_df)} (starting from day 401)")
     print(f"Days with positions: {len(results_df[results_df['position'] != 0])}")
     print(f"Maximum resistance: {results_df['resistance'].max():.6f}")
     print(f"Minimum resistance: {results_df['resistance'].min():.6f}")
