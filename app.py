@@ -169,7 +169,7 @@ class Individual:
         self.ret = 0
     
     def random_init(self):
-        # BLIND INITIALIZATION: No previous knowledge used.
+        # BLIND INITIALIZATION
         self.params = {
             'sma_fast': random.randint(10, 80),
             'sma_slow': random.randint(60, 200),
@@ -187,14 +187,12 @@ class Individual:
         self.fix_constraints()
 
     def fix_constraints(self):
-        # Logical Hard Constraints
         if self.params['sma_fast'] >= self.params['sma_slow']:
             self.params['sma_fast'] = int(self.params['sma_slow'] * 0.5)
             
         if self.params['lev_thresh_low'] > self.params['lev_thresh_high']:
              self.params['lev_thresh_low'] = self.params['lev_thresh_high'] * 0.9
 
-        # Integer enforcement
         self.params['sma_fast'] = int(self.params['sma_fast'])
         self.params['sma_slow'] = int(self.params['sma_slow'])
         self.params['w'] = int(self.params['w'])
@@ -217,37 +215,56 @@ def run_genetic_optimization(df):
     ELITISM_PCT = 0.2
     # -----------------------
 
-    global_data['optimization_status'] = "Initializing Population (Blind)..."
+    # SPLIT DATA (IS / OOS)
+    cutoff = len(df) // 2
+    train_df = df.iloc[:cutoff].copy() # First Half
+    test_df = df.iloc[cutoff:].copy()  # Second Half
+    
+    print(f"Split Data: Training on first {len(train_df)} rows, Testing on last {len(test_df)} rows.")
+
+    global_data['optimization_status'] = "Initializing (Training on 1st Half)..."
     population = []
     
-    # NO SEEDING - PURE RANDOM START
+    # Init Population (Blind)
     for _ in range(POP_SIZE):
         population.append(Individual())
         
     for gen in range(GENERATIONS):
-        global_data['optimization_status'] = f"Generation {gen+1}/{GENERATIONS}..."
+        global_data['optimization_status'] = f"Generation {gen+1}/{GENERATIONS} (In-Sample)..."
         print(f"--- Running Generation {gen+1} ---")
         
-        # Evaluate
+        # Evaluate on TRAIN set
         for ind in population:
             if ind.sharpe == -999:
-                ret, sharpe = run_strategy_dynamic(df, ind.params)
+                ret, sharpe = run_strategy_dynamic(train_df, ind.params)
                 ind.ret = ret
                 ind.sharpe = sharpe
         
-        # Sort
+        # Sort by Train Sharpe
         population.sort(key=lambda x: x.sharpe, reverse=True)
         best = population[0]
-        print(f"Gen {gen+1} Best: Sharpe={best.sharpe:.3f} | Return={best.ret:.2f}x")
         
-        # Record
+        # Report (Showing Train Metrics)
+        print(f"Gen {gen+1} Best (Train): Sharpe={best.sharpe:.3f}")
+        
         global_data['generation_info'].append({
-            'gen': gen+1, 'best_sharpe': best.sharpe, 'best_ret': best.ret
+            'gen': gen+1, 'best_sharpe': best.sharpe
         })
-        global_data['top_performers'] = [
-            {'params': p.params, 'sharpe': p.sharpe, 'ret': p.ret} 
-            for p in population[:5]
-        ]
+        
+        # Calculate OOS Stats for Top 5
+        top_performers_snapshot = []
+        for p in population[:5]:
+             # Run on Test Set
+             test_ret, test_sharpe = run_strategy_dynamic(test_df, p.params)
+             top_performers_snapshot.append({
+                 'params': p.params, 
+                 'train_sharpe': p.sharpe, 
+                 'train_ret': p.ret,
+                 'test_sharpe': test_sharpe, # The "Future" result
+                 'test_ret': test_ret
+             })
+             
+        global_data['top_performers'] = top_performers_snapshot
         
         # Evolution
         next_gen = []
@@ -287,26 +304,48 @@ def index():
         tr:nth-child(even) {{ background-color: #f2f2f2; }}
         th {{ background-color: #4CAF50; color: white; }}
         .btn {{ padding: 10px 20px; background: blue; color: white; text-decoration: none; border-radius: 5px; }}
+        .highlight {{ color: red; font-weight: bold; }}
     </style>
-    <h1>Blind Genetic Optimizer (Pop: 300, Gen: 50)</h1>
+    <h1>Genetic Optimizer (IS/OOS Split)</h1>
+    <p><strong>Training Data:</strong> First 50% | <strong>Test Data:</strong> Second 50%</p>
     <h3>Status: {status}</h3>
     <a href="/start" class="btn">START OPTIMIZATION</a>
     <br><br>
-    <h2>Best Results</h2>
+    <h2>Top 5 Results</h2>
     """
     if top:
-        html += "<table><tr><th>Sharpe</th><th>Return</th><th>Parameters</th></tr>"
+        html += """
+        <table>
+            <tr>
+                <th>Train Sharpe (IS)</th>
+                <th>Test Sharpe (OOS)</th>
+                <th>Train Return</th>
+                <th>Test Return</th>
+                <th>Parameters</th>
+            </tr>
+        """
         for t in top:
+            # Highlight if Test Sharpe is also good (> 1.5)
+            test_style = "color: green; font-weight: bold;" if t['test_sharpe'] > 1.5 else ""
             p_formatted = ", ".join([f"{k}:{v:.3f}" if isinstance(v, float) else f"{k}:{v}" for k,v in t['params'].items()])
-            html += f"<tr><td>{t['sharpe']:.3f}</td><td>{t['ret']:.2f}x</td><td>{p_formatted}</td></tr>"
+            
+            html += f"""
+            <tr>
+                <td>{t['train_sharpe']:.3f}</td>
+                <td style="{test_style}">{t['test_sharpe']:.3f}</td>
+                <td>{t['train_ret']:.2f}x</td>
+                <td>{t['test_ret']:.2f}x</td>
+                <td style="font-size: 0.8em">{p_formatted}</td>
+            </tr>
+            """
         html += "</table>"
     else:
         html += "<p>No results yet.</p>"
 
     if gen_stats:
-        html += "<h2>History</h2><ul>"
+        html += "<h2>Training History</h2><ul>"
         for g in gen_stats:
-            html += f"<li>Gen {g['gen']}: Sharpe {g['best_sharpe']:.3f}</li>"
+            html += f"<li>Gen {g['gen']}: Best Train Sharpe {g['best_sharpe']:.3f}</li>"
         html += "</ul>"
     return html
 
