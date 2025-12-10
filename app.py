@@ -13,13 +13,13 @@ from numba import njit, prange
 # --- Configuration ---
 SYMBOL = 'BTC/USDT'
 TIMEFRAME = '1d'
-START_DATE_STR = '2017-08-17 00:00:00' # Earliest Binance BTC data to maximize OOS
+START_DATE_STR = '2017-08-17 00:00:00'
 PORT = 8080
 
 # Optimization Settings
 OOS_STEP_SIZE = 60       # Re-optimize every 60 days
-TRAINING_WINDOW = 1460   # Fixed 4-year lookback (Force robust parameters)
-GRID_SIZE = 8            # Resolution (8^6 ~ 262k combinations)
+TRAINING_WINDOW = 1460   # 4-year fixed lookback
+GRID_SIZE = 8            # Resolution
 
 app = Flask(__name__)
 
@@ -61,7 +61,6 @@ def fetch_data(symbol, timeframe, start_str):
     df['timestamp'] = pd.to_datetime(df['timestamp'], unit='ms')
     df.set_index('timestamp', inplace=True)
     df = df[~df.index.duplicated(keep='first')]
-    print(f"Fetched {len(df)} rows.")
     return df
 
 # --- Pre-Computation ---
@@ -74,7 +73,7 @@ def prepare_features(df):
     data['sma_120'] = data['close'].rolling(window=120).mean().fillna(0)
     data['sma_360'] = data['close'].rolling(window=360).mean().fillna(0)
     
-    # Precompute III for all GRID_SIZE possible iii_windows (5 to 50)
+    # Precompute III matrix
     iii_windows = np.linspace(5, 50, GRID_SIZE).astype(int)
     iii_matrix = np.zeros((len(data), GRID_SIZE))
     
@@ -86,9 +85,9 @@ def prepare_features(df):
 
     return data, iii_matrix, iii_windows
 
-# --- Numba Optimized Strategy Kernel ---
+# --- Numba Kernel ---
 @njit(parallel=True, fastmath=True)
-def grid_search_kernel_fixed_window(
+def grid_search_kernel(
     opens, closes, highs, lows, 
     sma40, sma120, sma360, 
     iii_matrix, 
@@ -96,13 +95,9 @@ def grid_search_kernel_fixed_window(
     current_time_idx,
     training_window
 ):
-    """
-    Grid search with a FIXED lookback window.
-    """
     n_params = len(p_a)
     sharpe_results = np.zeros(n_params)
     
-    # Parallel loop over parameter combinations
     for i in prange(n_params):
         lev_a = p_a[i]
         lev_b = p_b[i]
@@ -111,11 +106,9 @@ def grid_search_kernel_fixed_window(
         band_pct = p_e[i]
         iii_idx = int(p_iii_idx[i])
         
-        # Define Time Range (Fixed Window)
         start_idx = current_time_idx - training_window
         end_idx = current_time_idx
         
-        # Safety check
         if start_idx < 360: 
             sharpe_results[i] = -999.0
             continue
@@ -132,7 +125,6 @@ def grid_search_kernel_fixed_window(
             prev_s360 = sma360[t-1]
             prev_iii = iii_matrix[t-1, iii_idx]
             
-            # Flat Regime
             if prev_iii < flat_thresh:
                 is_flat = True
             
@@ -143,23 +135,18 @@ def grid_search_kernel_fixed_window(
                 th40 = prev_s40 * band_pct
                 th120 = prev_s120 * band_pct
                 th360 = prev_s360 * band_pct
-                
                 if (dist40 <= th40) or (dist120 <= th120) or (dist360 <= th360):
                     is_flat = False
             
-            # Leverage & Signal
             lev = 0.0
             signal = 0
-            
             if not is_flat:
                 lev = lev_a if prev_iii < lev_thresh else lev_b
-                
                 if prev_c > prev_s40 and prev_c > prev_s120 and prev_c > prev_s360:
                     signal = 1
                 elif prev_c < prev_s40 and prev_c < prev_s120 and prev_c < prev_s360:
                     signal = -1
             
-            # PnL
             daily_ret = 0.0
             if signal != 0:
                 raw_ret = (closes[t] - opens[t]) / opens[t]
@@ -169,13 +156,11 @@ def grid_search_kernel_fixed_window(
             sum_sq_daily_ret += (daily_ret * daily_ret)
             n_days += 1
             
-        # Sharpe Calc
         if n_days > 1:
             mean_ret = sum_daily_ret / n_days
             var_ret = (sum_sq_daily_ret / n_days) - (mean_ret * mean_ret)
             if var_ret < 0: var_ret = 0.0
             std_ret = np.sqrt(var_ret)
-            
             if std_ret > 1e-9:
                 sharpe_results[i] = (mean_ret / std_ret) * np.sqrt(365)
             else:
@@ -184,6 +169,58 @@ def grid_search_kernel_fixed_window(
             sharpe_results[i] = 0.0
             
     return sharpe_results
+
+# --- Robust Selector Logic ---
+def select_robust_parameters(sharpe_array, p_a, p_b, p_c, p_d, p_e, p_iii_idx):
+    """
+    Instead of argmax (Best Peak), we select the MEDIAN of the Top 5%.
+    This forces the strategy to pick a 'Plateau' of stability.
+    """
+    # 1. Filter out garbage (negative sharpes)
+    valid_indices = np.where(sharpe_array > 0.1)[0]
+    if len(valid_indices) == 0:
+        return np.argmax(sharpe_array) # Fallback
+        
+    valid_sharpes = sharpe_array[valid_indices]
+    
+    # 2. Get Top 5% threshold
+    percentile_95 = np.percentile(valid_sharpes, 95)
+    
+    # 3. Get indices of the "Elite" group
+    elite_indices = valid_indices[valid_sharpes >= percentile_95]
+    
+    if len(elite_indices) == 0:
+        return np.argmax(sharpe_array)
+        
+    # 4. Calculate Median Parameter Values of the Elite Group
+    median_a = np.median(p_a[elite_indices])
+    median_b = np.median(p_b[elite_indices])
+    median_c = np.median(p_c[elite_indices])
+    median_d = np.median(p_d[elite_indices])
+    median_e = np.median(p_e[elite_indices])
+    median_iii = np.median(p_iii_idx[elite_indices])
+    
+    # 5. Find the single parameter set in our Elite Group closest to this "Center of Mass"
+    # Normalize simply by dividing by range if needed, but Euclidean dist on raw is okay for approximation
+    # Actually, we just want the index in `elite_indices` that minimizes distance to medians.
+    
+    best_dist = 999999.0
+    robust_idx = elite_indices[0]
+    
+    for idx in elite_indices:
+        dist = (
+            (p_a[idx] - median_a)**2 + 
+            (p_b[idx] - median_b)**2 + 
+            (p_c[idx] - median_c)**2 + 
+            (p_d[idx] - median_d)**2 + 
+            (p_e[idx] - median_e)**2 +
+            (p_iii_idx[idx] - median_iii)**2
+        )
+        if dist < best_dist:
+            best_dist = dist
+            robust_idx = idx
+            
+    return robust_idx
 
 # --- Run Single OOS Period ---
 def run_oos_period(
@@ -253,11 +290,9 @@ def perform_optimization():
             global_store['is_optimizing'] = False
             return
 
-        # Pre-process
         df, iii_matrix, iii_windows = prepare_features(df)
         
-        # Create 6D Parameter Grid (Removed Window dimension)
-        print("Generating parameter grid...")
+        # Create Grid
         g_lev_a = np.linspace(0, 5, GRID_SIZE)
         g_lev_b = np.linspace(0, 5, GRID_SIZE)
         g_lev_th = np.linspace(0, 0.6, GRID_SIZE)
@@ -265,7 +300,6 @@ def perform_optimization():
         g_band = np.linspace(0, 0.07, GRID_SIZE)
         g_iii_idx = np.arange(GRID_SIZE)
         
-        # Meshgrid (Order: a, b, c, d, e, iii_idx)
         mesh = np.array(np.meshgrid(
             g_lev_a, g_lev_b, g_lev_th, g_flat_th, g_band, g_iii_idx
         ))
@@ -277,8 +311,6 @@ def perform_optimization():
         n_d = np.ascontiguousarray(flat_mesh[3])
         n_e = np.ascontiguousarray(flat_mesh[4])
         n_iii = np.ascontiguousarray(flat_mesh[5])
-        
-        print(f"Grid size: {len(n_a)} combinations per step.")
 
         opens = df['open'].values
         closes = df['close'].values
@@ -289,42 +321,30 @@ def perform_optimization():
         s360 = df['sma_360'].values
         
         oos_results = []
-        
-        # Start Time: 4 Years (1460 days) + Max SMA (360) approx 1820
         start_t = TRAINING_WINDOW + 360
         total_len = len(closes)
         
-        if total_len < start_t:
-            print(f"Not enough data. Need {start_t} days, have {total_len}.")
-            global_store['is_optimizing'] = False
-            return
-            
-        print(f"Starting Rolling Optimization from index {start_t} (Date: {df.index[start_t]})...")
-        
         for t in range(start_t, total_len, OOS_STEP_SIZE):
-            
             oos_end = min(t + OOS_STEP_SIZE, total_len)
             if t >= total_len: break
             
-            print(f" optimizing for OOS [{t}:{oos_end}]...")
-            
-            # A. OPTIMIZE on [t-1460 : t]
-            sharpe_array = grid_search_kernel_fixed_window(
+            # 1. Get All Sharpes for this window
+            sharpe_array = grid_search_kernel(
                 opens, closes, highs, lows,
                 s40, s120, s360,
                 iii_matrix,
                 n_a, n_b, n_c, n_d, n_e, n_iii,
-                t, # End of training
-                TRAINING_WINDOW
+                t, TRAINING_WINDOW
             )
             
-            best_idx = np.argmax(sharpe_array)
-            best_sharpe = sharpe_array[best_idx]
+            # 2. SELECT ROBUST PARAMETERS (Median of Top 5%)
+            robust_idx = select_robust_parameters(sharpe_array, n_a, n_b, n_c, n_d, n_e, n_iii)
+            robust_sharpe = sharpe_array[robust_idx]
             
-            # B. RUN OOS
+            # 3. Run OOS
             oos_ret = run_oos_period(
                 opens, closes, s40, s120, s360, iii_matrix,
-                best_idx,
+                robust_idx,
                 n_a, n_b, n_c, n_d, n_e, n_iii,
                 t, oos_end
             )
@@ -333,19 +353,18 @@ def perform_optimization():
             chunk_df = pd.DataFrame({'strategy_ret': oos_ret}, index=oos_dates)
             oos_results.append(chunk_df)
             
-            # Log
             best_params = {
-                'lev_a': n_a[best_idx],
-                'lev_b': n_b[best_idx],
-                'lev_thresh': n_c[best_idx],
-                'flat_thresh': n_d[best_idx],
-                'band': n_e[best_idx],
-                'iii_win': iii_windows[int(n_iii[best_idx])]
+                'lev_a': n_a[robust_idx],
+                'lev_b': n_b[robust_idx],
+                'lev_thresh': n_c[robust_idx],
+                'flat_thresh': n_d[robust_idx],
+                'band': n_e[robust_idx],
+                'iii_win': iii_windows[int(n_iii[robust_idx])]
             }
             
             global_store['optimization_log'].append({
                 'date': df.index[t],
-                'is_sharpe': best_sharpe,
+                'is_sharpe': robust_sharpe,
                 'params': best_params
             })
 
@@ -361,14 +380,9 @@ def perform_optimization():
             
             global_store['oos_sharpe'] = oos_sharpe
             global_store['results'] = full_res
-            print(f"Optimization Complete. OOS Sharpe: {oos_sharpe:.2f}")
-        else:
-            print("No OOS results generated.")
-
+        
     except Exception as e:
-        print(f"Optimization Failed: {e}")
-        import traceback
-        traceback.print_exc()
+        print(f"Error: {e}")
         
     global_store['is_optimizing'] = False
 
@@ -377,7 +391,7 @@ def perform_optimization():
 def index():
     status = "Idle"
     if global_store['is_optimizing']:
-        status = "Running Optimization... (Check Console)"
+        status = "Running Robust Optimization... (Check Console)"
     
     res = global_store['results']
     plot_url = ""
@@ -385,11 +399,10 @@ def index():
     
     if res is not None and not res.empty:
         plt.figure(figsize=(12, 6))
-        plt.plot(res.index, res['cum_strategy'], label='Adaptive Rolling Strategy (4Y Lookback)', color='blue')
+        plt.plot(res.index, res['cum_strategy'], label='Robust Median Strategy', color='green')
         plt.plot(res.index, res['cum_bnh'], label='Buy & Hold', color='gray', alpha=0.5)
         plt.yscale('log')
-        plt.title(f'Walk-Forward Results')
-        plt.ylabel('Cumulative Return (Log)')
+        plt.title('Robust (Cluster-Based) Walk-Forward Results')
         plt.legend()
         plt.grid(True, which="both", alpha=0.2)
         
@@ -406,8 +419,7 @@ def index():
         for entry in global_store['optimization_log'][-15:]:
             p = entry['params']
             p_str = (f"A:{p['lev_a']:.1f}, B:{p['lev_b']:.1f}, "
-                     f"Th:{p['lev_thresh']:.2f}, Flat:{p['flat_thresh']:.2f}, "
-                     f"Band:{p['band']:.3f}, iii_W:{p['iii_win']}")
+                     f"Th:{p['lev_thresh']:.2f}, Flat:{p['flat_thresh']:.2f}")
             log_rows += f"<tr><td>{entry['date'].date()}</td><td>{entry['is_sharpe']:.2f}</td><td>{p_str}</td></tr>"
 
         stats_html = f"""
@@ -415,10 +427,10 @@ def index():
             <div class="stat-box"><strong>Total Return:</strong><br>{total_ret:.2f}x</div>
             <div class="stat-box"><strong>OOS Sharpe Ratio:</strong><br>{oos_sharpe:.2f}</div>
         </div>
-        <h3>Walk-Forward Log (Lookback: {TRAINING_WINDOW} days)</h3>
+        <h3>Walk-Forward Log (Median of Top 5%)</h3>
         <div style="overflow-x: auto;">
         <table border="1" cellpadding="5" style="border-collapse: collapse; width: 100%; font-size: 0.9em;">
-            <tr><th>Rebalance Date</th><th>Training Sharpe</th><th>Optimized Parameters</th></tr>
+            <tr><th>Rebalance Date</th><th>Training Sharpe</th><th>Robust Parameters</th></tr>
             {log_rows}
         </table>
         </div>
@@ -428,35 +440,31 @@ def index():
     <!DOCTYPE html>
     <html>
     <head>
-        <title>Adaptive Strategy</title>
+        <title>Robust Strategy</title>
         <style>
             body {{ font-family: sans-serif; padding: 20px; max-width: 1000px; margin: auto; background: #f9f9f9; }}
             .container {{ background: white; padding: 20px; box-shadow: 0 2px 10px rgba(0,0,0,0.1); border-radius: 8px; }}
             img {{ max-width: 100%; height: auto; margin-top: 20px; }}
             .stats {{ display: flex; gap: 20px; margin: 20px 0; justify-content: center; }}
             .stat-box {{ padding: 20px; background: #eef; border-radius: 8px; text-align: center; min-width: 150px; }}
-            button {{ padding: 12px 24px; font-size: 16px; cursor: pointer; background: #007bff; color: white; border: none; border-radius: 5px; transition: 0.2s; }}
-            button:disabled {{ background: #ccc; cursor: not-allowed; }}
-            button:hover:not(:disabled) {{ background: #0056b3; }}
+            button {{ padding: 12px 24px; font-size: 16px; cursor: pointer; background: #28a745; color: white; border: none; border-radius: 5px; }}
+            button:disabled {{ background: #ccc; }}
         </style>
         <meta http-equiv="refresh" content="10">
     </head>
     <body>
         <div class="container">
-            <h1 style="text-align:center;">Adaptive Grid Search: {SYMBOL}</h1>
+            <h1 style="text-align:center;">Robust Grid Search: {SYMBOL}</h1>
             <p style="text-align:center;"><strong>Status:</strong> {status}</p>
             <div style="text-align:center;">
                 <form action="/run" method="post">
                     <button type="submit" {'disabled' if global_store['is_optimizing'] else ''}>
-                        { 'Running Simulation...' if global_store['is_optimizing'] else 'Run Walk-Forward Optimization (4Y Window)' }
+                        { 'Running Simulation...' if global_store['is_optimizing'] else 'Run Robust Optimization' }
                     </button>
                 </form>
             </div>
-            
             <hr>
-            
-            {'<img src="data:image/png;base64,' + plot_url + '">' if plot_url else '<p style="text-align:center;">No results available. Please run optimization.</p>'}
-            
+            {'<img src="data:image/png;base64,' + plot_url + '">' if plot_url else '<p style="text-align:center;">No results available.</p>'}
             {stats_html}
         </div>
     </body>
