@@ -134,7 +134,7 @@ def generate_plot(df, best_period, training_cutoff):
     # --- PLOT 1: Price & Rainbow SMAs ---
     
     # Create a color map instance
-    cmap = matplotlib.colormaps['jet'] # 'jet' or 'turbo' gives high contrast for spectral data
+    cmap = matplotlib.colormaps['jet'] 
     norm = mcolors.Normalize(vmin=10, vmax=400)
     
     # Plot all SMAs using the colormap
@@ -147,14 +147,15 @@ def generate_plot(df, best_period, training_cutoff):
         if period == best_period:
             continue # Skip the winner, we plot it last on top
         else:
+            # All 40 SMAs are clearly visible with alpha=0.5
             ax1.plot(df.index, df[col_name], color=color, alpha=0.5, linewidth=1)
 
-    # Plot the Winner on top
+    # Plot the Winner on top with high contrast (No path_effects used)
     winner_col = f'SMA_{best_period}'
-    ax1.plot(df.index, df[winner_col], label=f'Best SMA: {best_period}', color='white', linewidth=3, path_effects=[matplotlib.patheffects.withStroke(linewidth=5, foreground='black')])
+    ax1.plot(df.index, df[winner_col], label=f'Best SMA: {best_period}', color='gold', linewidth=4, zorder=10) # Made line thicker and color prominent
     
-    # Plot Price
-    ax1.plot(df.index, df['close'], label='Price', color='black', linewidth=1.5, alpha=0.8)
+    # Plot Price (Changed color to white for better visibility against the colored SMAs)
+    ax1.plot(df.index, df['close'], label='Price', color='white', linewidth=1.5, alpha=0.9, zorder=5) 
     
     # Training Split Line
     ax1.axvline(training_cutoff, color='red', linestyle='--', linewidth=2, label='Train/Test Split')
@@ -166,12 +167,12 @@ def generate_plot(df, best_period, training_cutoff):
     ax1.set_yscale('log') # Log scale often looks better for long-term crypto
 
     # --- PLOT 2: Equity Curve ---
-    ax2.plot(df.index, df['equity'], label='Strategy Equity', color='green', linewidth=2)
+    ax2.plot(df.index, df['equity'], label='Strategy Equity', color='lime', linewidth=2) # Changed strategy equity to lime
     ax2.plot(df.index, df['buy_hold_equity'], label='Buy & Hold', color='gray', alpha=0.7, linestyle='--')
     
     # Training Split Line on Equity
     ax2.axvline(training_cutoff, color='red', linestyle='--', linewidth=2)
-    ax2.text(training_cutoff, df['equity'].mean(), '  <-- Training (In-Sample) | Test (Out-of-Sample) -->', color='red', fontsize=10, verticalalignment='center')
+    ax2.text(training_cutoff, df['equity'].min(), '  <-- Training (In-Sample) | Test (Out-of-Sample) -->', color='red', fontsize=10, verticalalignment='bottom')
 
     ax2.set_title('Equity Curve (Log Returns Accumulated)', fontsize=14)
     ax2.set_ylabel('Normalized Equity')
@@ -183,7 +184,7 @@ def generate_plot(df, best_period, training_cutoff):
     
     # Save
     buf = io.BytesIO()
-    plt.savefig(buf, format='png', dpi=100)
+    plt.savefig(buf, format='png', dpi=100, facecolor=fig.get_facecolor()) # Ensure background color is saved
     buf.seek(0)
     data = base64.b64encode(buf.getbuffer()).decode("ascii")
     plt.close(fig)
@@ -215,7 +216,7 @@ def index():
                 h1 {{ color: #fff; margin-bottom: 5px; }}
                 .stats {{ background: #333; padding: 15px; border-radius: 8px; margin: 20px 0; border: 1px solid #444; }}
                 .stats span {{ margin: 0 15px; font-size: 1.1em; }}
-                .highlight {{ color: #4caf50; font-weight: bold; }}
+                .highlight {{ color: #FFD700; font-weight: bold; }} /* Changed highlight to gold/yellow */
                 img {{ max-width: 100%; height: auto; border-radius: 4px; }}
                 button {{ background: #2196F3; color: white; border: none; padding: 10px 20px; font-size: 16px; cursor: pointer; border-radius: 4px; margin-top: 20px; }}
                 button:hover {{ background: #1976D2; }}
