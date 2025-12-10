@@ -56,7 +56,7 @@ def fetch_data(symbol, timeframe, start_str):
     return df
 
 # --- Optimized Strategy Engine ---
-def run_strategy_dynamic(df, params):
+def run_strategy_dynamic(df, params, debug=False):
     # Unpack Parameters
     p_sma_fast = int(params['sma_fast'])
     p_sma_slow = int(params['sma_slow'])
@@ -72,6 +72,10 @@ def run_strategy_dynamic(df, params):
     
     p_tp = params['tp_pct']
     p_sl = params['sl_pct']
+    
+    if debug:
+        print(f"DEBUG: Strategy parameters: sma_fast={p_sma_fast}, sma_slow={p_sma_slow}, w={p_w}, u={p_u:.3f}, y={p_y:.3f}")
+        print(f"DEBUG: Data shape: {df.shape}, first date: {df.index[0]}, last date: {df.index[-1]}")
 
     # Vectorized Calculations
     closes = df['close'].values
@@ -90,6 +94,11 @@ def run_strategy_dynamic(df, params):
     roll_sum = pd.Series(log_ret).rolling(window=p_w).sum()
     roll_abs_sum = pd.Series(np.abs(log_ret)).rolling(window=p_w).sum()
     iii = (roll_sum.abs() / roll_abs_sum).fillna(0).values
+    
+    if debug:
+        print(f"DEBUG: iii values (first 10): {iii[:10]}")
+        print(f"DEBUG: s_fast values (first 10): {s_fast[:10]}")
+        print(f"DEBUG: s_slow values (first 10): {s_slow[:10]}")
     
     # 3. Signals Loop
     n = len(closes)
@@ -111,6 +120,12 @@ def run_strategy_dynamic(df, params):
     
     start_idx = max(p_sma_slow, p_w) + 1
     
+    if debug:
+        print(f"DEBUG: start_idx = {start_idx}, n = {n}")
+        print(f"DEBUG: lev_arr (first 10): {lev_arr[:10]}")
+        print(f"DEBUG: iii_shifted (first 10): {iii_shifted[:10]}")
+    
+    signal_count = 0
     for i in range(start_idx, n):
         # A. Regime Logic
         if iii_shifted[i] < p_u:
@@ -135,8 +150,10 @@ def run_strategy_dynamic(df, params):
             elif pc < pf and pc < ps: sig = -1
         
         # C. Returns
-        if sig == 0: continue
+        if sig == 0: 
+            continue
             
+        signal_count += 1
         lev = lev_arr[i]
         o, h, l, c = opens[i], highs[i], lows[i], closes[i]
         
@@ -156,11 +173,33 @@ def run_strategy_dynamic(df, params):
             else: dr = (o - c) / o
             
         returns[i] = dr * lev
+        
+        if debug and signal_count <= 5:
+            print(f"DEBUG: Signal at i={i}, date={df.index[i]}, sig={sig}, lev={lev:.3f}, dr={dr:.6f}, return={returns[i]:.6f}")
+    
+    if debug:
+        print(f"DEBUG: Total signals generated: {signal_count}")
+        print(f"DEBUG: Returns array (non-zero): {returns[returns != 0]}")
+        print(f"DEBUG: Sum of returns: {np.sum(returns)}")
+        print(f"DEBUG: Product of (1+returns): {np.prod(1 + returns)}")
 
     # 4. Metrics
-    if np.all(returns == 0): return 0, 0
+    if np.all(returns == 0): 
+        if debug:
+            print(f"DEBUG: All returns are zero, returning 0, 0")
+        return 0, 0
+    
+    non_zero_returns = returns[returns != 0]
+    if debug:
+        print(f"DEBUG: Non-zero returns count: {len(non_zero_returns)}")
+        print(f"DEBUG: Non-zero returns values: {non_zero_returns}")
+    
     sharpe = (np.mean(returns) / np.std(returns) * np.sqrt(365)) if np.std(returns) != 0 else 0
     total_ret = np.prod(1 + returns)
+    
+    if debug:
+        print(f"DEBUG: Calculated sharpe: {sharpe:.6f}, total_ret: {total_ret:.6f}")
+    
     return total_ret, sharpe
 
 # --- Genetic Algorithm Components ---
@@ -276,7 +315,7 @@ def run_walk_forward_optimization(df, window_days=120):
         best_params = run_genetic_optimization_on_window(train_df)
         
         # Test on the single day
-        test_ret, test_sharpe = run_strategy_dynamic(test_df, best_params)
+        test_ret, test_sharpe = run_strategy_dynamic(test_df, best_params, debug=True)
         
         # For single day test, total return is the daily return
         daily_return = test_ret - 1 if test_ret > 0 else -1
@@ -343,7 +382,7 @@ def run_genetic_optimization_on_window(df):
         # Evaluate population
         for ind in population:
             if ind.sharpe == -999:
-                ret, sharpe = run_strategy_dynamic(df, ind.params)
+                ret, sharpe = run_strategy_dynamic(df, ind.params, debug=False)
                 ind.ret = ret
                 ind.sharpe = sharpe
         
@@ -403,7 +442,7 @@ def run_genetic_optimization_on_window(df):
         # Evaluate on TRAIN set
         for ind in population:
             if ind.sharpe == -999:
-                ret, sharpe = run_strategy_dynamic(train_df, ind.params)
+                ret, sharpe = run_strategy_dynamic(train_df, ind.params, debug=False)
                 ind.ret = ret
                 ind.sharpe = sharpe
         
@@ -422,7 +461,7 @@ def run_genetic_optimization_on_window(df):
         top_performers_snapshot = []
         for p in population[:5]:
              # Run on Test Set
-             test_ret, test_sharpe = run_strategy_dynamic(test_df, p.params)
+             test_ret, test_sharpe = run_strategy_dynamic(test_df, p.params, debug=False)
              top_performers_snapshot.append({
                  'params': p.params, 
                  'train_sharpe': p.sharpe, 
