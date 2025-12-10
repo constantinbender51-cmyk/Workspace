@@ -31,6 +31,137 @@ PROXIMITY_SCALING = 1/0.05  # 1/0.05 = 20
 analysis_results = None
 ohlcv_data = None
 results_data = None
+# Flask web server
+app = Flask(__name__)
+
+@app.route('/')
+def display_results():
+    """Display analysis results with plots"""
+    global analysis_results, ohlcv_data, results_data
+    
+    if analysis_results is None or ohlcv_data is None:
+        return "Analysis not yet completed. Please wait for the analysis to finish."
+    
+    # Create plots
+    fig, axes = plt.subplots(4, 1, figsize=(14, 16))
+    
+    # Plot 1: Price with resistance signals
+    ax1 = axes[0]
+    ax1.plot(analysis_results.index, analysis_results['price'], label='Price', color='blue', alpha=0.7)
+    # Mark entry signals (resistance > 0 and position changes)
+    entry_signals = analysis_results[analysis_results['position'] != 0]
+    if not entry_signals.empty:
+        ax1.scatter(entry_signals.index, entry_signals['price'], 
+                   color=['green' if pos == 1 else 'red' for pos in entry_signals['position']],
+                   s=50, label='Entry Signal (Green=Long, Red=Short)', zorder=5)
+    ax1.set_title(f'{SYMBOL} Price with Resistance Signals')
+    ax1.set_ylabel('Price (USDT)')
+    ax1.legend()
+    ax1.grid(True, alpha=0.3)
+    
+    # Plot 2: Resistance values
+    ax2 = axes[1]
+    ax2.plot(analysis_results.index, analysis_results['resistance'], 
+            label='Resistance', color='purple', alpha=0.7)
+    ax2.axhline(y=0, color='gray', linestyle='--', alpha=0.5)
+    ax2.set_title('Resistance Values Over Time')
+    ax2.set_ylabel('Resistance')
+    ax2.legend()
+    ax2.grid(True, alpha=0.3)
+    
+    # Plot 3: Position status
+    ax3 = axes[2]
+    ax3.plot(analysis_results.index, analysis_results['position'], 
+            label='Position (1=Long, -1=Short, 0=None)', color='orange', alpha=0.7)
+    ax3.set_title('Position Status')
+    ax3.set_ylabel('Position')
+    ax3.set_ylim([-1.5, 1.5])
+    ax3.legend()
+    ax3.grid(True, alpha=0.3)
+    
+    # Plot 4: Cumulative returns
+    ax4 = axes[3]
+    ax4.plot(analysis_results.index, analysis_results['cumulative_returns'], 
+            label='Cumulative Returns', color='green', alpha=0.7)
+    ax4.set_title('Cumulative Returns')
+    ax4.set_ylabel('Cumulative Returns')
+    ax4.set_xlabel('Date')
+    ax4.legend()
+    ax4.grid(True, alpha=0.3)
+    
+    plt.tight_layout()
+    
+    # Convert plot to base64 for HTML embedding
+    img = io.BytesIO()
+    plt.savefig(img, format='png', dpi=100)
+    img.seek(0)
+    plot_url = base64.b64encode(img.getvalue()).decode('utf8')
+    plt.close(fig)
+    
+    # Create HTML template
+    html_template = '''
+    <!DOCTYPE html>
+    <html>
+    <head>
+        <title>Binance Analysis Results</title>
+        <style>
+            body { font-family: Arial, sans-serif; margin: 20px; }
+            .container { max-width: 1400px; margin: 0 auto; }
+            .header { text-align: center; margin-bottom: 30px; }
+            .plot { margin-bottom: 40px; }
+            .stats { background-color: #f5f5f5; padding: 20px; border-radius: 5px; margin-bottom: 30px; }
+            table { width: 100%; border-collapse: collapse; margin-top: 20px; }
+            th, td { padding: 10px; text-align: left; border-bottom: 1px solid #ddd; }
+            th { background-color: #f2f2f2; }
+        </style>
+    </head>
+    <body>
+        <div class="container">
+            <div class="header">
+                <h1>Binance OHLCV Analysis Results</h1>
+                <p>Symbol: {{ symbol }} | Timeframe: {{ timeframe }} | Start Date: {{ start_date }}</p>
+            </div>
+            
+            <div class="stats">
+                <h2>Summary Statistics</h2>
+                <p>Total days analyzed: {{ total_days }}</p>
+                <p>Days with positions: {{ days_with_positions }}</p>
+                <p>Maximum resistance: {{ max_resistance }}</p>
+                <p>Minimum resistance: {{ min_resistance }}</p>
+                <p>Average resistance: {{ avg_resistance }}</p>
+                <p>Standard deviation of resistance: {{ std_resistance }}</p>
+            </div>
+            
+            <div class="plot">
+                <h2>Analysis Plots</h2>
+                <img src="data:image/png;base64,{{ plot_url }}" alt="Analysis Plots" style="width:100%;">
+            </div>
+            
+            <div>
+                <h2>Recent Data (Last 10 Days)</h2>
+                {{ recent_data|safe }}
+            </div>
+        </div>
+    </body>
+    </html>
+    '''
+    
+    # Prepare data for template
+    recent_data = analysis_results.tail(10).to_html()
+    
+    return render_template_string(html_template,
+                                 symbol=SYMBOL,
+                                 timeframe=TIMEFRAME,
+                                 start_date=START_DATE,
+                                 total_days=len(analysis_results),
+                                 days_with_positions=len(analysis_results[analysis_results['position'] != 0]),
+                                 max_resistance=f"{analysis_results['resistance'].max():.6f}",
+                                 min_resistance=f"{analysis_results['resistance'].min():.6f}",
+                                 avg_resistance=f"{analysis_results['resistance'].mean():.6f}",
+                                 std_resistance=f"{analysis_results['resistance'].std():.6f}",
+                                 plot_url=plot_url,
+                                 recent_data=recent_data)
+
 
 # Initialize exchange
 exchange = ccxt.binance({
@@ -449,6 +580,17 @@ if __name__ == "__main__":
     try:
         df, results_df = run_analysis()
         print("\nAnalysis complete!")
+        
+        # Store results globally for web server
+        global analysis_results, ohlcv_data, results_data
+        analysis_results = results_df
+        ohlcv_data = df
+        results_data = results_df
+        
+        # Start web server
+        print("\nStarting web server on port 8080...")
+        app.run(host='0.0.0.0', port=8080, debug=False)
+        
     except KeyboardInterrupt:
         print("\nAnalysis interrupted by user.")
     except Exception as e:
