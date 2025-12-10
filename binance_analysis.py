@@ -84,7 +84,10 @@ def calculate_returns(df):
 def calculate_smas(df):
     """Calculate Simple Moving Averages of returns for different windows"""
     for window in SMA_WINDOWS:
+        # Calculate SMA (average of returns over window)
         df[f'sma_{window}'] = df['returns'].rolling(window=window, min_periods=window).mean()
+        # Calculate cumulative SMA (sum of SMA values up to day x)
+        df[f'cumulative_sma_{window}'] = df[f'sma_{window}'].cumsum()
     return df
 
 def calculate_proximity(current_value, reference_value):
@@ -129,13 +132,13 @@ def calculate_sma_significance(df, day_idx):
     
     # Calculate significance for each SMA window
     for window in SMA_WINDOWS:
-        sma_col = f'sma_{window}'
+        cum_sma_col = f'cumulative_sma_{window}'
         if day_idx >= window - 1:  # Ensure we have enough data for SMA
-            sma_value = df[sma_col].iloc[day_idx]
+            cum_sma_value = df[cum_sma_col].iloc[day_idx]
             cum_returns = df['cumulative_returns'].iloc[day_idx]
             
-            # Calculate proximity of cumulative returns to SMA
-            proximity = calculate_proximity(cum_returns, sma_value)
+            # Calculate proximity of cumulative returns to cumulative SMA
+            proximity = calculate_proximity(cum_returns, cum_sma_value)
             
             # Significance = weighted future ror sum * proximity
             significance = future_ror_sum * proximity
@@ -171,16 +174,16 @@ def calculate_resistance(df, n):
     sma_significances = {}
     
     for window in SMA_WINDOWS:
-        sma_col = f'sma_{window}'
+        cum_sma_col = f'cumulative_sma_{window}'
         if n >= window - 1:
-            sma_value = df[sma_col].iloc[n]
+            cum_sma_value = df[cum_sma_col].iloc[n]
             
             # Calculate significance at day n
             significance_dict = calculate_sma_significance(df, n)
             significance = significance_dict.get(window, 0)
             
-            # Calculate proximity to SMA
-            proximity = calculate_proximity(cum_returns_n, sma_value)
+            # Calculate proximity to cumulative SMA
+            proximity = calculate_proximity(cum_returns_n, cum_sma_value)
             
             part2_sum += proximity * significance
             sma_significances[window] = significance
