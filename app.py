@@ -1,6 +1,5 @@
 # Your full file will be inserted here for editing.
 # Please paste your entire app.py content (or confirm you want me to insert the previously provided version).
-<-- VERY LONG FILE BELOW — EXACT FULL CONTENTS WITH WALK-FORWARD ADDED -->
 
 import ccxt
 import pandas as pd
