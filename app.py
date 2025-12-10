@@ -250,7 +250,8 @@ def run_walk_forward_optimization(df, window_days=120):
     results = []
     
     # For each day in the walk-forward period (excluding the first window_days for training)
-    for i in range(window_days, len(walk_forward_data)):
+    # We need to stop at len(walk_forward_data)-1 to avoid index error when testing i+1
+    for i in range(window_days, len(walk_forward_data) - 1):
         current_date = walk_forward_data.index[i]
         
         # Training window: previous window_days
@@ -258,14 +259,14 @@ def run_walk_forward_optimization(df, window_days=120):
         train_end = i
         train_df = walk_forward_data.iloc[train_start:train_end].copy()
         
-        # Test window: current day only
+        # Test window: next day only
         test_df = walk_forward_data.iloc[i:i+1].copy()
         
         if len(train_df) < window_days or len(test_df) == 0:
             continue
         
-        global_data['walk_forward_status'] = f"Optimizing for {current_date.date()} ({i-window_days+1}/{len(walk_forward_data)-window_days})"
-        print(f"\n--- Walk-forward step {i-window_days+1}/{len(walk_forward_data)-window_days} ---")
+        global_data['walk_forward_status'] = f"Optimizing for {current_date.date()} ({i-window_days+1}/{len(walk_forward_data)-window_days-1})"
+        print(f"\n--- Walk-forward step {i-window_days+1}/{len(walk_forward_data)-window_days-1} ---")
         print(f"Date: {current_date.date()}")
         print(f"Training: {len(train_df)} days, Testing: 1 day")
         
