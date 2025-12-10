@@ -17,7 +17,7 @@ START_DATE_STR = '2018-01-01 00:00:00'
 PORT = 8080
 
 # Optimization Settings
-WINDOW_SIZE = 360  # Days for In-Sample training AND Out-of-Sample execution
+WINDOW_SIZE = 1299  # Days for In-Sample training AND Out-of-Sample execution
 GRID_SIZE = 10    # Number of steps per parameter
 
 app = Flask(__name__)
