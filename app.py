@@ -22,7 +22,9 @@ global_data = {
     'raw_data': None,
     'optimization_status': "Idle",
     'top_performers': [],
-    'generation_info': []
+    'generation_info': [],
+    'walk_forward_status': "Idle",
+    'walk_forward_results': []
 }
 
 # --- Data Fetching ---
