@@ -8,11 +8,12 @@ from flask import Flask
 import io
 import time
 import base64
+from datetime import datetime, timedelta
 
 # --- Configuration ---
-SYMBOL = 'BTC/USDT'
+SYMBOL = 'BTC/USDT'  # Kraken uses BTC/USDT or XBT/USD
 TIMEFRAME = '1d' 
-START_DATE_STR = '2018-01-01 00:00:00'
+MAX_DAYS = 720       # Kraken public endpoint limit
 PORT = 8080
 
 # --- Strategy Parameters (Fixed) ---
@@ -27,40 +28,57 @@ global_data = {
     'results': pd.DataFrame()
 }
 
-def fetch_data(symbol, timeframe, start_str):
-    """Fetches historical OHLCV data from Binance."""
-    print(f"Fetching {symbol} data from Binance starting {start_str}...")
-    exchange = ccxt.binance()
-    start_ts = exchange.parse8601(start_str)
+def fetch_data(symbol, timeframe, max_days):
+    """
+    Fetches historical OHLCV data from Kraken.
+    Kraken public API typically returns the last 720 intervals for daily data.
+    """
+    print(f"Fetching last {max_days} days of {symbol} data from Kraken...")
+    exchange = ccxt.kraken()
     
-    ohlcv_list = []
-    current_ts = start_ts
-    now_ts = exchange.milliseconds()
+    # Calculate start timestamp for reference (approx 720 days ago)
+    # Kraken public OHLC often ignores 'since' if it's too far back, returning only the last 720 points.
+    since_ts = exchange.milliseconds() - (max_days * 24 * 60 * 60 * 1000)
     
-    while current_ts < now_ts:
-        try:
-            ohlcvs = exchange.fetch_ohlcv(symbol, timeframe, since=current_ts)
-            if not ohlcvs:
-                break
-            current_ts = ohlcvs[-1][0] + 1
-            ohlcv_list += ohlcvs
-            time.sleep(0.05) 
-        except Exception as e:
-            print(f"Error fetching data: {e}")
-            break
+    try:
+        # Fetch data
+        # Note: Kraken's standard OHLC endpoint has a limit of 720 candles.
+        ohlcvs = exchange.fetch_ohlcv(symbol, timeframe, since=since_ts)
+        
+        if not ohlcvs:
+            print("No data received from Kraken.")
+            return pd.DataFrame()
 
-    df = pd.DataFrame(ohlcv_list, columns=['timestamp', 'open', 'high', 'low', 'close', 'volume'])
-    df['timestamp'] = pd.to_datetime(df['timestamp'], unit='ms')
-    df.set_index('timestamp', inplace=True)
-    df = df[~df.index.duplicated(keep='first')]
-    print(f"Fetched {len(df)} rows.")
-    return df
+        print(f"Fetched {len(ohlcvs)} raw candles.")
+
+        df = pd.DataFrame(ohlcvs, columns=['timestamp', 'open', 'high', 'low', 'close', 'volume'])
+        df['timestamp'] = pd.to_datetime(df['timestamp'], unit='ms')
+        df.set_index('timestamp', inplace=True)
+        
+        # Sort and drop duplicates just in case
+        df = df.sort_index()
+        df = df[~df.index.duplicated(keep='first')]
+        
+        # Enforce the 720 day max limit if API returns more (rare for Kraken public)
+        if len(df) > max_days:
+            df = df.iloc[-max_days:]
+            
+        print(f"Processed {len(df)} rows.")
+        return df
+
+    except Exception as e:
+        print(f"Error fetching data from Kraken: {e}")
+        return pd.DataFrame()
 
 def run_strategy(df):
     """
     Runs the strategy with fixed parameters:
     W=35, U=0.16, Y=0.045
     """
+    if len(df) < 120:
+        print("Not enough data to run strategy (need > 120 days).")
+        return pd.DataFrame()
+
     data = df.copy()
 
     # 1. Log Returns
@@ -71,7 +89,6 @@ def run_strategy(df):
     data['sma_120'] = data['close'].rolling(window=120).mean()
 
     # 3. Calculate iii (Efficiency Ratio) for window W=35
-    # Used for BOTH leverage calculation AND flat regime trigger
     w = PARAM_W
     data['iii'] = (data['log_ret'].rolling(w).sum().abs() / 
                    data['log_ret'].abs().rolling(w).sum()).fillna(0)
@@ -81,7 +98,6 @@ def run_strategy(df):
 
     # 4. Leverage Logic
     # < 0.13 -> 0.5, < 0.18 -> 4.5, else 2.45
-    # Uses the shifted iii
     conditions = [
         (data['iii_shifted'] < 0.13),
         (data['iii_shifted'] < 0.18)
@@ -118,7 +134,7 @@ def run_strategy(df):
             
         # 2. Release: If in flat regime, check if price enters band Y around SMAs
         if is_flat_regime:
-            # Check bands using YESTERDAY'S price vs SMAs (to avoid lookahead on release)
+            # Check bands using YESTERDAY'S price vs SMAs
             prev_c = closes[i-1]
             prev_s40 = sma40s[i-1]
             prev_s120 = sma120s[i-1]
@@ -193,7 +209,7 @@ def run_strategy(df):
 
 # --- Main Execution ---
 try:
-    raw_df = fetch_data(SYMBOL, TIMEFRAME, START_DATE_STR)
+    raw_df = fetch_data(SYMBOL, TIMEFRAME, MAX_DAYS)
     
     if not raw_df.empty:
         print("Running strategy with fixed parameters...")
@@ -212,14 +228,14 @@ except Exception as e:
 def index():
     df_res = global_data['results']
     if df_res is None or df_res.empty:
-        return "Error: No results available."
+        return "Error: No results available or data fetch failed."
     
     # Create Plot
     plt.figure(figsize=(12, 6))
     label_str = f'Strategy (w={PARAM_W}, u={PARAM_U}, y={PARAM_Y:.1%})'
     plt.plot(df_res.index, df_res['cumulative_ret'], label=label_str, color='blue')
     plt.plot(df_res.index, df_res['bnh_ret'], label=f'Buy & Hold ({SYMBOL})', color='gray', alpha=0.5)
-    plt.title(f'Strategy Result: {SYMBOL} (Fixed Parameters)')
+    plt.title(f'Strategy Result: {SYMBOL} (Last {MAX_DAYS} Days - Kraken)')
     plt.ylabel('Cumulative Return (Log Scale)')
     plt.yscale('log')
     plt.legend()
@@ -253,10 +269,11 @@ def index():
     </head>
     <body>
         <div class="container">
-            <h1>Strategy Results: {SYMBOL}</h1>
+            <h1>Strategy Results: {SYMBOL} (Kraken)</h1>
             
             <div class="params">
                 <h3>Fixed Parameters:</h3>
+                <p><strong>Max Days:</strong> {MAX_DAYS}</p>
                 <p><strong>iii Window (w):</strong> {PARAM_W} days</p>
                 <p><strong>iii Threshold (u):</strong> {PARAM_U}</p>
                 <p><strong>Band Width (y):</strong> {PARAM_Y:.1%}</p>
