@@ -165,11 +165,10 @@ class Individual:
         else:
             self.params = {}
             self.random_init()
-        self.sharpe = -999 # This will now store the "Stability Score"
+        self.sharpe = -999 # Stability Score
         self.ret = 0
     
     def random_init(self):
-        # BLIND INITIALIZATION - FULL UNBIASED RANGES
         self.params = {
             'sma_fast': random.randint(10, 80),
             'sma_slow': random.randint(60, 200),
@@ -210,15 +209,15 @@ class Individual:
 
 def calculate_stability_fitness(df_chunks, params):
     """
-    Calculates fitness based on consistency across time chunks.
-    Fitness = Mean(Sharpes) - (Penalty * StdDev(Sharpes))
+    Calculates fitness based on consistency across 8 chunks.
+    Fitness = Mean(Sharpes) - (1.5 * StdDev(Sharpes))
     """
     sharpes = []
     rets = []
     
     for chunk in df_chunks:
-        # We need at least some data to run
-        if len(chunk) < 100: continue
+        # Reduced min length requirement since we have 8 chunks now
+        if len(chunk) < 50: continue 
         
         ret, sharpe = run_strategy_dynamic(chunk, params)
         sharpes.append(sharpe)
@@ -230,11 +229,9 @@ def calculate_stability_fitness(df_chunks, params):
     avg_sharpe = np.mean(sharpes)
     std_sharpe = np.std(sharpes)
     
-    # Score: We want high average and low deviation.
-    # If std is high, score drops significantly.
+    # REVERTED TO PREVIOUS FORMULA (1.5x)
     stability_score = avg_sharpe - (1.5 * std_sharpe)
     
-    # Also calculate total return across all chunks for display
     total_ret = np.prod(rets)
     
     return total_ret, stability_score
@@ -244,7 +241,7 @@ def run_genetic_optimization(df):
     POP_SIZE = 300
     GENERATIONS = 50
     ELITISM_PCT = 0.2
-    CHUNKS = 4 # Split training data into 4 periods
+    CHUNKS = 8 # INCREASED TO 8
     # -----------------------
 
     # SPLIT DATA (IS / OOS)
@@ -256,7 +253,7 @@ def run_genetic_optimization(df):
     chunk_size = len(train_df) // CHUNKS
     train_chunks = [train_df.iloc[i:i+chunk_size].copy() for i in range(0, len(train_df), chunk_size)]
     
-    print(f"Split Data: Training on first {len(train_df)} rows (4 Chunks), Testing on last {len(test_df)} rows.")
+    print(f"Split Data: Training on first {len(train_df)} rows ({CHUNKS} Chunks), Testing on last {len(test_df)} rows.")
 
     global_data['optimization_status'] = "Initializing (Training on 1st Half)..."
     population = []
@@ -266,7 +263,7 @@ def run_genetic_optimization(df):
         population.append(Individual())
         
     for gen in range(GENERATIONS):
-        global_data['optimization_status'] = f"Generation {gen+1}/{GENERATIONS} (In-Sample Robustness)..."
+        global_data['optimization_status'] = f"Generation {gen+1}/{GENERATIONS} (8-Chunk Robustness)..."
         print(f"--- Running Generation {gen+1} ---")
         
         # Evaluate on TRAIN CHUNKS
@@ -274,7 +271,7 @@ def run_genetic_optimization(df):
             if ind.sharpe == -999:
                 ret, stability_score = calculate_stability_fitness(train_chunks, ind.params)
                 ind.ret = ret
-                ind.sharpe = stability_score # Storing Stability Score in sharpe variable for sorting
+                ind.sharpe = stability_score 
         
         # Sort by Stability Score
         population.sort(key=lambda x: x.sharpe, reverse=True)
@@ -289,17 +286,16 @@ def run_genetic_optimization(df):
         # Calculate OOS Stats for Top 5
         top_performers_snapshot = []
         for p in population[:5]:
-             # Run on Test Set
              test_ret, test_sharpe = run_strategy_dynamic(test_df, p.params)
              
-             # Calculate pure Train Sharpe (non-chunked) for comparison
+             # Calculate pure Train Sharpe for reference
              full_train_ret, full_train_sharpe = run_strategy_dynamic(train_df, p.params)
              
              top_performers_snapshot.append({
                  'params': p.params, 
-                 'stability_score': p.sharpe, # The metric we optimized for
+                 'stability_score': p.sharpe,
                  'train_sharpe': full_train_sharpe,
-                 'test_sharpe': test_sharpe, # The "Future" result
+                 'test_sharpe': test_sharpe,
                  'test_ret': test_ret
              })
              
@@ -343,10 +339,9 @@ def index():
         tr:nth-child(even) {{ background-color: #f2f2f2; }}
         th {{ background-color: #4CAF50; color: white; }}
         .btn {{ padding: 10px 20px; background: blue; color: white; text-decoration: none; border-radius: 5px; }}
-        .highlight {{ color: red; font-weight: bold; }}
     </style>
-    <h1>Genetic Optimizer (Robustness Check)</h1>
-    <p>Optimization Metric: <strong>Stability Score</strong> (Avg Sharpe - 1.5 * StdDev) across 4 training periods.</p>
+    <h1>Genetic Optimizer (8 Chunks)</h1>
+    <p>Optimization Metric: <strong>Stability Score</strong> (Mean - 1.5 * Std) across 8 periods.</p>
     <h3>Status: {status}</h3>
     <a href="/start" class="btn">START OPTIMIZATION</a>
     <br><br>
@@ -356,7 +351,7 @@ def index():
         html += """
         <table>
             <tr>
-                <th>Stability Score (Fitness)</th>
+                <th>Stability Score</th>
                 <th>Full Train Sharpe</th>
                 <th>Test Sharpe (OOS)</th>
                 <th>Test Return</th>
@@ -364,8 +359,10 @@ def index():
             </tr>
         """
         for t in top:
-            # Highlight if Test Sharpe is good (> 1.5)
-            test_style = "color: green; font-weight: bold;" if t['test_sharpe'] > 1.5 else "color: red;"
+            # Highlight if Test Sharpe is bad (< 1.5)
+            # GREEN if > 1.5, RED if <= 1.5 (Untradable)
+            test_style = "color: green; font-weight: bold;" if t['test_sharpe'] > 1.5 else "color: red; font-weight: bold;"
+            
             p_formatted = ", ".join([f"{k}:{v:.3f}" if isinstance(v, float) else f"{k}:{v}" for k,v in t['params'].items()])
             
             html += f"""
