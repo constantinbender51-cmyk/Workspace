@@ -1,3 +1,4 @@
+
 import ccxt
 import pandas as pd
 import numpy as np
@@ -102,7 +103,6 @@ def run_strategy_dynamic(df, params):
     # Tier 1 (Lowest III): lev_low
     # Tier 2 (Middle III): lev_high
     # Tier 3 (Highest III): lev_mid (Default)
-    # The variable names refer to the REGIME, not the MAGNITUDE.
     lev_arr = np.full(n, p_lev_mid)
     lev_arr[iii_shifted < p_lev_th_high] = p_lev_high
     lev_arr[iii_shifted < p_lev_th_low] = p_lev_low
@@ -184,8 +184,7 @@ class Individual:
             'lev_thresh_low': random.uniform(0.05, 0.25),
             'lev_thresh_high': random.uniform(0.15, 0.40),
             
-            # UNBIASED LEVERAGE: Any regime can have any leverage (0x to 5x)
-            # This allows finding "Inverted" structures (e.g. Mid > High)
+            # UNBIASED LEVERAGE: Any regime can have any leverage
             'lev_low': random.uniform(0.0, 5.0),  
             'lev_mid': random.uniform(0.0, 5.0),
             'lev_high': random.uniform(0.0, 5.0),
@@ -222,67 +221,58 @@ def run_genetic_optimization(df):
     POP_SIZE = 300
     GENERATIONS = 50
     ELITISM_PCT = 0.2
-    # -----------------------
 
     # SPLIT DATA (IS / OOS)
     cutoff = len(df) // 2
-    train_df = df.iloc[:cutoff].copy() # First Half
-    test_df = df.iloc[cutoff:].copy()  # Second Half
+    train_df = df.iloc[:cutoff].copy()
+    test_df = df.iloc[cutoff:].copy()
     
-    print(f"Split Data: Training on first {len(train_df)} rows, Testing on last {len(test_df)} rows.")
+    print(f"Split Data: Training on {len(train_df)}, Testing on {len(test_df)}")
 
-    global_data['optimization_status'] = "Initializing (Training on 1st Half)..."
+    global_data['optimization_status'] = "Initializing..."
     population = []
     
-    # Init Population (Blind)
     for _ in range(POP_SIZE):
         population.append(Individual())
         
     for gen in range(GENERATIONS):
-        global_data['optimization_status'] = f"Generation {gen+1}/{GENERATIONS} (In-Sample)..."
-        print(f"--- Running Generation {gen+1} ---")
+        global_data['optimization_status'] = f"Generation {gen+1}/{GENERATIONS}"
+        print(f"--- Generation {gen+1} ---")
         
-        # Evaluate on TRAIN set
         for ind in population:
             if ind.sharpe == -999:
                 ret, sharpe = run_strategy_dynamic(train_df, ind.params)
                 ind.ret = ret
                 ind.sharpe = sharpe
         
-        # Sort by Train Sharpe
         population.sort(key=lambda x: x.sharpe, reverse=True)
         best = population[0]
-        
-        # Report (Showing Train Metrics)
-        print(f"Gen {gen+1} Best (Train): Sharpe={best.sharpe:.3f}")
-        
+        print(f"Gen {gen+1} Best Sharpe {best.sharpe:.3f}")
+
         global_data['generation_info'].append({
             'gen': gen+1, 'best_sharpe': best.sharpe
         })
         
-        # Calculate OOS Stats for Top 5
         top_performers_snapshot = []
         for p in population[:5]:
-             # Run on Test Set
              test_ret, test_sharpe = run_strategy_dynamic(test_df, p.params)
              top_performers_snapshot.append({
                  'params': p.params, 
                  'train_sharpe': p.sharpe, 
                  'train_ret': p.ret,
-                 'test_sharpe': test_sharpe, # The "Future" result
+                 'test_sharpe': test_sharpe,
                  'test_ret': test_ret
              })
              
         global_data['top_performers'] = top_performers_snapshot
         
-        # Evolution
         next_gen = []
         elite_count = int(POP_SIZE * ELITISM_PCT)
         next_gen.extend(population[:elite_count])
         
         while len(next_gen) < POP_SIZE:
-            p1 = random.choice(population[:int(POP_SIZE/2)])
-            p2 = random.choice(population[:int(POP_SIZE/2)])
+            p1 = random.choice(population[:POP_SIZE//2])
+            p2 = random.choice(population[:POP_SIZE//2])
             child = Individual(p1.params)
             for k in child.params:
                 if random.random() > 0.5:
@@ -296,6 +286,74 @@ def run_genetic_optimization(df):
 
     global_data['optimization_status'] = "Complete"
     print("Optimization Finished.")
+
+# ============================================================
+# === NEW: 14-DAY ROLLING WALK-FORWARD OPTIMIZATION ADDED HERE ===
+# ============================================================
+
+def walk_forward_rolling(df, window=14):
+    """
+    Rolling 14-day walk-forward optimization.
+    For each day t:
+        - optimize on [t-window : t-1]
+        - trade on day t
+    """
+    results = []
+    equity = 1.0
+    equity_curve = [equity]
+
+    for t in range(window, len(df)):
+        train_df = df.iloc[t-window:t]
+        trade_df = df.iloc[t:t+1]
+
+        # small quick GA
+        POP = 40
+        GEN = 12
+        population = [Individual() for _ in range(POP)]
+
+        for _ in range(GEN):
+            for ind in population:
+                if ind.sharpe == -999:
+                    ret, sharpe = run_strategy_dynamic(train_df, ind.params)
+                    ind.sharpe = sharpe
+                    ind.ret = ret
+
+            population.sort(key=lambda x: x.sharpe, reverse=True)
+            next_gen = population[:8]
+
+            while len(next_gen) < POP:
+                p1 = random.choice(population[:20])
+                p2 = random.choice(population[:20])
+                child = Individual(p1.params)
+                for k in child.params:
+                    if random.random() < 0.5:
+                        child.params[k] = p2.params[k]
+                if random.random() < 0.2:
+                    child.mutate()
+                child.fix_constraints()
+                next_gen.append(child)
+
+            population = next_gen
+
+        best = population[0].params
+
+        ret, _ = run_strategy_dynamic(trade_df, best)
+        equity *= (ret if ret > 0 else 1 + ret)
+        equity_curve.append(equity)
+
+        results.append({
+            "day": df.index[t],
+            "params": best,
+            "trade_return": ret,
+            "equity": equity
+        })
+
+        print(f"[WFO] {df.index[t].date()}  ret={ret:.3f}  eq={equity:.3f}")
+
+    return pd.DataFrame(results), equity_curve
+
+# ============================================================
+
 
 # --- Routes ---
 
@@ -334,7 +392,6 @@ def index():
             </tr>
         """
         for t in top:
-            # Highlight if Test Sharpe is also good (> 1.5)
             test_style = "color: green; font-weight: bold;" if t['test_sharpe'] > 1.5 else ""
             p_formatted = ", ".join([f"{k}:{v:.3f}" if isinstance(v, float) else f"{k}:{v}" for k,v in t['params'].items()])
             
