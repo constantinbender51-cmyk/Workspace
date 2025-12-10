@@ -90,19 +90,31 @@ def calculate_smas(df):
         df[f'cumulative_sma_{window}'] = df[f'sma_{window}'].cumsum()
     return df
 
-def calculate_proximity(current_value, reference_value):
+def calculate_proximity(current_value, reference_value, debug=False):
     """
     Calculate proximity as 1/(distance * (1/0.05))
     where distance = abs(current_value - reference_value) / abs(reference_value)
     """
     if reference_value == 0:
+        if debug:
+            print(f"  DEBUG proximity: reference_value is 0, returning 0")
         return 0
     
     distance = abs(current_value - reference_value) / abs(reference_value)
+    
+    if debug:
+        print(f"  DEBUG proximity: current={current_value:.6f}, reference={reference_value:.6f}, distance={distance:.6f}")
+    
     if distance == 0:
+        if debug:
+            print(f"  DEBUG proximity: distance is 0, returning np.inf")
         return np.inf  # Perfect match
     
     proximity = 1 / (distance * PROXIMITY_SCALING)
+    
+    if debug:
+        print(f"  DEBUG proximity: calculated proximity={proximity:.6f}")
+    
     return proximity
 
 def calculate_position_proximity(current_value, reference_value):
@@ -148,7 +160,7 @@ def calculate_sma_significance(df, day_idx):
     
     return significance_dict
 
-def calculate_resistance(df, n):
+def calculate_resistance(df, n, debug=False):
     """
     Calculate resistance at day n (last day of lookback window)
     Resistance = sum(proximities to past cumulative returns * returns_of_returns)
@@ -157,21 +169,38 @@ def calculate_resistance(df, n):
     # We now ensure n >= LOOKBACK_WINDOW before calling this function
     # No need to check since we start at LOOKBACK_WINDOW
     
+    if debug:
+        print(f"\nDEBUG calculate_resistance for day {n}:")
+        print(f"  cum_returns_n = {df['cumulative_returns'].iloc[n]:.6f}")
+    
     resistance = 0
     cum_returns_n = df['cumulative_returns'].iloc[n]
     
     # Part 1: Sum over lookback days
     part1_sum = 0
+    part1_debug = []
     for x in range(n - LOOKBACK_WINDOW + 1, n + 1):
         cum_returns_x = df['cumulative_returns'].iloc[x]
         ror_x = df['returns_of_returns'].iloc[x]
         
-        proximity = calculate_proximity(cum_returns_n, cum_returns_x)
-        part1_sum += proximity * ror_x
+        proximity = calculate_proximity(cum_returns_n, cum_returns_x, debug=debug and x % 100 == 0)
+        contribution = proximity * ror_x
+        part1_sum += contribution
+        
+        if debug and x % 100 == 0:
+            part1_debug.append((x, cum_returns_x, ror_x, proximity, contribution))
+    
+    if debug:
+        print(f"  Part1 sum = {part1_sum:.6f}")
+        if part1_debug:
+            print(f"  Part1 sample contributions (every 100th day):")
+            for x, cr, ror, prox, contrib in part1_debug[:5]:
+                print(f"    Day {x}: cum_returns={cr:.6f}, ror={ror:.6f}, proximity={prox:.6f}, contribution={contrib:.6f}")
     
     # Part 2: Sum over SMAs
     part2_sum = 0
     sma_significances = {}
+    part2_debug = []
     
     for window in SMA_WINDOWS:
         cum_sma_col = f'cumulative_sma_{window}'
@@ -183,12 +212,27 @@ def calculate_resistance(df, n):
             significance = significance_dict.get(window, 0)
             
             # Calculate proximity to cumulative SMA
-            proximity = calculate_proximity(cum_returns_n, cum_sma_value)
+            proximity = calculate_proximity(cum_returns_n, cum_sma_value, debug=debug and window % 100 == 0)
             
-            part2_sum += proximity * significance
+            contribution = proximity * significance
+            part2_sum += contribution
             sma_significances[window] = significance
+            
+            if debug and window % 100 == 0:
+                part2_debug.append((window, cum_sma_value, significance, proximity, contribution))
+    
+    if debug:
+        print(f"  Part2 sum = {part2_sum:.6f}")
+        if part2_debug:
+            print(f"  Part2 sample contributions (every 100th window):")
+            for window, sma, sig, prox, contrib in part2_debug[:5]:
+                print(f"    Window {window}: cum_sma={sma:.6f}, significance={sig:.6f}, proximity={prox:.6f}, contribution={contrib:.6f}")
     
     resistance = part1_sum + part2_sum
+    
+    if debug:
+        print(f"  Total resistance = {resistance:.6f}")
+        print(f"  Is resistance inf or -inf? {np.isinf(resistance)}")
     
     return resistance, sma_significances
 
@@ -225,8 +269,9 @@ def run_analysis():
     for n in range(LOOKBACK_WINDOW, len(df)):
         current_date = df.index[n]
         
-        # Calculate resistance
-        resistance, sma_significances = calculate_resistance(df, n)
+        # Calculate resistance with debug for first few iterations
+        debug_resistance = (n - LOOKBACK_WINDOW) < 5  # Debug first 5 calculations
+        resistance, sma_significances = calculate_resistance(df, n, debug=debug_resistance)
         
         # Check for entry signal
         if not entry_flag and resistance > RESISTANCE_THRESHOLD:
