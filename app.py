@@ -1,6 +1,3 @@
-# Your full file will be inserted here for editing.
-# Please paste your entire app.py content (or confirm you want me to insert the previously provided version).
-
 import ccxt
 import pandas as pd
 import numpy as np
@@ -25,10 +22,7 @@ global_data = {
     'raw_data': None,
     'optimization_status': "Idle",
     'top_performers': [],
-    'generation_info': [],
-    'walk_forward_status': "Idle",
-    'walk_forward_results': None,
-    'walk_forward_equity_curve': None
+    'generation_info': []
 }
 
 # --- Data Fetching ---
@@ -108,6 +102,7 @@ def run_strategy_dynamic(df, params):
     # Tier 1 (Lowest III): lev_low
     # Tier 2 (Middle III): lev_high
     # Tier 3 (Highest III): lev_mid (Default)
+    # The variable names refer to the REGIME, not the MAGNITUDE.
     lev_arr = np.full(n, p_lev_mid)
     lev_arr[iii_shifted < p_lev_th_high] = p_lev_high
     lev_arr[iii_shifted < p_lev_th_low] = p_lev_low
@@ -189,7 +184,8 @@ class Individual:
             'lev_thresh_low': random.uniform(0.05, 0.25),
             'lev_thresh_high': random.uniform(0.15, 0.40),
             
-            # UNBIASED LEVERAGE: Any regime can have any leverage
+            # UNBIASED LEVERAGE: Any regime can have any leverage (0x to 5x)
+            # This allows finding "Inverted" structures (e.g. Mid > High)
             'lev_low': random.uniform(0.0, 5.0),  
             'lev_mid': random.uniform(0.0, 5.0),
             'lev_high': random.uniform(0.0, 5.0),
@@ -226,58 +222,67 @@ def run_genetic_optimization(df):
     POP_SIZE = 300
     GENERATIONS = 50
     ELITISM_PCT = 0.2
+    # -----------------------
 
     # SPLIT DATA (IS / OOS)
     cutoff = len(df) // 2
-    train_df = df.iloc[:cutoff].copy()
-    test_df = df.iloc[cutoff:].copy()
+    train_df = df.iloc[:cutoff].copy() # First Half
+    test_df = df.iloc[cutoff:].copy()  # Second Half
     
-    print(f"Split Data: Training on {len(train_df)}, Testing on {len(test_df)}")
+    print(f"Split Data: Training on first {len(train_df)} rows, Testing on last {len(test_df)} rows.")
 
-    global_data['optimization_status'] = "Initializing..."
+    global_data['optimization_status'] = "Initializing (Training on 1st Half)..."
     population = []
     
+    # Init Population (Blind)
     for _ in range(POP_SIZE):
         population.append(Individual())
         
     for gen in range(GENERATIONS):
-        global_data['optimization_status'] = f"Generation {gen+1}/{GENERATIONS}"
-        print(f"--- Generation {gen+1} ---")
+        global_data['optimization_status'] = f"Generation {gen+1}/{GENERATIONS} (In-Sample)..."
+        print(f"--- Running Generation {gen+1} ---")
         
+        # Evaluate on TRAIN set
         for ind in population:
             if ind.sharpe == -999:
                 ret, sharpe = run_strategy_dynamic(train_df, ind.params)
                 ind.ret = ret
                 ind.sharpe = sharpe
         
+        # Sort by Train Sharpe
         population.sort(key=lambda x: x.sharpe, reverse=True)
         best = population[0]
-        print(f"Gen {gen+1} Best Sharpe {best.sharpe:.3f}")
-
+        
+        # Report (Showing Train Metrics)
+        print(f"Gen {gen+1} Best (Train): Sharpe={best.sharpe:.3f}")
+        
         global_data['generation_info'].append({
             'gen': gen+1, 'best_sharpe': best.sharpe
         })
         
+        # Calculate OOS Stats for Top 5
         top_performers_snapshot = []
         for p in population[:5]:
+             # Run on Test Set
              test_ret, test_sharpe = run_strategy_dynamic(test_df, p.params)
              top_performers_snapshot.append({
                  'params': p.params, 
                  'train_sharpe': p.sharpe, 
                  'train_ret': p.ret,
-                 'test_sharpe': test_sharpe,
+                 'test_sharpe': test_sharpe, # The "Future" result
                  'test_ret': test_ret
              })
              
         global_data['top_performers'] = top_performers_snapshot
         
+        # Evolution
         next_gen = []
         elite_count = int(POP_SIZE * ELITISM_PCT)
         next_gen.extend(population[:elite_count])
         
         while len(next_gen) < POP_SIZE:
-            p1 = random.choice(population[:POP_SIZE//2])
-            p2 = random.choice(population[:POP_SIZE//2])
+            p1 = random.choice(population[:int(POP_SIZE/2)])
+            p2 = random.choice(population[:int(POP_SIZE/2)])
             child = Individual(p1.params)
             for k in child.params:
                 if random.random() > 0.5:
@@ -291,89 +296,6 @@ def run_genetic_optimization(df):
 
     global_data['optimization_status'] = "Complete"
     print("Optimization Finished.")
-
-def run_walk_forward_optimization(df):
-    """Run walk-forward optimization and store results."""
-    global_data['walk_forward_status'] = "Running..."
-    print("Starting walk-forward optimization...")
-    
-    try:
-        results_df, equity_curve = walk_forward_rolling(df, window=14)
-        global_data['walk_forward_results'] = results_df
-        global_data['walk_forward_equity_curve'] = equity_curve
-        global_data['walk_forward_status'] = "Complete"
-        print(f"Walk-forward optimization complete. Processed {len(results_df)} days.")
-    except Exception as e:
-        global_data['walk_forward_status'] = f"Error: {str(e)}"
-        print(f"Walk-forward error: {e}")
-
-# ============================================================
-# === NEW: 14-DAY ROLLING WALK-FORWARD OPTIMIZATION ADDED HERE ===
-# ============================================================
-
-def walk_forward_rolling(df, window=14):
-    """
-    Rolling 14-day walk-forward optimization.
-    For each day t:
-        - optimize on [t-window : t-1]
-        - trade on day t
-    """
-    results = []
-    equity = 1.0
-    equity_curve = [equity]
-
-    for t in range(window, len(df)):
-        train_df = df.iloc[t-window:t]
-        trade_df = df.iloc[t:t+1]
-
-        # small quick GA
-        POP = 40
-        GEN = 12
-        population = [Individual() for _ in range(POP)]
-
-        for _ in range(GEN):
-            for ind in population:
-                if ind.sharpe == -999:
-                    ret, sharpe = run_strategy_dynamic(train_df, ind.params)
-                    ind.sharpe = sharpe
-                    ind.ret = ret
-
-            population.sort(key=lambda x: x.sharpe, reverse=True)
-            next_gen = population[:8]
-
-            while len(next_gen) < POP:
-                p1 = random.choice(population[:20])
-                p2 = random.choice(population[:20])
-                child = Individual(p1.params)
-                for k in child.params:
-                    if random.random() < 0.5:
-                        child.params[k] = p2.params[k]
-                if random.random() < 0.2:
-                    child.mutate()
-                child.fix_constraints()
-                next_gen.append(child)
-
-            population = next_gen
-
-        best = population[0].params
-
-        ret, _ = run_strategy_dynamic(trade_df, best)
-        equity *= (ret if ret > 0 else 1 + ret)
-        equity_curve.append(equity)
-
-        results.append({
-            "day": df.index[t],
-            "params": best,
-            "trade_return": ret,
-            "equity": equity
-        })
-
-        print(f"[WFO] {df.index[t].date()}  ret={ret:.3f}  eq={equity:.3f}")
-
-    return pd.DataFrame(results), equity_curve
-
-# ============================================================
-
 
 # --- Routes ---
 
@@ -412,6 +334,7 @@ def index():
             </tr>
         """
         for t in top:
+            # Highlight if Test Sharpe is also good (> 1.5)
             test_style = "color: green; font-weight: bold;" if t['test_sharpe'] > 1.5 else ""
             p_formatted = ", ".join([f"{k}:{v:.3f}" if isinstance(v, float) else f"{k}:{v}" for k,v in t['params'].items()])
             
@@ -427,53 +350,6 @@ def index():
         html += "</table>"
     else:
         html += "<p>No results yet.</p>"
-    # Walk-forward section
-    wf_status = global_data['walk_forward_status']
-    wf_results = global_data['walk_forward_results']
-    wf_equity = global_data['walk_forward_equity_curve']
-    html += f"""
-    <div class="section">
-        <h1>Walk-Forward Optimization (14-Day Rolling)</h1>
-        <p><strong>Method:</strong> For each day, optimize on previous 14 days, trade on current day</p>
-        <h3>Walk-Forward Status: {wf_status}</h3>
-        <a href="/start_walk_forward" class="btn btn-wf">START WALK-FORWARD OPTIMIZATION</a>
-        <br><br>"""
-    
-    if wf_results is not None and not wf_results.empty:
-        html += f"""
-        <h2>Walk-Forward Results ({len(wf_results)} trading days)</h2>
-        <p><strong>Final Equity:</strong> {wf_equity[-1]:.3f}x (from 1.0x starting)</p>
-        <p><strong>Total Return:</strong> {(wf_equity[-1] - 1) * 100:.1f}%</p>
-        <table>
-            <tr>
-                <th>Date</th>
-                <th>Trade Return</th>
-                <th>Cumulative Equity</th>
-                <th>Parameters (Sample)</th>
-            </tr>"""
-        
-        # Show first 10 and last 10 results
-        for idx, row in wf_results.head(10).iterrows():
-            params_sample = ", ".join([f"{k}:{v:.2f}" if isinstance(v, float) else f"{k}:{v}" 
-                                      for k, v in list(row['params'].items())[:3]]) + "..."
-            html += f"""
-            <tr>
-                <td>{row['day'].date()}</td>
-                <td>{row['trade_return']:.3f}</td>
-                <td>{row['equity']:.3f}</td>
-                <td style="font-size: 0.8em">{params_sample}</td>
-            </tr>"""
-        
-        if len(wf_results) > 20:
-            html += "<tr><td colspan='4' style='text-align: center;'>... (showing first 10 of " + str(len(wf_results)) + " days) ...</td></tr>"
-        
-        html += "</table>"
-    elif wf_status != "Idle":
-        html += f"<p>No walk-forward results yet. Status: {wf_status}</p>"
-    else:
-        html += "<p>No walk-forward results yet. Click the button above to start.</p>"
-    
-    html += "</div>"
 
     if gen_stats:
         html += "<h2>Training History</h2><ul>"
@@ -489,13 +365,6 @@ def start_opt():
     t = Thread(target=run_genetic_optimization, args=(global_data['raw_data'],))
     t.start()
     return "Started! <a href='/'>Back</a>"
-@app.route('/start_walk_forward')
-def start_walk_forward():
-    if global_data['raw_data'] is None: return "Data not loaded."
-    if "Running" in global_data['walk_forward_status']: return "Walk-forward already running."
-    t = Thread(target=run_walk_forward_optimization, args=(global_data['raw_data'],))
-    t.start()
-    return "Walk-forward optimization started! <a href='/'>Back</a>"
 
 if __name__ == '__main__':
     raw_df = fetch_data(SYMBOL, TIMEFRAME, START_DATE_STR)
