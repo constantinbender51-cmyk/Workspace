@@ -231,7 +231,7 @@ def run_genetic_optimization(df):
 
 def run_walk_forward_optimization(df, window_days=120):
     """Run walk-forward optimization using a sliding window approach.
-    For each day starting at day 121 (index 120), optimize on previous 120 days, then test on that day."""
+    For each day starting at day 121 (index 120), optimize on previous 120 days, then test on forward window."""
     
     global_data['walk_forward_status'] = f"Running walk-forward with {window_days}-day window..."
     print(f"Starting walk-forward optimization with {window_days}-day window")
@@ -247,9 +247,11 @@ def run_walk_forward_optimization(df, window_days=120):
     
     results = []
     
-    # Start at day 121 (index 120) and go through all remaining days
-    # For each day i, train on previous window_days (i-window_days to i-1), test on day i
-    for i in range(window_days, total_days):
+    # Start at day 121 (index 120) and go through all remaining days with step size
+    # For each day i, train on previous window_days (i-window_days to i-1), test on forward window
+    test_window_size = 30  # Test on next 30 days after optimization
+    
+    for i in range(window_days, total_days - test_window_size):
         current_date = df.index[i]
         
         # Training window: previous window_days (indices i-window_days to i-1)
@@ -257,32 +259,39 @@ def run_walk_forward_optimization(df, window_days=120):
         train_end = i  # Exclusive
         train_df = df.iloc[train_start:train_end].copy()
         
-        # Test window: current day only (index i)
-        test_df = df.iloc[i:i+1].copy()
+        # Test window: next test_window_size days (indices i to i+test_window_size-1)
+        test_start = i
+        test_end = i + test_window_size
+        test_df = df.iloc[test_start:test_end].copy()
         
-        if len(train_df) < window_days or len(test_df) == 0:
+        if len(train_df) < window_days or len(test_df) < test_window_size:
             continue
         
         step_num = i - window_days + 1
-        total_steps = total_days - window_days
+        total_steps = total_days - window_days - test_window_size
         
         global_data['walk_forward_status'] = f"Optimizing for {current_date.date()} ({step_num}/{total_steps})"
         print(f"\n--- Walk-forward step {step_num}/{total_steps} ---")
         print(f"Date: {current_date.date()}")
         print(f"Training: {len(train_df)} days (indices {train_start} to {train_end-1})")
-        print(f"Testing: 1 day (index {i})")
+        print(f"Testing: {test_window_size} days (indices {test_start} to {test_end-1})")
         
         # Run genetic optimization on training window
         best_params = run_genetic_optimization_on_window(train_df)
         
-        # Test on current day
+        # Test on forward window
         test_ret, test_sharpe = run_strategy_dynamic(test_df, best_params)
+        
+        # Calculate daily return from total return
+        daily_return = test_ret ** (1/test_window_size) - 1 if test_ret > 0 else -1
         
         # Store results
         results.append({
             'date': current_date,
             'params': best_params,
-            'daily_return': test_ret - 1,  # Convert from total return to daily return
+            'test_window_size': test_window_size,
+            'total_return': test_ret,
+            'daily_return': daily_return,
             'sharpe': test_sharpe,
             'cumulative_return': 0.0  # Will be calculated later
         })
@@ -297,8 +306,8 @@ def run_walk_forward_optimization(df, window_days=120):
                 cum_return *= (1 + r['daily_return'])
                 r['cumulative_return'] = cum_return - 1
     
-    global_data['walk_forward_status'] = f"Complete: {len(results)} days optimized"
-    print(f"\nWalk-forward optimization complete. Processed {len(results)} days.")
+    global_data['walk_forward_status'] = f"Complete: {len(results)} windows optimized"
+    print(f"\nWalk-forward optimization complete. Processed {len(results)} windows.")
     
     # Calculate summary statistics
     if results:
@@ -306,7 +315,8 @@ def run_walk_forward_optimization(df, window_days=120):
         cumulative_returns = [r['cumulative_return'] for r in results]
         
         print(f"\nWalk-forward Summary:")
-        print(f"Total days: {len(results)}")
+        print(f"Total windows: {len(results)}")
+        print(f"Test window size: {results[0]['test_window_size']} days")
         print(f"Final cumulative return: {cumulative_returns[-1]:.4f}")
         print(f"Average daily return: {np.mean(daily_returns):.6f}")
         print(f"Std of daily returns: {np.std(daily_returns):.6f}")
@@ -524,7 +534,8 @@ def index():
     if wf_results:
         html += "<div class='section'>"
         html += "<h2>Walk-Forward Results</h2>"
-        html += f"<p><strong>Total days processed:</strong> {len(wf_results)}</p>"
+        html += f"<p><strong>Total windows processed:</strong> {len(wf_results)}</p>"
+        html += f"<p><strong>Test window size:</strong> {wf_results[0]['test_window_size']} days</p>"
         
         # Calculate summary statistics
         daily_returns = [r['daily_return'] for r in wf_results]
@@ -544,11 +555,13 @@ def index():
                 html += f"<p><strong>Annualized Sharpe Ratio:</strong> {annual_sharpe:.4f}</p>"
         
         # Show recent results table
-        html += "<h3>Recent Daily Results (Last 10 Days)</h3>"
+        html += "<h3>Recent Window Results (Last 10 Windows)</h3>"
         html += """
         <table>
             <tr>
                 <th>Date</th>
+                <th>Test Window Size</th>
+                <th>Total Return</th>
                 <th>Daily Return</th>
                 <th>Cumulative Return</th>
                 <th>Sharpe</th>
@@ -560,10 +573,13 @@ def index():
             date_str = r['date'].strftime('%Y-%m-%d')
             daily_style = "color: green;" if r['daily_return'] >= 0 else "color: red;"
             cum_style = "color: green;" if r['cumulative_return'] >= 0 else "color: red;"
+            total_style = "color: green;" if r['total_return'] >= 1 else "color: red;"
             
             html += f"""
             <tr>
                 <td>{date_str}</td>
+                <td>{r['test_window_size']}</td>
+                <td style="{total_style}">{r['total_return']:.4f}</td>
                 <td style="{daily_style}">{r['daily_return']:.6f}</td>
                 <td style="{cum_style}">{r['cumulative_return']:.6f}</td>
                 <td>{r['sharpe']:.4f}</td>
