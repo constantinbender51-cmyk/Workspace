@@ -52,8 +52,27 @@ def calculate_sharpe(returns):
     """Calculates annualized Sharpe Ratio (Crypto 365 days)."""
     if returns.std() == 0:
         return 0
-    # Assuming risk-free rate is 0 for simplicity in crypto context
     return np.sqrt(365) * (returns.mean() / returns.std())
+
+def calculate_efficiency_ratio(df, period=30):
+    """
+    Calculates the Efficiency Ratio (III):
+    Numerator: abs(sum(log_returns)) over period
+    Denominator: sum(abs(log_returns)) over period
+    """
+    # Calculate Log Returns
+    log_ret = np.log(df['close'] / df['close'].shift(1))
+    
+    # Numerator: Absolute value of the net directional move
+    numerator = log_ret.rolling(window=period).sum().abs()
+    
+    # Denominator: Sum of the absolute individual moves (volatility/path length)
+    denominator = log_ret.abs().rolling(window=period).sum()
+    
+    # Efficiency Ratio
+    er = numerator / denominator
+    
+    return er
 
 def grid_search(df):
     """
@@ -72,17 +91,12 @@ def grid_search(df):
     sma_range = range(10, 410, 10)
     
     for period in sma_range:
-        # Calculate temp SMA
         sma = train_df['close'].rolling(window=period).mean()
         
-        # Logic: Long if Close > SMA, Short if Close < SMA
-        # 1 = Long, -1 = Short
+        # Logic: Long (1) if Close > SMA, Short (-1) if Close < SMA
         position = np.where(train_df['close'] > sma, 1, -1)
+        position = pd.Series(position, index=train_df.index).shift(1) # No lookahead
         
-        # Shift position to avoid look-ahead
-        position = pd.Series(position, index=train_df.index).shift(1)
-        
-        # Calculate Returns
         market_return = np.log(train_df['close'] / train_df['close'].shift(1))
         strategy_return = position * market_return
         
@@ -95,19 +109,18 @@ def grid_search(df):
     return best_period, best_sharpe, cutoff_date
 
 def run_strategy(df, best_period):
-    """Calculates all SMAs for viz, but runs logic only on best_period."""
+    """Calculates SMAs, Strategy Logic, and Efficiency Ratio."""
     data = df.copy()
     
-    # 1. Pre-calculate ALL SMAs for the visualization
+    # 1. Pre-calculate ALL SMAs for visualization
     sma_cols = []
     for period in range(10, 410, 10):
         col_name = f'SMA_{period}'
         data[col_name] = data['close'].rolling(window=period).mean()
         sma_cols.append(col_name)
 
-    # 2. Run Strategy Logic using the OPTIMIZED period
+    # 2. Run Strategy Logic (Optimized Period)
     signal_col = f'SMA_{best_period}'
-    
     conditions = [
         (data['close'] > data[signal_col]),
         (data['close'] < data[signal_col])
@@ -125,66 +138,70 @@ def run_strategy(df, best_period):
     data['equity'] = data['strategy_return'].cumsum().apply(np.exp)
     data['buy_hold_equity'] = data['market_return'].cumsum().apply(np.exp)
     
+    # 3. Calculate Efficiency Ratio (III)
+    data['efficiency_ratio'] = calculate_efficiency_ratio(data, period=30)
+    
     return data, sma_cols
 
 def generate_plot(df, best_period, training_cutoff):
-    """Generates the plot with colormap for SMAs and split line."""
-    fig, (ax1, ax2) = plt.subplots(2, 1, figsize=(14, 12), sharex=True, gridspec_kw={'height_ratios': [2, 1]})
+    """Generates a 3-panel plot: Price/SMAs, Equity, and Efficiency Ratio."""
+    # Increased height for 3 subplots
+    fig, (ax1, ax2, ax3) = plt.subplots(3, 1, figsize=(14, 16), sharex=True, 
+                                        gridspec_kw={'height_ratios': [2, 1, 1]})
     
     # --- PLOT 1: Price & Rainbow SMAs ---
-    
-    # Create a color map instance
     cmap = matplotlib.colormaps['jet'] 
     norm = mcolors.Normalize(vmin=10, vmax=400)
     
-    # Plot all SMAs using the colormap
     sma_range = range(10, 410, 10)
     for period in sma_range:
         col_name = f'SMA_{period}'
-        # Color based on period length
         color = cmap(norm(period))
-        
         if period == best_period:
-            continue # Skip the winner, we plot it last on top
+            continue 
         else:
-            # All 40 SMAs are clearly visible with alpha=0.5
             ax1.plot(df.index, df[col_name], color=color, alpha=0.5, linewidth=1)
 
-    # Plot the Winner on top with high contrast (No path_effects used)
     winner_col = f'SMA_{best_period}'
-    ax1.plot(df.index, df[winner_col], label=f'Best SMA: {best_period}', color='gold', linewidth=4, zorder=10) # Made line thicker and color prominent
-    
-    # Plot Price (Changed color to white for better visibility against the colored SMAs)
+    ax1.plot(df.index, df[winner_col], label=f'Best SMA: {best_period}', color='gold', linewidth=4, zorder=10)
     ax1.plot(df.index, df['close'], label='Price', color='white', linewidth=1.5, alpha=0.9, zorder=5) 
-    
-    # Training Split Line
     ax1.axvline(training_cutoff, color='red', linestyle='--', linewidth=2, label='Train/Test Split')
     
-    ax1.set_title(f'{SYMBOL} Price & 40 SMAs (Color Mapped) | Optimal: SMA {best_period}', fontsize=14)
+    ax1.set_title(f'{SYMBOL} Price & 40 SMAs | Optimal: SMA {best_period}', fontsize=14)
     ax1.set_ylabel('Price (USDT)')
-    ax1.legend(loc='upper left', framealpha=0.9)
+    ax1.legend(loc='upper left')
     ax1.grid(True, alpha=0.3)
-    ax1.set_yscale('log') # Log scale often looks better for long-term crypto
+    ax1.set_yscale('log') 
 
     # --- PLOT 2: Equity Curve ---
-    ax2.plot(df.index, df['equity'], label='Strategy Equity', color='lime', linewidth=2) # Changed strategy equity to lime
+    ax2.plot(df.index, df['equity'], label='Strategy Equity', color='lime', linewidth=2)
     ax2.plot(df.index, df['buy_hold_equity'], label='Buy & Hold', color='gray', alpha=0.7, linestyle='--')
-    
-    # Training Split Line on Equity
     ax2.axvline(training_cutoff, color='red', linestyle='--', linewidth=2)
-    ax2.text(training_cutoff, df['equity'].min(), '  <-- Training (In-Sample) | Test (Out-of-Sample) -->', color='red', fontsize=10, verticalalignment='bottom')
-
+    
     ax2.set_title('Equity Curve (Log Returns Accumulated)', fontsize=14)
     ax2.set_ylabel('Normalized Equity')
-    ax2.set_xlabel('Date')
     ax2.legend(loc='upper left')
     ax2.grid(True, alpha=0.3)
+
+    # --- PLOT 3: Efficiency Ratio (III) ---
+    # abs(sum(log returns)) / sum(abs(log returns))
+    ax3.plot(df.index, df['efficiency_ratio'], color='cyan', linewidth=1.5, label='Efficiency Ratio (30d)')
+    ax3.axhline(0.3, color='white', linestyle=':', alpha=0.5, label='Choppy Threshold (0.3)')
+    ax3.axhline(0.6, color='yellow', linestyle=':', alpha=0.5, label='Trending Threshold (0.6)')
+    ax3.fill_between(df.index, df['efficiency_ratio'], alpha=0.2, color='cyan')
+    ax3.axvline(training_cutoff, color='red', linestyle='--', linewidth=2)
+
+    ax3.set_title(r'Efficiency Ratio: $\frac{| \sum r_t |}{\sum |r_t|}$ (30-day)', fontsize=14)
+    ax3.set_ylabel('Efficiency (0=Chop, 1=Trend)')
+    ax3.set_xlabel('Date')
+    ax3.set_ylim(0, 1)
+    ax3.legend(loc='upper left')
+    ax3.grid(True, alpha=0.3)
     
     plt.tight_layout()
     
-    # Save
     buf = io.BytesIO()
-    plt.savefig(buf, format='png', dpi=100, facecolor=fig.get_facecolor()) # Ensure background color is saved
+    plt.savefig(buf, format='png', dpi=100, facecolor=fig.get_facecolor())
     buf.seek(0)
     data = base64.b64encode(buf.getbuffer()).decode("ascii")
     plt.close(fig)
@@ -216,7 +233,7 @@ def index():
                 h1 {{ color: #fff; margin-bottom: 5px; }}
                 .stats {{ background: #333; padding: 15px; border-radius: 8px; margin: 20px 0; border: 1px solid #444; }}
                 .stats span {{ margin: 0 15px; font-size: 1.1em; }}
-                .highlight {{ color: #FFD700; font-weight: bold; }} /* Changed highlight to gold/yellow */
+                .highlight {{ color: #FFD700; font-weight: bold; }} 
                 img {{ max-width: 100%; height: auto; border-radius: 4px; }}
                 button {{ background: #2196F3; color: white; border: none; padding: 10px 20px; font-size: 16px; cursor: pointer; border-radius: 4px; margin-top: 20px; }}
                 button:hover {{ background: #1976D2; }}
@@ -224,7 +241,7 @@ def index():
         </head>
         <body>
             <div class="container">
-                <h1>AI Trading Lab: SMA Grid Search</h1>
+                <h1>AI Trading Lab: Efficiency Analysis</h1>
                 <p>Optimization run on first 50% of data (In-Sample)</p>
                 
                 <div class="stats">
@@ -247,5 +264,5 @@ def index():
         return f"<h1>Error</h1><pre>{traceback.format_exc()}</pre>"
 
 if __name__ == '__main__':
-    print(f"Starting Grid Search Server on {PORT}...")
+    print(f"Starting Server on {PORT}...")
     app.run(host='0.0.0.0', port=PORT, debug=True)
