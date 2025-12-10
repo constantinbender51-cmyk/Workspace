@@ -13,14 +13,13 @@ from numba import njit, prange
 # --- Configuration ---
 SYMBOL = 'BTC/USDT'
 TIMEFRAME = '1d'
-START_DATE_STR = '2018-01-01 00:00:00'
+START_DATE_STR = '2017-08-17 00:00:00' # Earliest Binance BTC data to maximize OOS
 PORT = 8080
 
 # Optimization Settings
-OOS_STEP_SIZE = 60      # How often we re-optimize (Out-of-Sample horizon)
-GRID_SIZE = 8           # Resolution for strategy params (8^6 ~ 262k combos)
-WINDOW_GRID_STEPS = 5   # Resolution for Window Size (100 to 1000)
-# Total Iterations per Step = 262k * 5 ~= 1.3 Million (Safe for 30s timeout)
+OOS_STEP_SIZE = 60       # Re-optimize every 60 days
+TRAINING_WINDOW = 1460   # Fixed 4-year lookback (Force robust parameters)
+GRID_SIZE = 8            # Resolution (8^6 ~ 262k combinations)
 
 app = Flask(__name__)
 
@@ -29,7 +28,8 @@ global_store = {
     'data': None,
     'results': None,
     'optimization_log': [],
-    'is_optimizing': False
+    'is_optimizing': False,
+    'oos_sharpe': 0.0
 }
 
 # --- Data Fetching ---
@@ -69,7 +69,7 @@ def prepare_features(df):
     data = df.copy()
     data['log_ret'] = np.log(data['close'] / data['close'].shift(1)).fillna(0)
     
-    # SMAs (Max lookback 360, but window grid goes to 1000, so we need enough history)
+    # SMAs
     data['sma_40'] = data['close'].rolling(window=40).mean().fillna(0)
     data['sma_120'] = data['close'].rolling(window=120).mean().fillna(0)
     data['sma_360'] = data['close'].rolling(window=360).mean().fillna(0)
@@ -88,75 +88,35 @@ def prepare_features(df):
 
 # --- Numba Optimized Strategy Kernel ---
 @njit(parallel=True, fastmath=True)
-def grid_search_kernel_variable_window(
+def grid_search_kernel_fixed_window(
     opens, closes, highs, lows, 
     sma40, sma120, sma360, 
     iii_matrix, 
-    param_grid_a, param_grid_b, param_grid_c, param_grid_d, param_grid_e, param_grid_window,
-    current_time_idx
+    p_a, p_b, p_c, p_d, p_e, p_iii_idx,
+    current_time_idx,
+    training_window
 ):
     """
-    Runs combinations for variable lookback windows.
-    Returns: Array of Sharpes
+    Grid search with a FIXED lookback window.
     """
-    n_params = len(param_grid_a) 
-    sharpe_results = np.zeros(n_params) 
-    
-    # Parallel loop
-    for p in prange(n_params):
-        
-        # 1. Decode Parameters
-        lev_a = param_grid_a[p]
-        lev_b = param_grid_b[p]
-        lev_thresh = param_grid_c[p]
-        flat_thresh = param_grid_d[p]
-        band_pct = param_grid_e[p]
-        lookback_window = int(param_grid_window[p])
-        
-        # Map p to iii_matrix column (Implicit: we constructed meshgrid so last dim iterates fastest)
-        # Note: We must ensure the meshgrid construction aligns with this modulo logic.
-        # Actually, if we pass explicit arrays from meshgrid, we don't need modulo math if we included the iii_idx in the mesh.
-        # But here param_grid_iii_idx is not passed, so we rely on grid structure. 
-        # To be safe, let's assume iii index is derived.
-        # However, we have 7 dimensions now. It's safer to use the 'f' parameter from the grid if possible.
-        # For now, let's assume the iii_index is the modulo GRID_SIZE of p? 
-        # No, with 7 dims that's risky. 
-        # Let's Rely on `param_grid_iii_idx` passed in (added to args).
-        # WAIT: I will add `param_grid_f_idx` to arguments for safety.
-        
-        # Temporary fallback: We will assume p iterates [a, b, c, d, e, win, f_idx] 
-        # actually, let's just pass the iii index array.
-        pass 
-
-    return sharpe_results
-
-# Re-defining Kernel with explicit index array for safety
-@njit(parallel=True, fastmath=True)
-def grid_search_kernel_safe(
-    opens, closes, highs, lows, 
-    sma40, sma120, sma360, 
-    iii_matrix, 
-    p_a, p_b, p_c, p_d, p_e, p_win, p_iii_idx,
-    current_time_idx
-):
     n_params = len(p_a)
     sharpe_results = np.zeros(n_params)
     
+    # Parallel loop over parameter combinations
     for i in prange(n_params):
         lev_a = p_a[i]
         lev_b = p_b[i]
         lev_thresh = p_c[i]
         flat_thresh = p_d[i]
         band_pct = p_e[i]
-        window_size = int(p_win[i])
         iii_idx = int(p_iii_idx[i])
         
-        # Define Time Range
-        start_idx = current_time_idx - window_size
+        # Define Time Range (Fixed Window)
+        start_idx = current_time_idx - training_window
         end_idx = current_time_idx
         
-        # Check bounds
-        if start_idx < 120: # Ensure enough data for SMAs
+        # Safety check
+        if start_idx < 360: 
             sharpe_results[i] = -999.0
             continue
             
@@ -177,7 +137,6 @@ def grid_search_kernel_safe(
                 is_flat = True
             
             if is_flat:
-                # Check bands (Release logic)
                 dist40 = abs(prev_c - prev_s40)
                 dist120 = abs(prev_c - prev_s120)
                 dist360 = abs(prev_c - prev_s360)
@@ -233,7 +192,6 @@ def run_oos_period(
     p_a, p_b, p_c, p_d, p_e, p_iii_idx,
     start_idx, end_idx
 ):
-    # Retrieve best params
     lev_a = p_a[best_idx]
     lev_b = p_b[best_idx]
     lev_thresh = p_c[best_idx]
@@ -287,47 +245,41 @@ def run_oos_period(
 def perform_optimization():
     global global_store
     global_store['is_optimizing'] = True
-    global_store['optimization_log'] = [] # Reset log
+    global_store['optimization_log'] = [] 
     
     try:
-        # 1. Fetch
         df = fetch_data(SYMBOL, TIMEFRAME, START_DATE_STR)
-        if df.empty: return
+        if df.empty: 
+            global_store['is_optimizing'] = False
+            return
 
-        # 2. Pre-process
+        # Pre-process
         df, iii_matrix, iii_windows = prepare_features(df)
         
-        # 3. Create 7D Parameter Grid
-        # Using GRID_SIZE=8 for params and 5 for window gives 8^6 * 5 ~ 1.3M iterations
+        # Create 6D Parameter Grid (Removed Window dimension)
         print("Generating parameter grid...")
         g_lev_a = np.linspace(0, 5, GRID_SIZE)
         g_lev_b = np.linspace(0, 5, GRID_SIZE)
         g_lev_th = np.linspace(0, 0.6, GRID_SIZE)
         g_flat_th = np.linspace(0, 0.5, GRID_SIZE)
         g_band = np.linspace(0, 0.07, GRID_SIZE)
-        g_iii_idx = np.arange(GRID_SIZE) # Indices for iii windows
+        g_iii_idx = np.arange(GRID_SIZE)
         
-        # New Dimension: Lookback Window Size
-        g_win_size = np.linspace(100, 1000, WINDOW_GRID_STEPS) 
-        
-        # Meshgrid (Order: a, b, c, d, e, win, iii_idx)
+        # Meshgrid (Order: a, b, c, d, e, iii_idx)
         mesh = np.array(np.meshgrid(
-            g_lev_a, g_lev_b, g_lev_th, g_flat_th, g_band, g_win_size, g_iii_idx
+            g_lev_a, g_lev_b, g_lev_th, g_flat_th, g_band, g_iii_idx
         ))
-        flat_mesh = mesh.reshape(7, -1)
+        flat_mesh = mesh.reshape(6, -1)
         
-        # Convert to contiguous arrays for Numba
         n_a = np.ascontiguousarray(flat_mesh[0])
         n_b = np.ascontiguousarray(flat_mesh[1])
         n_c = np.ascontiguousarray(flat_mesh[2])
         n_d = np.ascontiguousarray(flat_mesh[3])
         n_e = np.ascontiguousarray(flat_mesh[4])
-        n_win = np.ascontiguousarray(flat_mesh[5])
-        n_iii = np.ascontiguousarray(flat_mesh[6])
+        n_iii = np.ascontiguousarray(flat_mesh[5])
         
         print(f"Grid size: {len(n_a)} combinations per step.")
 
-        # 4. Rolling Window Loop
         opens = df['open'].values
         closes = df['close'].values
         highs = df['high'].values
@@ -338,32 +290,32 @@ def perform_optimization():
         
         oos_results = []
         
-        # Start time must allow for max lookback (1000) + SMAs (360) -> ~1360
-        start_t = 1400 
+        # Start Time: 4 Years (1460 days) + Max SMA (360) approx 1820
+        start_t = TRAINING_WINDOW + 360
         total_len = len(closes)
         
         if total_len < start_t:
-            print("Not enough data for 1000 day lookback.")
+            print(f"Not enough data. Need {start_t} days, have {total_len}.")
             global_store['is_optimizing'] = False
             return
             
-        print(f"Starting Rolling Optimization from index {start_t}...")
+        print(f"Starting Rolling Optimization from index {start_t} (Date: {df.index[start_t]})...")
         
         for t in range(start_t, total_len, OOS_STEP_SIZE):
             
-            # OOS Horizon
             oos_end = min(t + OOS_STEP_SIZE, total_len)
             if t >= total_len: break
             
             print(f" optimizing for OOS [{t}:{oos_end}]...")
             
-            # A. OPTIMIZE (Find best window + best params)
-            sharpe_array = grid_search_kernel_safe(
+            # A. OPTIMIZE on [t-1460 : t]
+            sharpe_array = grid_search_kernel_fixed_window(
                 opens, closes, highs, lows,
                 s40, s120, s360,
                 iii_matrix,
-                n_a, n_b, n_c, n_d, n_e, n_win, n_iii,
-                t # Current time (end of training, start of OOS)
+                n_a, n_b, n_c, n_d, n_e, n_iii,
+                t, # End of training
+                TRAINING_WINDOW
             )
             
             best_idx = np.argmax(sharpe_array)
@@ -388,7 +340,6 @@ def perform_optimization():
                 'lev_thresh': n_c[best_idx],
                 'flat_thresh': n_d[best_idx],
                 'band': n_e[best_idx],
-                'lookback': n_win[best_idx],
                 'iii_win': iii_windows[int(n_iii[best_idx])]
             }
             
@@ -404,7 +355,6 @@ def perform_optimization():
             full_res['cum_strategy'] = (1 + full_res['strategy_ret']).cumprod()
             full_res['cum_bnh'] = (1 + full_res['bnh_ret']).cumprod()
             
-            # Calculate Aggregate OOS Sharpe
             mean_oos = full_res['strategy_ret'].mean()
             std_oos = full_res['strategy_ret'].std()
             oos_sharpe = (mean_oos / std_oos) * np.sqrt(365) if std_oos > 0 else 0
@@ -435,10 +385,10 @@ def index():
     
     if res is not None and not res.empty:
         plt.figure(figsize=(12, 6))
-        plt.plot(res.index, res['cum_strategy'], label='Adaptive Rolling Strategy', color='blue')
+        plt.plot(res.index, res['cum_strategy'], label='Adaptive Rolling Strategy (4Y Lookback)', color='blue')
         plt.plot(res.index, res['cum_bnh'], label='Buy & Hold', color='gray', alpha=0.5)
         plt.yscale('log')
-        plt.title(f'Walk-Forward Optimization Results')
+        plt.title(f'Walk-Forward Results')
         plt.ylabel('Cumulative Return (Log)')
         plt.legend()
         plt.grid(True, which="both", alpha=0.2)
@@ -455,7 +405,7 @@ def index():
         log_rows = ""
         for entry in global_store['optimization_log'][-15:]:
             p = entry['params']
-            p_str = (f"Lookback:{int(p['lookback'])}d, A:{p['lev_a']:.1f}, B:{p['lev_b']:.1f}, "
+            p_str = (f"A:{p['lev_a']:.1f}, B:{p['lev_b']:.1f}, "
                      f"Th:{p['lev_thresh']:.2f}, Flat:{p['flat_thresh']:.2f}, "
                      f"Band:{p['band']:.3f}, iii_W:{p['iii_win']}")
             log_rows += f"<tr><td>{entry['date'].date()}</td><td>{entry['is_sharpe']:.2f}</td><td>{p_str}</td></tr>"
@@ -465,7 +415,7 @@ def index():
             <div class="stat-box"><strong>Total Return:</strong><br>{total_ret:.2f}x</div>
             <div class="stat-box"><strong>OOS Sharpe Ratio:</strong><br>{oos_sharpe:.2f}</div>
         </div>
-        <h3>Walk-Forward Log (Re-optimized every {OOS_STEP_SIZE} days)</h3>
+        <h3>Walk-Forward Log (Lookback: {TRAINING_WINDOW} days)</h3>
         <div style="overflow-x: auto;">
         <table border="1" cellpadding="5" style="border-collapse: collapse; width: 100%; font-size: 0.9em;">
             <tr><th>Rebalance Date</th><th>Training Sharpe</th><th>Optimized Parameters</th></tr>
@@ -498,7 +448,7 @@ def index():
             <div style="text-align:center;">
                 <form action="/run" method="post">
                     <button type="submit" {'disabled' if global_store['is_optimizing'] else ''}>
-                        { 'Running Simulation...' if global_store['is_optimizing'] else 'Run Walk-Forward Optimization' }
+                        { 'Running Simulation...' if global_store['is_optimizing'] else 'Run Walk-Forward Optimization (4Y Window)' }
                     </button>
                 </form>
             </div>
