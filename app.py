@@ -289,6 +289,21 @@ def run_genetic_optimization(df):
     global_data['optimization_status'] = "Complete"
     print("Optimization Finished.")
 
+def run_walk_forward_optimization(df):
+    """Run walk-forward optimization and store results."""
+    global_data['walk_forward_status'] = "Running..."
+    print("Starting walk-forward optimization...")
+    
+    try:
+        results_df, equity_curve = walk_forward_rolling(df, window=14)
+        global_data['walk_forward_results'] = results_df
+        global_data['walk_forward_equity_curve'] = equity_curve
+        global_data['walk_forward_status'] = "Complete"
+        print(f"Walk-forward optimization complete. Processed {len(results_df)} days.")
+    except Exception as e:
+        global_data['walk_forward_status'] = f"Error: {str(e)}"
+        print(f"Walk-forward error: {e}")
+
 # ============================================================
 # === NEW: 14-DAY ROLLING WALK-FORWARD OPTIMIZATION ADDED HERE ===
 # ============================================================
@@ -409,6 +424,50 @@ def index():
         html += "</table>"
     else:
         html += "<p>No results yet.</p>"
+    # Walk-forward section
+    html += f"""
+    <div class="section">
+        <h1>Walk-Forward Optimization (14-Day Rolling)</h1>
+        <p><strong>Method:</strong> For each day, optimize on previous 14 days, trade on current day</p>
+        <h3>Walk-Forward Status: {wf_status}</h3>
+        <a href="/start_walk_forward" class="btn btn-wf">START WALK-FORWARD OPTIMIZATION</a>
+        <br><br>"""
+    
+    if wf_results is not None and not wf_results.empty:
+        html += f"""
+        <h2>Walk-Forward Results ({len(wf_results)} trading days)</h2>
+        <p><strong>Final Equity:</strong> {wf_equity[-1]:.3f}x (from 1.0x starting)</p>
+        <p><strong>Total Return:</strong> {(wf_equity[-1] - 1) * 100:.1f}%</p>
+        <table>
+            <tr>
+                <th>Date</th>
+                <th>Trade Return</th>
+                <th>Cumulative Equity</th>
+                <th>Parameters (Sample)</th>
+            </tr>"""
+        
+        # Show first 10 and last 10 results
+        for idx, row in wf_results.head(10).iterrows():
+            params_sample = ", ".join([f"{k}:{v:.2f}" if isinstance(v, float) else f"{k}:{v}" 
+                                      for k, v in list(row['params'].items())[:3]]) + "..."
+            html += f"""
+            <tr>
+                <td>{row['day'].date()}</td>
+                <td>{row['trade_return']:.3f}</td>
+                <td>{row['equity']:.3f}</td>
+                <td style="font-size: 0.8em">{params_sample}</td>
+            </tr>"""
+        
+        if len(wf_results) > 20:
+            html += "<tr><td colspan='4' style='text-align: center;'>... (showing first 10 of " + str(len(wf_results)) + " days) ...</td></tr>"
+        
+        html += "</table>"
+    elif wf_status != "Idle":
+        html += f"<p>No walk-forward results yet. Status: {wf_status}</p>"
+    else:
+        html += "<p>No walk-forward results yet. Click the button above to start.</p>"
+    
+    html += "</div>"
 
     if gen_stats:
         html += "<h2>Training History</h2><ul>"
@@ -424,6 +483,13 @@ def start_opt():
     t = Thread(target=run_genetic_optimization, args=(global_data['raw_data'],))
     t.start()
     return "Started! <a href='/'>Back</a>"
+@app.route('/start_walk_forward')
+def start_walk_forward():
+    if global_data['raw_data'] is None: return "Data not loaded."
+    if "Running" in global_data['walk_forward_status']: return "Walk-forward already running."
+    t = Thread(target=run_walk_forward_optimization, args=(global_data['raw_data'],))
+    t.start()
+    return "Walk-forward optimization started! <a href='/'>Back</a>"
 
 if __name__ == '__main__':
     raw_df = fetch_data(SYMBOL, TIMEFRAME, START_DATE_STR)
