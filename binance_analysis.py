@@ -146,17 +146,17 @@ def run_backtest(df):
     )
     
     # --- 2.7 Calculate SMA Proximity Metric ---
-    # SMA Proximity = (1 / |(Close - SMA) / SMA| * 100) * 20
+    # SMA Proximity = min(1.0, (1 / |(Close - SMA) / SMA| * 100) * 100). Scaler is 1/0.01 = 100.
     
     # Absolute percentage difference: |(Close - SMA) / SMA| * 100
     df['SMA_Distance_Pct'] = np.abs((df['Close'] - df[f'SMA_{SMA_PERIOD}']) / df[f'SMA_{SMA_PERIOD}']) * 100
     
-    # Calculate Proximity base (20 / Pct Distance)
-    # Use np.where to handle the zero-distance case, setting it to a value > 1.0 (e.g., 20.0)
+    # Calculate Proximity base (100 / Pct Distance)
+    # Use np.where to handle the zero-distance case, setting it to a value > 1.0 (e.g., 100.0)
     proximity_base = np.where(
         df['SMA_Distance_Pct'] == 0,
-        20.0, # Value that will be capped to 1.0
-        20.0 / df['SMA_Distance_Pct']
+        100.0, # Value that will be capped to 1.0
+        100.0 / df['SMA_Distance_Pct']
     )
     
     # Apply the cap at 1.0
@@ -308,7 +308,7 @@ def serve_results():
                     <div class="container mx-auto p-4 bg-gray-800 shadow-xl rounded-xl">
                         <h1 class="text-3xl font-bold mb-4 text-green-400">Backtesting Results: {SYMBOL} SMA-120</h1>
                         <p class="text-gray-300 mb-6">
-                            The backtest now displays three plots: Price/SMA, Log Equity Curve, and the Capped SMA Proximity (Max 1.0).
+                            The backtest now displays three plots: Price/SMA, Log Equity Curve, and the Capped SMA Proximity (Max 1.0). The proximity scaler is set to 100.
                         </p>
                         <div class="plot-container">
                             <img src="{RESULTS_DIR}/{PLOT_FILE}" alt="Strategy Cumulative Returns Plot" class="w-full h-auto rounded-lg shadow-2xl">
