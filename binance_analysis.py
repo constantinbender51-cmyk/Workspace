@@ -18,7 +18,7 @@ DC_WINDOW = 20  # Donchian Channel Period
 POSITION_SIZE = 1  # Unit of asset traded (+1 for Long, -1 for Short)
 PORT = 8080
 ANNUAL_TRADING_DAYS = 252 # Used for annualizing Sharpe Ratio
-MAX_SMA_SCAN = 800 # Increased maximum SMA for the scan
+MAX_SMA_SCAN = 1000 # Increased maximum SMA for the scan
 
 # --- Global Variables to store results (populated once at startup) ---
 GLOBAL_DATA_SOURCE = "Binance (CCXT)"
