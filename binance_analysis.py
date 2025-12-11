@@ -15,7 +15,7 @@ TIMEFRAME = '1d' # Daily candles
 START_DATE = '2018-01-01'
 SMA_WINDOWS_PLOT = [120] 
 DC_WINDOW = 20  # Donchian Channel Period (N)
-T_FACTOR = 100  # Multiplier 't' in the position size formula
+K_FACTOR = 0.2  # Exponent 'k' in the position size formula (new name/value)
 POSITION_SIZE_MAX = 1.0  # Maximum position size limit
 PORT = 8080
 ANNUAL_TRADING_DAYS = 252 # Used for annualizing Sharpe Ratio
@@ -162,32 +162,33 @@ def calculate_dynamic_position(df_ind_raw):
     """
     Calculates position size based on volatility (DC width relative to price),
     and sets the direction based on SMA 120.
+    
+    New Size = 1 - (DC_Width / Close)^K_FACTOR
     """
     df = df_ind_raw.copy()
     
-    # 1. Calculate Volatility Component: (DC Width / Price) * t
+    # 1. Calculate Relative Volatility: DC Width / Price
     df['DC_Width'] = df['DC_Upper'] - df['DC_Lower']
     
-    # Calculate Volatility Ratio: (DC Width / Price) * t
-    df['Volatility_Ratio'] = (df['DC_Width'] / df['Close']) * T_FACTOR
+    # Calculate Relative Width Ratio
+    df['Relative_Width'] = df['DC_Width'] / df['Close']
     
-    # 2. Calculate Base Position Size (1 / Volatility_Ratio), capped at POSITION_SIZE_MAX
-    # Note: Using np.where to handle division by zero or infinite volatility safely
+    # 2. Calculate Base Position Size (1 - (Relative_Width ^ K_FACTOR)), clipped
+    # Note: np.power handles the exponentiation.
     df['Size_Decider'] = np.where(
-        (df['Volatility_Ratio'] > 0),
-        (1 / df['Volatility_Ratio']).clip(upper=POSITION_SIZE_MAX),
-        0.0 # Set size to 0 if ratio is non-positive or zero
+        (df['Close'] > 0), # Ensure Close > 0 to prevent division issues
+        (1 - np.power(df['Relative_Width'], K_FACTOR)).clip(lower=0, upper=POSITION_SIZE_MAX),
+        0.0 
     )
     
     # 3. Determine Direction Signal (+1 or -1) from SMA 120
     sma_col = 'SMA_120'
     df['Direction_Decider'] = np.where(df['Close'] > df[sma_col], 1, -1)
     
-    # C. Final Held Position = Direction Decided Yesterday * Size Decided Yesterday
-    # Position for day T is decided using data from day T-1.
+    # 4. Final Held Position = Direction Decided Yesterday * Size Decided Yesterday
     df['Held_Position'] = (df['Direction_Decider'] * df['Size_Decider']).shift(1).fillna(0)
     
-    # 4. Enforce Global Start for Tradable Period (Index MAX_SMA_SCAN)
+    # 5. Enforce Global Start for Tradable Period (Index MAX_SMA_SCAN)
     tradable_start_index = MAX_SMA_SCAN 
     
     if len(df) <= tradable_start_index:
@@ -195,14 +196,14 @@ def calculate_dynamic_position(df_ind_raw):
         
     df_tradable = df.iloc[tradable_start_index:].copy()
 
-    # 5. Calculate Strategy Return
+    # 6. Calculate Strategy Return
     df_tradable['Daily_Return'] = df_tradable['Close'].pct_change()
     daily_returns_clean = df_tradable['Daily_Return'].fillna(0)
     
     # Strategy Return = Daily Asset Return * Held Position
     df_tradable['Strategy_Return'] = daily_returns_clean * df_tradable['Held_Position']
     
-    # 6. Calculate Cumulative Equity (starting fresh from 1.0)
+    # 7. Calculate Cumulative Equity (starting fresh from 1.0)
     df_tradable.loc[:, 'Equity'] = (1 + df_tradable['Strategy_Return']).cumprod()
     
     # Buy & Hold Benchmark
@@ -239,7 +240,7 @@ def calculate_sharpe_ratios_scan(df_raw, min_sma, max_sma):
             sharpe_ratio = 0.0 
             
         final_equity = df_strategy['Equity'].iloc[-1]
-        
+            
         results.append({
             'SMA_Window': sma_w,
             'Sharpe_Ratio': sharpe_ratio,
@@ -363,7 +364,7 @@ def create_plot(df, sma_window):
     ax1.grid(True, linestyle='--', alpha=0.6)
     ax1.legend(loc='upper left', fontsize=8)
     ax1.set_yscale('log')
-    ax1.set_title(f'SMA {sma_window} Signal with Dynamic Volatility Sizing (T={T_FACTOR})', fontsize=12)
+    ax1.set_title(f'SMA {sma_window} Signal with Dynamic Volatility Sizing (K={K_FACTOR})', fontsize=12)
 
     # --- Equity Plot (Bottom Panel) ---
     ax2 = axes[1]
@@ -513,9 +514,8 @@ def analysis_dashboard():
             </div>
         """)
         
-    # Define the mathematical expression for the HTML display separately, 
-    # avoiding complex escapes inside the main f-string.
-    position_sizing_formula = r"$1 / \left( \frac{\text{DC Upper} - \text{DC Lower}}{\text{Close}} \times 100 \right)$"
+    # Define the mathematical expression for the HTML display separately.
+    position_sizing_formula = r"$1 - \left( \frac{\text{DC Upper} - \text{DC Lower}}{\text{Close}} \right)^{0.2}$"
         
     # HTML Template with Tailwind CSS for modern look and responsiveness
     html_content = f"""
