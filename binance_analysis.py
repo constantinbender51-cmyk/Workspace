@@ -13,9 +13,9 @@ START_DATE = '2018-01-01'
 TIME_FRAME = '1d'
 
 SMA_LONG_TERM = 400
-SMA_MID_TERM = 120 # Retained for plotting context only
+SMA_MID_TERM = 120 # Used only for plotting historical context
 SMA_FAST = 40 
-PROXIMITY_THRESHOLD = 0.02 # 2% Breakout zone
+PROXIMITY_THRESHOLD = 0.02 # 2% Entry zone
 
 # --- 2. DATA FETCHING (Using CCXT for Binance) ---
 
@@ -73,7 +73,7 @@ def get_data(symbol, since_date_str='2018-01-01'):
 
 def run_backtest(df):
     """
-    Calculates SMAs and implements the Breakout Hold Strategy using lagged data.
+    Calculates SMAs and implements the Retracement Confirmation Strategy using lagged data.
     """
     print("Running backtest and calculating SMAs...")
     
@@ -82,79 +82,64 @@ def run_backtest(df):
     df[f'SMA_{SMA_MID_TERM}'] = df['close'].rolling(window=SMA_MID_TERM).mean()
     df[f'SMA_{SMA_FAST}'] = df['close'].rolling(window=SMA_FAST).mean()
 
-    # Drop initial NaN values created by rolling windows (first 400 days)
+    # CRITICAL: Drop initial NaN values created by rolling windows (at least 400 days)
     df = df.dropna()
 
-    # --- Prepare Lagged Data for Crosses and Conditions ---
+    # --- Prepare Lagged Data for Crosses and Conditions (T-1 and T-2) ---
+    # We create shifted columns directly on the DataFrame before dropping any more NaNs
+    df['close_l1'] = df['close'].shift(1)
+    df[f'SMA_{SMA_LONG_TERM}_l1'] = df[f'SMA_{SMA_LONG_TERM}'].shift(1)
+    df[f'SMA_{SMA_FAST}_l1'] = df[f'SMA_{SMA_FAST}'].shift(1)
     
-    # T-1 data for today's signal
-    close_l = df['close'].shift(1)
-    sma_long_l = df[f'SMA_{SMA_LONG_TERM}'].shift(1)
-    sma_fast_l = df[f'SMA_{SMA_FAST}'].shift(1)
-    
-    # T-2 data for cross detection
-    close_l2 = df['close'].shift(2)
-    sma_long_l2 = df[f'SMA_{SMA_LONG_TERM}'].shift(2)
-    sma_fast_l2 = df[f'SMA_{SMA_FAST}'].shift(2)
+    df['close_l2'] = df['close'].shift(2)
+    df[f'SMA_{SMA_LONG_TERM}_l2'] = df[f'SMA_{SMA_LONG_TERM}'].shift(2)
+    df[f'SMA_{SMA_FAST}_l2'] = df[f'SMA_{SMA_FAST}'].shift(2)
 
-    
+    # Drop the rows created by the shifting (T-1, T-2). This makes the first row the first valid signal.
+    df = df.dropna()
+
     # --- 3. CREATE DATASETS (Regimes for Reporting) ---
     df_bull = df[df['close'] > df[f'SMA_{SMA_LONG_TERM}']].copy()
     df_bear = df[df['close'] < df[f'SMA_{SMA_LONG_TERM}']].copy()
 
-    # --- 4. IMPLEMENT STRATEGY LOGIC (Breakout Hold Strategy) ---
+    # --- 4. IMPLEMENT STRATEGY LOGIC (Retracement Confirmation Strategy) ---
     
-    # --- Entry Conditions (Breakout of +/- 2% of 400 SMA, T-2 to T-1) ---
+    # --- Entry Conditions (Crossing INTO the +/- 2% zone, T-2 to T-1) ---
     
-    # LONG ENTRY: Price crosses ABOVE (SMA400 * 1.02)
-    BULL_TRIGGER_L2 = sma_long_l2 * (1 + PROXIMITY_THRESHOLD)
-    BULL_TRIGGER_L1 = sma_long_l * (1 + PROXIMITY_THRESHOLD)
-    LONG_ENTRY = ((close_l2 <= BULL_TRIGGER_L2) & (close_l > BULL_TRIGGER_L1)).fillna(0).astype(int)
+    # LONG ENTRY: Price crosses *INTO* the zone (from ABOVE +2% to within +2% and 0%)
+    BULL_CONFIRM_L2 = df[f'SMA_{SMA_LONG_TERM}_l2'] * (1 + PROXIMITY_THRESHOLD)
+    BULL_CONFIRM_L1 = df[f'SMA_{SMA_LONG_TERM}_l1'] * (1 + PROXIMITY_THRESHOLD)
     
-    # SHORT ENTRY: Price crosses BELOW (SMA400 * 0.98)
-    BEAR_TRIGGER_L2 = sma_long_l2 * (1 - PROXIMITY_THRESHOLD)
-    BEAR_TRIGGER_L1 = sma_long_l * (1 - PROXIMITY_THRESHOLD)
-    SHORT_ENTRY = ((close_l2 >= BEAR_TRIGGER_L2) & (close_l < BEAR_TRIGGER_L1)).fillna(0).astype(int)
+    LONG_ENTRY = (
+        (df['close_l2'] > BULL_CONFIRM_L2) &          # T-2 was OUTSIDE (above +2%)
+        (df['close_l1'] <= BULL_CONFIRM_L1) &         # T-1 is NOW INSIDE (below or at +2%)
+        (df['close_l1'] > df[f'SMA_{SMA_LONG_TERM}_l1'])  # AND T-1 is still above 400 SMA
+    ).astype(int)
+    
+    # SHORT ENTRY: Price crosses *INTO* the zone (from BELOW -2% to within -2% and 0%)
+    BEAR_CONFIRM_L2 = df[f'SMA_{SMA_LONG_TERM}_l2'] * (1 - PROXIMITY_THRESHOLD)
+    BEAR_CONFIRM_L1 = df[f'SMA_{SMA_LONG_TERM}_l1'] * (1 - PROXIMITY_THRESHOLD)
+    
+    SHORT_ENTRY = (
+        (df['close_l2'] < BEAR_CONFIRM_L2) &          # T-2 was OUTSIDE (below -2%)
+        (df['close_l1'] >= BEAR_CONFIRM_L1) &         # T-1 is NOW INSIDE (above or at -2%)
+        (df['close_l1'] < df[f'SMA_{SMA_LONG_TERM}_l1'])  # AND T-1 is still below 400 SMA
+    ).astype(int)
     
     # --- Exit Conditions (40 SMA Cross, T-2 to T-1) ---
 
     # LONG EXIT: Price crosses 40 SMA from ABOVE
-    EXIT_LONG = ((close_l2 >= sma_fast_l2) & (close_l < sma_fast_l)).fillna(0).astype(int)
+    EXIT_LONG = ((df['close_l2'] >= df[f'SMA_{SMA_FAST}_l2']) & (df['close_l1'] < df[f'SMA_{SMA_FAST}_l1'])).astype(int)
     
     # SHORT EXIT: Price crosses 40 SMA from BELOW
-    EXIT_SHORT = ((close_l2 <= sma_fast_l2) & (close_l > sma_fast_l)).fillna(0).astype(int)
-    
-    # Drop rows where we can't calculate T-2 values
-    df = df.dropna()
-
-    # Recalculate signals for the remaining index
-    def get_lagged_series(col_name, lag):
-        return df[col_name].shift(lag).loc[df.index]
-        
-    close_l = get_lagged_series('close', 1)
-    sma_long_l = get_lagged_series(f'SMA_{SMA_LONG_TERM}', 1)
-    sma_fast_l = get_lagged_series(f'SMA_{SMA_FAST}', 1)
-    close_l2 = get_lagged_series('close', 2)
-    sma_long_l2 = get_lagged_series(f'SMA_{SMA_LONG_TERM}', 2)
-    sma_fast_l2 = get_lagged_series(f'SMA_{SMA_FAST}', 2)
-
-    # Re-apply entry/exit logic using the final, aligned lagged series
-    BULL_TRIGGER_L2 = sma_long_l2 * (1 + PROXIMITY_THRESHOLD)
-    BULL_TRIGGER_L1 = sma_long_l * (1 + PROXIMITY_THRESHOLD)
-    LONG_ENTRY = ((close_l2.fillna(0) <= BULL_TRIGGER_L2.fillna(0)) & (close_l.fillna(0) > BULL_TRIGGER_L1.fillna(0))).astype(int)
-    
-    BEAR_TRIGGER_L2 = sma_long_l2 * (1 - PROXIMITY_THRESHOLD)
-    BEAR_TRIGGER_L1 = sma_long_l * (1 - PROXIMITY_THRESHOLD)
-    SHORT_ENTRY = ((close_l2.fillna(0) >= BEAR_TRIGGER_L2.fillna(0)) & (close_l.fillna(0) < BEAR_TRIGGER_L1.fillna(0))).astype(int)
-    
-    EXIT_LONG = ((close_l2.fillna(0) >= sma_fast_l2.fillna(0)) & (close_l.fillna(0) < sma_fast_l.fillna(0))).astype(int)
-    EXIT_SHORT = ((close_l2.fillna(0) <= sma_fast_l2.fillna(0)) & (close_l.fillna(0) > sma_fast_l.fillna(0))).astype(int)
+    EXIT_SHORT = ((df['close_l2'] <= df[f'SMA_{SMA_FAST}_l2']) & (df['close_l1'] > df[f'SMA_{SMA_FAST}_l1'])).astype(int)
 
     # --- Calculate Persistent Position (State Machine) ---
     position = 0
     df['Position_Raw'] = 0.0 
     
     for i in range(len(df)):
+        # Extract signal values safely
         entry_long = LONG_ENTRY.iloc[i]
         entry_short = SHORT_ENTRY.iloc[i]
         exit_long = EXIT_LONG.iloc[i]
@@ -187,7 +172,7 @@ def run_backtest(df):
     
     # Signal: T-1 Position_Raw determines T's trade
     df['Signal'] = df['Position_Raw'].shift(1) 
-    df = df.dropna()
+    df = df.dropna() # Drop the first row due to the final shift
     
     # Calculate Daily Returns
     df['Daily_Return'] = df['close'].pct_change()
@@ -366,7 +351,7 @@ HTML_TEMPLATE = """
 </head>
 <body>
     <div class="container">
-        <h1>{{ symbol }} 400/40 SMA Breakout Hold Strategy Backtest</h1>
+        <h1>{{ symbol }} 400/40 SMA Retracement Confirmation Strategy Backtest</h1>
         <div class="datasource">Data Source: Binance via CCXT | Timeframe: {{ timeframe }}</div>
         
         <!-- Plotting Area -->
@@ -419,10 +404,10 @@ HTML_TEMPLATE = """
             </div>
         </div>
         <div class="strategy-description">
-            Strategy Logic (400/40 SMA Breakout Hold):<br>
+            Strategy Logic (400/40 SMA Retracement Confirmation):<br>
             - **Signal Determination (Today):** Based on Price and SMAs from **Yesterday (T-1)**.<br>
-            - **Long Entry:** Price crosses **ABOVE** the $400 SMA + 2\% threshold (must have been below this level previously).<br>
-            - **Short Entry:** Price crosses **BELOW** the $400 SMA - 2\%$ threshold (must have been above this level previously).<br>
+            - **Long Entry:** Price crosses **INTO** the $400 SMA to $400 SMA + 2\%$ zone, coming from **ABOVE** the $+2\%$ threshold.<br>
+            - **Short Entry:** Price crosses **INTO** the $400 SMA - 2\%$ to $400 SMA$ zone, coming from **BELOW** the $-2\%$ threshold.<br>
             - **Exit Long:** Price crosses the 40 SMA **from above**.<br>
             - **Exit Short:** Price crosses the 40 SMA **from below**.<br>
             - **Hold:** Stay in the position until the corresponding Exit condition is met.
