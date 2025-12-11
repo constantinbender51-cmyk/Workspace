@@ -15,7 +15,7 @@ TIMEFRAME = '1d' # Daily candles
 START_DATE = '2018-01-01'
 SMA_WINDOWS_PLOT = [120] 
 DC_WINDOW = 20  # Donchian Channel Period (N)
-SL_FEE = 0.0005 # 0.05% fee applied on Stop Loss hit (new constant)
+SL_FEE = 0.0005 # 0.05% fee applied on Stop Loss hit
 POSITION_SIZE_MAX = 1.0  # Maximum position size limit
 PORT = 8080
 ANNUAL_TRADING_DAYS = 252 # Used for annualizing Sharpe Ratio
@@ -23,16 +23,16 @@ MAX_SMA_SCAN = 120 # Maximum SMA for the scan and the global analysis start poin
 SCAN_DELAY = 5.0 # Seconds delay after every 50 SMA calculations to respect API limits
 
 # --- Grid Search Ranges ---
-# K: 0.001 to 5.000 in 0.001 steps (~5000 runs)
-K_FACTOR_RANGE = np.arange(0.001, 5.001, 0.001)
-# S (Stop Loss %): 0.5% (0.005) to 10% (0.100) in 0.5% (0.005) steps (~20 runs)
-S_FACTOR_RANGE = np.arange(0.005, 0.1001, 0.005)
+# K: 0.0001 to 0.0100 in 0.0001 steps (101 runs)
+K_FACTOR_RANGE = np.arange(0.0001, 0.0101, 0.0001)
+# S (Stop Loss %): Fixed at 2% (0.02)
+S_FACTOR_RANGE = np.array([0.02])
 
 # --- Global Variables to store results (populated once at startup) ---
 GLOBAL_DATA_SOURCE = "Binance (CCXT)"
 GLOBAL_IMG_BASE64 = ""      # Image for Strategy Plot (using Optimal K & S)
 GLOBAL_ANALYSIS_IMG = ""    # Image for Sharpe/Equity Scan (for SMA window 1-120)
-GLOBAL_K_S_ANALYSIS_IMG = "" # Image for K & S 2D Heatmap Search
+GLOBAL_K_S_ANALYSIS_IMG = "" # Image for K & S 2D Heatmap/1D Plot Search
 GLOBAL_SUMMARY_TABLE = ""
 GLOBAL_TOTAL_RETURN = 0.0
 GLOBAL_SHARPE = 0.0         # Annualized Sharpe Ratio for the Optimal K & S strategy
@@ -202,14 +202,15 @@ def calculate_dynamic_position(df_ind_raw, k_factor, s_factor):
     
     # --- Stop Loss Logic (SL FIXED at s_factor% from Previous Close + 0.05% fee) ---
     
+    # s_factor is the trigger percentage
     TOTAL_LOSS_RATE = s_factor + SL_FEE # Stop Loss % + Fee
-    
+
     # A. Long SL Hit Check: Low < SL Price (Prev Close * (1 - Total Loss Rate))
-    SL_Price_Long = df['Previous_Close'] * (1 - TOTAL_LOSS_RATE)
+    SL_Price_Long = df['Previous_Close'] * (1 - s_factor)
     is_long_sl_hit = (df['Held_Position'] > 0) & (df['Low'] < SL_Price_Long)
 
     # B. Short SL Hit Check: High > SL Price (Prev Close * (1 + Total Loss Rate))
-    SL_Price_Short = df['Previous_Close'] * (1 + TOTAL_LOSS_RATE)
+    SL_Price_Short = df['Previous_Close'] * (1 + s_factor)
     is_short_sl_hit = (df['Held_Position'] < 0) & (df['High'] > SL_Price_Short)
 
     df['SL_Hit'] = is_long_sl_hit | is_short_sl_hit
@@ -248,24 +249,31 @@ def calculate_dynamic_position(df_ind_raw, k_factor, s_factor):
     
     return df_tradable[['Close', sma_col, 'DC_Upper', 'DC_Lower', 'Held_Position', 'SL_Hit', 'Strategy_Return', 'Equity', 'Buy_Hold_Equity']]
 
-# --- 2D K & S Grid Search Function ---
+# --- 2D K & S Grid Search Function (now adapting for fixed S) ---
 
 def run_k_s_grid_search(df_ind_raw):
     """Runs a 2D grid search for the optimal K and S factors based on Sharpe Ratio."""
+    k_range_start = K_FACTOR_RANGE[0]
     k_range_end = K_FACTOR_RANGE[-1]
     s_range_start_pct = S_FACTOR_RANGE[0]*100
     s_range_end_pct = S_FACTOR_RANGE[-1]*100
     
-    print(f"\n--- Starting K & S 2D Grid Search (K: {K_FACTOR_RANGE[0]:.3f} to {k_range_end:.3f}, S: {s_range_start_pct:.1f}% to {s_range_end_pct:.1f}%) ---")
+    # Handle the specific case where S is fixed (1D plot)
+    if len(S_FACTOR_RANGE) == 1:
+        print(f"\n--- Starting 1D K-Factor Grid Search (K: {k_range_start:.4f} to {k_range_end:.4f}) with Fixed S = {s_range_start_pct:.2f}% ---")
+        S_FIXED = S_FACTOR_RANGE[0]
+    else:
+        print(f"\n--- Starting K & S 2D Grid Search (K: {k_range_start:.4f} to {k_range_end:.4f}, S: {s_range_start_pct:.1f}% to {s_range_end_pct:.1f}%) ---")
+        
     
     # Use lists to ensure exact floating point values from arange are used for indexing later
-    K_VALUES = [round(k, 3) for k in K_FACTOR_RANGE]
+    K_VALUES = [round(k, 4) for k in K_FACTOR_RANGE]
     S_VALUES = [round(s, 3) for s in S_FACTOR_RANGE]
     
     sharpe_matrix = np.zeros((len(K_VALUES), len(S_VALUES)))
     max_sharpe = -np.inf
     optimal_k = 0.0
-    optimal_s = 0.0
+    optimal_s = S_VALUES[0] # Default to the first (or only) S value
     
     total_runs = len(K_VALUES) * len(S_VALUES)
     run_count = 0
@@ -296,38 +304,54 @@ def run_k_s_grid_search(df_ind_raw):
                 optimal_s = s
             
             run_count += 1
-            if run_count % 1000 == 0:
-                 print(f"Processed {run_count}/{total_runs} combinations. Current best Sharpe: {max_sharpe:.3f} (K={optimal_k:.3f}, S={optimal_s*100:.2f}%)")
+            if run_count % 20 == 0:
+                 print(f"Processed {run_count}/{total_runs} combinations. Current best Sharpe: {max_sharpe:.4f} (K={optimal_k:.4f}, S={optimal_s*100:.2f}%)")
 
 
-    print(f"--- K & S Search Complete. Optimal K: {optimal_k:.3f}, Optimal S: {optimal_s*100:.2f}% ---")
+    print(f"--- K & S Search Complete. Optimal K: {optimal_k:.4f}, Optimal S: {optimal_s*100:.2f}% ---")
     
-    # --- Generate Heatmap Plot ---
-    fig, ax = plt.subplots(figsize=(12, 6))
     
-    # Only label every 500th K tick for readability (5000 total ticks)
-    k_labels = [f'{k:.3f}' if i % 500 == 0 else '' for i, k in enumerate(K_VALUES)]
-    s_labels = [f'{s*100:.1f}%' for s in S_VALUES]
-    
-    # Use transpose so K is on Y-axis (vertical) and S is on X-axis (horizontal)
-    im = ax.imshow(sharpe_matrix.T, aspect='auto', origin='lower', cmap='viridis')
+    # --- Generate Plot (1D Line Plot for Fixed S) ---
+    if len(S_VALUES) == 1:
+        fig, ax = plt.subplots(1, 1, figsize=(10, 4))
+        sharpe_values = sharpe_matrix[:, 0]
+        
+        ax.plot(K_VALUES, sharpe_values, color='#5a3d90', linewidth=2)
+        
+        ax.scatter(optimal_k, max_sharpe, color='red', s=50, zorder=5)
+        ax.text(optimal_k, max_sharpe * 1.01, 
+                f'Optimal K: {optimal_k:.4f}', fontsize=9, color='red', ha='center')
 
-    ax.set_xticks(np.arange(len(K_VALUES)))
-    ax.set_yticks(np.arange(len(S_VALUES)))
-    ax.set_xticklabels(k_labels, rotation=45, ha="right", fontsize=8)
-    ax.set_yticklabels(s_labels, fontsize=8)
-    
-    ax.set_xlabel('K-Factor (Volatility Exponent)', fontsize=10)
-    ax.set_ylabel('S-Factor (Stop Loss %)', fontsize=10)
-    ax.set_title(f'Sharpe Ratio Heatmap (Optimal K={optimal_k:.3f}, Optimal S={optimal_s*100:.1f}%)', fontsize=12)
-    
-    cbar = fig.colorbar(im, ax=ax, label='Annualized Sharpe Ratio')
-    
-    # Highlight the optimum point
-    # Find indices based on float match (using np.where for K_FACTOR_RANGE which is an array, and .index() for S_VALUES which is a list of rounded values)
-    opt_k_idx = np.where(np.isclose(K_FACTOR_RANGE, optimal_k))[0][0]
-    opt_s_idx = S_VALUES.index(optimal_s)
-    ax.scatter(opt_k_idx, opt_s_idx, marker='X', color='red', s=100, label='Optimum')
+        ax.set_xlabel('K-Factor (Volatility Exponent)', fontsize=10)
+        ax.set_ylabel('Annualized Sharpe Ratio', fontsize=10)
+        ax.set_title(f'Sharpe Ratio vs. K-Factor (Fixed S = {S_VALUES[0]*100:.2f}%)', fontsize=12)
+        ax.grid(True, linestyle=':', alpha=0.6)
+        
+    # --- Generate Plot (Original 2D Heatmap) ---
+    else:
+        fig, ax = plt.subplots(figsize=(12, 6))
+        
+        # Only label every 10th K tick for readability
+        k_labels = [f'{k:.3f}' if i % 10 == 0 else '' for i, k in enumerate(K_VALUES)]
+        s_labels = [f'{s*100:.1f}%' for s in S_VALUES]
+        
+        im = ax.imshow(sharpe_matrix.T, aspect='auto', origin='lower', cmap='viridis')
+
+        ax.set_xticks(np.arange(len(K_VALUES)))
+        ax.set_yticks(np.arange(len(S_VALUES)))
+        ax.set_xticklabels(k_labels, rotation=45, ha="right", fontsize=8)
+        ax.set_yticklabels(s_labels, fontsize=8)
+        
+        ax.set_xlabel('K-Factor (Volatility Exponent)', fontsize=10)
+        ax.set_ylabel('S-Factor (Stop Loss %)', fontsize=10)
+        ax.set_title(f'Sharpe Ratio Heatmap (Optimal K={optimal_k:.3f}, Optimal S={optimal_s*100:.1f}%)', fontsize=12)
+        
+        cbar = fig.colorbar(im, ax=ax, label='Annualized Sharpe Ratio')
+        
+        # Highlight the optimum point
+        opt_k_idx = np.where(np.isclose(K_FACTOR_RANGE, optimal_k))[0][0]
+        opt_s_idx = S_VALUES.index(optimal_s)
+        ax.scatter(opt_k_idx, opt_s_idx, marker='X', color='red', s=100, label='Optimum')
     
     plt.tight_layout()
     buf = io.BytesIO()
@@ -339,7 +363,6 @@ def run_k_s_grid_search(df_ind_raw):
     return optimal_k, optimal_s, img_base64
 
 # --- Comprehensive SMA Scan and Sharpe Ratio Calculation ---
-# (Kept for the separate plot/context, logic unchanged)
 
 def calculate_sharpe_ratios_scan(df_raw, min_sma, max_sma):
     """
@@ -484,251 +507,4 @@ def create_plot(df, sma_window, k_factor, s_factor):
     ax1.plot(df_plot.index, df_plot[sma_col], 
              label=f'SMA {sma_window}', 
              color='#FF6347', linestyle='-', linewidth=2.5, zorder=2) 
-    ax1.plot(df_plot.index, df_plot['DC_Upper'], label='DC Upper (20)', color='#9400D3', linestyle=':', linewidth=1.0, alpha=0.5, zorder=2)
-    ax1.plot(df_plot.index, df_plot['DC_Lower'], label='DC Lower (20)', color='#9400D3', linestyle=':', linewidth=1.0, alpha=0.5, zorder=2)
-    
-    ax1.set_ylabel('Price (Log Scale)', fontsize=10)
-    ax1.grid(True, linestyle='--', alpha=0.6)
-    ax1.legend(loc='upper left', fontsize=8)
-    ax1.set_yscale('log')
-    ax1.set_title(f'SMA {sma_window} Signal w/ Dynamic Sizing (K={k_factor:.3f}) - SL: {s_factor*100:.2f}% + {SL_FEE*100:.2f}% Fee', fontsize=12)
-
-    # --- Equity Plot (Bottom Panel) ---
-    ax2 = axes[1]
-    
-    final_strategy_return = (df_plot['Equity'].iloc[-1] - 1) * 100
-    
-    plotted_returns = df_plot['Strategy_Return']
-    sharpe_plotted = (plotted_returns.mean() / plotted_returns.std()) * np.sqrt(ANNUAL_TRADING_DAYS)
-    
-    ax2.plot(df_plot.index, df_plot['Equity'], label=f'Strategy Equity (Sharpe: {sharpe_plotted:.3f})', color='blue', linewidth=3)
-    ax2.plot(df_plot['Buy_Hold_Equity'], label='Buy & Hold Benchmark', color='gray', linestyle='--', alpha=0.7)
-    
-    ax2.set_xlabel('Date', fontsize=10)
-    ax2.set_ylabel('Cumulative Return', fontsize=10)
-    ax2.grid(True, linestyle='--', alpha=0.6)
-    ax2.legend(loc='upper left', fontsize=9)
-    
-    plt.tight_layout()
-    
-    # Save plot to buffer
-    buf = io.BytesIO()
-    plt.savefig(buf, format='png')
-    buf.seek(0)
-    plt.close(fig)
-    
-    img_base64 = base64.b64encode(buf.read()).decode('utf-8')
-    return img_base64, final_strategy_return
-
-# --- Setup Function (Runs once at startup) ---
-
-def setup_analysis():
-    """Runs the full backtest analysis, SMA scan, K-factor search, and populates global variables."""
-    global GLOBAL_IMG_BASE64, GLOBAL_ANALYSIS_IMG, GLOBAL_K_S_ANALYSIS_IMG, GLOBAL_SUMMARY_TABLE, GLOBAL_TOTAL_RETURN, GLOBAL_STATUS, GLOBAL_ERROR, GLOBAL_TOP_10_MD, GLOBAL_SHARPE, GLOBAL_OPTIMAL_K, GLOBAL_OPTIMAL_S
-    
-    MAIN_SMA_WINDOW = 120 
-
-    # --- Part 1: Data Fetching and Indicator Calculation ---
-    try:
-        df_raw = fetch_binance_data(SYMBOL, TIMEFRAME, START_DATE)
-        split_idx = int(len(df_raw) * 0.70)
-        df_raw_sliced = df_raw.iloc[:split_idx]
-        print(f"--- DATA SLICED: Running analysis on first {len(df_raw_sliced)} candles (70% of total) ---")
-        
-        if len(df_raw_sliced) < MAX_SMA_SCAN + 10:
-             raise ValueError(f"70% data slice is too short ({len(df_raw_sliced)} days). Max SMA {MAX_SMA_SCAN} requires more data.")
-        
-        df_ind = calculate_indicators(df_raw_sliced, [])
-        
-    except Exception as e:
-        GLOBAL_ERROR = f"Fatal Data/Indicator Error: {e}\n\nTraceback:\n{traceback.format_exc()}"
-        print(f"--- FATAL ERROR DURING DATA SETUP ---\n{GLOBAL_ERROR}", file=sys.stderr)
-        return
-
-    # --- Part 2: Comprehensive SMA Scan (SMA 1 to MAX_SMA_SCAN) ---
-    try:
-        results_df_sma = calculate_sharpe_ratios_scan(df_raw_sliced, min_sma=1, max_sma=MAX_SMA_SCAN)
-        GLOBAL_ANALYSIS_IMG = create_analysis_visualization(results_df_sma.sort_values(by='SMA_Window', ascending=True))
-        
-        top_10_df = results_df_sma.sort_values(by='Sharpe_Ratio', ascending=False).head(10).copy()
-        top_10_df['Sharpe_Ratio'] = top_10_df['Sharpe_Ratio'].apply(lambda x: f'{x:.3f}')
-        top_10_df['Final_Equity'] = top_10_df['Final_Equity'].apply(lambda x: f'{x:.2f}x')
-        top_10_df = top_10_df.rename(columns={'SMA_Window': 'SMA Window', 'Sharpe_Ratio': 'Sharpe Ratio', 'Final_Equity': 'Final Equity (x)'})
-        GLOBAL_TOP_10_MD = f"""
-## Top 10 SMA Crossover Strategies (Sharpe Ratio)
-{top_10_df.to_markdown(index=False)}
-"""
-        print(GLOBAL_TOP_10_MD)
-
-
-    except Exception as e:
-        GLOBAL_ERROR = f"Fatal Sharpe Scan Error: {e}\n\nTraceback:\n{traceback.format_exc()}"
-        print(f"--- FATAL ERROR DURING SHARPE SCAN ---\n{GLOBAL_ERROR}", file=sys.stderr)
-        return
-        
-    # --- Part 3: K & S Grid Search ---
-    try:
-        GLOBAL_OPTIMAL_K, GLOBAL_OPTIMAL_S, GLOBAL_K_S_ANALYSIS_IMG = run_k_s_grid_search(df_ind)
-        
-    except Exception as e:
-        GLOBAL_ERROR = f"Fatal K & S Grid Search Error: {e}\n\nTraceback:\n{traceback.format_exc()}"
-        print(f"--- FATAL ERROR DURING K & S SEARCH ---\n{GLOBAL_ERROR}", file=sys.stderr)
-        # Fallback values
-        GLOBAL_OPTIMAL_K = 0.35
-        GLOBAL_OPTIMAL_S = 0.05
-        return
-
-    # --- Part 4: Run Main Strategy with Optimal K & S ---
-    try:
-        print(f"--- Running main strategy with Optimal K: {GLOBAL_OPTIMAL_K:.3f} and Optimal S: {GLOBAL_OPTIMAL_S*100:.2f}% ---")
-        
-        df_final = calculate_dynamic_position(df_ind, GLOBAL_OPTIMAL_K, GLOBAL_OPTIMAL_S)
-        
-        returns = df_final['Strategy_Return']
-        if returns.std() > 0:
-            GLOBAL_SHARPE = (returns.mean() / returns.std()) * np.sqrt(ANNUAL_TRADING_DAYS)
-        else:
-            GLOBAL_SHARPE = 0.0
-
-        current_position = df_final['Held_Position'].iloc[-1]
-        
-        if current_position > 0:
-            GLOBAL_STATUS = f"LONG ({current_position:.2f})"
-        elif current_position < 0:
-            GLOBAL_STATUS = f"SHORT ({current_position:.2f})"
-        else:
-             GLOBAL_STATUS = "FLAT (0.00)"
-             
-        GLOBAL_IMG_BASE64, GLOBAL_TOTAL_RETURN = create_plot(df_final, MAIN_SMA_WINDOW, GLOBAL_OPTIMAL_K, GLOBAL_OPTIMAL_S)
-        
-        # Add SL_Hit column to the summary table
-        summary_df = df_final[['Close', f'SMA_{MAIN_SMA_WINDOW}', 'DC_Upper', 'DC_Lower', 'Held_Position', 'SL_Hit', 'Equity', 'Strategy_Return']].tail(10)
-        summary_df['SL_Hit'] = summary_df['SL_Hit'].astype(int) # Convert boolean to 1/0 for cleaner display
-        summary_df = summary_df.rename(columns={'Held_Position': 'Pos Held', 'Strategy_Return': 'Ret Final', f'SMA_{MAIN_SMA_WINDOW}': 'SMA 120', 'SL_Hit': 'SL Hit'})
-        
-        GLOBAL_SUMMARY_TABLE = summary_df.to_html(classes='table-auto w-full text-sm text-left', 
-                                                  float_format=lambda x: f'{x:,.4f}') 
-        
-        print(f"--- Strategy Sharpe Ratio (K={GLOBAL_OPTIMAL_K}, S={GLOBAL_OPTIMAL_S}): {GLOBAL_SHARPE:.3f} ---")
-        print("--- ANALYSIS COMPLETE ---")
-
-    except Exception as e:
-        GLOBAL_ERROR = f"Fatal Main Strategy Run Error: {e}\n\nTraceback:\n{traceback.format_exc()}"
-        print(f"--- FATAL ERROR DURING MAIN STRATEGY RUN ---\n{GLOBAL_ERROR}", file=sys.stderr)
-        return
-
-
-# --- Flask Web Server ---
-from flask import Flask, render_template_string
-
-app = Flask(__name__)
-
-@app.route('/')
-def analysis_dashboard():
-    """Renders the dashboard using pre-calculated global variables."""
-    
-    if GLOBAL_ERROR:
-        return render_template_string(f"""
-            <div class="p-8 text-center bg-white rounded-xl shadow-lg m-auto max-w-lg">
-                <h1 class="text-3xl font-bold text-red-600 mb-4">Analysis Failed at Startup</h1>
-                <p class="text-gray-700">The backtest and plotting could not be completed when the server started. This is usually due to a network error, Binance API limit, or missing data.</p>
-                <p class="mt-6 p-4 bg-red-100 text-red-800 rounded-lg text-left overflow-x-auto text-sm whitespace-pre-wrap"><strong>Details:</strong> {GLOBAL_ERROR}</p>
-            </div>
-        """)
-        
-    # Define the mathematical expression for the HTML display separately.
-    position_sizing_formula = r"$1 - \left( \frac{\text{DC Upper} - \text{DC Lower}}{\text{Close}} \right)^{k}$"
-    total_sl_loss = GLOBAL_OPTIMAL_S + SL_FEE
-        
-    # HTML Template with Tailwind CSS for modern look and responsiveness
-    html_content = f"""
-    <!DOCTYPE html>
-    <html lang="en">
-    <head>
-        <meta charset="UTF-8">
-        <meta name="viewport" content="width=device-width, initial-scale=1.0">
-        <title>SMA 120 Dynamic Position</title>
-        <script src="https://cdn.tailwindcss.com"></script>
-        <style>
-            .table-auto th, .table-auto td {{
-                padding: 8px 12px;
-                border: 1px solid #e5e7eb;
-                text-align: right;
-            }}
-            .table-auto th {{
-                text-align: left;
-                background-color: #f3f4f6;
-                font-weight: 600;
-            }}
-            .data-source-tag {{
-                font-size: 0.75rem;
-                padding: 0.25rem 0.5rem;
-                border-radius: 0.5rem;
-                font-weight: bold;
-                margin-left: 1rem;
-            }}
-        </style>
-    </head>
-    <body class="bg-gray-100 p-4 sm:p-8 font-sans">
-        <div class="max-w-7xl mx-auto bg-white p-6 sm:p-10 rounded-xl shadow-2xl">
-            <h1 class="text-4xl font-extrabold text-blue-700 mb-6 border-b-4 border-blue-200 pb-2">
-                Dynamic Volatility Sizing Dashboard (K & S Optimized)
-                <span class="data-source-tag bg-blue-200 text-blue-800">{GLOBAL_DATA_SOURCE}</span>
-            </h1>
-
-            <div class="grid md:grid-cols-4 gap-6 mb-8">
-                <div class="bg-blue-50 p-4 rounded-lg shadow-md">
-                    <p class="text-lg font-medium text-blue-600">Symbol</p>
-                    <p class="text-2xl font-bold text-blue-800">{SYMBOL} ({TIMEFRAME})</p>
-                </div>
-                <div class="bg-yellow-50 p-4 rounded-lg shadow-md">
-                    <p class="text-lg font-medium text-yellow-600">Optimal K-Factor</p>
-                    <p class="text-2xl font-bold text-yellow-800">{GLOBAL_OPTIMAL_K:.3f}</p>
-                </div>
-                <div class="bg-green-50 p-4 rounded-lg shadow-md">
-                    <p class="text-lg font-medium text-green-600">Optimal Stop Loss (S + Fee)</p>
-                    <p class="text-2xl font-bold text-green-800">{total_sl_loss*100:.2f}%</p>
-                </div>
-                <div class="bg-red-50 p-4 rounded-lg shadow-md">
-                    <p class="text-lg font-medium text-red-600">Current Position</p>
-                    <p class="text-2xl font-bold text-red-800">{GLOBAL_STATUS}</p>
-                </div>
-            </div>
-            
-            <div class="grid lg:grid-cols-2 gap-8 mb-8">
-                
-                <div class="order-1">
-                    <h2 class="text-2xl font-semibold text-gray-700 mb-4">Optimized Strategy Backtest</h2>
-                    <div class="bg-gray-50 p-2 rounded-lg shadow-inner overflow-hidden">
-                        <img src="data:image/png;base64,{GLOBAL_IMG_BASE64}" alt="Trading Strategy Backtest Plot" class="w-full h-auto rounded-lg"/>
-                    </div>
-                </div>
-
-                <div class="order-2">
-                    <h2 class="text-2xl font-semibold text-gray-700 mb-4">K & S Optimization Heatmap (Sharpe Ratio)</h2>
-                    <div class="bg-gray-50 p-2 rounded-lg shadow-inner overflow-hidden">
-                        <img src="data:image/png;base64,{GLOBAL_K_S_ANALYSIS_IMG}" alt="K and S Optimization Heatmap Plot" class="w-full h-auto rounded-lg"/>
-                    </div>
-                </div>
-            </div>
-            
-            <h2 class="text-2xl font-semibold text-gray-700 mt-8 mb-4">Recent Dynamic Strategy Data (SL Hit = 1 means Stop Loss Hit)</h2>
-            <div class="overflow-x-auto rounded-lg shadow-md border border-gray-200">
-                {GLOBAL_SUMMARY_TABLE}
-            </div>
-            
-            <p class="mt-8 text-sm text-gray-600 border-t pt-4">
-                **Strategy Logic:** Direction is determined by SMA 120 crossover. Position size is calculated dynamically (K={GLOBAL_OPTIMAL_K:.3f}): {position_sizing_formula}. **Stop Loss (SL) is set at {GLOBAL_OPTIMAL_S*100:.2f}% deviation from previous close, incurring a total loss of {total_sl_loss*100:.2f}% (SL + {SL_FEE*100:.2f}% fee) when triggered.**
-            </p>
-        </div>
-    </body>
-    </html>
-    """
-    return render_template_string(html_content)
-
-if __name__ == '__main__':
-    # 1. Run the entire data analysis and calculation process once at startup
-    setup_analysis()
-    
-    # 2. Start the Flask server to serve the pre-calculated results
-    app.run(host='0.0.0.0', port=PORT, debug=True, use_reloader=False)
+    ax1.plot(df_plot.index, df_plot['DC_Upper'], labe
