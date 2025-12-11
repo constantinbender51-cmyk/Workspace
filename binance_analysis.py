@@ -86,7 +86,8 @@ def run_backtest(df):
     df = df.dropna()
 
     # --- Prepare Lagged Data for Crosses and Conditions (T-1 and T-2) ---
-    # We create shifted columns directly on the DataFrame before dropping any more NaNs
+    
+    # We create shifted columns directly on the DataFrame
     df['close_l1'] = df['close'].shift(1)
     df[f'SMA_{SMA_LONG_TERM}_l1'] = df[f'SMA_{SMA_LONG_TERM}'].shift(1)
     df[f'SMA_{SMA_FAST}_l1'] = df[f'SMA_{SMA_FAST}'].shift(1)
@@ -139,7 +140,7 @@ def run_backtest(df):
     df['Position_Raw'] = 0.0 
     
     for i in range(len(df)):
-        # Extract signal values safely
+        # Extract signal values safely using iloc
         entry_long = LONG_ENTRY.iloc[i]
         entry_short = SHORT_ENTRY.iloc[i]
         exit_long = EXIT_LONG.iloc[i]
@@ -172,7 +173,7 @@ def run_backtest(df):
     
     # Signal: T-1 Position_Raw determines T's trade
     df['Signal'] = df['Position_Raw'].shift(1) 
-    df = df.dropna() # Drop the first row due to the final shift
+    df = df.dropna() # Drop the first row due to the final shift (Signal is NaN)
     
     # Calculate Daily Returns
     df['Daily_Return'] = df['close'].pct_change()
@@ -188,7 +189,7 @@ def run_backtest(df):
     df['Cumulative_BuyHold_Return'] = (1 + df['Daily_Return']).cumprod()
 
 
-    # --- 6. METRICS CALCULATION (Unchanged) ---
+    # --- 6. METRICS CALCULATION (Refined Trade Tracking Loop) ---
     
     total_days = len(df)
     annualized_returns = (df['Cumulative_Strategy_Return'].iloc[-1] ** (365 / total_days)) - 1
@@ -203,32 +204,46 @@ def run_backtest(df):
     trades = []
     trade_open = None
     
-    # Identify trades by signal change
-    for index, row in df.iterrows():
-        current_signal = row['Signal']
-        prev_signal = df['Signal'].shift(1).loc[index]
-
-        # Entry (Signal goes from 0 to 1 or -1)
-        if current_signal != 0 and prev_signal == 0:
-            trade_open = {'entry_date': index, 'entry_price': row['open'], 'position': current_signal}
+    # Use ILOC for safe index tracking
+    for i in range(len(df)):
+        index = df.index[i]
+        row = df.iloc[i] # Current day's row
         
-        # Exit (Signal goes from 1/-1 to 0) or Flip (1 to -1 or -1 to 1)
+        current_signal = row['Signal']
+        # The previous signal is the signal from the prior row (i-1)
+        prev_signal = df['Signal'].iloc[i-1] if i > 0 else 0.0
+
+        # 1. Entry (Signal goes from 0 to 1 or -1)
+        if current_signal != 0 and prev_signal == 0:
+            # Standard entry: Trade opens today based on yesterday's signal
+            if trade_open is None:
+                trade_open = {'entry_date': index, 'entry_price': row['open'], 'position': current_signal}
+        
+        # 2. Exit (Signal goes to 0) or Flip (Signal changes direction)
         elif current_signal != prev_signal and prev_signal != 0:
-             # Close old trade
-             pnl = (row['open'] / trade_open['entry_price'] - 1) * trade_open['position']
-             trades.append({
-                'entry_date': trade_open['entry_date'],
-                'exit_date': index,
-                'position': ('Long' if trade_open['position'] == 1 else 'Short') + (' (Flip)' if current_signal != 0 else ''),
-                'pnl': pnl,
-                'win': pnl > 0
-            })
-             
-             # Open new trade if it's a flip, otherwise set to None
-             if current_signal != 0:
-                 trade_open = {'entry_date': index, 'entry_price': row['open'], 'position': current_signal}
-             else:
-                 trade_open = None
+            
+            # --- Close Old Trade ---
+            # **CRITICAL FIX**: Check if a trade is actually open before accessing it.
+            if trade_open is not None: 
+                # PnL calculated based on today's opening price vs. entry price
+                pnl = (row['open'] / trade_open['entry_price'] - 1) * trade_open['position']
+                trades.append({
+                    'entry_date': trade_open['entry_date'],
+                    'exit_date': index,
+                    'position': ('Long' if trade_open['position'] == 1 else 'Short') + (' (Flip)' if current_signal != 0 else ''),
+                    'pnl': pnl,
+                    'win': pnl > 0
+                })
+            
+            # --- Open New Trade (if it was a flip) ---
+            if current_signal != 0:
+                trade_open = {'entry_date': index, 'entry_price': row['open'], 'position': current_signal}
+            else:
+                trade_open = None
+        
+        # 3. Handle Start In Position (Edge Case: First day is already 1 or -1)
+        elif i == 0 and current_signal != 0 and trade_open is None:
+             trade_open = {'entry_date': index, 'entry_price': row['open'], 'position': current_signal}
 
 
     # Close any remaining open trade at the last price
