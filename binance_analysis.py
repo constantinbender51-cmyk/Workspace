@@ -15,6 +15,7 @@ TIMEFRAME = '1d' # Daily candles
 START_DATE = '2018-01-01'
 SMA_WINDOWS_PLOT = [120] 
 DC_WINDOW = 20  # Donchian Channel Period (N)
+STOP_LOSS_PCT = 0.05 # 5% stop loss from previous day's close
 # K_FACTOR will be dynamically set by the optimal value found in the grid search or manually provided
 POSITION_SIZE_MAX = 1.0  # Maximum position size limit
 PORT = 8080
@@ -167,7 +168,7 @@ def get_strategy_returns_scan(df_raw, sma_window):
 def calculate_dynamic_position(df_ind_raw, k_factor):
     """
     Calculates position size based on volatility (DC width relative to price),
-    and sets the direction based on SMA 120.
+    and sets the direction based on SMA 120, incorporating Stop Loss logic.
     
     Size = 1 - (DC_Width / Close)^k_factor
     """
@@ -178,12 +179,10 @@ def calculate_dynamic_position(df_ind_raw, k_factor):
     df['Relative_Width'] = df['DC_Width'] / df['Close']
     
     # 2. Calculate Base Position Size (1 - (Relative_Width ^ k_factor)), clipped at lower bound 0
-    # Ensures Close > 0 and Relative_Width > 0 for np.power calculation stability
     valid_conditions = (df['Close'] > 0) & (df['Relative_Width'] > 0)
 
     df['Size_Decider'] = np.where(
         valid_conditions,
-        # Clip lower=0 remains for safety against negative sizes when volatility is high.
         (1 - np.power(df['Relative_Width'], k_factor)).clip(lower=0),
         0.0 
     )
@@ -195,6 +194,42 @@ def calculate_dynamic_position(df_ind_raw, k_factor):
     # 4. Final Held Position = Direction Decided Yesterday * Size Decided Yesterday
     df['Held_Position'] = (df['Direction_Decider'] * df['Size_Decider']).shift(1).fillna(0)
     
+    # Calculate Previous Close for SL calculation (used for current day's trade)
+    df['Previous_Close'] = df['Close'].shift(1)
+    
+    # Calculate daily asset return
+    df['Daily_Return'] = df['Close'].pct_change().fillna(0)
+    
+    # --- Stop Loss Logic (SL is hit based on intraday OHLC) ---
+    
+    # A. Long SL Hit Check: Low < SL Price (Prev Close * (1 - SL%))
+    SL_Price_Long = df['Previous_Close'] * (1 - STOP_LOSS_PCT)
+    is_long_sl_hit = (df['Held_Position'] > 0) & (df['Low'] < SL_Price_Long)
+
+    # B. Short SL Hit Check: High > SL Price (Prev Close * (1 + SL%))
+    SL_Price_Short = df['Previous_Close'] * (1 + STOP_LOSS_PCT)
+    is_short_sl_hit = (df['Held_Position'] < 0) & (df['High'] > SL_Price_Short)
+
+    df['SL_Hit'] = is_long_sl_hit | is_short_sl_hit
+
+    # C. Calculate Strategy Return:
+    # Default return: Daily asset return * Held Position
+    df['Strategy_Return'] = df['Daily_Return'] * df['Held_Position']
+
+    # If SL is hit, the return is capped at the maximum allowed loss (STOP_LOSS_PCT)
+    # Loss = -STOP_LOSS_PCT * |Held Position|
+    
+    # Apply SL for long positions
+    loss_long = -STOP_LOSS_PCT * df['Held_Position']
+    df.loc[is_long_sl_hit, 'Strategy_Return'] = loss_long
+    
+    # Apply SL for short positions
+    # Note: Held_Position is negative for shorts, so we use its absolute value for size.
+    loss_short = -STOP_LOSS_PCT * np.abs(df['Held_Position'])
+    df.loc[is_short_sl_hit, 'Strategy_Return'] = loss_short
+    
+    # --- End Stop Loss Logic ---
+    
     # 5. Enforce Global Start for Tradable Period (Index MAX_SMA_SCAN)
     tradable_start_index = MAX_SMA_SCAN 
     
@@ -203,19 +238,14 @@ def calculate_dynamic_position(df_ind_raw, k_factor):
         
     df_tradable = df.iloc[tradable_start_index:].copy()
 
-    # 6. Calculate Strategy Return
-    df_tradable['Daily_Return'] = df_tradable['Close'].pct_change()
-    daily_returns_clean = df_tradable['Daily_Return'].fillna(0)
-    df_tradable['Strategy_Return'] = daily_returns_clean * df_tradable['Held_Position']
-    
-    # 7. Calculate Cumulative Equity (starting fresh from 1.0)
+    # 6. Calculate Cumulative Equity
     df_tradable.loc[:, 'Equity'] = (1 + df_tradable['Strategy_Return']).cumprod()
     
     # Buy & Hold Benchmark
     start_price_bh = df_tradable['Close'].iloc[0]
     df_tradable.loc[:, 'Buy_Hold_Equity'] = df_tradable['Close'] / start_price_bh
     
-    return df_tradable[['Close', sma_col, 'DC_Upper', 'DC_Lower', 'Held_Position', 'Strategy_Return', 'Equity', 'Buy_Hold_Equity']]
+    return df_tradable[['Close', sma_col, 'DC_Upper', 'DC_Lower', 'Held_Position', 'SL_Hit', 'Strategy_Return', 'Equity', 'Buy_Hold_Equity']]
 
 # --- K-Factor Grid Search Function ---
 
@@ -415,8 +445,13 @@ def create_plot(df, sma_window, k_factor):
         if color and alpha > 0.01: # Don't plot near-zero positions
             end_adjusted = end + pd.Timedelta(days=1)
             ax1.axvspan(start, end_adjusted, facecolor=color, alpha=alpha, zorder=0)
-    
-    # 2. Price and SMAs/DC
+            
+    # 2. Highlight Stop Loss days with a black marker
+    sl_days = df_plot[df_plot['SL_Hit']].index
+    for day in sl_days:
+        ax1.axvspan(day, day + pd.Timedelta(days=1), facecolor='black', alpha=0.4, zorder=1)
+
+    # 3. Price and SMAs/DC
     ax1.plot(df_plot.index, df_plot['Close'], label='Price (Close)', color='#1f77b4', linewidth=1.5, alpha=0.9, zorder=2)
     
     # Plotting the main SMA 120 and DC for context
@@ -430,7 +465,7 @@ def create_plot(df, sma_window, k_factor):
     ax1.grid(True, linestyle='--', alpha=0.6)
     ax1.legend(loc='upper left', fontsize=8)
     ax1.set_yscale('log')
-    ax1.set_title(f'SMA {sma_window} Signal with Dynamic Sizing (Optimal K={k_factor:.3f})', fontsize=12)
+    ax1.set_title(f'SMA {sma_window} Signal with Dynamic Sizing (Optimal K={k_factor:.3f}) - Black Overlay: SL Hit @ {STOP_LOSS_PCT*100:.0f}%', fontsize=12)
 
     # --- Equity Plot (Bottom Panel) ---
     ax2 = axes[1]
@@ -542,8 +577,10 @@ def setup_analysis():
              
         GLOBAL_IMG_BASE64, GLOBAL_TOTAL_RETURN = create_plot(df_final, MAIN_SMA_WINDOW, GLOBAL_OPTIMAL_K)
         
-        summary_df = df_final[['Close', f'SMA_{MAIN_SMA_WINDOW}', 'DC_Upper', 'DC_Lower', 'Held_Position', 'Equity', 'Strategy_Return']].tail(10)
-        summary_df = summary_df.rename(columns={'Held_Position': 'Pos Held', 'Strategy_Return': 'Ret Final', f'SMA_{MAIN_SMA_WINDOW}': 'SMA 120'})
+        # Add SL_Hit column to the summary table
+        summary_df = df_final[['Close', f'SMA_{MAIN_SMA_WINDOW}', 'DC_Upper', 'DC_Lower', 'Held_Position', 'SL_Hit', 'Equity', 'Strategy_Return']].tail(10)
+        summary_df['SL_Hit'] = summary_df['SL_Hit'].astype(int) # Convert boolean to 1/0 for cleaner display
+        summary_df = summary_df.rename(columns={'Held_Position': 'Pos Held', 'Strategy_Return': 'Ret Final', f'SMA_{MAIN_SMA_WINDOW}': 'SMA 120', 'SL_Hit': 'SL Hit'})
         
         GLOBAL_SUMMARY_TABLE = summary_df.to_html(classes='table-auto w-full text-sm text-left', 
                                                   float_format=lambda x: f'{x:,.4f}') 
@@ -624,7 +661,7 @@ def analysis_dashboard():
                     <p class="text-2xl font-bold text-yellow-800">{GLOBAL_OPTIMAL_K:.3f}</p>
                 </div>
                 <div class="bg-green-50 p-4 rounded-lg shadow-md">
-                    <p class="text-lg font-medium text-green-600">Strategy Sharpe Ratio</p>
+                    <p class="text-lg font-medium text-green-600">Strategy Sharpe Ratio (SL Included)</p>
                     <p class="text-2xl font-bold text-green-800">{GLOBAL_SHARPE:.3f}</p>
                 </div>
                 <div class="bg-red-50 p-4 rounded-lg shadow-md">
@@ -650,13 +687,13 @@ def analysis_dashboard():
                 </div>
             </div>
             
-            <h2 class="text-2xl font-semibold text-gray-700 mt-8 mb-4">Recent Dynamic Strategy Data</h2>
+            <h2 class="text-2xl font-semibold text-gray-700 mt-8 mb-4">Recent Dynamic Strategy Data (SL Hit = 1 means Stop Loss Hit)</h2>
             <div class="overflow-x-auto rounded-lg shadow-md border border-gray-200">
                 {GLOBAL_SUMMARY_TABLE}
             </div>
             
             <p class="mt-8 text-sm text-gray-600 border-t pt-4">
-                **Strategy Logic:** The direction is determined by the SMA 120 crossover. The position size is calculated dynamically using the volatility ratio raised to the optimal K-factor (K={GLOBAL_OPTIMAL_K:.3f}): {position_sizing_formula}. Lower volatility leads to a larger position size (max 1.0).
+                **Strategy Logic:** Direction is determined by SMA 120 crossover. Position size is calculated dynamically (K={GLOBAL_OPTIMAL_K:.3f}): {position_sizing_formula}. **Stop Loss (SL) is implemented at {STOP_LOSS_PCT*100:.0f}% deviation from the previous close against the position.**
             </p>
         </div>
     </body>
