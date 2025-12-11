@@ -15,22 +15,27 @@ TIMEFRAME = '1d' # Daily candles
 START_DATE = '2018-01-01'
 SMA_WINDOWS_PLOT = [120] 
 DC_WINDOW = 20  # Donchian Channel Period (N)
-K_FACTOR = 0.2  # Exponent 'k' in the position size formula (new name/value)
+# K_FACTOR will be dynamically set by the optimal value found in the grid search
 POSITION_SIZE_MAX = 1.0  # Maximum position size limit
 PORT = 8080
 ANNUAL_TRADING_DAYS = 252 # Used for annualizing Sharpe Ratio
 MAX_SMA_SCAN = 120 # Maximum SMA for the scan and the global analysis start point
 SCAN_DELAY = 5.0 # Seconds delay after every 50 SMA calculations to respect API limits
 
+# --- Grid Search Range ---
+K_FACTOR_RANGE = np.arange(0.01, 0.81, 0.01)
+
 # --- Global Variables to store results (populated once at startup) ---
 GLOBAL_DATA_SOURCE = "Binance (CCXT)"
-GLOBAL_IMG_BASE64 = ""      # Image for Strategy Plot
-GLOBAL_ANALYSIS_IMG = ""    # Image for Sharpe/Equity Scan Plot
+GLOBAL_IMG_BASE64 = ""      # Image for Strategy Plot (using Optimal K)
+GLOBAL_ANALYSIS_IMG = ""    # Image for Sharpe/Equity Scan (for SMA window 1-120)
+GLOBAL_K_ANALYSIS_IMG = ""  # Image for K-Factor Scan
 GLOBAL_SUMMARY_TABLE = ""
 GLOBAL_TOTAL_RETURN = 0.0
-GLOBAL_SHARPE = 0.0         # Annualized Sharpe Ratio for the SMA 120 strategy
+GLOBAL_SHARPE = 0.0         # Annualized Sharpe Ratio for the Optimal K strategy
 GLOBAL_STATUS = "PENDING"
 GLOBAL_ERROR = None
+GLOBAL_OPTIMAL_K = 0.0      # Optimal K found in the search
 GLOBAL_TOP_10_MD = ""       # Markdown for the top 10 results
 
 # --- Data Fetching (CCXT with Pagination) ---
@@ -156,28 +161,28 @@ def get_strategy_returns_scan(df_raw, sma_window):
 
     return df_tradable
 
-# --- Dynamic Position Size Strategy (New Core Logic) ---
+# --- Dynamic Position Size Strategy (Core Logic adapted for K_FACTOR) ---
 
-def calculate_dynamic_position(df_ind_raw):
+def calculate_dynamic_position(df_ind_raw, k_factor):
     """
     Calculates position size based on volatility (DC width relative to price),
     and sets the direction based on SMA 120.
     
-    New Size = 1 - (DC_Width / Close)^K_FACTOR
+    Size = 1 - (DC_Width / Close)^k_factor
     """
     df = df_ind_raw.copy()
     
     # 1. Calculate Relative Volatility: DC Width / Price
     df['DC_Width'] = df['DC_Upper'] - df['DC_Lower']
-    
-    # Calculate Relative Width Ratio
     df['Relative_Width'] = df['DC_Width'] / df['Close']
     
-    # 2. Calculate Base Position Size (1 - (Relative_Width ^ K_FACTOR)), clipped
-    # Note: np.power handles the exponentiation.
+    # 2. Calculate Base Position Size (1 - (Relative_Width ^ k_factor)), clipped
+    # Ensures Close > 0 and Relative_Width > 0 for np.power calculation stability
+    valid_conditions = (df['Close'] > 0) & (df['Relative_Width'] > 0)
+
     df['Size_Decider'] = np.where(
-        (df['Close'] > 0), # Ensure Close > 0 to prevent division issues
-        (1 - np.power(df['Relative_Width'], K_FACTOR)).clip(lower=0, upper=POSITION_SIZE_MAX),
+        valid_conditions,
+        (1 - np.power(df['Relative_Width'], k_factor)).clip(lower=0, upper=POSITION_SIZE_MAX),
         0.0 
     )
     
@@ -199,8 +204,6 @@ def calculate_dynamic_position(df_ind_raw):
     # 6. Calculate Strategy Return
     df_tradable['Daily_Return'] = df_tradable['Close'].pct_change()
     daily_returns_clean = df_tradable['Daily_Return'].fillna(0)
-    
-    # Strategy Return = Daily Asset Return * Held Position
     df_tradable['Strategy_Return'] = daily_returns_clean * df_tradable['Held_Position']
     
     # 7. Calculate Cumulative Equity (starting fresh from 1.0)
@@ -211,6 +214,73 @@ def calculate_dynamic_position(df_ind_raw):
     df_tradable.loc[:, 'Buy_Hold_Equity'] = df_tradable['Close'] / start_price_bh
     
     return df_tradable[['Close', sma_col, 'DC_Upper', 'DC_Lower', 'Held_Position', 'Strategy_Return', 'Equity', 'Buy_Hold_Equity']]
+
+# --- K-Factor Grid Search Function ---
+
+def run_k_grid_search(df_ind_raw):
+    """Runs a grid search for the optimal K_FACTOR based on Sharpe Ratio."""
+    print("\n--- Starting K-Factor Grid Search (0.01 to 0.80) ---")
+    results = []
+    
+    for k in K_FACTOR_RANGE:
+        k = round(k, 2) # Ensure clean decimal representation
+        df_strategy = calculate_dynamic_position(df_ind_raw, k)
+        
+        if df_strategy.empty:
+            continue
+            
+        returns = df_strategy['Strategy_Return']
+        std_dev_daily_return = returns.std()
+        
+        if std_dev_daily_return > 0:
+            avg_daily_return = returns.mean()
+            sharpe_ratio = (avg_daily_return / std_dev_daily_return) * np.sqrt(ANNUAL_TRADING_DAYS)
+        else:
+            sharpe_ratio = 0.0 
+            
+        final_equity = df_strategy['Equity'].iloc[-1]
+            
+        results.append({
+            'K_Factor': k,
+            'Sharpe_Ratio': sharpe_ratio,
+            'Final_Equity': final_equity
+        })
+        
+        if (k * 100) % 10 == 0:
+            print(f"Processed K={k:.2f}...")
+
+    results_df = pd.DataFrame(results)
+    
+    if results_df.empty:
+        return 0.2, results_df, "" # Return default K if search failed
+
+    best_k_row = results_df.sort_values(by='Sharpe_Ratio', ascending=False).iloc[0]
+    optimal_k = best_k_row['K_Factor']
+    
+    print(f"--- K-Factor Search Complete. Optimal K: {optimal_k:.3f} ---")
+    
+    # Generate Plot
+    fig, ax = plt.subplots(1, 1, figsize=(10, 4))
+    ax.plot(results_df['K_Factor'], results_df['Sharpe_Ratio'], 
+            color='#5a3d90', linewidth=2)
+    
+    ax.scatter(optimal_k, best_k_row['Sharpe_Ratio'], color='red', s=50, zorder=5)
+    ax.text(optimal_k, best_k_row['Sharpe_Ratio'] * 1.05, 
+            f'Optimal K: {optimal_k:.3f}', fontsize=9, color='red', ha='center')
+
+    ax.set_xlabel('K-Factor (Exponent)', fontsize=10)
+    ax.set_ylabel('Annualized Sharpe Ratio', fontsize=10)
+    ax.set_title(f'Sharpe Ratio vs. K-Factor Optimization (SMA 120 Signal)', fontsize=12)
+    ax.grid(True, linestyle=':', alpha=0.6)
+    
+    plt.tight_layout()
+    buf = io.BytesIO()
+    plt.savefig(buf, format='png')
+    buf.seek(0)
+    plt.close(fig)
+    img_base64 = base64.b64encode(buf.read()).decode('utf-8')
+    
+    return optimal_k, results_df, img_base64
 
 # --- Comprehensive SMA Scan and Sharpe Ratio Calculation ---
 
@@ -223,14 +293,12 @@ def calculate_sharpe_ratios_scan(df_raw, min_sma, max_sma):
     print(f"\n--- Starting SMA Scan (SMA {min_sma} to {max_sma}) ---")
     
     for sma_w in range(min_sma, max_sma + 1):
-        # We use the simple, individual SMA strategy returns here for the scan chart
         df_strategy = get_strategy_returns_scan(df_raw, sma_w)
         
         if df_strategy.empty:
             continue
             
         returns = df_strategy['Strategy_Return']
-            
         std_dev_daily_return = returns.std()
         
         if std_dev_daily_return > 0:
@@ -249,12 +317,9 @@ def calculate_sharpe_ratios_scan(df_raw, min_sma, max_sma):
         
         if sma_w % 50 == 0:
             print(f"Processed SMA {sma_w}...")
-            # --- SAFEGUARD: Delay to avoid rate limiting during heavy scan ---
             time.sleep(SCAN_DELAY)
-            # -----------------------------------------------------------------
 
     results_df = pd.DataFrame(results)
-    
     print(f"--- SMA Scan Complete. Found {len(results_df)} valid windows. ---")
     return results_df
 
@@ -316,7 +381,7 @@ def create_analysis_visualization(results_df):
 
 # --- Plotting Dynamic Position Strategy ---
 
-def create_plot(df, sma_window):
+def create_plot(df, sma_window, k_factor):
     """Generates the main strategy plot (Close Price + Equity Curve) for the dynamic position size strategy."""
     
     df_plot = df.copy() 
@@ -364,7 +429,7 @@ def create_plot(df, sma_window):
     ax1.grid(True, linestyle='--', alpha=0.6)
     ax1.legend(loc='upper left', fontsize=8)
     ax1.set_yscale('log')
-    ax1.set_title(f'SMA {sma_window} Signal with Dynamic Volatility Sizing (K={K_FACTOR})', fontsize=12)
+    ax1.set_title(f'SMA {sma_window} Signal with Dynamic Sizing (Optimal K={k_factor:.3f})', fontsize=12)
 
     # --- Equity Plot (Bottom Panel) ---
     ax2 = axes[1]
@@ -396,26 +461,21 @@ def create_plot(df, sma_window):
 # --- Setup Function (Runs once at startup) ---
 
 def setup_analysis():
-    """Runs the full backtest analysis, SMA scan, and populates global variables."""
-    global GLOBAL_IMG_BASE64, GLOBAL_ANALYSIS_IMG, GLOBAL_SUMMARY_TABLE, GLOBAL_TOTAL_RETURN, GLOBAL_STATUS, GLOBAL_ERROR, GLOBAL_TOP_10_MD, GLOBAL_SHARPE
+    """Runs the full backtest analysis, SMA scan, K-factor search, and populates global variables."""
+    global GLOBAL_IMG_BASE64, GLOBAL_ANALYSIS_IMG, GLOBAL_K_ANALYSIS_IMG, GLOBAL_SUMMARY_TABLE, GLOBAL_TOTAL_RETURN, GLOBAL_STATUS, GLOBAL_ERROR, GLOBAL_TOP_10_MD, GLOBAL_SHARPE, GLOBAL_OPTIMAL_K
     
-    MAIN_SMA_WINDOW = 120 # Define main SMA for the plot
+    MAIN_SMA_WINDOW = 120 
 
     # --- Part 1: Data Fetching and Indicator Calculation ---
     try:
-        # 1. API Fetch - Called only once
         df_raw = fetch_binance_data(SYMBOL, TIMEFRAME, START_DATE)
-        
-        # 2. SLICING LOGIC: Slice to the first 70% of data
         split_idx = int(len(df_raw) * 0.70)
         df_raw_sliced = df_raw.iloc[:split_idx]
         print(f"--- DATA SLICED: Running analysis on first {len(df_raw_sliced)} candles (70% of total) ---")
         
-        # Check if the 70% slice is still long enough for the MAX_SMA_SCAN
         if len(df_raw_sliced) < MAX_SMA_SCAN + 10:
              raise ValueError(f"70% data slice is too short ({len(df_raw_sliced)} days). Max SMA {MAX_SMA_SCAN} requires more data.")
         
-        # 3. Calculate necessary indicators (SMA 120 and DC 20)
         df_ind = calculate_indicators(df_raw_sliced, [])
         
     except Exception as e:
@@ -425,22 +485,13 @@ def setup_analysis():
 
     # --- Part 2: Comprehensive SMA Scan (SMA 1 to MAX_SMA_SCAN) ---
     try:
-        # Pass the 70% slice for the scan (no API calls in this function)
-        results_df = calculate_sharpe_ratios_scan(df_raw_sliced, min_sma=1, max_sma=MAX_SMA_SCAN)
+        results_df_sma = calculate_sharpe_ratios_scan(df_raw_sliced, min_sma=1, max_sma=MAX_SMA_SCAN)
+        GLOBAL_ANALYSIS_IMG = create_analysis_visualization(results_df_sma.sort_values(by='SMA_Window', ascending=True))
         
-        # Generate the visualization
-        GLOBAL_ANALYSIS_IMG = create_analysis_visualization(results_df.sort_values(by='SMA_Window', ascending=True))
-        
-        # Generate Markdown table for the Top 10 results (for console and reference)
-        top_10_df = results_df.sort_values(by='Sharpe_Ratio', ascending=False).head(10).copy()
+        top_10_df = results_df_sma.sort_values(by='Sharpe_Ratio', ascending=False).head(10).copy()
         top_10_df['Sharpe_Ratio'] = top_10_df['Sharpe_Ratio'].apply(lambda x: f'{x:.3f}')
         top_10_df['Final_Equity'] = top_10_df['Final_Equity'].apply(lambda x: f'{x:.2f}x')
-        top_10_df = top_10_df.rename(columns={
-            'SMA_Window': 'SMA Window', 
-            'Sharpe_Ratio': 'Sharpe Ratio', 
-            'Final_Equity': 'Final Equity (x)'
-        })
-        
+        top_10_df = top_10_df.rename(columns={'SMA_Window': 'SMA Window', 'Sharpe_Ratio': 'Sharpe Ratio', 'Final_Equity': 'Final Equity (x)'})
         GLOBAL_TOP_10_MD = f"""
 ## Top 10 SMA Crossover Strategies (Sharpe Ratio)
 {top_10_df.to_markdown(index=False)}
@@ -452,21 +503,29 @@ def setup_analysis():
         GLOBAL_ERROR = f"Fatal Sharpe Scan Error: {e}\n\nTraceback:\n{traceback.format_exc()}"
         print(f"--- FATAL ERROR DURING SHARPE SCAN ---\n{GLOBAL_ERROR}", file=sys.stderr)
         return
+        
+    # --- Part 3: K-Factor Grid Search ---
+    try:
+        GLOBAL_OPTIMAL_K, results_df_k, GLOBAL_K_ANALYSIS_IMG = run_k_grid_search(df_ind)
 
-    # --- Part 3: Dynamic Position Sizing Strategy Backtest ---
+    except Exception as e:
+        GLOBAL_ERROR = f"Fatal K-Factor Grid Search Error: {e}\n\nTraceback:\n{traceback.format_exc()}"
+        print(f"--- FATAL ERROR DURING K-FACTOR SEARCH ---\n{GLOBAL_ERROR}", file=sys.stderr)
+        # Fall back to default K=0.2 if search fails
+        GLOBAL_OPTIMAL_K = 0.2
+        return
+
+    # --- Part 4: Run Main Strategy with Optimal K ---
     try:
         
-        # 1. Get Dynamic Position Sizing Results
-        df_final = calculate_dynamic_position(df_ind)
+        df_final = calculate_dynamic_position(df_ind, GLOBAL_OPTIMAL_K)
         
-        # 2. Calculate final Sharpe Ratio for the Dynamic strategy
         returns = df_final['Strategy_Return']
         if returns.std() > 0:
             GLOBAL_SHARPE = (returns.mean() / returns.std()) * np.sqrt(ANNUAL_TRADING_DAYS)
         else:
             GLOBAL_SHARPE = 0.0
 
-        # 3. Determine current status
         current_position = df_final['Held_Position'].iloc[-1]
         
         if current_position > 0:
@@ -476,23 +535,20 @@ def setup_analysis():
         else:
              GLOBAL_STATUS = "FLAT (0.00)"
              
-        # 4. Create Plot
-        GLOBAL_IMG_BASE64, GLOBAL_TOTAL_RETURN = create_plot(df_final, MAIN_SMA_WINDOW)
+        GLOBAL_IMG_BASE64, GLOBAL_TOTAL_RETURN = create_plot(df_final, MAIN_SMA_WINDOW, GLOBAL_OPTIMAL_K)
         
-        # 5. Populate Global Results
-        # Create summary table
         summary_df = df_final[['Close', f'SMA_{MAIN_SMA_WINDOW}', 'DC_Upper', 'DC_Lower', 'Held_Position', 'Equity', 'Strategy_Return']].tail(10)
         summary_df = summary_df.rename(columns={'Held_Position': 'Pos Held', 'Strategy_Return': 'Ret Final', f'SMA_{MAIN_SMA_WINDOW}': 'SMA 120'})
         
         GLOBAL_SUMMARY_TABLE = summary_df.to_html(classes='table-auto w-full text-sm text-left', 
                                                   float_format=lambda x: f'{x:,.4f}') 
         
-        print(f"--- Dynamic Strategy Sharpe Ratio: {GLOBAL_SHARPE:.3f} ---")
+        print(f"--- Optimal K Strategy Sharpe Ratio: {GLOBAL_SHARPE:.3f} ---")
         print("--- ANALYSIS COMPLETE ---")
 
     except Exception as e:
-        GLOBAL_ERROR = f"Fatal Main Backtest Error: {e}\n\nTraceback:\n{traceback.format_exc()}"
-        print(f"--- FATAL ERROR DURING MAIN BACKTEST ---\n{GLOBAL_ERROR}", file=sys.stderr)
+        GLOBAL_ERROR = f"Fatal Main Strategy Run Error: {e}\n\nTraceback:\n{traceback.format_exc()}"
+        print(f"--- FATAL ERROR DURING MAIN STRATEGY RUN ---\n{GLOBAL_ERROR}", file=sys.stderr)
         return
 
 
@@ -515,7 +571,7 @@ def analysis_dashboard():
         """)
         
     # Define the mathematical expression for the HTML display separately.
-    position_sizing_formula = r"$1 - \left( \frac{\text{DC Upper} - \text{DC Lower}}{\text{Close}} \right)^{0.2}$"
+    position_sizing_formula = r"$1 - \left( \frac{\text{DC Upper} - \text{DC Lower}}{\text{Close}} \right)^{k}$"
         
     # HTML Template with Tailwind CSS for modern look and responsiveness
     html_content = f"""
@@ -559,12 +615,12 @@ def analysis_dashboard():
                     <p class="text-2xl font-bold text-blue-800">{SYMBOL} ({TIMEFRAME})</p>
                 </div>
                 <div class="bg-yellow-50 p-4 rounded-lg shadow-md">
-                    <p class="text-lg font-medium text-yellow-600">Strategy Sharpe Ratio</p>
-                    <p class="text-2xl font-bold text-yellow-800">{GLOBAL_SHARPE:.3f}</p>
+                    <p class="text-lg font-medium text-yellow-600">Optimal K-Factor</p>
+                    <p class="text-2xl font-bold text-yellow-800">{GLOBAL_OPTIMAL_K:.3f}</p>
                 </div>
                 <div class="bg-green-50 p-4 rounded-lg shadow-md">
-                    <p class="text-lg font-medium text-green-600">Total Strategy Return</p>
-                    <p class="text-2xl font-bold text-green-800">{GLOBAL_TOTAL_RETURN:.2f}%</p>
+                    <p class="text-lg font-medium text-green-600">Strategy Sharpe Ratio</p>
+                    <p class="text-2xl font-bold text-green-800">{GLOBAL_SHARPE:.3f}</p>
                 </div>
                 <div class="bg-red-50 p-4 rounded-lg shadow-md">
                     <p class="text-lg font-medium text-red-600">Current Position</p>
@@ -575,16 +631,16 @@ def analysis_dashboard():
             <div class="grid lg:grid-cols-2 gap-8 mb-8">
                 
                 <div class="order-1">
-                    <h2 class="text-2xl font-semibold text-gray-700 mb-4">Dynamic Position Sizing (SMA 120 Signal)</h2>
+                    <h2 class="text-2xl font-semibold text-gray-700 mb-4">Dynamic Position Sizing (Optimal K)</h2>
                     <div class="bg-gray-50 p-2 rounded-lg shadow-inner overflow-hidden">
                         <img src="data:image/png;base64,{GLOBAL_IMG_BASE64}" alt="Trading Strategy Backtest Plot" class="w-full h-auto rounded-lg"/>
                     </div>
                 </div>
 
                 <div class="order-2">
-                    <h2 class="text-2xl font-semibold text-gray-700 mb-4">SMA Crossover Optimization Scan (1 to {MAX_SMA_SCAN} on 70% Data)</h2>
+                    <h2 class="text-2xl font-semibold text-gray-700 mb-4">K-Factor Optimization Plot (Sharpe vs K)</h2>
                     <div class="bg-gray-50 p-2 rounded-lg shadow-inner overflow-hidden">
-                        <img src="data:image/png;base64,{GLOBAL_ANALYSIS_IMG}" alt="SMA Sharpe Ratio and Equity Analysis Plot" class="w-full h-auto rounded-lg"/>
+                        <img src="data:image/png;base64,{GLOBAL_K_ANALYSIS_IMG}" alt="K-Factor Optimization Plot" class="w-full h-auto rounded-lg"/>
                     </div>
                 </div>
             </div>
@@ -595,7 +651,7 @@ def analysis_dashboard():
             </div>
             
             <p class="mt-8 text-sm text-gray-600 border-t pt-4">
-                **Strategy Logic:** The direction is determined by the SMA 120 crossover. The position size is calculated dynamically: {position_sizing_formula}. Lower volatility leads to a larger position size (max 1.0).
+                **Strategy Logic:** The direction is determined by the SMA 120 crossover. The position size is calculated dynamically using the volatility ratio raised to the optimal K-factor: {position_sizing_formula}. Lower volatility leads to a larger position size (max 1.0).
             </p>
         </div>
     </body>
