@@ -19,7 +19,7 @@ T_FACTOR = 100  # Multiplier 't' in the position size formula
 POSITION_SIZE_MAX = 1.0  # Maximum position size limit
 PORT = 8080
 ANNUAL_TRADING_DAYS = 252 # Used for annualizing Sharpe Ratio
-MAX_SMA_SCAN = 120 # Maximum SMA for the scan and the global analysis start point (changed to 120/MAX(SMA, DC) for efficiency)
+MAX_SMA_SCAN = 120 # Maximum SMA for the scan and the global analysis start point
 SCAN_DELAY = 5.0 # Seconds delay after every 50 SMA calculations to respect API limits
 
 # --- Global Variables to store results (populated once at startup) ---
@@ -166,43 +166,28 @@ def calculate_dynamic_position(df_ind_raw):
     df = df_ind_raw.copy()
     
     # 1. Calculate Volatility Component: (DC Width / Price) * t
-    # Note: We use the previous day's data (shifted by 1) for this calculation
-    
-    # Calculate DC Width
     df['DC_Width'] = df['DC_Upper'] - df['DC_Lower']
     
     # Calculate Volatility Ratio: (DC Width / Price) * t
-    # Using Close price as the Price reference
     df['Volatility_Ratio'] = (df['DC_Width'] / df['Close']) * T_FACTOR
     
     # 2. Calculate Base Position Size (1 / Volatility_Ratio), capped at POSITION_SIZE_MAX
-    # We rely on the previous day's DC/Price to determine today's position size.
-    df['Base_Size'] = (1 / df['Volatility_Ratio']).shift(1)
-    df['Base_Size'] = df['Base_Size'].clip(upper=POSITION_SIZE_MAX)
+    # Note: Using np.where to handle division by zero or infinite volatility safely
+    df['Size_Decider'] = np.where(
+        (df['Volatility_Ratio'] > 0),
+        (1 / df['Volatility_Ratio']).clip(upper=POSITION_SIZE_MAX),
+        0.0 # Set size to 0 if ratio is non-positive or zero
+    )
     
     # 3. Determine Direction Signal (+1 or -1) from SMA 120
     sma_col = 'SMA_120'
-    df['Direction_Signal'] = np.where(df['Close'] > df[sma_col], 1, -1)
-    
-    # 4. Final Position = Direction Signal * Base Position Size
-    # The Position is set by the Direction_Signal (current day) * Base_Size (lagged, from previous day)
-    df['Held_Position'] = df['Direction_Signal'].shift(1) * df['Base_Size'].shift(-1).fillna(0) # Logic adjustment to use correct shifted size
-    
-    # --- Correct Shift Logic for Position Size ---
-    # The Position Size decision (Base_Size) should be based on yesterday's Close/DC width.
-    # The Direction Signal decision should also be based on yesterday's close/SMA 120.
-    
-    # A. Calculate Position Size (based on end-of-day data)
-    df['Size_Decider'] = (1 / df['Volatility_Ratio']).clip(upper=POSITION_SIZE_MAX)
-    
-    # B. Calculate Direction Signal (based on end-of-day data)
     df['Direction_Decider'] = np.where(df['Close'] > df[sma_col], 1, -1)
     
     # C. Final Held Position = Direction Decided Yesterday * Size Decided Yesterday
+    # Position for day T is decided using data from day T-1.
     df['Held_Position'] = (df['Direction_Decider'] * df['Size_Decider']).shift(1).fillna(0)
-    # ----------------------------------------------
     
-    # 5. Enforce Global Start for Tradable Period (Index MAX_SMA_SCAN)
+    # 4. Enforce Global Start for Tradable Period (Index MAX_SMA_SCAN)
     tradable_start_index = MAX_SMA_SCAN 
     
     if len(df) <= tradable_start_index:
@@ -210,14 +195,14 @@ def calculate_dynamic_position(df_ind_raw):
         
     df_tradable = df.iloc[tradable_start_index:].copy()
 
-    # 6. Calculate Strategy Return
+    # 5. Calculate Strategy Return
     df_tradable['Daily_Return'] = df_tradable['Close'].pct_change()
     daily_returns_clean = df_tradable['Daily_Return'].fillna(0)
     
     # Strategy Return = Daily Asset Return * Held Position
     df_tradable['Strategy_Return'] = daily_returns_clean * df_tradable['Held_Position']
     
-    # 7. Calculate Cumulative Equity (starting fresh from 1.0)
+    # 6. Calculate Cumulative Equity (starting fresh from 1.0)
     df_tradable.loc[:, 'Equity'] = (1 + df_tradable['Strategy_Return']).cumprod()
     
     # Buy & Hold Benchmark
@@ -528,6 +513,10 @@ def analysis_dashboard():
             </div>
         """)
         
+    # Define the mathematical expression for the HTML display separately, 
+    # avoiding complex escapes inside the main f-string.
+    position_sizing_formula = r"$1 / \left( \frac{\text{DC Upper} - \text{DC Lower}}{\text{Close}} \times 100 \right)$"
+        
     # HTML Template with Tailwind CSS for modern look and responsiveness
     html_content = f"""
     <!DOCTYPE html>
@@ -606,7 +595,7 @@ def analysis_dashboard():
             </div>
             
             <p class="mt-8 text-sm text-gray-600 border-t pt-4">
-                **Strategy Logic:** The direction is determined by the SMA 120 crossover. The position size is calculated dynamically: $1 / \left( \frac{\text{DC Upper} - \text{DC Lower}}{\text{Close}} \times {T\_FACTOR} \right)$. Lower volatility leads to a larger position size (max 1.0).
+                **Strategy Logic:** The direction is determined by the SMA 120 crossover. The position size is calculated dynamically: {position_sizing_formula}. Lower volatility leads to a larger position size (max 1.0).
             </p>
         </div>
     </body>
