@@ -17,7 +17,7 @@ SYMBOL = 'BTC/USDT'
 TIMEFRAME = '1d' 
 START_DATE = '2018-01-01 00:00:00'
 PORT = 8080
-WINDOW_SIZE = 50 # Rolling optimization window
+WINDOW_SIZE = 2000 # Rolling optimization window
 FIXED_III_THRESHOLD = 0.1 # New fixed threshold
 
 def fetch_data():
