@@ -17,6 +17,7 @@ SMA_PERIOD = 120
 PLOT_FILE = 'strategy_results.png'
 SERVER_PORT = 8080
 RESULTS_DIR = 'results'
+ANNUALIZATION_FACTOR = 365 # Used for annualizing Sharpe Ratio for daily data
 
 # --- 1. Data Fetching Utilities ---
 
@@ -94,6 +95,29 @@ def fetch_klines(symbol, interval, start_str):
     
     return df.dropna()
 
+# --- Sharpe Ratio Calculation ---
+
+def calculate_sharpe_ratio(returns, annualization_factor=ANNUALIZATION_FACTOR, risk_free_rate=0):
+    """
+    Calculates the Annualized Sharpe Ratio.
+    """
+    if returns.empty:
+        return 0.0
+        
+    # Calculate mean daily excess return
+    excess_return = returns - risk_free_rate
+    mean_excess_return = excess_return.mean()
+
+    # Calculate standard deviation of daily returns
+    std_dev = returns.std()
+    
+    if std_dev == 0:
+        return 0.0
+
+    # Annualize: mean * T / (std * sqrt(T))
+    sharpe = (mean_excess_return * annualization_factor) / (std_dev * np.sqrt(annualization_factor))
+    return sharpe
+
 # --- 2. Backtesting Logic ---
 
 def run_backtest(df):
@@ -103,35 +127,34 @@ def run_backtest(df):
     print(f"-> Running backtest on {len(df)} candles...")
     
     # 2.1 Calculate the 120-day Simple Moving Average (SMA)
-    # The SMA is calculated based on the Close price of the current day.
+    # The SMA is calculated based on the Close price.
     df[f'SMA_{SMA_PERIOD}'] = df['Close'].rolling(window=SMA_PERIOD).mean()
     
     # 2.2 Calculate daily returns (log returns are often preferred for backtesting)
     df['Daily_Return'] = np.log(df['Close'] / df['Close'].shift(1))
 
-    # 2.3 Generate Trading Signals (Position)
-    # Rule: Price > SMA = Long (+1), Price < SMA = Short (-1)
-    # Signal on day T is based on the comparison of Close(T-1) vs. SMA(T-1)
+    # --- Look-ahead Bias Prevention (Explicit shift) ---
+    # For a decision on day T (applied to returns of day T), we use Close(T-1) and SMA(T-1)
+    df['Yesterday_Close'] = df['Close'].shift(1)
+    df['Yesterday_SMA'] = df[f'SMA_{SMA_PERIOD}'].shift(1)
     
-    # Calculate the position for the *next* day based on today's closing data
-    # We use numpy.where for vectorized conditional assignment
+    # 2.3 Generate Trading Signals (Position for day T)
+    # Rule: Position on day T is based on (Close(T-1) vs SMA(T-1))
     df['Position'] = np.where(
-        df['Close'] > df[f'SMA_{SMA_PERIOD}'],  # Condition: Current Close > Current SMA
-        1,                                      # Value if True (Long)
-        -1                                      # Value if False (Short)
+        df['Yesterday_Close'] > df['Yesterday_SMA'],  # Condition: Close(T-1) > SMA(T-1)
+        1,                                           # Value if True (Long position held on Day T)
+        -1                                           # Value if False (Short position held on Day T)
     )
-
-    # Shift the position column forward by one day. 
-    # This means the position calculated on day T is actually held on day T+1, 
-    # which correctly avoids look-ahead bias.
-    df['Position'] = df['Position'].shift(1)
     
-    # The first SMA_PERIOD entries will have NaN SMA, and the first return will be NaN,
-    # and the first Position will be NaN. We drop these.
+    # Drop the temporary columns for cleanliness and keep the final SMA column
+    df = df.drop(columns=['Yesterday_Close', 'Yesterday_SMA'])
+    # --- End Look-ahead Prevention ---
+    
+    # The first SMA_PERIOD entries will have NaN SMA. We drop rows with any NaNs.
     df = df.dropna()
     
     # 2.4 Calculate Strategy Returns
-    # Strategy Return = Daily_Return * Position
+    # Strategy Return = Daily_Return(T) * Position(T)
     df['Strategy_Return'] = df['Daily_Return'] * df['Position']
     
     # 2.5 Calculate Cumulative Returns (Equity Curve)
@@ -139,14 +162,20 @@ def run_backtest(df):
     df['Cumulative_Strategy_Return'] = np.exp(df['Strategy_Return'].cumsum())
     df['Buy_and_Hold_Return'] = np.exp(df['Daily_Return'].cumsum())
     
-    # Calculate basic stats
+    # 2.6 Calculate Metrics
     total_return = (df['Cumulative_Strategy_Return'].iloc[-1] - 1) * 100
     bh_return = (df['Buy_and_Hold_Return'].iloc[-1] - 1) * 100
+    
+    strategy_sharpe = calculate_sharpe_ratio(df['Strategy_Return'])
+    bh_sharpe = calculate_sharpe_ratio(df['Daily_Return'])
     
     print("-" * 40)
     print("Backtest Summary:")
     print(f"Strategy Total Return: {total_return:.2f}%")
     print(f"Buy & Hold Total Return: {bh_return:.2f}%")
+    print("-" * 40)
+    print(f"Strategy Annualized Sharpe: {strategy_sharpe:.2f}")
+    print(f"Buy & Hold Annualized Sharpe: {bh_sharpe:.2f}")
     print("-" * 40)
     
     return df
