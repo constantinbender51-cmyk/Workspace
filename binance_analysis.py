@@ -16,7 +16,7 @@ PLOT_FILE = 'strategy_results.png'
 SERVER_PORT = 8080 
 RESULTS_DIR = 'results'
 ANNUALIZATION_FACTOR = 365 # Used for annualizing Sharpe Ratio for daily data
-REGIME_FILTER_SMA = 360 # Macro-regime filter changed to SMA 360
+REGIME_FILTER_SMA = 360 # Macro-regime filter (SMA 360)
 
 # --- FINAL OPTIMIZED PARAMETER SETS ---
 
@@ -140,19 +140,24 @@ def run_backtest_regime_switching(df_raw):
     """
     df = df_raw.copy()
     
-    # 1. Calculate SMA 360 Filter
+    # 1. Calculate SMAs and Raw Daily Returns
     df[f'SMA_{REGIME_FILTER_SMA}'] = df['Close'].rolling(window=REGIME_FILTER_SMA).mean()
     df['Daily_Return_Raw'] = np.log(df['Close'] / df['Close'].shift(1))
 
-    # --- Prepare Lagged Indicators ---
-    df['Yesterday_Close'] = df['Close'].shift(1)
-    df['Yesterday_SMA_360'] = df[f'SMA_{REGIME_FILTER_SMA}'].shift(1)
-    
     # Pre-calculate strategy-specific SMAs (M=143 and M=157)
     df[f'SMA_{BULL_PARAMS["M"]}'] = df['Close'].rolling(window=BULL_PARAMS["M"]).mean()
     df[f'SMA_{BEAR_PARAMS["M"]}'] = df['Close'].rolling(window=BEAR_PARAMS["M"]).mean()
 
-    # Drop initial NaNs
+    # --- Prepare LAG INDICATORS (CRITICAL FOR LOOKAHEAD PREVENTION AND FIXING ERROR) ---
+    df['Yesterday_Close'] = df['Close'].shift(1)
+    df['Yesterday_SMA_360'] = df[f'SMA_{REGIME_FILTER_SMA}'].shift(1)
+    
+    # Lagged SMAs for the strategy itself
+    df[f'LAG_SMA_{BULL_PARAMS["M"]}'] = df[f'SMA_{BULL_PARAMS["M"]}'].shift(1)
+    df[f'LAG_SMA_{BEAR_PARAMS["M"]}'] = df[f'SMA_{BEAR_PARAMS["M"]}'].shift(1)
+
+
+    # Drop initial NaNs (max lag is 360 + 1)
     df = df.dropna().copy()
     
     if df.empty:
@@ -184,11 +189,11 @@ def run_backtest_regime_switching(df_raw):
         reentry_prox = current_params['P']
         sma_period = current_params['M']
         
-        # Lag the strategy's own optimized SMA based on the current regime's M value
-        strategy_sma_key = f'SMA_{sma_period}'
-        yesterday_strategy_sma = df.loc[index, strategy_sma_key].shift(1)
+        # Access the correct LAG SMAs using the optimized M value
+        strategy_sma_lag_key = f'LAG_SMA_{sma_period}'
+        yesterday_strategy_sma = df.loc[index, strategy_sma_lag_key]
         
-        # Proximity uses the current regime's strategy SMA (not the filter SMA 360)
+        # Proximity uses the current regime's strategy SMA
         proximity = np.abs((entry_price - yesterday_strategy_sma) / yesterday_strategy_sma)
         
         # --- 2. Calculate Base Position and Direction ---
