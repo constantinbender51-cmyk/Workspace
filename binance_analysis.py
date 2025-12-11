@@ -18,7 +18,8 @@ DC_WINDOW = 20  # Donchian Channel Period
 POSITION_SIZE = 1  # Unit of asset traded (+1 for Long, -1 for Short)
 PORT = 8080
 ANNUAL_TRADING_DAYS = 252 # Used for annualizing Sharpe Ratio
-MAX_SMA_SCAN = 400 # Maximum SMA for the scan and the global analysis start point
+MAX_SMA_SCAN = 1000 # Maximum SMA for the scan and the global analysis start point
+SCAN_DELAY = 5.0 # Seconds delay after every 50 SMA calculations to respect API limits
 
 # --- Global Variables to store results (populated once at startup) ---
 GLOBAL_DATA_SOURCE = "Binance (CCXT)"
@@ -34,6 +35,7 @@ GLOBAL_TOP_10_MD = ""       # Markdown for the top 10 results
 
 def fetch_binance_data(symbol, timeframe, start_date):
     """
+    *** CALLED ONLY ONCE ***
     Fetches historical OHLCV data from Binance using CCXT with pagination.
     """
     exchange = ccxt.binance({
@@ -44,7 +46,7 @@ def fetch_binance_data(symbol, timeframe, start_date):
     all_ohlcv = []
     limit = 1000
     
-    print(f"--- STARTING DATA FETCH: {symbol} ({timeframe}) from {start_date} via Binance/CCXT ---")
+    print(f"--- STARTING API DATA FETCH: {symbol} ({timeframe}) from {start_date} via Binance/CCXT ---")
 
     while True:
         try:
@@ -76,7 +78,6 @@ def fetch_binance_data(symbol, timeframe, start_date):
             raise 
             
     # Check minimum data needed for the longest SMA scan (MAX_SMA_SCAN)
-    # Plus a few extra days for safe calculation/slicing
     if len(all_ohlcv) < MAX_SMA_SCAN + 10: 
         raise ValueError(f"Not enough data fetched. Required >{MAX_SMA_SCAN + 10}, received {len(all_ohlcv)}.")
         
@@ -113,6 +114,7 @@ def get_strategy_returns(df_raw, sma_window):
     """
     Calculates returns for a Long/Short strategy based on a single given SMA window.
     Enforces a global start time for equity/Sharpe calculation (MAX_SMA_SCAN day).
+    *** Operates only on the in-memory df_raw (no API calls) ***
     """
     df = df_raw.copy()
     sma_col = f'SMA_{sma_window}'
@@ -138,8 +140,6 @@ def get_strategy_returns(df_raw, sma_window):
     
     # 4. Enforce Global Start for Tradable Period (Index MAX_SMA_SCAN)
     
-    # The first MAX_SMA_SCAN rows are needed for the longest SMA calculation. 
-    # Returns/Equity must start on the first day the SMA 1000 decision is fully informed (Day 1001).
     tradable_start_index = MAX_SMA_SCAN 
     
     if len(df) <= tradable_start_index:
@@ -171,7 +171,7 @@ def calculate_sharpe_ratios_scan(df_raw, min_sma, max_sma):
     print(f"\n--- Starting SMA Scan (Sharpe Ratio Calculation from SMA {min_sma} to {max_sma}) ---")
     
     for sma_w in range(min_sma, max_sma + 1):
-        # Pass the full 70% data slice. The strategy function handles the global start time.
+        # Passes the sliced data (no API call)
         df_strategy = get_strategy_returns(df_raw, sma_w)
         
         if df_strategy.empty:
@@ -197,6 +197,9 @@ def calculate_sharpe_ratios_scan(df_raw, min_sma, max_sma):
         
         if sma_w % 50 == 0:
             print(f"Processed SMA {sma_w}...")
+            # --- SAFEGUARD: Delay to avoid rate limiting during heavy scan ---
+            time.sleep(SCAN_DELAY)
+            # -----------------------------------------------------------------
 
     results_df = pd.DataFrame(results)
     
@@ -265,7 +268,6 @@ def create_plot(df, strategy_sma):
     """Generates the main SMA 120 strategy plot (Close Price + Equity Curve)
        and highlights intersection days (SMA 120 Loss & SMA 40 Profit)."""
     
-    # Note: df here is already the globally tradable subset and contains Strategy_Return_40
     df_plot = df.copy() 
     strategy_sma_col = f'SMA_{strategy_sma}'
 
@@ -292,9 +294,6 @@ def create_plot(df, strategy_sma):
         ax1.axvspan(start, end_adjusted, facecolor=color, alpha=alpha, zorder=0)
 
     # 2. Highlight Intersection Days (SMA 120 LOSS AND SMA 40 PROFIT)
-    # The main strategy return is in 'Strategy_Return'
-    # The comparison return is in 'Strategy_Return_40'
-    
     # Condition: SMA 120 strategy lost (< 0) AND SMA 40 strategy gained (> 0)
     intersection_days = df_plot[(df_plot['Strategy_Return'] < 0) & (df_plot['Strategy_Return_40'] > 0)].index
     
@@ -350,9 +349,10 @@ def setup_analysis():
     
     # --- Part 1: Data Fetching and Indicator Calculation ---
     try:
+        # 1. API Fetch - Called only once
         df_raw = fetch_binance_data(SYMBOL, TIMEFRAME, START_DATE)
         
-        # SLICING LOGIC: Slice to the first 70% of data
+        # 2. SLICING LOGIC: Slice to the first 70% of data
         split_idx = int(len(df_raw) * 0.70)
         df_raw_sliced = df_raw.iloc[:split_idx]
         print(f"--- DATA SLICED: Running analysis on first {len(df_raw_sliced)} candles (70% of total) ---")
@@ -361,7 +361,7 @@ def setup_analysis():
         if len(df_raw_sliced) < MAX_SMA_SCAN + 10:
              raise ValueError(f"70% data slice is too short ({len(df_raw_sliced)} days). Max SMA {MAX_SMA_SCAN} requires more data.")
         
-        # Calculate SMA 120 (main) and SMA 40 (comparison) on the sliced data
+        # 3. Calculate necessary indicators on the sliced data
         df_ind = calculate_indicators(df_raw_sliced, SMA_WINDOWS_PLOT)
         
     except Exception as e:
@@ -371,7 +371,7 @@ def setup_analysis():
 
     # --- Part 2: Comprehensive Sharpe Ratio Scan (SMA 1 to MAX_SMA_SCAN) ---
     try:
-        # Pass the 70% slice for the scan
+        # Pass the 70% slice for the scan (no API calls in this function)
         results_df = calculate_sharpe_ratios_scan(df_raw_sliced, min_sma=1, max_sma=MAX_SMA_SCAN)
         
         # Generate the visualization
@@ -411,7 +411,6 @@ def setup_analysis():
         df_40 = get_strategy_returns(df_ind, COMPARE_SMA_WINDOW)
         
         # 3. Merge SMA 40 returns onto the main dataframe for plotting comparison
-        # Alignment is guaranteed since get_strategy_returns enforces the global start index (Day 1001)
         df_final['Strategy_Return_40'] = df_40['Strategy_Return']
 
         # 4. Determine current status
