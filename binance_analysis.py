@@ -100,14 +100,14 @@ def calculate_indicators(df):
 
 def run_backtest(df):
     """
-    Implements a simple SMA 200 Long (+1) / Short (-1) strategy and calculates equity.
-    Position for day t is decided by Close vs. SMA 200 on day t-1.
+    FOR VERIFICATION: Forces a permanent Long position to ensure strategy equity 
+    matches Buy & Hold.
     """
     
-    # 1. Position Decision and Held Position (Decision based on t-1)
-    df['Next_Day_Position'] = np.where(df['Close'] > df['SMA_200'], 
-                                       POSITION_SIZE,      # +1 for Long (Price > SMA)
-                                       -POSITION_SIZE)     # -1 for Short (Price <= SMA)
+    # 1. Position Decision and Held Position
+    # --- MODIFICATION: ALWAYS GO LONG (TEST MODE) ---
+    df['Next_Day_Position'] = POSITION_SIZE      # Always +1 (Long)
+    # --------------------------------------------------
     
     df['Held_Position'] = df['Next_Day_Position'].shift(1).fillna(0)
     
@@ -115,7 +115,7 @@ def run_backtest(df):
     df['Daily_Return'] = df['Close'].pct_change()
     daily_returns_clean = df['Daily_Return'].fillna(0)
     
-    # Strategy Return = Daily Asset Return * Held Position
+    # Strategy Return = Daily Asset Return * Held Position (+1)
     df['Strategy_Return'] = daily_returns_clean * df['Held_Position']
     
     # 3. Final Cleanup
@@ -157,30 +157,12 @@ def create_plot(df):
     # --- Price and Indicator Plot (Top Panel) ---
     ax1 = axes[0]
     
-    # 1. Background Coloring for Position (Long/Short)
+    # 1. Background Coloring for Position (Always Green)
     pos_series = df_plot['Position']
     
-    # Identify segments of continuous position
-    change_indices = pos_series.index[pos_series.diff() != 0]
-
-    segment_starts = pd.Index([pos_series.index[0]]).append(change_indices)
-    segment_ends = change_indices.append(pd.Index([pos_series.index[-1]]))
-    
-    # Plot spans for each segment
-    for start, end in zip(segment_starts, segment_ends):
-        current_pos = pos_series.loc[start]
-        
-        if current_pos == POSITION_SIZE:
-            color = 'green'
-            alpha = 0.08
-        elif current_pos == -POSITION_SIZE:
-            color = 'red'
-            alpha = 0.08
-        else:
-            continue
-            
-        end_adjusted = end + pd.Timedelta(days=1)
-        ax1.axvspan(start, end_adjusted, facecolor=color, alpha=alpha, zorder=0)
+    # Since position is always +1, we just draw one large green span
+    ax1.axvspan(df_plot.index[0], df_plot.index[-1] + pd.Timedelta(days=1), 
+                facecolor='green', alpha=0.08, zorder=0)
 
     # 2. Price and Indicators
     ax1.plot(df_plot.index, df_plot['Close'], label='Price', color='#1f77b4', linewidth=1.5, alpha=0.9, zorder=1)
@@ -193,7 +175,7 @@ def create_plot(df):
     ax1.plot(df_plot.index, df_plot['DC_Lower'], label=f'DC {DC_WINDOW} Lower', color='c', linestyle='-.', alpha=0.5, zorder=1)
     
     # 3. Final Touches
-    ax1.set_title(f'{SYMBOL} Price and Indicators (Binance/CCXT)', fontsize=16)
+    ax1.set_title(f'{SYMBOL} Price and Indicators (TEST: Permanent LONG)', fontsize=16)
     ax1.set_ylabel('Price (USD)', fontsize=12)
     ax1.grid(True, linestyle='--', alpha=0.6)
     ax1.legend(loc='upper left', fontsize=8)
@@ -205,7 +187,8 @@ def create_plot(df):
     final_strategy_return = (df_plot['Equity'].iloc[-1] - 1) * 100
     final_bh_return = (df_plot['Buy_Hold_Equity'].iloc[-1] - 1) * 100
     
-    ax2.plot(df_plot.index, df_plot['Equity'], label='SMA 200 Strategy Equity', color='blue', linewidth=2)
+    # The lines should overlap perfectly here
+    ax2.plot(df_plot.index, df_plot['Equity'], label='Strategy Equity (Always LONG)', color='blue', linewidth=3)
     ax2.plot(df_plot.index, df_plot['Buy_Hold_Equity'], label='Buy & Hold Benchmark', color='gray', linestyle='--', alpha=0.7)
     
     ax2.set_title(f'Strategy Equity Curve (Final Return: {final_strategy_return:.2f}%) vs B&H ({final_bh_return:.2f}%)', fontsize=14)
@@ -239,12 +222,12 @@ def setup_analysis():
         # 2. Calculate Indicators
         df_ind = calculate_indicators(df_raw)
         
-        # 3. Run Backtest
+        # 3. Run Backtest (Always LONG test)
         df_final = run_backtest(df_ind)
         
         # 4. Determine current status
         current_position = df_final['Position'].iloc[-1]
-        GLOBAL_STATUS = "LONG" if current_position == POSITION_SIZE else "SHORT"
+        GLOBAL_STATUS = "LONG (TEST MODE)"
 
         # 5. Create Plot
         img_base64, total_strategy_return = create_plot(df_final)
@@ -265,22 +248,17 @@ def setup_analysis():
         start_price_bh = df_final.iloc[0]['Close']
         end_price_bh = df_final.iloc[-1]['Close']
         final_bh_equity = df_final['Buy_Hold_Equity'].iloc[-1]
+        final_strategy_equity = df_final['Equity'].iloc[-1]
         
-        print("\n--- ANALYSIS VERIFICATION DETAILS ---")
+        print("\n--- VERIFICATION DETAILS: PERMANENT LONG TEST ---")
         print(f"B&H Start Date (Tradable Period): {start_date_bh}")
         print(f"B&H End Date: {end_date_bh}")
         print(f"Price at Start: {start_price_bh:,.2f} USD")
         print(f"Price at End: {end_price_bh:,.2f} USD")
-        print(f"B&H Total Compounded Return: {final_bh_equity:.2f}x ({(final_bh_equity - 1) * 100:.2f}%)")
-        print(f"Price Ratio Check (End/Start): {end_price_bh / start_price_bh:.2f}x")
-        print("--- NOTE: B&H Equity is calculated as the Price Ratio (Close_t / Close_start) ---")
+        print(f"Strategy Final Equity: {final_strategy_equity:.6f}x")
+        print(f"B&H Final Equity (Price Ratio): {final_bh_equity:.6f}x")
+        print(f"MATCH CHECK (Strategy == B&H): {final_strategy_equity:.6f} == {final_bh_equity:.6f}")
         print("----------------------------------------------------------------------")
-        
-        print("--- DIAGNOSTIC: Short Position Logic Verification (Last 5 days of data) ---")
-        diag_df = df_final[['Close', 'SMA_200', 'Daily_Return', 'Position', 'Strategy_Return']].tail(5)
-        print("Note: If 'Position' is -1 (Short), a negative 'Daily_Return' (price fell) results in a positive 'Strategy_Return' (profit).")
-        print(diag_df)
-        print("----------------------------------------------------------------------------")
         print("--- ANALYSIS COMPLETE ---")
 
 
@@ -369,7 +347,7 @@ def analysis_dashboard():
             </div>
             
             <p class="mt-8 text-sm text-gray-600 border-t pt-4">
-                **Note:** This backtest uses a Long/Short strategy based on Close vs. SMA 200, executed daily (Close-to-Close). Transaction costs and slippage are not included.
+                **Note:** This is currently running in a **Permanent LONG Test Mode** to verify compounding logic. Transaction costs and slippage are not included.
             </p>
         </div>
     </body>
