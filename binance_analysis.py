@@ -122,12 +122,11 @@ def calculate_sharpe_ratio(returns, annualization_factor=ANNUALIZATION_FACTOR, r
 
 def run_backtest(df):
     """
-    Applies the SMA strategy and calculates returns.
+    Applies the SMA strategy, calculates returns, and computes the SMA Proximity.
     """
     print(f"-> Running backtest on {len(df)} candles...")
     
     # 2.1 Calculate the 120-day Simple Moving Average (SMA)
-    # The SMA is calculated based on the Close price.
     df[f'SMA_{SMA_PERIOD}'] = df['Close'].rolling(window=SMA_PERIOD).mean()
     
     # 2.2 Calculate daily returns (log returns are often preferred for backtesting)
@@ -146,7 +145,22 @@ def run_backtest(df):
         -1                                           # Value if False (Short position held on Day T)
     )
     
-    # Drop the temporary columns for cleanliness and keep the final SMA column
+    # --- 2.7 Calculate SMA Proximity Metric ---
+    # SMA Proximity = (1 / |(Close - SMA) / SMA| * 100) * 20
+    
+    # Absolute percentage difference: |(Close - SMA) / SMA| * 100
+    df['SMA_Distance_Pct'] = np.abs((df['Close'] - df[f'SMA_{SMA_PERIOD}']) / df[f'SMA_{SMA_PERIOD}']) * 100
+    
+    # Calculate Proximity, handling division by zero (when distance is 0)
+    # If distance is 0, proximity is theoretically infinite (we cap it high)
+    max_proximity = 1000.0 # High arbitrary value for 0 distance
+    df['SMA_Proximity'] = np.where(
+        df['SMA_Distance_Pct'] == 0,
+        max_proximity,
+        20.0 / df['SMA_Distance_Pct']
+    )
+    
+    # Drop the temporary columns for cleanliness and keep the final SMA column and proximity
     df = df.drop(columns=['Yesterday_Close', 'Yesterday_SMA'])
     # --- End Look-ahead Prevention ---
     
@@ -158,7 +172,6 @@ def run_backtest(df):
     df['Strategy_Return'] = df['Daily_Return'] * df['Position']
     
     # 2.5 Calculate Cumulative Returns (Equity Curve)
-    # Cumulative returns are calculated using the exponent of the cumulative log returns
     df['Cumulative_Strategy_Return'] = np.exp(df['Strategy_Return'].cumsum())
     df['Buy_and_Hold_Return'] = np.exp(df['Daily_Return'].cumsum())
     
@@ -184,8 +197,8 @@ def run_backtest(df):
 
 def plot_results(df):
     """
-    Generates and saves the plot of the strategy's equity curve.
-    Uses a logarithmic Y-scale.
+    Generates and saves the plot of the strategy's equity curve and SMA Proximity.
+    Uses a logarithmic Y-scale for the equity curve.
     """
     print(f"-> Generating plot in '{RESULTS_DIR}/{PLOT_FILE}'...")
     
@@ -194,24 +207,45 @@ def plot_results(df):
     plot_path = os.path.join(RESULTS_DIR, PLOT_FILE)
 
     plt.style.use('dark_background')
-    fig, ax = plt.subplots(figsize=(14, 8))
+    
+    # Create a figure with two subplots: 2 rows, 1 column. 
+    # Ratio: 3 parts for Equity Curve, 1 part for Proximity
+    fig = plt.figure(figsize=(14, 12))
+    gs = fig.add_gridspec(2, 1, hspace=0.3, height_ratios=[3, 1])
+    
+    # --- Top Subplot: Equity Curve (Log Scale) ---
+    ax1 = fig.add_subplot(gs[0])
     
     # Plotting the equity curves
-    df['Cumulative_Strategy_Return'].plot(ax=ax, label=f'SMA {SMA_PERIOD} Strategy', color='#10B981', linewidth=2)
-    df['Buy_and_Hold_Return'].plot(ax=ax, label='Buy & Hold (Benchmark)', color='#EF4444', linestyle='--', linewidth=1.5)
+    df['Cumulative_Strategy_Return'].plot(ax=ax1, label=f'SMA {SMA_PERIOD} Strategy', color='#10B981', linewidth=2)
+    df['Buy_and_Hold_Return'].plot(ax=ax1, label='Buy & Hold (Benchmark)', color='#EF4444', linestyle='--', linewidth=1.5)
     
     # Set Y-axis to Logarithmic Scale as requested
-    ax.set_yscale('log')
+    ax1.set_yscale('log')
     
-    # Style and Labels
-    ax.set_title(f'{SYMBOL} 120-Day SMA Strategy Equity Curve (Log Scale Since 2018)', fontsize=16, color='white')
-    ax.set_xlabel('Date', fontsize=12, color='white')
-    ax.set_ylabel('Cumulative Return (Log Scale - Multiplier)', fontsize=12, color='white')
-    ax.legend(loc='upper left', fontsize=10)
-    ax.grid(True, linestyle=':', alpha=0.5, color='#374151', which='both')
+    # Style and Labels for ax1
+    ax1.set_title(f'{SYMBOL} Backtesting Results (120-Day SMA)', fontsize=16, color='white')
+    ax1.set_xlabel('') # Clear X-label for the top plot
+    ax1.set_ylabel('Cumulative Return (Log Scale - Multiplier)', fontsize=12, color='white')
+    ax1.legend(loc='upper left', fontsize=10)
+    ax1.grid(True, linestyle=':', alpha=0.5, color='#374151', which='both')
+    ax1.yaxis.set_major_formatter(ScalarFormatter()) # Ensure non-scientific notation
     
-    # Ensure non-scientific notation on the log scale
-    ax.yaxis.set_major_formatter(ScalarFormatter())
+    # --- Bottom Subplot: SMA Proximity ---
+    ax2 = fig.add_subplot(gs[1], sharex=ax1) # Share X-axis with ax1
+    
+    # Plotting SMA Proximity
+    df['SMA_Proximity'].plot(ax=ax2, label='SMA Proximity', color='#3B82F6', linewidth=1)
+    
+    # Style and Labels for ax2
+    ax2.set_title('SMA Proximity Metric (High value = Close to SMA)', fontsize=12, color='white')
+    ax2.set_xlabel('Date', fontsize=12, color='white')
+    ax2.set_ylabel('Proximity Score', fontsize=12, color='white')
+    ax2.legend(loc='upper left', fontsize=10)
+    ax2.grid(True, linestyle=':', alpha=0.5, color='#374151')
+    
+    # Remove tick labels from the upper plot's x-axis for a cleaner look
+    plt.setp(ax1.get_xticklabels(), visible=False)
 
     # Save the plot
     plt.savefig(plot_path, bbox_inches='tight', dpi=150)
@@ -256,7 +290,7 @@ def serve_results():
                     <div class="container mx-auto p-4 bg-gray-800 shadow-xl rounded-xl">
                         <h1 class="text-3xl font-bold mb-4 text-green-400">Backtesting Results: {SYMBOL} SMA-120</h1>
                         <p class="text-gray-300 mb-6">
-                            The backtest calculated daily returns for the strategy: Long if yesterday's Close > 120-Day SMA, Short if Close < 120-Day SMA. The Y-axis is set to a <strong>Logarithmic Scale</strong> to better show compounded returns.
+                            The backtest calculated daily returns for the strategy: Long if yesterday's Close > 120-Day SMA, Short if Close < 120-Day SMA. The Y-axis is set to a <strong>Logarithmic Scale</strong> to better show compounded returns. The new plot below shows the SMA Proximity indicator.
                         </p>
                         <div class="plot-container">
                             <img src="{RESULTS_DIR}/{PLOT_FILE}" alt="Strategy Cumulative Returns Plot" class="w-full h-auto rounded-lg shadow-2xl">
