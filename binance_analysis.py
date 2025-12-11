@@ -5,7 +5,9 @@ import io
 import base64
 import time
 from flask import Flask, render_template_string
-import ccxt # CCXT is now mandatory
+import ccxt 
+import sys
+import traceback
 
 # --- Configuration Constants ---
 SYMBOL = 'BTC/USDT'
@@ -16,12 +18,19 @@ DC_WINDOW = 20  # Donchian Channel Period
 POSITION_SIZE = 1  # Unit of asset traded
 PORT = 8080
 
+# --- Global Variables to store results (populated once at startup) ---
+GLOBAL_DATA_SOURCE = "Binance (CCXT)"
+GLOBAL_IMG_BASE64 = ""
+GLOBAL_SUMMARY_TABLE = ""
+GLOBAL_TOTAL_RETURN = 0.0
+GLOBAL_STATUS = "PENDING"
+GLOBAL_ERROR = None # Store fatal error if analysis fails
+
 # --- Data Fetching (CCXT with Pagination) ---
 
 def fetch_binance_data(symbol, timeframe, start_date):
     """
     Fetches historical OHLCV data from Binance using CCXT with pagination.
-    This function is now the ONLY method for data retrieval.
     """
     exchange = ccxt.binance({
         'enableRateLimit': True, # Automatically respect API rate limits
@@ -31,11 +40,10 @@ def fetch_binance_data(symbol, timeframe, start_date):
     all_ohlcv = []
     limit = 1000
     
-    print(f"--- FETCHING DATA: {symbol} ({timeframe}) from {start_date} via Binance/CCXT ---")
+    print(f"--- STARTING DATA FETCH: {symbol} ({timeframe}) from {start_date} via Binance/CCXT ---")
 
     while True:
         try:
-            # Fetch batch of OHLCV data
             ohlcv_batch = exchange.fetch_ohlcv(
                 symbol, 
                 timeframe, 
@@ -50,24 +58,21 @@ def fetch_binance_data(symbol, timeframe, start_date):
             all_ohlcv.extend(ohlcv_batch)
             
             # Use the timestamp of the last candle fetched to set 'since' for the next request.
-            # We add 1 millisecond to prevent fetching the last candle of the previous batch.
             since_timestamp = ohlcv_batch[-1][0] + 1 
             
-            print(f"Fetched {len(all_ohlcv)} candles up to {exchange.iso8601(ohlcv_batch[-1][0])}")
+            print(f"Fetched total {len(all_ohlcv)} candles up to {exchange.iso8601(ohlcv_batch[-1][0])}")
             
-            # If the number of candles returned is less than the limit, we've caught up to the present.
             if len(ohlcv_batch) < limit:
                 break
                 
-            # Sleep to ensure we don't violate rate limits
             time.sleep(exchange.rateLimit / 1000) 
             
         except Exception as e:
             print(f"An error occurred during CCXT fetching: {e}")
-            raise # Re-raise to be caught by the main handler
+            raise # Re-raise for the analysis setup function to catch
             
-    if not all_ohlcv:
-        raise ValueError("Could not fetch any data from Binance. Check connection or symbol.")
+    if len(all_ohlcv) < 400: # Need at least 400 for the SMA 400
+        raise ValueError(f"Not enough data fetched. Required >400, received {len(all_ohlcv)}.")
         
     df = pd.DataFrame(all_ohlcv, columns=['timestamp', 'Open', 'High', 'Low', 'Close', 'Volume'])
     df['Date'] = pd.to_datetime(df['timestamp'], unit='ms')
@@ -75,7 +80,7 @@ def fetch_binance_data(symbol, timeframe, start_date):
     df = df[['Open', 'High', 'Low', 'Close', 'Volume']].astype(float)
     df = df.sort_index()
     
-    print(f"Total candles fetched: {len(df)}")
+    print(f"--- SUCCESS: Total candles fetched: {len(df)} ---")
     return df
 
 # --- Indicator Calculation ---
@@ -96,7 +101,6 @@ def calculate_indicators(df):
 def run_backtest(df):
     """
     Implements a simple SMA 200 crossover strategy (Long/Flat) and calculates equity.
-    Rule: Long (Position=1) when Close > SMA 200, Flat (Position=0) otherwise.
     """
     df['Position'] = np.where(df['Close'] > df['SMA_200'], POSITION_SIZE, 0)
     df['Daily_Return'] = df['Close'].pct_change()
@@ -105,12 +109,16 @@ def run_backtest(df):
     df['Buy_Hold_Equity'] = (1 + df['Daily_Return']).cumprod()
     
     # Normalize starting equity to 1 at the point the longest SMA (SMA 400) is available
-    normalization_index = df.first_valid_index()
+    df_clean = df.dropna()
+    if df_clean.empty:
+        raise ValueError("DataFrame is empty after dropping NaN values from indicators.")
+        
+    normalization_index = df_clean.index[0]
     
-    df['Equity'] = df['Equity'] / df['Equity'].loc[normalization_index]
-    df['Buy_Hold_Equity'] = df['Buy_Hold_Equity'] / df['Buy_Hold_Equity'].loc[normalization_index]
+    df_clean['Equity'] = df_clean['Equity'] / df_clean['Equity'].loc[normalization_index]
+    df_clean['Buy_Hold_Equity'] = df_clean['Buy_Hold_Equity'] / df_clean['Buy_Hold_Equity'].loc[normalization_index]
 
-    return df.dropna()
+    return df_clean
 
 # --- Plotting ---
 
@@ -175,14 +183,11 @@ def create_plot(df):
     img_base64 = base64.b64encode(buf.read()).decode('utf-8')
     return img_base64, final_strategy_return
 
-# --- Flask Web Server ---
+# --- Setup Function (Runs once at startup) ---
 
-app = Flask(__name__)
-
-@app.route('/')
-def analysis_dashboard():
-    """Main route to run analysis and serve the plot."""
-    data_source = "Binance (CCXT)"
+def setup_analysis():
+    """Runs the full backtest analysis and populates global variables."""
+    global GLOBAL_IMG_BASE64, GLOBAL_SUMMARY_TABLE, GLOBAL_TOTAL_RETURN, GLOBAL_STATUS, GLOBAL_ERROR
     
     try:
         # 1. Get Data
@@ -194,100 +199,121 @@ def analysis_dashboard():
         # 3. Run Backtest
         df_final = run_backtest(df_ind)
         
-        # Determine current position status
+        # 4. Determine current status
         current_position = df_final['Position'].iloc[-1]
-        status = "LONG" if current_position == POSITION_SIZE else "FLAT/SHORT"
+        GLOBAL_STATUS = "LONG" if current_position == POSITION_SIZE else "FLAT/SHORT"
 
-        # 4. Create Plot
+        # 5. Create Plot
         img_base64, total_strategy_return = create_plot(df_final)
         
-        # Determine the last 10 days of the data for a small table snapshot
-        summary_df = df_final[['Close', 'SMA_200', 'DC_Upper', 'DC_Lower', 'Position', 'Equity']].tail(10)
-        summary_table = summary_df.to_html(classes='table-auto w-full text-sm text-left', 
-                                           float_format=lambda x: f'{x:,.2f}')
+        # 6. Populate Global Results
+        GLOBAL_IMG_BASE64 = img_base64
+        GLOBAL_TOTAL_RETURN = total_strategy_return
         
-        # HTML Template with Tailwind CSS for modern look and responsiveness
-        html_content = f"""
-        <!DOCTYPE html>
-        <html lang="en">
-        <head>
-            <meta charset="UTF-8">
-            <meta name="viewport" content="width=device-width, initial-scale=1.0">
-            <title>SMA 200 Trading Backtest</title>
-            <script src="https://cdn.tailwindcss.com"></script>
-            <style>
-                /* Custom styles for the generated table */
-                .table-auto th, .table-auto td {{
-                    padding: 8px 12px;
-                    border: 1px solid #e5e7eb;
-                    text-align: right;
-                }}
-                .table-auto th {{
-                    text-align: left;
-                    background-color: #f3f4f6;
-                    font-weight: 600;
-                }}
-                .data-source-tag {{
-                    font-size: 0.75rem;
-                    padding: 0.25rem 0.5rem;
-                    border-radius: 0.5rem;
-                    font-weight: bold;
-                    margin-left: 1rem;
-                }}
-            </style>
-        </head>
-        <body class="bg-gray-100 p-4 sm:p-8 font-sans">
-            <div class="max-w-7xl mx-auto bg-white p-6 sm:p-10 rounded-xl shadow-2xl">
-                <h1 class="text-4xl font-extrabold text-blue-700 mb-6 border-b-4 border-blue-200 pb-2">
-                    Crypto Trading Backtest Dashboard
-                    <span class="data-source-tag bg-blue-200 text-blue-800">{data_source}</span>
-                </h1>
-
-                <div class="grid md:grid-cols-3 gap-6 mb-8">
-                    <div class="bg-blue-50 p-4 rounded-lg shadow-md">
-                        <p class="text-lg font-medium text-blue-600">Symbol</p>
-                        <p class="text-2xl font-bold text-blue-800">{SYMBOL} ({TIMEFRAME})</p>
-                    </div>
-                    <div class="bg-green-50 p-4 rounded-lg shadow-md">
-                        <p class="text-lg font-medium text-green-600">Strategy Return</p>
-                        <p class="text-2xl font-bold text-green-800">{total_strategy_return:.2f}%</p>
-                    </div>
-                    <div class="bg-red-50 p-4 rounded-lg shadow-md">
-                        <p class="text-lg font-medium text-red-600">Current Position</p>
-                        <p class="text-2xl font-bold text-red-800">{status}</p>
-                    </div>
-                </div>
-
-                <h2 class="text-2xl font-semibold text-gray-700 mb-4">Price & Equity Plot (Since {START_DATE})</h2>
-                <div class="bg-gray-50 p-2 rounded-lg shadow-inner mb-8 overflow-hidden">
-                    <img src="data:image/png;base64,{img_base64}" alt="Trading Strategy Backtest Plot" class="w-full h-auto rounded-lg"/>
-                </div>
-
-                <h2 class="text-2xl font-semibold text-gray-700 mb-4">Last 10 Days Data Snapshot</h2>
-                <div class="overflow-x-auto rounded-lg shadow-md border border-gray-200">
-                    {summary_table}
-                </div>
-                
-                <p class="mt-8 text-sm text-gray-600 border-t pt-4">
-                    **Note:** This backtest uses a simple Close > SMA 200 rule for daily position sizing (long/flat). Transaction costs and slippage are not included.
-                </p>
-            </div>
-        </body>
-        </html>
-        """
-        return render_template_string(html_content)
+        # Create summary table
+        summary_df = df_final[['Close', 'SMA_200', 'DC_Upper', 'DC_Lower', 'Position', 'Equity']].tail(10)
+        GLOBAL_SUMMARY_TABLE = summary_df.to_html(classes='table-auto w-full text-sm text-left', 
+                                                  float_format=lambda x: f'{x:,.2f}')
+        
+        print("--- ANALYSIS COMPLETE ---")
 
     except Exception as e:
-        # Generic error handling for failed CCXT import or data fetching issues
-        error_message = f"Analysis Failed. Please ensure the 'ccxt' library is installed (`pip install ccxt`), and check your network connection or API limits. Details: {e}"
-        print(f"FATAL ERROR: {error_message}")
+        # Catch and store any errors during startup analysis
+        GLOBAL_ERROR = f"Fatal Analysis Error: {e}\n\nTraceback:\n{traceback.format_exc()}"
+        print(f"--- FATAL ERROR DURING ANALYSIS SETUP ---\n{GLOBAL_ERROR}", file=sys.stderr)
+        
+# --- Flask Web Server ---
+
+app = Flask(__name__)
+
+@app.route('/')
+def analysis_dashboard():
+    """Renders the dashboard using pre-calculated global variables."""
+    
+    # Check if analysis failed at startup
+    if GLOBAL_ERROR:
         return render_template_string(f"""
             <div class="p-8 text-center bg-white rounded-xl shadow-lg m-auto max-w-lg">
-                <h1 class="text-3xl font-bold text-red-600 mb-4">Analysis Failed</h1>
-                <p class="text-gray-700">The script could not fetch data from Binance. This is usually due to the 'ccxt' library not being installed or a network/API issue.</p>
-                <p class="mt-6 p-4 bg-red-100 text-red-800 rounded-lg text-left overflow-x-auto"><strong>Error:</strong> {error_message}</p>
+                <h1 class="text-3xl font-bold text-red-600 mb-4">Analysis Failed at Startup</h1>
+                <p class="text-gray-700">The backtest and plotting could not be completed when the server started. This is usually due to a network error, Binance API limit, or missing data.</p>
+                <p class="mt-6 p-4 bg-red-100 text-red-800 rounded-lg text-left overflow-x-auto text-sm whitespace-pre-wrap"><strong>Details:</strong> {GLOBAL_ERROR}</p>
             </div>
         """)
+        
+    # HTML Template with Tailwind CSS for modern look and responsiveness
+    html_content = f"""
+    <!DOCTYPE html>
+    <html lang="en">
+    <head>
+        <meta charset="UTF-8">
+        <meta name="viewport" content="width=device-width, initial-scale=1.0">
+        <title>SMA 200 Trading Backtest</title>
+        <script src="https://cdn.tailwindcss.com"></script>
+        <style>
+            /* Custom styles for the generated table */
+            .table-auto th, .table-auto td {{
+                padding: 8px 12px;
+                border: 1px solid #e5e7eb;
+                text-align: right;
+            }}
+            .table-auto th {{
+                text-align: left;
+                background-color: #f3f4f6;
+                font-weight: 600;
+            }}
+            .data-source-tag {{
+                font-size: 0.75rem;
+                padding: 0.25rem 0.5rem;
+                border-radius: 0.5rem;
+                font-weight: bold;
+                margin-left: 1rem;
+            }}
+        </style>
+    </head>
+    <body class="bg-gray-100 p-4 sm:p-8 font-sans">
+        <div class="max-w-7xl mx-auto bg-white p-6 sm:p-10 rounded-xl shadow-2xl">
+            <h1 class="text-4xl font-extrabold text-blue-700 mb-6 border-b-4 border-blue-200 pb-2">
+                Crypto Trading Backtest Dashboard
+                <span class="data-source-tag bg-blue-200 text-blue-800">{GLOBAL_DATA_SOURCE}</span>
+            </h1>
+
+            <div class="grid md:grid-cols-3 gap-6 mb-8">
+                <div class="bg-blue-50 p-4 rounded-lg shadow-md">
+                    <p class="text-lg font-medium text-blue-600">Symbol</p>
+                    <p class="text-2xl font-bold text-blue-800">{SYMBOL} ({TIMEFRAME})</p>
+                </div>
+                <div class="bg-green-50 p-4 rounded-lg shadow-md">
+                    <p class="text-lg font-medium text-green-600">Strategy Return</p>
+                    <p class="text-2xl font-bold text-green-800">{GLOBAL_TOTAL_RETURN:.2f}%</p>
+                </div>
+                <div class="bg-red-50 p-4 rounded-lg shadow-md">
+                    <p class="text-lg font-medium text-red-600">Current Position</p>
+                    <p class="text-2xl font-bold text-red-800">{GLOBAL_STATUS}</p>
+                </div>
+            </div>
+
+            <h2 class="text-2xl font-semibold text-gray-700 mb-4">Price & Equity Plot (Since {START_DATE})</h2>
+            <div class="bg-gray-50 p-2 rounded-lg shadow-inner mb-8 overflow-hidden">
+                <img src="data:image/png;base64,{GLOBAL_IMG_BASE64}" alt="Trading Strategy Backtest Plot" class="w-full h-auto rounded-lg"/>
+            </div>
+
+            <h2 class="text-2xl font-semibold text-gray-700 mb-4">Last 10 Days Data Snapshot</h2>
+            <div class="overflow-x-auto rounded-lg shadow-md border border-gray-200">
+                {GLOBAL_SUMMARY_TABLE}
+            </div>
+            
+            <p class="mt-8 text-sm text-gray-600 border-t pt-4">
+                **Note:** This backtest uses a simple Close > SMA 200 rule for daily position sizing (long/flat). Transaction costs and slippage are not included.
+            </p>
+        </div>
+    </body>
+    </html>
+    """
+    return render_template_string(html_content)
 
 if __name__ == '__main__':
+    # 1. Run the entire data analysis and calculation process once at startup
+    setup_analysis()
+    
+    # 2. Start the Flask server to serve the pre-calculated results
     app.run(host='0.0.0.0', port=PORT, debug=True, use_reloader=False)
