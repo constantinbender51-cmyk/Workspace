@@ -169,7 +169,7 @@ def calculate_sharpe_ratios_scan(df_raw, min_sma, max_sma):
     print(f"\n--- Starting SMA Scan (Sharpe Ratio Calculation from SMA {min_sma} to {max_sma}) ---")
     
     for sma_w in range(min_sma, max_sma + 1):
-        # Pass the full 50% data slice. The strategy function handles the global start time.
+        # Pass the full 70% data slice. The strategy function handles the global start time.
         df_strategy = get_strategy_returns(df_raw, sma_w)
         
         if df_strategy.empty:
@@ -223,7 +223,7 @@ def create_analysis_visualization(results_df):
     ax1.axhline(best_sharpe, color='red', linestyle='--', alpha=0.4, linewidth=1)
 
     ax1.set_ylabel('Annualized Sharpe Ratio', fontsize=10)
-    ax1.set_title(f'SMA Crossover Strategy Performance (SMA 1 to {MAX_SMA_SCAN} - 50% Data Sample)', fontsize=14)
+    ax1.set_title(f'SMA Crossover Strategy Performance (SMA 1 to {MAX_SMA_SCAN} - 70% Data Sample)', fontsize=14)
     ax1.grid(True, linestyle=':', alpha=0.6)
     ax1.set_xlim(1, MAX_SMA_SCAN)
     
@@ -287,14 +287,8 @@ def create_plot(df, strategy_sma):
         end_adjusted = end + pd.Timedelta(days=1)
         ax1.axvspan(start, end_adjusted, facecolor=color, alpha=alpha, zorder=0)
 
-    # 2. Price and SMA 120 (SMA 120 must be calculated on the original pre-sliced df_raw)
-    # Since df_plot is the sliced version, we must rely on the calculated SMA values.
-    # The strategy returns function already ensures SMA 120 is available and clean.
+    # 2. Price and SMA 120 
     ax1.plot(df_plot.index, df_plot['Close'], label='Price (Close)', color='#1f77b4', linewidth=1.5, alpha=0.9, zorder=1)
-    
-    # We must merge the SMA 120 column back into df_plot from df_ind if it's not already there.
-    # The setup_analysis logic ensures df_ind has SMA 120, and get_strategy_returns ensures the full SMA is calculated.
-    # We will assume df_plot (which is the output of get_strategy_returns) contains the SMA 120 column.
     ax1.plot(df_plot.index, df_plot[strategy_sma_col], 
              label=f'SMA {strategy_sma}', 
              color='#FF6347', linestyle='-', linewidth=2.5, zorder=2) 
@@ -341,15 +335,14 @@ def setup_analysis():
     try:
         df_raw = fetch_binance_data(SYMBOL, TIMEFRAME, START_DATE)
         
-        # SLICING LOGIC: We need enough data for MAX_SMA_SCAN + 10 days for indicators, 
-        # and then we slice to the first 50% of the fetched data *before* running the scan.
-        split_idx = len(df_raw) // 2
+        # NEW LOGIC: Slice to the first 70% of data
+        split_idx = int(len(df_raw) * 0.70)
         df_raw_sliced = df_raw.iloc[:split_idx]
-        print(f"--- DATA SLICED: Running analysis on first {len(df_raw_sliced)} candles (50% of total) ---")
+        print(f"--- DATA SLICED: Running analysis on first {len(df_raw_sliced)} candles (70% of total) ---")
         
-        # Check if the 50% slice is still long enough for the MAX_SMA_SCAN
+        # Check if the 70% slice is still long enough for the MAX_SMA_SCAN
         if len(df_raw_sliced) < MAX_SMA_SCAN + 10:
-             raise ValueError(f"50% data slice is too short ({len(df_raw_sliced)} days). Max SMA {MAX_SMA_SCAN} requires more data.")
+             raise ValueError(f"70% data slice is too short ({len(df_raw_sliced)} days). Max SMA {MAX_SMA_SCAN} requires more data.")
         
         # Calculate SMA 120 and D-Channels on the sliced data
         df_ind = calculate_indicators(df_raw_sliced, SMA_WINDOWS_PLOT)
@@ -361,7 +354,7 @@ def setup_analysis():
 
     # --- Part 2: Comprehensive Sharpe Ratio Scan (SMA 1 to MAX_SMA_SCAN) ---
     try:
-        # Pass the 50% slice for the scan
+        # Pass the 70% slice for the scan
         results_df = calculate_sharpe_ratios_scan(df_raw_sliced, min_sma=1, max_sma=MAX_SMA_SCAN)
         
         # Generate the visualization
@@ -497,7 +490,7 @@ def analysis_dashboard():
                 </div>
 
                 <div class="order-2">
-                    <h2 class="text-2xl font-semibold text-gray-700 mb-4">SMA Optimization Scan (1 to {MAX_SMA_SCAN} on 50% Data)</h2>
+                    <h2 class="text-2xl font-semibold text-gray-700 mb-4">SMA Optimization Scan (1 to {MAX_SMA_SCAN} on 70% Data)</h2>
                     <div class="bg-gray-50 p-2 rounded-lg shadow-inner overflow-hidden">
                         <img src="data:image/png;base64,{GLOBAL_ANALYSIS_IMG}" alt="SMA Sharpe Ratio and Equity Analysis Plot" class="w-full h-auto rounded-lg"/>
                     </div>
