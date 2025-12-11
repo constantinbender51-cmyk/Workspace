@@ -104,27 +104,27 @@ def run_backtest(df):
     Position for day t is decided by Close vs. SMA 200 on day t-1.
     """
     
-    # 1. Position Decision: 1 (Long) if Close > SMA 200, -1 (Short) otherwise
+    # 1. Position Decision and Held Position (Decision based on t-1)
     df['Next_Day_Position'] = np.where(df['Close'] > df['SMA_200'], 
                                        POSITION_SIZE, 
                                        -POSITION_SIZE)
+    df['Held_Position'] = df['Next_Day_Position'].shift(1).fillna(0) # 0 for the first day(s)
     
-    # 2. Position HELD: Shifted position, as the decision made on t-1 dictates the position 
-    # held for the return calculation period (Close_t-1 to Close_t).
-    df['Held_Position'] = df['Next_Day_Position'].shift(1).fillna(0)
-    
-    # 3. Calculate Daily Strategy Returns
+    # 2. Calculate Daily Strategy Returns
     df['Daily_Return'] = df['Close'].pct_change()
     
-    # Strategy Return = Daily Asset Return * Held Position (+1 or -1).
-    # This correctly achieves Capital * (1 + R) for long, and Capital * (1 - R) for short.
-    df['Strategy_Return'] = df['Daily_Return'] * df['Held_Position']
+    # Ensure the cumulative product is well-behaved by starting returns at 0.0
+    daily_returns_clean = df['Daily_Return'].fillna(0)
     
-    # 4. Calculate Cumulative Equity
+    # Strategy Return = Daily Asset Return * Held Position
+    df['Strategy_Return'] = daily_returns_clean * df['Held_Position']
+    
+    # 3. Calculate Cumulative Equity
     df['Equity'] = (1 + df['Strategy_Return']).cumprod()
-    df['Buy_Hold_Equity'] = (1 + df['Daily_Return']).cumprod()
+    df['Buy_Hold_Equity'] = (1 + daily_returns_clean).cumprod() 
     
-    # 5. Final Cleanup and Normalization
+    # 4. Final Cleanup and Normalization
+    # Drop NaNs caused by indicators (SMA 400 in this case)
     df_clean = df.dropna()
     if df_clean.empty:
         raise ValueError("DataFrame is empty after dropping NaN values from indicators.")
@@ -134,9 +134,12 @@ def run_backtest(df):
     # Renaming Held_Position to Position for summary table display
     df_clean.rename(columns={'Held_Position': 'Position'}, inplace=True) 
     
-    # Normalization 
-    df_clean.loc[:, 'Equity'] = df_clean['Equity'] / df_clean['Equity'].loc[normalization_index]
-    df_clean.loc[:, 'Buy_Hold_Equity'] = df_clean['Buy_Hold_Equity'] / df_clean['Buy_Hold_Equity'].loc[normalization_index]
+    # Normalization: Set the equity curve starting point to 1.0 at the first tradable day.
+    initial_equity = df_clean['Equity'].loc[normalization_index]
+    initial_bh = df_clean['Buy_Hold_Equity'].loc[normalization_index]
+    
+    df_clean.loc[:, 'Equity'] = df_clean['Equity'] / initial_equity
+    df_clean.loc[:, 'Buy_Hold_Equity'] = df_clean['Buy_Hold_Equity'] / initial_bh
 
     return df_clean
 
@@ -169,11 +172,10 @@ def create_plot(df):
         
         if current_pos == POSITION_SIZE:
             color = 'green'
-            label = 'Long Position' if start == pos_series.index[0] or start == change_indices[0] else None
+            # Note: Removed the label logic to avoid legend clutter, as position is implied by color
             alpha = 0.08
         elif current_pos == -POSITION_SIZE:
             color = 'red'
-            label = 'Short Position' if start == pos_series.index[0] or start == change_indices[0] else None
             alpha = 0.08
         else:
             continue
