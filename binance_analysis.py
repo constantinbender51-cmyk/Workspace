@@ -267,7 +267,7 @@ def create_analysis_visualization(results_df):
 
 def create_plot(df, strategy_sma):
     """Generates the main SMA 120 strategy plot (Close Price + Equity Curve)
-       and highlights days price is within 3% of SMA 40."""
+       and highlights days where price is within 3% of SMA 40 OR between SMAs 40/120."""
     
     df_plot = df.copy() 
     sma_120_col = f'SMA_{strategy_sma}'
@@ -302,16 +302,22 @@ def create_plot(df, strategy_sma):
             end_adjusted = end + pd.Timedelta(days=1)
             ax1.axvspan(start, end_adjusted, facecolor=color, alpha=alpha, zorder=0)
 
-    # 2. Highlight Price within 3% band of SMA 40
+    # 2. Highlight Days based on combined condition (3% band OR between SMAs 40/120)
     
-    # Condition: |(Price - SMA 40) / SMA 40| <= 0.03
-    # Use np.abs for absolute deviation
-    condition = np.abs((df_plot['Close'] - df_plot[sma_40_col]) / df_plot[sma_40_col]) <= BAND_PERCENTAGE
+    # Condition A: Price within 3% band of SMA 40
+    condition_A = np.abs((df_plot['Close'] - df_plot[sma_40_col]) / df_plot[sma_40_col]) <= BAND_PERCENTAGE
     
-    band_days = df_plot[condition].index
+    # Condition B: Price is strictly between SMA 40 and SMA 120
+    condition_B = (
+        (df_plot['Close'] > df_plot[sma_40_col]) & (df_plot['Close'] < df_plot[sma_120_col]) |
+        (df_plot['Close'] < df_plot[sma_40_col]) & (df_plot['Close'] > df_plot[sma_120_col])
+    )
+    
+    # Combined Condition (A OR B)
+    combined_days = df_plot[condition_A | condition_B].index
     
     # Draw a distinct red marker on these specific days
-    for day in band_days:
+    for day in combined_days:
         # Use a strong red background for emphasis
         ax1.axvspan(day, day + pd.Timedelta(days=1), facecolor='#DC143C', alpha=0.3, zorder=1) 
     
@@ -328,7 +334,7 @@ def create_plot(df, strategy_sma):
     ax1.grid(True, linestyle='--', alpha=0.6)
     ax1.legend(loc='upper left', fontsize=8)
     ax1.set_yscale('log')
-    ax1.set_title(f'SMA {strategy_sma} Crossover Strategy (Red Highlight: Price within {BAND_PERCENTAGE*100:.0f}% of SMA 40)', fontsize=12)
+    ax1.set_title(f'SMA {strategy_sma} Crossover Strategy (Red Highlight: Price Near SMA 40 OR Between SMAs)', fontsize=12)
 
     # --- Equity Plot (Bottom Panel) ---
     ax2 = axes[1]
@@ -545,7 +551,7 @@ def analysis_dashboard():
             </div>
             
             <p class="mt-8 text-sm text-gray-600 border-t pt-4">
-                **Strategy:** Long if Close > SMA, Short if Close $\le$ SMA. The strategy runs continuously (no flat period). **The red background highlights where the price is within a 3% band of SMA 40.**
+                **Strategy:** Long if Close > SMA, Short if Close $\le$ SMA. The strategy runs continuously (no flat period). **The red background highlights where the price is within a 3% band of SMA 40 OR between SMA 40 and SMA 120.**
             </p>
         </div>
     </body>
