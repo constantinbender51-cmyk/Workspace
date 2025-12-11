@@ -4,3 +4,4 @@ matplotlib>=3.4.0
 requests>=2.26.0
 flask>=2.0.0
 ccxt>=1.50.0
+tabulate>=0.8.0
