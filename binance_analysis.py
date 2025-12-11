@@ -8,7 +8,7 @@ import os
 from http.server import SimpleHTTPRequestHandler, HTTPServer
 from matplotlib.ticker import ScalarFormatter
 
-# --- Configuration ---
+# --- Configuration --
 SYMBOL = 'BTCUSDT'
 INTERVAL = '1d'
 START_DATE = '1 Jan, 2018'
