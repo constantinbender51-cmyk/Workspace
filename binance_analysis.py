@@ -20,7 +20,7 @@ ANNUALIZATION_FACTOR = 365 # Used for annualizing Sharpe Ratio for daily data
 
 # --- Rolling Optimization Parameters ---
 OPTIMIZATION_STEP = 90 # Re-optimize every 90 days (approx. 3 months)
-GRID_START = 0.010     # 1.0%
+GRID_START = 0.001     # 0.1% (UPDATED)
 GRID_END = 0.080       # 8.0%
 GRID_STEP = 0.001      # 0.1%
 
@@ -82,8 +82,9 @@ def fetch_klines(symbol, interval, start_str):
 
 def calculate_sharpe_ratio(returns, annualization_factor=ANNUALIZATION_FACTOR, risk_free_rate=0):
     """Calculates the Annualized Sharpe Ratio."""
+    # Ensure there is enough data for meaningful std dev calculation
     if returns.empty or len(returns) <= 1:
-        return -np.inf # Return a very low Sharpe for invalid windows
+        return -np.inf 
     excess_return = returns - risk_free_rate
     mean_excess_return = excess_return.mean()
     std_dev = excess_return.std()
@@ -132,6 +133,7 @@ def run_strategy_core(df_window, center_distance):
     df['Yesterday_Close'] = df['Close'].shift(1)
     df['Yesterday_SMA_120'] = df[f'SMA_{SMA_PERIOD_120}'].shift(1)
     
+    # Drop NaNs created by shifting/SMA calc only at the beginning of the window
     df = df.dropna()
     
     # 1. Calculate Distance (D): Absolute decimal distance from the SMA (lagged)
@@ -159,7 +161,8 @@ def run_strategy_core(df_window, center_distance):
     # 5. Calculate Strategy Returns
     df['Strategy_Return'] = df['Daily_Return'] * df['Position_Size']
     
-    return df['Strategy_Return']
+    # We only care about the returns for the period we are trading (excluding the warmup/preceding day)
+    return df['Strategy_Return'].iloc[1:]
 
 def run_grid_search(df_optimization_window):
     """
@@ -169,11 +172,12 @@ def run_grid_search(df_optimization_window):
     center_distances = [round(c, 3) for c in np.arange(GRID_START, GRID_END + GRID_STEP/2, GRID_STEP)]
 
     best_sharpe = -np.inf
-    optimal_center = GRID_START # Default to min if search fails
+    optimal_center = GRID_START
     
     # Run search
     for center_distance in center_distances:
         # Calculate returns for the optimization window
+        # The optimization window needs one preceding day to calculate the first return
         strategy_returns = run_strategy_core(df_optimization_window, center_distance)
         
         # Calculate Sharpe Ratio on the returns
@@ -191,12 +195,12 @@ def run_rolling_optimization_backtest(df_full):
     """
     print("-> Starting Rolling Optimization Backtest...")
 
-    # Ensure enough data exists for initial SMA calculation and first optimization window
+    # Ensure enough data exists for initial SMA calculation and first execution window
     min_data_needed = SMA_PERIOD_120 + OPTIMIZATION_STEP 
     if len(df_full) < min_data_needed:
         raise ValueError(f"Not enough data for rolling optimization. Need at least {min_data_needed} days.")
 
-    # Index where optimization begins (after warmup + first step)
+    # Index where optimization begins (after SMA warmup)
     start_index = SMA_PERIOD_120 
     end_index = len(df_full)
 
@@ -216,28 +220,23 @@ def run_rolling_optimization_backtest(df_full):
         df_optimization_window = df_full.iloc[:current_rebalance_point]
         
         # --- 2. Run Optimization ---
+        # Note: The optimization window requires SMA_PERIOD_120 + 1 days minimum to yield returns.
         optimal_center = run_grid_search(df_optimization_window)
-        optimal_centers_history[df_full.index[current_rebalance_point]] = optimal_center
         
-        print(f"   Optimization up to {df_full.index[current_rebalance_point].strftime('%Y-%m-%d')} completed. Optimal Center: {optimal_center*100:.1f}%")
-
         # --- 3. Define Execution Window ---
-        # The strategy trades the next OPTIMIZATION_STEP (90 days)
         execution_start = current_rebalance_point
         execution_end = min(current_rebalance_point + OPTIMIZATION_STEP, end_index)
         
-        df_execution_window = df_full.iloc[execution_start:execution_end]
-        
-        # --- 4. Run Strategy on Execution Window with Optimal Parameter ---
-        # We need the SMA and shifted returns/close for the execution window as well.
-        # To calculate returns correctly, we need one prior row for the shift() function to work.
-        
-        # We pass the execution window and its preceding row to run_strategy_core
+        # We need the execution window plus the preceding day to calculate the first return in the window
         df_full_with_preceding = df_full.iloc[execution_start - 1 : execution_end]
         
-        # strategy_returns will return data only for the execution period (start to end)
+        # --- 4. Run Strategy on Execution Window with Optimal Parameter ---
         strategy_returns = run_strategy_core(df_full_with_preceding, optimal_center)
         
+        # Store the optimal center and the date it was set
+        optimal_centers_history[strategy_returns.index[0]] = optimal_center
+        print(f"   Optimization up to {df_full.index[execution_start-1].strftime('%Y-%m-%d')} completed. Optimal Center: {optimal_center*100:.1f}%")
+
         # Store the returns for stitching
         all_strategy_returns.append(strategy_returns)
         
@@ -247,33 +246,42 @@ def run_rolling_optimization_backtest(df_full):
     # --- 6. Final Metric Calculation ---
     
     # Stitch all daily returns together
-    df_returns = pd.concat(all_strategy_returns)
+    df_returns_stitched = pd.concat(all_strategy_returns).rename('Strategy_Return')
     
-    # Calculate Buy & Hold returns for the same final period
-    df_returns['Cumulative_Strategy_Return'] = np.exp(df_returns.sum().cumsum())
+    # Calculate strategy cumulative returns
+    strategy_cumulative_returns = np.exp(df_returns_stitched.cumsum())
     
     # Recalculate B&H over the same period for fair comparison
-    df_full = df_full.iloc[df_returns.index[0].to_datetime64() <= df_full.index]
-    df_full['Daily_Return'] = np.log(df_full['Close'] / df_full['Close'].shift(1))
-    df_full['Cumulative_Buy_and_Hold'] = np.exp(df_full['Daily_Return'].cumsum())
+    start_date = df_returns_stitched.index[0]
+    
+    # Use loc slicing to get the relevant period, ensuring index is used for comparison
+    df_full_sliced = df_full.loc[start_date:].copy()
+    
+    df_full_sliced['Daily_Return'] = np.log(df_full_sliced['Close'] / df_full_sliced['Close'].shift(1))
+    df_full_sliced['Cumulative_Buy_and_Hold'] = np.exp(df_full_sliced['Daily_Return'].cumsum())
     
     # Combine final cumulative returns
     df_final = pd.DataFrame({
-        'Cumulative_Strategy_Return': df_returns['Cumulative_Strategy_Return'],
-        'Cumulative_Buy_and_Hold': df_full['Cumulative_Buy_and_Hold'].loc[df_returns.index]
+        'Cumulative_Strategy_Return': strategy_cumulative_returns,
+        # Ensure indices match exactly for the final B&H series
+        'Cumulative_Buy_and_Hold': df_full_sliced['Cumulative_Buy_and_Hold'].loc[df_returns_stitched.index]
     })
 
+    # Prepare daily returns for Sharpe/DD calculations (must use the same index for both)
+    bh_daily_returns = df_full_sliced['Daily_Return'].loc[df_returns_stitched.index].dropna()
+    strategy_daily_returns = df_returns_stitched.loc[bh_daily_returns.index]
+    
     # --- Generate Metrics ---
     metrics = []
     
     # B&H
     metrics.append(generate_metrics(
-        df_final['Cumulative_Buy_and_Hold'], df_full['Daily_Return'].loc[df_returns.index], 'Buy & Hold (Benchmark)'
+        df_final['Cumulative_Buy_and_Hold'], bh_daily_returns, 'Buy & Hold (Benchmark)'
     ))
     
     # Strategy
     metrics.append(generate_metrics(
-        df_returns.sum(), df_returns.sum(), f'Rolling Dynamic Strategy (90-day re-opt)'
+        df_final['Cumulative_Strategy_Return'], strategy_daily_returns, f'Rolling Dynamic Strategy (90-day re-opt)'
     ))
     
     # Print comparison table
