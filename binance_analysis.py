@@ -100,11 +100,24 @@ def calculate_indicators(df):
 
 def run_backtest(df):
     """
-    Implements a simple SMA 200 crossover strategy (Long/Flat) and calculates equity.
+    Implements a simple SMA 200 Long/Short crossover strategy and calculates equity.
+    Rule: Long (Position=1) when Close > SMA 200. Short (Position=-1) when Close <= SMA 200.
     """
-    df['Position'] = np.where(df['Close'] > df['SMA_200'], POSITION_SIZE, 0)
+    # 1. Define Position: 1 (Long) if Close > SMA 200, -1 (Short) otherwise
+    df['Position'] = np.where(df['Close'] > df['SMA_200'], 
+                              POSITION_SIZE, 
+                              -POSITION_SIZE)
+    
+    # 2. Calculate Daily Strategy Returns
+    # Daily return: Close to Close
     df['Daily_Return'] = df['Close'].pct_change()
+    
+    # Strategy return = (Daily Asset Return) * (Position held from previous day)
+    # This correctly handles Long (return * 1) and Short (return * -1). 
+    # A negative asset return (price drop) results in a positive strategy return when short (- * - = +).
     df['Strategy_Return'] = df['Daily_Return'] * df['Position'].shift(1).fillna(0)
+    
+    # 3. Calculate Cumulative Equity
     df['Equity'] = (1 + df['Strategy_Return']).cumprod()
     df['Buy_Hold_Equity'] = (1 + df['Daily_Return']).cumprod()
     
@@ -115,8 +128,9 @@ def run_backtest(df):
         
     normalization_index = df_clean.index[0]
     
-    df_clean['Equity'] = df_clean['Equity'] / df_clean['Equity'].loc[normalization_index]
-    df_clean['Buy_Hold_Equity'] = df_clean['Buy_Hold_Equity'] / df_clean['Buy_Hold_Equity'].loc[normalization_index]
+    # Use .loc to avoid SettingWithCopyWarning, though technically safe here
+    df_clean.loc[:, 'Equity'] = df_clean['Equity'] / df_clean['Equity'].loc[normalization_index]
+    df_clean.loc[:, 'Buy_Hold_Equity'] = df_clean['Buy_Hold_Equity'] / df_clean['Buy_Hold_Equity'].loc[normalization_index]
 
     return df_clean
 
@@ -126,29 +140,71 @@ def create_plot(df):
     """Generates the main analysis plot using matplotlib, encoded as base64."""
     
     # Use data after the longest indicator (SMA 400) has stabilized
-    df_plot = df.iloc[400:] 
+    df_plot = df.iloc[400:].copy() # Use a copy for manipulation
 
     fig, axes = plt.subplots(2, 1, figsize=(14, 10), sharex=True, 
                              gridspec_kw={'height_ratios': [3, 1]})
     
     # --- Price and Indicator Plot (Top Panel) ---
     ax1 = axes[0]
-    ax1.plot(df_plot.index, df_plot['Close'], label='Price', color='#1f77b4', linewidth=1.5, alpha=0.9)
-    ax1.plot(df_plot.index, df_plot['SMA_50'], label='SMA 50', color='green', linestyle='--', alpha=0.7)
-    ax1.plot(df_plot.index, df_plot['SMA_200'], label='SMA 200', color='red', linestyle='-', linewidth=2)
-    ax1.plot(df_plot.index, df_plot['SMA_400'], label='SMA 400', color='orange', linestyle=':', alpha=0.7)
+    
+    # 1. Background Coloring for Position (Long/Short)
+    # Determine segments of continuous position
+    positions = df_plot['Position'].unique()
+    
+    # Iterate through positions and plot background spans
+    for pos in positions:
+        df_pos = df_plot[df_plot['Position'] == pos]
+        
+        # Determine color
+        if pos == POSITION_SIZE:
+            color = 'green'
+            alpha = 0.08
+        elif pos == -POSITION_SIZE:
+            color = 'red'
+            alpha = 0.08
+        else: # Should not happen with this 1/-1 strategy
+            continue 
+            
+        # Group adjacent dates for cleaner spans
+        in_position = df_pos.index.to_series().diff().dt.days == 1
+        segment_starts = df_pos.index[~in_position]
+        segment_ends = df_pos.index[in_position.shift(-1, fill_value=False)]
+        
+        # If the last point is a start, it's a segment end too.
+        if df_pos.index[-1] not in segment_ends and df_pos.index[-1] in segment_starts:
+             segment_ends = segment_ends.append(pd.Index([df_pos.index[-1]]))
+
+        # Correct for cases where the very first day is a segment start
+        if df_plot.index[0] in segment_starts and df_plot.index[0] in df_pos.index:
+            pass
+        else:
+             segment_starts = df_pos.index[~in_position]
+             
+        # Plot spans
+        for start, end in zip(segment_starts, segment_ends):
+             # Ensure end date is slightly later than the actual candle to span the whole day visually
+             end_adjusted = end + pd.Timedelta(days=1)
+             ax1.axvspan(start, end_adjusted, facecolor=color, alpha=alpha, zorder=0)
+
+    # 2. Price and Indicators
+    ax1.plot(df_plot.index, df_plot['Close'], label='Price', color='#1f77b4', linewidth=1.5, alpha=0.9, zorder=1)
+    ax1.plot(df_plot.index, df_plot['SMA_50'], label='SMA 50', color='green', linestyle='--', alpha=0.7, zorder=1)
+    ax1.plot(df_plot.index, df_plot['SMA_200'], label='SMA 200', color='red', linestyle='-', linewidth=2, zorder=1)
+    ax1.plot(df_plot.index, df_plot['SMA_400'], label='SMA 400', color='orange', linestyle=':', alpha=0.7, zorder=1)
     
     # Donchian Channels
-    ax1.plot(df_plot.index, df_plot['DC_Upper'], label=f'DC {DC_WINDOW} Upper', color='c', linestyle='-.', alpha=0.5)
-    ax1.plot(df_plot.index, df_plot['DC_Lower'], label=f'DC {DC_WINDOW} Lower', color='c', linestyle='-.', alpha=0.5)
-    ax1.fill_between(df_plot.index, df_plot['DC_Lower'], df_plot['DC_Upper'], color='cyan', alpha=0.05)
+    ax1.plot(df_plot.index, df_plot['DC_Upper'], label=f'DC {DC_WINDOW} Upper', color='c', linestyle='-.', alpha=0.5, zorder=1)
+    ax1.plot(df_plot.index, df_plot['DC_Lower'], label=f'DC {DC_WINDOW} Lower', color='c', linestyle='-.', alpha=0.5, zorder=1)
+    ax1.fill_between(df_plot.index, df_plot['DC_Lower'], df_plot['DC_Upper'], color='cyan', alpha=0.05, zorder=0)
     
     # Highlighting Trades (Change in Position)
-    entry_dates = df_plot[(df_plot['Position'].diff() > 0)].index
-    exit_dates = df_plot[(df_plot['Position'].diff() < 0)].index
+    entry_long_dates = df_plot[(df_plot['Position'].diff() == POSITION_SIZE*2)].index # Transition from -1 to 1
+    exit_long_dates = df_plot[(df_plot['Position'].diff() == -POSITION_SIZE*2)].index # Transition from 1 to -1
     
-    ax1.scatter(entry_dates, df_plot.loc[entry_dates, 'Close'], marker='^', color='lime', s=100, label='Long Entry', zorder=5)
-    ax1.scatter(exit_dates, df_plot.loc[exit_dates, 'Close'], marker='v', color='fuchsia', s=100, label='Exit', zorder=5)
+    ax1.scatter(entry_long_dates, df_plot.loc[entry_long_dates, 'Close'], marker='^', color='darkgreen', s=100, label='Long Entry', zorder=5)
+    ax1.scatter(exit_long_dates, df_plot.loc[exit_long_dates, 'Close'], marker='v', color='darkred', s=100, label='Short Entry/Exit Long', zorder=5)
+
 
     ax1.set_title(f'{SYMBOL} Price, Indicators, and Trading Signals (Binance/CCXT)', fontsize=16)
     ax1.set_ylabel('Price (USD)', fontsize=12)
@@ -201,7 +257,7 @@ def setup_analysis():
         
         # 4. Determine current status
         current_position = df_final['Position'].iloc[-1]
-        GLOBAL_STATUS = "LONG" if current_position == POSITION_SIZE else "FLAT/SHORT"
+        GLOBAL_STATUS = "LONG" if current_position == POSITION_SIZE else "SHORT"
 
         # 5. Create Plot
         img_base64, total_strategy_return = create_plot(df_final)
@@ -230,7 +286,6 @@ app = Flask(__name__)
 def analysis_dashboard():
     """Renders the dashboard using pre-calculated global variables."""
     
-    # Check if analysis failed at startup
     if GLOBAL_ERROR:
         return render_template_string(f"""
             <div class="p-8 text-center bg-white rounded-xl shadow-lg m-auto max-w-lg">
@@ -303,7 +358,7 @@ def analysis_dashboard():
             </div>
             
             <p class="mt-8 text-sm text-gray-600 border-t pt-4">
-                **Note:** This backtest uses a simple Close > SMA 200 rule for daily position sizing (long/flat). Transaction costs and slippage are not included.
+                **Note:** This backtest uses a Long/Short strategy based on Close vs. SMA 200, executed daily (Close-to-Close). Transaction costs and slippage are not included.
             </p>
         </div>
     </body>
