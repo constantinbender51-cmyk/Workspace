@@ -109,8 +109,6 @@ def run_backtest(df):
                                        POSITION_SIZE,      # +1 for Long (Price > SMA)
                                        -POSITION_SIZE)     # -1 for Short (Price <= SMA)
     
-    # Position HELD: Shifted position, as the decision made on t-1 dictates the position 
-    # held for the return calculation period (Close_t-1 to Close_t).
     df['Held_Position'] = df['Next_Day_Position'].shift(1).fillna(0)
     
     # 2. Calculate Daily Strategy Returns
@@ -118,31 +116,30 @@ def run_backtest(df):
     daily_returns_clean = df['Daily_Return'].fillna(0)
     
     # Strategy Return = Daily Asset Return * Held Position
-    # - If Held_Position is +1 (LONG): Strategy_Return = Daily_Return
-    # - If Held_Position is -1 (SHORT): Strategy_Return = -Daily_Return
-    #   (I.e., if price falls (neg. Daily_Return), Strategy_Return is positive (profit on short))
     df['Strategy_Return'] = daily_returns_clean * df['Held_Position']
     
-    # 3. Calculate Cumulative Equity
-    df['Equity'] = (1 + df['Strategy_Return']).cumprod()
-    df['Buy_Hold_Equity'] = (1 + daily_returns_clean).cumprod() 
-    
-    # 4. Final Cleanup and Normalization
+    # 3. Final Cleanup
     df_clean = df.dropna()
     if df_clean.empty:
         raise ValueError("DataFrame is empty after dropping NaN values from indicators.")
         
+    # The normalization index is the first row where all indicators are valid (i.e., SMA_400 is non-NaN)
     normalization_index = df_clean.index[0]
     
+    # 4. Calculate Cumulative Equity
+    
+    # Strategy Equity: Calculated using geometric return, starting at 1.0 from the tradable period.
+    strategy_returns_tradable = df_clean['Strategy_Return'].loc[normalization_index:]
+    df_clean.loc[:, 'Equity'] = (1 + strategy_returns_tradable).cumprod().reindex(df_clean.index, fill_value=1.0)
+    
+    # Buy & Hold Benchmark: Calculated using the price ratio, ensuring perfect geometric compounding 
+    # relative to the start of the tradable period.
+    start_price_bh = df_clean['Close'].loc[normalization_index]
+    bh_equity_series = (df_clean['Close'] / start_price_bh).reindex(df_clean.index, fill_value=1.0)
+    df_clean.loc[:, 'Buy_Hold_Equity'] = bh_equity_series
+
     # Renaming Held_Position to Position for summary table display
     df_clean.rename(columns={'Held_Position': 'Position'}, inplace=True) 
-    
-    # Normalization: Set the equity curve starting point to 1.0 at the first tradable day.
-    initial_equity = df_clean['Equity'].loc[normalization_index]
-    initial_bh = df_clean['Buy_Hold_Equity'].loc[normalization_index]
-    
-    df_clean.loc[:, 'Equity'] = df_clean['Equity'] / initial_equity
-    df_clean.loc[:, 'Buy_Hold_Equity'] = df_clean['Buy_Hold_Equity'] / initial_bh
 
     return df_clean
 
@@ -261,15 +258,30 @@ def setup_analysis():
         GLOBAL_SUMMARY_TABLE = summary_df.to_html(classes='table-auto w-full text-sm text-left', 
                                                   float_format=lambda x: f'{x:,.2f}')
         
-        print("--- ANALYSIS COMPLETE ---")
+        # --- DIAGNOSTIC PRINT for B&H and Short Logic ---
+        start_date_bh = df_final.index[0].strftime('%Y-%m-%d')
+        end_date_bh = df_final.index[-1].strftime('%Y-%m-%d')
         
-        # --- DIAGNOSTIC PRINT FOR SHORT LOGIC ---
-        # Show a critical section of the data to prove the short profit/loss logic
-        print("\n--- DIAGNOSTIC: Short Position Logic Verification (Last 5 days of data) ---")
+        start_price_bh = df_final.iloc[0]['Close']
+        end_price_bh = df_final.iloc[-1]['Close']
+        final_bh_equity = df_final['Buy_Hold_Equity'].iloc[-1]
+        
+        print("\n--- ANALYSIS VERIFICATION DETAILS ---")
+        print(f"B&H Start Date (Tradable Period): {start_date_bh}")
+        print(f"B&H End Date: {end_date_bh}")
+        print(f"Price at Start: {start_price_bh:,.2f} USD")
+        print(f"Price at End: {end_price_bh:,.2f} USD")
+        print(f"B&H Total Compounded Return: {final_bh_equity:.2f}x ({(final_bh_equity - 1) * 100:.2f}%)")
+        print(f"Price Ratio Check (End/Start): {end_price_bh / start_price_bh:.2f}x")
+        print("--- NOTE: B&H Equity is calculated as the Price Ratio (Close_t / Close_start) ---")
+        print("----------------------------------------------------------------------")
+        
+        print("--- DIAGNOSTIC: Short Position Logic Verification (Last 5 days of data) ---")
         diag_df = df_final[['Close', 'SMA_200', 'Daily_Return', 'Position', 'Strategy_Return']].tail(5)
         print("Note: If 'Position' is -1 (Short), a negative 'Daily_Return' (price fell) results in a positive 'Strategy_Return' (profit).")
         print(diag_df)
         print("----------------------------------------------------------------------------")
+        print("--- ANALYSIS COMPLETE ---")
 
 
     except Exception as e:
