@@ -106,17 +106,21 @@ def run_backtest(df):
     
     # 1. Position Decision and Held Position (Decision based on t-1)
     df['Next_Day_Position'] = np.where(df['Close'] > df['SMA_200'], 
-                                       POSITION_SIZE, 
-                                       -POSITION_SIZE)
-    df['Held_Position'] = df['Next_Day_Position'].shift(1).fillna(0) # 0 for the first day(s)
+                                       POSITION_SIZE,      # +1 for Long (Price > SMA)
+                                       -POSITION_SIZE)     # -1 for Short (Price <= SMA)
+    
+    # Position HELD: Shifted position, as the decision made on t-1 dictates the position 
+    # held for the return calculation period (Close_t-1 to Close_t).
+    df['Held_Position'] = df['Next_Day_Position'].shift(1).fillna(0)
     
     # 2. Calculate Daily Strategy Returns
     df['Daily_Return'] = df['Close'].pct_change()
-    
-    # Ensure the cumulative product is well-behaved by starting returns at 0.0
     daily_returns_clean = df['Daily_Return'].fillna(0)
     
     # Strategy Return = Daily Asset Return * Held Position
+    # - If Held_Position is +1 (LONG): Strategy_Return = Daily_Return
+    # - If Held_Position is -1 (SHORT): Strategy_Return = -Daily_Return
+    #   (I.e., if price falls (neg. Daily_Return), Strategy_Return is positive (profit on short))
     df['Strategy_Return'] = daily_returns_clean * df['Held_Position']
     
     # 3. Calculate Cumulative Equity
@@ -124,7 +128,6 @@ def run_backtest(df):
     df['Buy_Hold_Equity'] = (1 + daily_returns_clean).cumprod() 
     
     # 4. Final Cleanup and Normalization
-    # Drop NaNs caused by indicators (SMA 400 in this case)
     df_clean = df.dropna()
     if df_clean.empty:
         raise ValueError("DataFrame is empty after dropping NaN values from indicators.")
@@ -172,7 +175,6 @@ def create_plot(df):
         
         if current_pos == POSITION_SIZE:
             color = 'green'
-            # Note: Removed the label logic to avoid legend clutter, as position is implied by color
             alpha = 0.08
         elif current_pos == -POSITION_SIZE:
             color = 'red'
@@ -260,6 +262,15 @@ def setup_analysis():
                                                   float_format=lambda x: f'{x:,.2f}')
         
         print("--- ANALYSIS COMPLETE ---")
+        
+        # --- DIAGNOSTIC PRINT FOR SHORT LOGIC ---
+        # Show a critical section of the data to prove the short profit/loss logic
+        print("\n--- DIAGNOSTIC: Short Position Logic Verification (Last 5 days of data) ---")
+        diag_df = df_final[['Close', 'SMA_200', 'Daily_Return', 'Position', 'Strategy_Return']].tail(5)
+        print("Note: If 'Position' is -1 (Short), a negative 'Daily_Return' (price fell) results in a positive 'Strategy_Return' (profit).")
+        print(diag_df)
+        print("----------------------------------------------------------------------------")
+
 
     except Exception as e:
         # Catch and store any errors during startup analysis
