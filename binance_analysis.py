@@ -18,7 +18,7 @@ TIMEFRAME = '1d'
 START_DATE = '2018-01-01 00:00:00'
 PORT = 8080
 WINDOW_SIZE = 250 # Rolling optimization window
-FIXED_III_THRESHOLD = 0.1 # New fixed threshold
+FIXED_III_THRESHOLD = 0.01 # New fixed threshold
 
 def fetch_data():
     """Fetches historical OHLCV data from Binance."""
