@@ -1,257 +1,282 @@
-import ccxt
 import pandas as pd
 import numpy as np
-import matplotlib
-matplotlib.use('Agg') # Set backend to non-interactive
 import matplotlib.pyplot as plt
-import matplotlib.cm as cm
-import matplotlib.colors as mcolors
-from flask import Flask, render_template_string
-import io
-import base64
-
-app = Flask(__name__)
+import requests
+import time
+import datetime as dt
+import os
+import threading
+from http.server import SimpleHTTPRequestHandler, HTTPServer
 
 # --- Configuration ---
-SYMBOL = 'BTC/USDT'
-TIMEFRAME = '1d' 
-START_DATE = '2018-01-01 00:00:00'
-PORT = 8080
+SYMBOL = 'BTCUSDT'
+INTERVAL = '1d'
+START_DATE = '1 Jan, 2018'
+SMA_PERIOD = 120
+PLOT_FILE = 'strategy_results.png'
+SERVER_PORT = 8080
+RESULTS_DIR = 'results'
 
-# Optimization Parameters
-TRAIN_WINDOW = 400   # Lookback window for finding best params
-RETRAIN_DAYS = 400   # How often we re-optimize (and hold params) - UPDATED TO 400
-FIXED_III_THRESHOLD = 0.1 # Fixed leverage threshold
+# --- 1. Data Fetching Utilities ---
 
-def fetch_data():
-    """Fetches historical OHLCV data from Binance."""
-    exchange = ccxt.binance()
-    since = exchange.parse8601(START_DATE)
-    all_candles = []
+def date_to_milliseconds(date_str):
+    """Convert date string to UTC timestamp in milliseconds"""
+    # Helper to convert human-readable date to Binance's millisecond timestamp
+    return int(dt.datetime.strptime(date_str, '%d %b, %Y').timestamp() * 1000)
+
+def fetch_klines(symbol, interval, start_str):
+    """
+    Fetches historical klines (OHLCV) data from Binance.
+    Handles the 1000 limit per request by looping.
+    """
+    print(f"-> Fetching {symbol} {interval} data starting from {start_str}...")
     
-    print(f"Fetching {SYMBOL} data from {START_DATE}...")
+    # Convert start date to millisecond timestamp
+    start_ts = date_to_milliseconds(start_str)
     
+    # Base URL for klines endpoint
+    base_url = 'https://api.binance.com/api/v3/klines'
+    
+    all_data = []
+    
+    # Loop to fetch data in chunks of 1000 candles
     while True:
         try:
-            candles = exchange.fetch_ohlcv(SYMBOL, TIMEFRAME, since=since, limit=1000)
-            if not candles:
-                break
+            params = {
+                'symbol': symbol,
+                'interval': interval,
+                'startTime': start_ts,
+                'limit': 1000
+            }
             
-            last_timestamp = candles[-1][0]
-            since = last_timestamp + 1
-            all_candles += candles
+            response = requests.get(base_url, params=params)
+            response.raise_for_status() # Raise HTTPError for bad responses (4xx or 5xx)
+            klines = response.json()
             
-            if len(candles) < 1000:
+            if not klines:
                 break
-                
-        except Exception as e:
+
+            all_data.extend(klines)
+            
+            # The next request should start from the close time of the last candle + 1 millisecond
+            start_ts = klines[-1][0] + 1
+            
+            # Print progress
+            print(f"   Fetched up to: {dt.datetime.fromtimestamp(start_ts / 1000).strftime('%Y-%m-%d')}")
+            
+            # To respect Binance's rate limits
+            time.sleep(0.5) 
+            
+            # Check if we have reached the current time (last candle in the response is the newest available)
+            if len(klines) < 1000:
+                break
+
+        except requests.exceptions.RequestException as e:
             print(f"Error fetching data: {e}")
             break
+        
+    print(f"-> Data fetch complete. Total candles: {len(all_data)}")
+    
+    # Convert list of lists into a DataFrame
+    df = pd.DataFrame(all_data, columns=[
+        'Open Time', 'Open', 'High', 'Low', 'Close', 'Volume', 'Close Time', 
+        'Quote Asset Volume', 'Number of Trades', 'Taker Buy Base Asset Volume', 
+        'Taker Buy Quote Asset Volume', 'Ignore'
+    ])
 
-    df = pd.DataFrame(all_candles, columns=['timestamp', 'open', 'high', 'low', 'close', 'volume'])
-    df['timestamp'] = pd.to_datetime(df['timestamp'], unit='ms')
-    df.set_index('timestamp', inplace=True)
+    # Clean and format DataFrame
+    df['Open Time'] = pd.to_datetime(df['Open Time'], unit='ms')
+    df['Close'] = pd.to_numeric(df['Close'])
+    df = df.set_index('Open Time')
+    df = df[['Open', 'High', 'Low', 'Close', 'Volume']].astype(float)
+    
+    return df.dropna()
+
+# --- 2. Backtesting Logic ---
+
+def run_backtest(df):
+    """
+    Applies the SMA strategy and calculates returns.
+    """
+    print(f"-> Running backtest on {len(df)} candles...")
+    
+    # 2.1 Calculate the 120-day Simple Moving Average (SMA)
+    # The SMA is calculated based on the Close price of the current day.
+    df[f'SMA_{SMA_PERIOD}'] = df['Close'].rolling(window=SMA_PERIOD).mean()
+    
+    # 2.2 Calculate daily returns (log returns are often preferred for backtesting)
+    df['Daily_Return'] = np.log(df['Close'] / df['Close'].shift(1))
+
+    # 2.3 Generate Trading Signals (Position)
+    # Rule: Price > SMA = Long (+1), Price < SMA = Short (-1)
+    # We must use T-1 data to avoid look-ahead bias.
+    # Signal on day T is based on the comparison of Close(T-1) vs. SMA(T-1)
+    
+    # Calculate the position for the *next* day based on today's closing data
+    # We use numpy.where for vectorized conditional assignment
+    df['Position'] = np.where(
+        df['Close'] > df[f'SMA_{SMA_PERIOD}'],  # Condition: Current Close > Current SMA
+        1,                                      # Value if True (Long)
+        -1                                      # Value if False (Short)
+    )
+
+    # Shift the position column forward by one day. 
+    # This means the position calculated on day T is actually held on day T+1, 
+    # which correctly avoids look-ahead bias.
+    df['Position'] = df['Position'].shift(1)
+    
+    # The first SMA_PERIOD entries will have NaN SMA, and the first return will be NaN,
+    # and the first Position will be NaN. We drop these.
+    df = df.dropna()
+    
+    # 2.4 Calculate Strategy Returns
+    # Strategy Return = Daily_Return * Position
+    df['Strategy_Return'] = df['Daily_Return'] * df['Position']
+    
+    # 2.5 Calculate Cumulative Returns (Equity Curve)
+    # Cumulative returns are calculated using the exponent of the cumulative log returns
+    df['Cumulative_Strategy_Return'] = np.exp(df['Strategy_Return'].cumsum())
+    df['Buy_and_Hold_Return'] = np.exp(df['Daily_Return'].cumsum())
+    
+    # Calculate basic stats
+    total_return = (df['Cumulative_Strategy_Return'].iloc[-1] - 1) * 100
+    bh_return = (df['Buy_and_Hold_Return'].iloc[-1] - 1) * 100
+    
+    print("-" * 40)
+    print("Backtest Summary:")
+    print(f"Strategy Total Return: {total_return:.2f}%")
+    print(f"Buy & Hold Total Return: {bh_return:.2f}%")
+    print("-" * 40)
+    
     return df
 
-def calculate_efficiency_ratio(df, period=30):
-    log_ret = np.log(df['close'] / df['close'].shift(1))
-    numerator = log_ret.rolling(window=period).sum().abs()
-    denominator = log_ret.abs().rolling(window=period).sum()
-    return numerator / denominator
+# --- 3. Plotting Results ---
 
-def walk_forward_optimization(df):
+def plot_results(df):
     """
-    Performs Walk-Forward Optimization with Periodic Retraining (400 days).
+    Generates and saves the plot of the strategy's equity curve.
     """
-    print(f"Preparing Strategy Matrix (40 SMAs, Fixed Threshold {FIXED_III_THRESHOLD})...")
-    data = df.copy()
-    data['market_return'] = np.log(data['close'] / data['close'].shift(1))
+    print(f"-> Generating plot in '{RESULTS_DIR}/{PLOT_FILE}'...")
     
-    # 1. Calculate III and Leverage Multiplier ONCE
-    data['iii'] = calculate_efficiency_ratio(data, period=30)
-    # Leverage: 0.5 if iii < 0.1, else 1.0 (Shifted 1 step later)
-    leverage_mult = np.where(data['iii'] < FIXED_III_THRESHOLD, 0.5, 1.0)
-    
-    # 2. Generate Parameter Range (SMA only)
-    sma_periods = list(range(10, 410, 10)) # 40 periods
-    
-    # 3. Build Strategy Returns Matrix (N_days x 40 Strategies)
-    strategy_returns = {}
-    
-    for period in sma_periods:
-        # Calculate SMA and Raw Direction
-        sma = data['close'].rolling(window=period).mean()
-        raw_direction = np.where(data['close'] > sma, 1, -1)
-        
-        # Position = Direction * Fixed Leverage
-        pos_vector = raw_direction * leverage_mult
-        
-        # Strategy Return(t) = Pos(t-1) * MarketRet(t)
-        strat_ret = pd.Series(pos_vector, index=data.index).shift(1) * data['market_return']
-        strategy_returns[period] = strat_ret
+    # Ensure the results directory exists
+    os.makedirs(RESULTS_DIR, exist_ok=True)
+    plot_path = os.path.join(RESULTS_DIR, PLOT_FILE)
 
-    # DataFrame of all potential strategy returns
-    strat_df = pd.DataFrame(strategy_returns)
+    plt.style.use('dark_background')
+    fig, ax = plt.subplots(figsize=(14, 8))
     
-    # 4. Step-wise Walk Forward Optimization
-    print(f"Running Step-wise WFO (Train: {TRAIN_WINDOW}d, Hold: {RETRAIN_DAYS}d)...")
+    # Plotting the equity curves
+    df['Cumulative_Strategy_Return'].plot(ax=ax, label=f'SMA {SMA_PERIOD} Strategy', color='#10B981', linewidth=2)
+    df['Buy_and_Hold_Return'].plot(ax=ax, label='Buy & Hold (Benchmark)', color='#EF4444', linestyle='--', linewidth=1.5)
     
-    # Result containers
-    wfo_returns = np.zeros(len(data))
-    best_sma_log = np.full(len(data), np.nan)
+    # Style and Labels
+    ax.set_title(f'{SYMBOL} 120-Day SMA Strategy Equity Curve (Since 2018)', fontsize=16, color='white')
+    ax.set_xlabel('Date', fontsize=12, color='white')
+    ax.set_ylabel('Cumulative Return (Logarithmic)', fontsize=12, color='white')
+    ax.legend(loc='upper left', fontsize=10)
+    ax.grid(True, linestyle=':', alpha=0.5, color='#374151')
     
-    # Start loop after the first training window is available
-    # We iterate in steps of RETRAIN_DAYS
-    for t in range(TRAIN_WINDOW, len(data), RETRAIN_DAYS):
-        
-        # A. Define Training Set (Lookback 400 days from t)
-        train_start = t - TRAIN_WINDOW
-        train_end = t
-        train_slice = strat_df.iloc[train_start:train_end]
-        
-        # B. Find Best SMA in Training Set (Max Sharpe)
-        # Avoid division by zero
-        sharpes = train_slice.mean() / (train_slice.std() + 1e-9)
-        best_sma = sharpes.idxmax()
-        
-        # C. Define Test Set (Next 400 days from t)
-        test_start = t
-        test_end = min(t + RETRAIN_DAYS, len(data))
-        
-        # D. Apply Best SMA to Test Set
-        # We take the column corresponding to best_sma
-        wfo_returns[test_start:test_end] = strat_df[best_sma].iloc[test_start:test_end]
-        
-        # Log the parameter for plotting
-        best_sma_log[test_start:test_end] = best_sma
-        
-    # 5. Store Results
-    data['strategy_return'] = wfo_returns
-    data['equity'] = data['strategy_return'].cumsum().apply(np.exp)
-    data['buy_hold_equity'] = data['market_return'].cumsum().apply(np.exp)
-    data['best_sma'] = best_sma_log
+    # Format axes to percentages
+    from matplotlib.ticker import FuncFormatter
+    formatter = FuncFormatter(lambda y, _: f'{y*100:.0f}%')
+    ax.yaxis.set_major_formatter(formatter)
     
-    return data
-
-def generate_plot(df):
-    """Generates the plot showing Equity and Step-wise Parameter Evolution."""
-    # Filter out warm-up period for cleaner plots
-    plot_df = df.iloc[TRAIN_WINDOW:].copy()
-    
-    fig = plt.figure(figsize=(14, 16))
-    gs = fig.add_gridspec(3, 1, height_ratios=[2, 1, 1])
-    
-    ax1 = fig.add_subplot(gs[0])
-    ax2 = fig.add_subplot(gs[1], sharex=ax1)
-    ax3 = fig.add_subplot(gs[2], sharex=ax1)
-    
-    # --- PLOT 1: Equity Curves ---
-    ax1.plot(plot_df.index, plot_df['equity'], label='WFO Strategy (Retrain 400d)', color='lime', linewidth=2)
-    ax1.plot(plot_df.index, plot_df['buy_hold_equity'], label='Buy & Hold', color='gray', alpha=0.5, linestyle='--')
-    
-    ax1.set_title(f'Walk-Forward Optimization (Train: {TRAIN_WINDOW}d, Hold: {RETRAIN_DAYS}d)', fontsize=14)
-    ax1.set_ylabel('Normalized Equity')
-    ax1.legend(loc='upper left')
-    ax1.grid(True, alpha=0.3)
-    ax1.set_yscale('log')
-
-    # --- PLOT 2: Best SMA Evolution (Step Function) ---
-    ax2.step(plot_df.index, plot_df['best_sma'], where='post', color='cyan', linewidth=2, label='Active SMA')
-    ax2.scatter(plot_df.index, plot_df['best_sma'], color='cyan', s=10, alpha=0.5)
-    
-    ax2.set_title('Dynamic SMA Selection (Re-optimized every 400 days)', fontsize=12)
-    ax2.set_ylabel('Selected SMA Period')
-    ax2.legend(loc='upper right')
-    ax2.grid(True, alpha=0.3)
-    ax2.set_ylim(0, 420)
-
-    # --- PLOT 3: Efficiency Ratio ---
-    ax3.plot(plot_df.index, plot_df['iii'], color='magenta', linewidth=1, label='Efficiency Ratio (III)')
-    ax3.axhline(FIXED_III_THRESHOLD, color='orange', linestyle='--', linewidth=2, label=f'Threshold ({FIXED_III_THRESHOLD})')
-    
-    # Fill background
-    ax3.fill_between(plot_df.index, 0, FIXED_III_THRESHOLD, color='red', alpha=0.1, label='Zone: 0.5x Leverage')
-    
-    ax3.set_title(f'Efficiency Ratio (III) < {FIXED_III_THRESHOLD} triggers De-leveraging', fontsize=12)
-    ax3.set_ylabel('Efficiency')
-    ax3.set_xlabel('Date')
-    ax3.set_ylim(0, 0.6)
-    ax3.legend(loc='upper left')
-    ax3.grid(True, alpha=0.3)
-    
-    plt.tight_layout()
-    
-    buf = io.BytesIO()
-    plt.savefig(buf, format='png', dpi=100, facecolor=fig.get_facecolor())
-    buf.seek(0)
-    data = base64.b64encode(buf.getbuffer()).decode("ascii")
+    # Save the plot
+    plt.savefig(plot_path, bbox_inches='tight', dpi=150)
     plt.close(fig)
-    return data
+    print("-> Plot saved successfully.")
 
-@app.route('/')
-def index():
-    try:
-        # 1. Fetch
-        df = fetch_data()
-        
-        # 2. Walk-Forward Optimization
-        result_df = walk_forward_optimization(df)
-        
-        # 3. Stats
-        valid_rets = result_df['strategy_return'].iloc[TRAIN_WINDOW:]
-        total_return = result_df['equity'].iloc[-1] if not result_df['equity'].empty else 1.0
-        
-        sharpe_calc = valid_rets.mean() / (valid_rets.std() + 1e-9)
-        sharpe = np.sqrt(365) * sharpe_calc
-        
-        # 4. Plot
-        plot_data = generate_plot(result_df)
-        
-        html = f"""
-        <!DOCTYPE html>
-        <html>
-        <head>
-            <title>Walk-Forward WFO: {SYMBOL}</title>
-            <style>
-                body {{ font-family: 'Segoe UI', sans-serif; text-align: center; background: #1e1e1e; color: #eee; padding: 20px; }}
-                .container {{ background: #2d2d2d; padding: 30px; border-radius: 12px; box-shadow: 0 4px 15px rgba(0,0,0,0.5); display: inline-block; max-width: 95%; }}
-                h1 {{ color: #fff; margin-bottom: 5px; }}
-                .stats {{ background: #333; padding: 15px; border-radius: 8px; margin: 20px 0; border: 1px solid #444; }}
-                .stats span {{ margin: 0 15px; font-size: 1.1em; }}
-                .highlight {{ color: #00e676; font-weight: bold; }} 
-                img {{ max-width: 100%; height: auto; border-radius: 4px; }}
-                button {{ background: #2196F3; color: white; border: none; padding: 10px 20px; font-size: 16px; cursor: pointer; border-radius: 4px; margin-top: 20px; }}
-                button:hover {{ background: #1976D2; }}
-            </style>
-        </head>
-        <body>
-            <div class="container">
-                <h1>AI Trading Lab: Periodic WFO</h1>
-                <p>Train Window: {TRAIN_WINDOW} Days | Retrain Frequency: {RETRAIN_DAYS} Days</p>
-                
-                <div class="stats">
-                    <span>Total Return: <span class="highlight">{total_return:.2f}x</span></span>
-                    <span>WFO Sharpe: <span class="highlight">{sharpe:.2f}</span></span>
-                </div>
-                
-                <div style="margin-bottom: 20px; color: #aaa; font-size: 0.9em;">
-                    The model looks back {TRAIN_WINDOW} days to find the best SMA, locks it in for {RETRAIN_DAYS} days, and then repeats.
-                    <br>Leverage is halved if Efficiency Ratio < {FIXED_III_THRESHOLD}.
-                </div>
+# --- 4. Web Server ---
 
-                <img src="data:image/png;base64,{plot_data}" alt="Backtest Plot">
-                <br>
-                <button onclick="location.reload()">Run Again</button>
-            </div>
-        </body>
-        </html>
-        """
-        return render_template_string(html)
-        
-    except Exception as e:
-        import traceback
-        return f"<h1>Error</h1><pre>{traceback.format_exc()}</pre>"
+def serve_results():
+    """
+    Starts a simple HTTP server to host the results page.
+    """
+    print(f"\n==========================================================")
+    print(f"🚀 Starting Web Server on http://localhost:{SERVER_PORT}/")
+    print(f"==========================================================")
+    
+    # Custom Handler to serve the HTML page
+    class ResultsHandler(SimpleHTTPRequestHandler):
+        def do_GET(self):
+            # If the root path is requested, serve the custom HTML content
+            if self.path == '/':
+                self.send_response(200)
+                self.send_header('Content-type', 'text/html')
+                self.end_headers()
+                
+                # HTML content to display the plot
+                html_content = f"""
+                <!DOCTYPE html>
+                <html lang="en">
+                <head>
+                    <meta charset="UTF-8">
+                    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+                    <title>Trading Strategy Results</title>
+                    <script src="https://cdn.tailwindcss.com"></script>
+                    <style>
+                        body {{ font-family: 'Inter', sans-serif; background-color: #1F2937; color: #F3F4F6; }}
+                        .container {{ max-width: 1024px; }}
+                        .plot-container {{ background-color: #374151; border-radius: 0.5rem; padding: 1rem; }}
+                    </style>
+                </head>
+                <body class="p-8">
+                    <div class="container mx-auto p-4 bg-gray-800 shadow-xl rounded-xl">
+                        <h1 class="text-3xl font-bold mb-4 text-green-400">Backtesting Results: {SYMBOL} SMA-120</h1>
+                        <p class="text-gray-300 mb-6">
+                            The backtest calculated daily returns for the strategy: Long if yesterday's Close > 120-Day SMA, Short if Close < 120-Day SMA.
+                        </p>
+                        <div class="plot-container">
+                            <img src="{RESULTS_DIR}/{PLOT_FILE}" alt="Strategy Cumulative Returns Plot" class="w-full h-auto rounded-lg shadow-2xl">
+                        </div>
+                        <div class="mt-6 p-4 bg-gray-700 rounded-lg">
+                            <p class="text-xl font-semibold">Server Running on Port {SERVER_PORT}</p>
+                            <p class="text-sm text-gray-400">Close the terminal window to stop the server.</p>
+                        </div>
+                    </div>
+                </body>
+                </html>
+                """
+                self.wfile.write(bytes(html_content, "utf8"))
+            
+            # If the plot image or results directory is requested, serve it from the local path
+            elif self.path.startswith('/' + RESULTS_DIR):
+                SimpleHTTPRequestHandler.do_GET(self)
+            
+            # Fallback for other files (like favicon.ico)
+            else:
+                self.send_response(404)
+                self.end_headers()
+                self.wfile.write(b'404 Not Found')
+
+        # We must change the directory the server looks in to be the current directory
+        def translate_path(self, path):
+            # This ensures the server can find files in the current directory and subdirectories
+            return os.path.join(os.getcwd(), path.lstrip('/'))
+
+    
+    # Change the working directory of the server to the root of the script execution
+    with HTTPServer(("", SERVER_PORT), ResultsHandler) as httpd:
+        try:
+            httpd.serve_forever()
+        except KeyboardInterrupt:
+            print("\n-> Server stopped by user.")
+
+
+# --- Main Execution ---
 
 if __name__ == '__main__':
-    print(f"Starting Server on {PORT}...")
-    app.run(host='0.0.0.0', port=PORT, debug=True)
+    # 1. Fetch data
+    df_data = fetch_klines(SYMBOL, INTERVAL, START_DATE)
+    
+    if df_data.empty:
+        print("Error: Could not retrieve data. Exiting.")
+    else:
+        # 2. Run backtest and get results
+        results_df = run_backtest(df_data)
+        
+        # 3. Plot results
+        plot_results(results_df)
+
+        # 4. Start web server in the main thread
+        serve_results()
