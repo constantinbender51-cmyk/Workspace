@@ -17,8 +17,11 @@ SYMBOL = 'BTC/USDT'
 TIMEFRAME = '1d' 
 START_DATE = '2018-01-01 00:00:00'
 PORT = 8080
-WINDOW_SIZE = 80 # Rolling optimization window
-FIXED_III_THRESHOLD = 0.2 # New fixed threshold
+
+# Optimization Parameters
+TRAIN_WINDOW = 400   # Lookback window for finding best params
+RETRAIN_DAYS = 60    # How often we re-optimize (and hold params)
+FIXED_III_THRESHOLD = 0.1 # Fixed leverage threshold
 
 def fetch_data():
     """Fetches historical OHLCV data from Binance."""
@@ -58,17 +61,20 @@ def calculate_efficiency_ratio(df, period=30):
 
 def walk_forward_optimization(df):
     """
-    Performs Vectorized Walk-Forward Optimization (1D Grid Search).
-    Optimizes only SMA period, keeping III threshold fixed at 0.1.
+    Performs Walk-Forward Optimization with Periodic Retraining.
+    1. Pre-calculates returns for all 40 SMA strategies.
+    2. Steps through time in 60-day chunks.
+    3. Looks back 400 days to pick best SMA.
+    4. Applies best SMA to next 60 days.
     """
-    print(f"Preparing Vectorized Strategy Matrix (40 SMAs, Fixed Threshold {FIXED_III_THRESHOLD})...")
+    print(f"Preparing Strategy Matrix (40 SMAs, Fixed Threshold {FIXED_III_THRESHOLD})...")
     data = df.copy()
     data['market_return'] = np.log(data['close'] / data['close'].shift(1))
     
-    # 1. Calculate III and Leverage Multiplier ONCE (Leverage is constant for all SMA strategies)
+    # 1. Calculate III and Leverage Multiplier ONCE
     data['iii'] = calculate_efficiency_ratio(data, period=30)
     # Leverage: 0.5 if iii < 0.1, else 1.0 (Shifted 1 step later)
-    leverage_mult = np.where(data['iii'] < FIXED_III_THRESHOLD, 0.1, 1.0)
+    leverage_mult = np.where(data['iii'] < FIXED_III_THRESHOLD, 0.5, 1.0)
     
     # 2. Generate Parameter Range (SMA only)
     sma_periods = list(range(10, 410, 10)) # 40 periods
@@ -77,8 +83,6 @@ def walk_forward_optimization(df):
     strategy_returns = {}
     
     for period in sma_periods:
-        col_name = f"{period}_{FIXED_III_THRESHOLD:.1f}"
-        
         # Calculate SMA and Raw Direction
         sma = data['close'].rolling(window=period).mean()
         raw_direction = np.where(data['close'] > sma, 1, -1)
@@ -88,59 +92,55 @@ def walk_forward_optimization(df):
         
         # Strategy Return(t) = Pos(t-1) * MarketRet(t)
         strat_ret = pd.Series(pos_vector, index=data.index).shift(1) * data['market_return']
-        strategy_returns[col_name] = strat_ret
+        strategy_returns[period] = strat_ret
 
-    # Convert to DataFrame (N_days x 40 columns)
+    # DataFrame of all potential strategy returns
     strat_df = pd.DataFrame(strategy_returns)
     
-    # 4. Calculate Rolling Sharpe (Vectorized)
-    print(f"Calculating Rolling Sharpe ({WINDOW_SIZE} days)...")
+    # 4. Step-wise Walk Forward Optimization
+    print(f"Running Step-wise WFO (Train: {TRAIN_WINDOW}d, Hold: {RETRAIN_DAYS}d)...")
     
-    rolling_mean = strat_df.rolling(window=WINDOW_SIZE).mean()
-    rolling_std = strat_df.rolling(window=WINDOW_SIZE).std()
-    rolling_sharpe = rolling_mean / (rolling_std + 1e-9)
+    # Result containers
+    wfo_returns = np.zeros(len(data))
+    best_sma_log = np.full(len(data), np.nan)
     
-    # 5. Select Best Strategy Daily
-    print("Selecting best strategies daily...")
-    best_strategy_col = rolling_sharpe.idxmax(axis=1)
-    selected_strategy_lagged = best_strategy_col.shift(1)
-    
-    # 6. Construct Walk-Forward Equity Curve
-    
-    col_map = {name: i for i, name in enumerate(strat_df.columns)}
-    col_indices = selected_strategy_lagged.map(col_map).fillna(0).astype(int)
-    
-    returns_arr = strat_df.values
-    row_indices = np.arange(len(data))
-    
-    selected_returns = returns_arr[row_indices, col_indices]
-    
-    # Handle the warm-up period (WINDOW_SIZE + 1 days are invalid)
-    selected_returns[:WINDOW_SIZE+1] = 0
-    
-    data['strategy_return'] = selected_returns
+    # Start loop after the first training window is available
+    # We iterate in steps of RETRAIN_DAYS
+    for t in range(TRAIN_WINDOW, len(data), RETRAIN_DAYS):
+        
+        # A. Define Training Set (Lookback 400 days from t)
+        train_start = t - TRAIN_WINDOW
+        train_end = t
+        train_slice = strat_df.iloc[train_start:train_end]
+        
+        # B. Find Best SMA in Training Set (Max Sharpe)
+        # Avoid division by zero
+        sharpes = train_slice.mean() / (train_slice.std() + 1e-9)
+        best_sma = sharpes.idxmax()
+        
+        # C. Define Test Set (Next 60 days from t)
+        test_start = t
+        test_end = min(t + RETRAIN_DAYS, len(data))
+        
+        # D. Apply Best SMA to Test Set
+        # We take the column corresponding to best_sma
+        wfo_returns[test_start:test_end] = strat_df[best_sma].iloc[test_start:test_end]
+        
+        # Log the parameter for plotting
+        best_sma_log[test_start:test_end] = best_sma
+        
+    # 5. Store Results
+    data['strategy_return'] = wfo_returns
     data['equity'] = data['strategy_return'].cumsum().apply(np.exp)
     data['buy_hold_equity'] = data['market_return'].cumsum().apply(np.exp)
-    
-    # Store dynamic params for plotting (Threshold is fixed)
-    def parse_params(val):
-        if pd.isna(val): return None, FIXED_III_THRESHOLD
-        try:
-            p, _ = val.split('_')
-            return int(p), FIXED_III_THRESHOLD
-        except ValueError:
-             return None, FIXED_III_THRESHOLD
-        
-    params = selected_strategy_lagged.apply(parse_params)
-    params_df = pd.DataFrame(params.tolist(), index=params.index, columns=['best_sma', 'best_thresh'])
-    data = pd.concat([data, params_df], axis=1)
+    data['best_sma'] = best_sma_log
     
     return data
 
 def generate_plot(df):
-    """Generates the plot showing Equity and Dynamic Parameter Evolution."""
+    """Generates the plot showing Equity and Step-wise Parameter Evolution."""
     # Filter out warm-up period for cleaner plots
-    plot_df = df.iloc[WINDOW_SIZE+1:].copy()
+    plot_df = df.iloc[TRAIN_WINDOW:].copy()
     
     fig = plt.figure(figsize=(14, 16))
     gs = fig.add_gridspec(3, 1, height_ratios=[2, 1, 1])
@@ -150,36 +150,35 @@ def generate_plot(df):
     ax3 = fig.add_subplot(gs[2], sharex=ax1)
     
     # --- PLOT 1: Equity Curves ---
-    ax1.plot(plot_df.index, plot_df['equity'], label='Walk-Forward Strategy', color='lime', linewidth=2)
+    ax1.plot(plot_df.index, plot_df['equity'], label='WFO Strategy (Retrain 60d)', color='lime', linewidth=2)
     ax1.plot(plot_df.index, plot_df['buy_hold_equity'], label='Buy & Hold', color='gray', alpha=0.5, linestyle='--')
     
-    ax1.set_title(f'Walk-Forward Optimization (Rolling {WINDOW_SIZE} Days)', fontsize=14)
+    ax1.set_title(f'Walk-Forward Optimization (Train: {TRAIN_WINDOW}d, Hold: {RETRAIN_DAYS}d)', fontsize=14)
     ax1.set_ylabel('Normalized Equity')
     ax1.legend(loc='upper left')
     ax1.grid(True, alpha=0.3)
     ax1.set_yscale('log')
 
-    # --- PLOT 2: Best SMA Evolution ---
-    ax2.scatter(plot_df.index, plot_df['best_sma'], c=plot_df['best_sma'], cmap='turbo', s=10, alpha=0.6)
-    ax2.plot(plot_df.index, plot_df['best_sma'].rolling(30).mean(), color='white', linewidth=1.5, alpha=0.8, label='30d Avg Selection')
+    # --- PLOT 2: Best SMA Evolution (Step Function) ---
+    # Plot the raw steps
+    ax2.step(plot_df.index, plot_df['best_sma'], where='post', color='cyan', linewidth=2, label='Active SMA')
+    ax2.scatter(plot_df.index, plot_df['best_sma'], color='cyan', s=10, alpha=0.5)
     
-    ax2.set_title('Dynamic SMA Selection (Optimized Daily)', fontsize=12)
+    ax2.set_title('Dynamic SMA Selection (Re-optimized every 60 days)', fontsize=12)
     ax2.set_ylabel('Selected SMA Period')
     ax2.legend(loc='upper right')
     ax2.grid(True, alpha=0.3)
+    ax2.set_ylim(0, 420)
 
-    # --- PLOT 3: Efficiency Ratio & Leverage Zones (Threshold Fixed) ---
-    ax3.plot(plot_df.index, plot_df['iii'], color='cyan', linewidth=1.5, label='Efficiency Ratio (III)')
-    
-    # Plot Fixed Threshold
-    ax3.axhline(FIXED_III_THRESHOLD, color='orange', linestyle='-', linewidth=2, label=f'Fixed Threshold ({FIXED_III_THRESHOLD:.1f})')
+    # --- PLOT 3: Efficiency Ratio ---
+    ax3.plot(plot_df.index, plot_df['iii'], color='magenta', linewidth=1, label='Efficiency Ratio (III)')
+    ax3.axhline(FIXED_III_THRESHOLD, color='orange', linestyle='--', linewidth=2, label=f'Threshold ({FIXED_III_THRESHOLD})')
     
     # Fill background
     ax3.fill_between(plot_df.index, 0, FIXED_III_THRESHOLD, color='red', alpha=0.1, label='Zone: 0.5x Leverage')
-    ax3.fill_between(plot_df.index, FIXED_III_THRESHOLD, 1.0, color='green', alpha=0.1, label='Zone: 1.0x Leverage')
     
-    ax3.set_title('Efficiency Ratio (III) with Fixed Leverage Regime', fontsize=12)
-    ax3.set_ylabel('Efficiency (0=Chop, 1=Trend)')
+    ax3.set_title(f'Efficiency Ratio (III) < {FIXED_III_THRESHOLD} triggers De-leveraging', fontsize=12)
+    ax3.set_ylabel('Efficiency')
     ax3.set_xlabel('Date')
     ax3.set_ylim(0, 0.6)
     ax3.legend(loc='upper left')
@@ -204,10 +203,9 @@ def index():
         result_df = walk_forward_optimization(df)
         
         # 3. Stats
-        valid_rets = result_df['strategy_return'].iloc[WINDOW_SIZE+1:]
+        valid_rets = result_df['strategy_return'].iloc[TRAIN_WINDOW:]
         total_return = result_df['equity'].iloc[-1] if not result_df['equity'].empty else 1.0
         
-        # Calculate Sharpe only if returns are non-zero
         sharpe_calc = valid_rets.mean() / (valid_rets.std() + 1e-9)
         sharpe = np.sqrt(365) * sharpe_calc
         
@@ -218,7 +216,7 @@ def index():
         <!DOCTYPE html>
         <html>
         <head>
-            <title>Walk-Forward Backtest: {SYMBOL}</title>
+            <title>Walk-Forward WFO: {SYMBOL}</title>
             <style>
                 body {{ font-family: 'Segoe UI', sans-serif; text-align: center; background: #1e1e1e; color: #eee; padding: 20px; }}
                 .container {{ background: #2d2d2d; padding: 30px; border-radius: 12px; box-shadow: 0 4px 15px rgba(0,0,0,0.5); display: inline-block; max-width: 95%; }}
@@ -233,8 +231,8 @@ def index():
         </head>
         <body>
             <div class="container">
-                <h1>AI Trading Lab: Walk-Forward Optimization (1D Search)</h1>
-                <p>Daily Re-Optimization (Window: {WINDOW_SIZE} days). Optimizing 40 SMAs.</p>
+                <h1>AI Trading Lab: Periodic WFO</h1>
+                <p>Train Window: {TRAIN_WINDOW} Days | Retrain Frequency: {RETRAIN_DAYS} Days</p>
                 
                 <div class="stats">
                     <span>Total Return: <span class="highlight">{total_return:.2f}x</span></span>
@@ -242,7 +240,8 @@ def index():
                 </div>
                 
                 <div style="margin-bottom: 20px; color: #aaa; font-size: 0.9em;">
-                    The strategy recalibrates the best SMA daily, using a fixed leverage threshold of <b>III < {FIXED_III_THRESHOLD:.1f}</b> for 0.5x leverage.
+                    The model looks back {TRAIN_WINDOW} days to find the best SMA, locks it in for {RETRAIN_DAYS} days, and then repeats.
+                    <br>Leverage is halved if Efficiency Ratio < {FIXED_III_THRESHOLD}.
                 </div>
 
                 <img src="data:image/png;base64,{plot_data}" alt="Backtest Plot">
