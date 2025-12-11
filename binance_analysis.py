@@ -15,7 +15,7 @@ TIMEFRAME = '1d' # Daily candles
 START_DATE = '2018-01-01'
 SMA_WINDOWS = [50, 200, 400]
 DC_WINDOW = 20  # Donchian Channel Period
-POSITION_SIZE = 1  # Unit of asset traded
+POSITION_SIZE = 1  # Unit of asset traded (+1 for Long, -1 for Short)
 PORT = 8080
 
 # --- Global Variables to store results (populated once at startup) ---
@@ -69,7 +69,7 @@ def fetch_binance_data(symbol, timeframe, start_date):
             
         except Exception as e:
             print(f"An error occurred during CCXT fetching: {e}")
-            raise # Re-raise for the analysis setup function to catch
+            raise 
             
     if len(all_ohlcv) < 400: # Need at least 400 for the SMA 400
         raise ValueError(f"Not enough data fetched. Required >400, received {len(all_ohlcv)}.")
@@ -100,35 +100,41 @@ def calculate_indicators(df):
 
 def run_backtest(df):
     """
-    Implements a simple SMA 200 Long/Short crossover strategy and calculates equity.
-    Rule: Long (Position=1) when Close > SMA 200. Short (Position=-1) when Close <= SMA 200.
+    Implements a simple SMA 200 Long (+1) / Short (-1) strategy and calculates equity.
+    Position for day t is decided by Close vs. SMA 200 on day t-1.
     """
-    # 1. Define Position: 1 (Long) if Close > SMA 200, -1 (Short) otherwise
-    df['Position'] = np.where(df['Close'] > df['SMA_200'], 
-                              POSITION_SIZE, 
-                              -POSITION_SIZE)
     
-    # 2. Calculate Daily Strategy Returns
-    # Daily return: Close to Close
+    # 1. Position Decision: 1 (Long) if Close > SMA 200, -1 (Short) otherwise
+    df['Next_Day_Position'] = np.where(df['Close'] > df['SMA_200'], 
+                                       POSITION_SIZE, 
+                                       -POSITION_SIZE)
+    
+    # 2. Position HELD: Shifted position, as the decision made on t-1 dictates the position 
+    # held for the return calculation period (Close_t-1 to Close_t).
+    df['Held_Position'] = df['Next_Day_Position'].shift(1).fillna(0)
+    
+    # 3. Calculate Daily Strategy Returns
     df['Daily_Return'] = df['Close'].pct_change()
     
-    # Strategy return = (Daily Asset Return) * (Position held from previous day)
-    # This correctly handles Long (return * 1) and Short (return * -1). 
-    # A negative asset return (price drop) results in a positive strategy return when short (- * - = +).
-    df['Strategy_Return'] = df['Daily_Return'] * df['Position'].shift(1).fillna(0)
+    # Strategy Return = Daily Asset Return * Held Position (+1 or -1).
+    # This correctly achieves Capital * (1 + R) for long, and Capital * (1 - R) for short.
+    df['Strategy_Return'] = df['Daily_Return'] * df['Held_Position']
     
-    # 3. Calculate Cumulative Equity
+    # 4. Calculate Cumulative Equity
     df['Equity'] = (1 + df['Strategy_Return']).cumprod()
     df['Buy_Hold_Equity'] = (1 + df['Daily_Return']).cumprod()
     
-    # Normalize starting equity to 1 at the point the longest SMA (SMA 400) is available
+    # 5. Final Cleanup and Normalization
     df_clean = df.dropna()
     if df_clean.empty:
         raise ValueError("DataFrame is empty after dropping NaN values from indicators.")
         
     normalization_index = df_clean.index[0]
     
-    # Use .loc to avoid SettingWithCopyWarning, though technically safe here
+    # Renaming Held_Position to Position for summary table display
+    df_clean.rename(columns={'Held_Position': 'Position'}, inplace=True) 
+    
+    # Normalization 
     df_clean.loc[:, 'Equity'] = df_clean['Equity'] / df_clean['Equity'].loc[normalization_index]
     df_clean.loc[:, 'Buy_Hold_Equity'] = df_clean['Buy_Hold_Equity'] / df_clean['Buy_Hold_Equity'].loc[normalization_index]
 
@@ -140,7 +146,7 @@ def create_plot(df):
     """Generates the main analysis plot using matplotlib, encoded as base64."""
     
     # Use data after the longest indicator (SMA 400) has stabilized
-    df_plot = df.iloc[400:].copy() # Use a copy for manipulation
+    df_plot = df.iloc[400:].copy() 
 
     fig, axes = plt.subplots(2, 1, figsize=(14, 10), sharex=True, 
                              gridspec_kw={'height_ratios': [3, 1]})
@@ -149,43 +155,31 @@ def create_plot(df):
     ax1 = axes[0]
     
     # 1. Background Coloring for Position (Long/Short)
-    # Determine segments of continuous position
-    positions = df_plot['Position'].unique()
+    pos_series = df_plot['Position']
     
-    # Iterate through positions and plot background spans
-    for pos in positions:
-        df_pos = df_plot[df_plot['Position'] == pos]
-        
-        # Determine color
-        if pos == POSITION_SIZE:
-            color = 'green'
-            alpha = 0.08
-        elif pos == -POSITION_SIZE:
-            color = 'red'
-            alpha = 0.08
-        else: # Should not happen with this 1/-1 strategy
-            continue 
-            
-        # Group adjacent dates for cleaner spans
-        in_position = df_pos.index.to_series().diff().dt.days == 1
-        segment_starts = df_pos.index[~in_position]
-        segment_ends = df_pos.index[in_position.shift(-1, fill_value=False)]
-        
-        # If the last point is a start, it's a segment end too.
-        if df_pos.index[-1] not in segment_ends and df_pos.index[-1] in segment_starts:
-             segment_ends = segment_ends.append(pd.Index([df_pos.index[-1]]))
+    # Identify segments of continuous position
+    change_indices = pos_series.index[pos_series.diff() != 0]
 
-        # Correct for cases where the very first day is a segment start
-        if df_plot.index[0] in segment_starts and df_plot.index[0] in df_pos.index:
-            pass
+    segment_starts = pd.Index([pos_series.index[0]]).append(change_indices)
+    segment_ends = change_indices.append(pd.Index([pos_series.index[-1]]))
+    
+    # Plot spans for each segment
+    for start, end in zip(segment_starts, segment_ends):
+        current_pos = pos_series.loc[start]
+        
+        if current_pos == POSITION_SIZE:
+            color = 'green'
+            label = 'Long Position' if start == pos_series.index[0] or start == change_indices[0] else None
+            alpha = 0.08
+        elif current_pos == -POSITION_SIZE:
+            color = 'red'
+            label = 'Short Position' if start == pos_series.index[0] or start == change_indices[0] else None
+            alpha = 0.08
         else:
-             segment_starts = df_pos.index[~in_position]
-             
-        # Plot spans
-        for start, end in zip(segment_starts, segment_ends):
-             # Ensure end date is slightly later than the actual candle to span the whole day visually
-             end_adjusted = end + pd.Timedelta(days=1)
-             ax1.axvspan(start, end_adjusted, facecolor=color, alpha=alpha, zorder=0)
+            continue
+            
+        end_adjusted = end + pd.Timedelta(days=1)
+        ax1.axvspan(start, end_adjusted, facecolor=color, alpha=alpha, zorder=0)
 
     # 2. Price and Indicators
     ax1.plot(df_plot.index, df_plot['Close'], label='Price', color='#1f77b4', linewidth=1.5, alpha=0.9, zorder=1)
@@ -196,17 +190,9 @@ def create_plot(df):
     # Donchian Channels
     ax1.plot(df_plot.index, df_plot['DC_Upper'], label=f'DC {DC_WINDOW} Upper', color='c', linestyle='-.', alpha=0.5, zorder=1)
     ax1.plot(df_plot.index, df_plot['DC_Lower'], label=f'DC {DC_WINDOW} Lower', color='c', linestyle='-.', alpha=0.5, zorder=1)
-    ax1.fill_between(df_plot.index, df_plot['DC_Lower'], df_plot['DC_Upper'], color='cyan', alpha=0.05, zorder=0)
     
-    # Highlighting Trades (Change in Position)
-    entry_long_dates = df_plot[(df_plot['Position'].diff() == POSITION_SIZE*2)].index # Transition from -1 to 1
-    exit_long_dates = df_plot[(df_plot['Position'].diff() == -POSITION_SIZE*2)].index # Transition from 1 to -1
-    
-    ax1.scatter(entry_long_dates, df_plot.loc[entry_long_dates, 'Close'], marker='^', color='darkgreen', s=100, label='Long Entry', zorder=5)
-    ax1.scatter(exit_long_dates, df_plot.loc[exit_long_dates, 'Close'], marker='v', color='darkred', s=100, label='Short Entry/Exit Long', zorder=5)
-
-
-    ax1.set_title(f'{SYMBOL} Price, Indicators, and Trading Signals (Binance/CCXT)', fontsize=16)
+    # 3. Final Touches
+    ax1.set_title(f'{SYMBOL} Price and Indicators (Binance/CCXT)', fontsize=16)
     ax1.set_ylabel('Price (USD)', fontsize=12)
     ax1.grid(True, linestyle='--', alpha=0.6)
     ax1.legend(loc='upper left', fontsize=8)
