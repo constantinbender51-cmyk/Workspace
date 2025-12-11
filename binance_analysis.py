@@ -205,14 +205,15 @@ def create_analysis_visualization(results_df):
              color='#1f77b4', linewidth=1.5, alpha=0.8)
     
     # Highlight the peak Sharpe Ratio
-    best_sma = results_df.iloc[0]['SMA_Window']
-    best_sharpe = results_df.iloc[0]['Sharpe_Ratio']
+    best_sharpe_row = results_df.sort_values(by='Sharpe_Ratio', ascending=False).iloc[0]
+    best_sma = best_sharpe_row['SMA_Window']
+    best_sharpe = best_sharpe_row['Sharpe_Ratio']
     
     ax1.scatter(best_sma, best_sharpe, color='red', s=50, zorder=5)
     ax1.axhline(best_sharpe, color='red', linestyle='--', alpha=0.4, linewidth=1)
 
     ax1.set_ylabel('Annualized Sharpe Ratio', fontsize=10)
-    ax1.set_title('SMA Crossover Strategy Performance (SMA 1 to 400)', fontsize=14)
+    ax1.set_title('SMA Crossover Strategy Performance (SMA 1 to 400 - 50% Data Sample)', fontsize=14)
     ax1.grid(True, linestyle=':', alpha=0.6)
     
     # --- Bottom Plot: Final Equity ---
@@ -294,7 +295,7 @@ def create_plot(df, strategy_sma):
     sharpe_plotted = (plotted_returns.mean() / plotted_returns.std()) * np.sqrt(ANNUAL_TRADING_DAYS)
     
     ax2.plot(df_plot.index, df_plot['Equity'], label=f'Strategy Equity (Sharpe: {sharpe_plotted:.2f})', color='blue', linewidth=3)
-    ax2.plot(df_plot.index, df_plot['Buy_Hold_Equity'], label='Buy & Hold Benchmark', color='gray', linestyle='--', alpha=0.7)
+    ax2.plot(df_plot['Buy_Hold_Equity'], label='Buy & Hold Benchmark', color='gray', linestyle='--', alpha=0.7)
     
     ax2.set_xlabel('Date', fontsize=10)
     ax2.set_ylabel('Cumulative Return', fontsize=10)
@@ -321,6 +322,11 @@ def setup_analysis():
     # --- Part 1: Data Fetching and Indicator Calculation ---
     try:
         df_raw = fetch_binance_data(SYMBOL, TIMEFRAME, START_DATE)
+        
+        # NEW LOGIC: Slice to the first 50% of data
+        split_idx = len(df_raw) // 2
+        df_raw = df_raw.iloc[:split_idx]
+        print(f"--- DATA SLICED: Running analysis on first {len(df_raw)} candles (50% of total) ---")
         
         # Calculate only SMA 120 and D-Channels for the main plot
         df_ind = calculate_indicators(df_raw, SMA_WINDOWS_PLOT)
