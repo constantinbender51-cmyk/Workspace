@@ -23,6 +23,8 @@ OPTIMIZATION_STEP = 90 # Re-optimize every 90 days (approx. 3 months)
 GRID_START = 0.001     # 0.1% (Start of search)
 GRID_END = 0.080       # 8.0%
 GRID_STEP = 0.001      # 0.1%
+MIN_SHARPE_VALIDITY_DAYS = 365 # Minimum days required for optimization window to run grid search
+INITIAL_DEFAULT_CENTER = 0.013 # Default center distance (1.3%) used before 365 days are available
 
 # --- 1. Data Fetching Utilities ---
 
@@ -90,6 +92,7 @@ def calculate_sharpe_ratio(returns, annualization_factor=ANNUALIZATION_FACTOR, r
     std_dev = excess_return.std()
     
     if std_dev == 0:
+        # Avoid division by zero, set Sharpe to zero if no volatility
         return 0.0
 
     sharpe = (mean_excess_return * annualization_factor) / (std_dev * np.sqrt(annualization_factor))
@@ -167,7 +170,6 @@ def run_strategy_core(df_window, center_distance):
 def run_grid_search(df_optimization_window):
     """
     Performs a grid search on the given optimization window to find the optimal center distance.
-    The window already includes the necessary preceding data (120 days + 1 lag) for run_strategy_core.
     """
     # Define grid search space (0.1% to 8.0% in 0.1% steps)
     center_distances = [round(c, 3) for c in np.arange(GRID_START, GRID_END + GRID_STEP/2, GRID_STEP)]
@@ -195,33 +197,42 @@ def run_rolling_optimization_backtest(df_full):
     """
     print("-> Starting Rolling Optimization Backtest...")
 
-    # The minimum data required before the first execution period starts (SMA + 1 day lag + 1 day return)
-    MIN_OPTIMIZATION_DAYS = SMA_PERIOD_120 + 2 
+    # The index where trading begins (after SMA + 1 day lag)
+    FIRST_VALID_TRADE_INDEX = SMA_PERIOD_120 + 1 
     
-    # Start the first optimization period at an index large enough to optimize on a full OPTIMIZATION_STEP window
-    current_rebalance_index = MIN_OPTIMIZATION_DAYS + OPTIMIZATION_STEP
+    # The index where the first optimization-based trade will start
+    current_rebalance_index = FIRST_VALID_TRADE_INDEX 
 
     if len(df_full) < current_rebalance_index:
-        raise ValueError(f"Not enough data for rolling optimization. Need at least {current_rebalance_index} days.")
+        raise ValueError(f"Not enough data for initial SMA calculation. Need at least {current_rebalance_index} days.")
 
     end_index = len(df_full)
     all_strategy_returns = []
     
     while current_rebalance_index < end_index:
         
-        # 1. OPTIMIZATION WINDOW: All history up to the execution start index (In-Sample)
-        # We include the prior 120 days of data in the optimization window to allow SMA calculation.
-        opt_start_index = max(0, current_rebalance_index - SMA_PERIOD_120 - 1)
-        df_optimization_window = df_full.iloc[opt_start_index:current_rebalance_index]
+        # --- Determine Center Distance for Current Block ---
         
-        # 2. Run Optimization (Sharpe on historical data)
-        optimal_center = run_grid_search(df_optimization_window)
+        # Optimization window includes all data up to the execution start index
+        df_optimization_history = df_full.iloc[:current_rebalance_index]
         
+        # Check if the optimization window has enough history for a meaningful Sharpe calculation
+        if len(df_optimization_history) >= MIN_SHARPE_VALIDITY_DAYS:
+            # OPTIMIZE: Include 120 prior days for SMA calculation within the optimization history
+            opt_start_index = max(0, current_rebalance_index - MIN_SHARPE_VALIDITY_DAYS - SMA_PERIOD_120 - 1)
+            df_opt_window = df_full.iloc[opt_start_index:current_rebalance_index]
+            optimal_center = run_grid_search(df_opt_window)
+            opt_status = "OPTIMIZED"
+        else:
+            # DEFAULT: Use the default center distance until enough data is available
+            optimal_center = INITIAL_DEFAULT_CENTER
+            opt_status = "DEFAULT"
+            
         # 3. EXECUTION WINDOW (The next OPTIMIZATION_STEP days - Out-of-Sample)
         execution_start_index = current_rebalance_index
         execution_end_index = min(execution_start_index + OPTIMIZATION_STEP, end_index)
         
-        # Execution data must include the preceding 120 days (or all data if earlier) for SMA calculation
+        # Execution data MUST include the preceding 120 days (or all data if earlier) for SMA calculation
         exec_data_start_index = max(0, execution_start_index - SMA_PERIOD_120 - 1)
         df_execution_data = df_full.iloc[exec_data_start_index : execution_end_index]
         
@@ -235,7 +246,7 @@ def run_rolling_optimization_backtest(df_full):
         
         if not strategy_returns_only_execution.empty:
             all_strategy_returns.append(strategy_returns_only_execution)
-            print(f"   Rebalance up to {df_full.index[current_rebalance_index-1].strftime('%Y-%m-%d')} | Optimal Center: {optimal_center*100:.1f}% | Executed trades: {len(strategy_returns_only_execution)} days")
+            print(f"   Rebalance up to {df_full.index[current_rebalance_index-1].strftime('%Y-%m-%d')} | Center ({opt_status}): {optimal_center*100:.1f}% | Executed trades: {len(strategy_returns_only_execution)} days")
         else:
              print(f"   Rebalance up to {df_full.index[current_rebalance_index-1].strftime('%Y-%m-%d')} | WARNING: No valid returns generated for execution window. Skipping this period.")
 
@@ -245,7 +256,6 @@ def run_rolling_optimization_backtest(df_full):
     # --- 7. Final Metric Calculation ---
     
     # Stitch all daily returns together
-    # This must be the first line after the loop to check for concatenation issues
     if not all_strategy_returns:
          raise IndexError("No objects to concatenate: No valid returns were generated throughout the backtest.")
 
@@ -405,7 +415,7 @@ def serve_results(metrics):
                         
                         <div class="mb-8">
                             <h2 class="text-xl font-semibold mb-3 text-gray-200">Strategy Metrics Comparison</h2>
-                            <p class="text-gray-400 mb-4">The dynamic sizing parameter (center distance) is re-optimized every 90 days using all past data (0.1% to 8.0% grid search).</p>
+                            <p class="text-gray-400 mb-4">The dynamic sizing parameter (center distance) is re-optimized every 90 days using all past data (0.1% to 8.0% grid search). A default of 1.3% is used until 365 days of optimization history is available.</p>
                             <div class="relative overflow-x-auto shadow-md sm:rounded-lg">
                                 <table class="w-full text-sm text-left text-gray-400">
                                     <thead class="text-xs uppercase bg-gray-700 text-gray-400">
