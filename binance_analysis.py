@@ -17,7 +17,8 @@ SYMBOL = 'BTC/USDT'
 TIMEFRAME = '1d' 
 START_DATE = '2018-01-01 00:00:00'
 PORT = 8080
-WINDOW_SIZE = 1000 # Rolling optimization window
+WINDOW_SIZE = 50 # Rolling optimization window
+FIXED_III_THRESHOLD = 0.1 # New fixed threshold
 
 def fetch_data():
     """Fetches historical OHLCV data from Binance."""
@@ -57,67 +58,61 @@ def calculate_efficiency_ratio(df, period=30):
 
 def walk_forward_optimization(df):
     """
-    Performs Vectorized Walk-Forward Optimization.
-    Now evaluates 800 strategies (40 SMAs x 20 III Thresholds) daily.
+    Performs Vectorized Walk-Forward Optimization (1D Grid Search).
+    Optimizes only SMA period, keeping III threshold fixed at 0.1.
     """
-    print("Preparing Vectorized Strategy Matrix (800 strategies)...")
+    print(f"Preparing Vectorized Strategy Matrix (40 SMAs, Fixed Threshold {FIXED_III_THRESHOLD})...")
     data = df.copy()
     data['market_return'] = np.log(data['close'] / data['close'].shift(1))
+    
+    # 1. Calculate III and Leverage Multiplier ONCE (Leverage is constant for all SMA strategies)
     data['iii'] = calculate_efficiency_ratio(data, period=30)
+    # Leverage: 0.5 if iii < 0.1, else 1.0 (Shifted 1 step later)
+    leverage_mult = np.where(data['iii'] < FIXED_III_THRESHOLD, 0.5, 1.0)
     
-    # 1. Generate Parameter Ranges
+    # 2. Generate Parameter Range (SMA only)
     sma_periods = list(range(10, 410, 10)) # 40 periods
-    # Finer step size (0.025) to increase strategy count
-    thresholds = np.arange(0.10, 0.60, 0.025) # 20 thresholds
     
-    print(f"Strategies to evaluate: {len(sma_periods)} SMA * {len(thresholds)} Thresholds = {len(sma_periods) * len(thresholds)}")
-    
-    # 2. Build Strategy Returns Matrix (N_days x 800 Strategies)
+    # 3. Build Strategy Returns Matrix (N_days x 40 Strategies)
     strategy_returns = {}
     
     for period in sma_periods:
+        col_name = f"{period}_{FIXED_III_THRESHOLD:.1f}"
+        
+        # Calculate SMA and Raw Direction
         sma = data['close'].rolling(window=period).mean()
         raw_direction = np.where(data['close'] > sma, 1, -1)
         
-        for thresh in thresholds:
-            col_name = f"{period}_{thresh:.3f}" # Use 3 decimals for key uniqueness
-            
-            # Leverage Logic: 0.5 if iii < thresh else 1.0
-            leverage = np.where(data['iii'] < thresh, 0.5, 1.0)
-            pos_vector = raw_direction * leverage
-            
-            # Strategy Return(t) = Pos(t-1) * MarketRet(t)
-            strat_ret = pd.Series(pos_vector, index=data.index).shift(1) * data['market_return']
-            strategy_returns[col_name] = strat_ret
+        # Position = Direction * Fixed Leverage
+        pos_vector = raw_direction * leverage_mult
+        
+        # Strategy Return(t) = Pos(t-1) * MarketRet(t)
+        strat_ret = pd.Series(pos_vector, index=data.index).shift(1) * data['market_return']
+        strategy_returns[col_name] = strat_ret
 
-    # Convert to DataFrame (N_days x 800 columns)
+    # Convert to DataFrame (N_days x 40 columns)
     strat_df = pd.DataFrame(strategy_returns)
     
-    # 3. Calculate Rolling Sharpe (Vectorized)
+    # 4. Calculate Rolling Sharpe (Vectorized)
     print(f"Calculating Rolling Sharpe ({WINDOW_SIZE} days)...")
     
-    # Mean / Std (Ignoring annualization for ranking)
     rolling_mean = strat_df.rolling(window=WINDOW_SIZE).mean()
     rolling_std = strat_df.rolling(window=WINDOW_SIZE).std()
     rolling_sharpe = rolling_mean / (rolling_std + 1e-9)
     
-    # 4. Select Best Strategy Daily
+    # 5. Select Best Strategy Daily
     print("Selecting best strategies daily...")
-    # Select best column name based on Sharpe ending at t-1
     best_strategy_col = rolling_sharpe.idxmax(axis=1)
     selected_strategy_lagged = best_strategy_col.shift(1)
     
-    # 5. Construct Walk-Forward Equity Curve
+    # 6. Construct Walk-Forward Equity Curve
     
-    wfo_returns = pd.Series(0.0, index=data.index)
     col_map = {name: i for i, name in enumerate(strat_df.columns)}
-    # Map column names to integers, fill NaNs with 0 (default col)
     col_indices = selected_strategy_lagged.map(col_map).fillna(0).astype(int)
     
     returns_arr = strat_df.values
     row_indices = np.arange(len(data))
     
-    # Select returns using numpy indexing
     selected_returns = returns_arr[row_indices, col_indices]
     
     # Handle the warm-up period (WINDOW_SIZE + 1 days are invalid)
@@ -127,15 +122,14 @@ def walk_forward_optimization(df):
     data['equity'] = data['strategy_return'].cumsum().apply(np.exp)
     data['buy_hold_equity'] = data['market_return'].cumsum().apply(np.exp)
     
-    # Store dynamic params for plotting
+    # Store dynamic params for plotting (Threshold is fixed)
     def parse_params(val):
-        if pd.isna(val): return None, None
+        if pd.isna(val): return None, FIXED_III_THRESHOLD
         try:
-            # Splits "period_thresh" string
-            p, t = val.split('_')
-            return int(p), float(t)
+            p, _ = val.split('_')
+            return int(p), FIXED_III_THRESHOLD
         except ValueError:
-             return None, None
+             return None, FIXED_III_THRESHOLD
         
     params = selected_strategy_lagged.apply(parse_params)
     params_df = pd.DataFrame(params.tolist(), index=params.index, columns=['best_sma', 'best_thresh'])
@@ -174,14 +168,21 @@ def generate_plot(df):
     ax2.legend(loc='upper right')
     ax2.grid(True, alpha=0.3)
 
-    # --- PLOT 3: Best Threshold Evolution ---
-    ax3.plot(plot_df.index, plot_df['best_thresh'], color='orange', linewidth=1.5)
-    ax3.fill_between(plot_df.index, 0, plot_df['best_thresh'], color='orange', alpha=0.2)
+    # --- PLOT 3: Efficiency Ratio & Leverage Zones (Threshold Fixed) ---
+    ax3.plot(plot_df.index, plot_df['iii'], color='cyan', linewidth=1.5, label='Efficiency Ratio (III)')
     
-    ax3.set_title('Dynamic III Threshold Selection', fontsize=12)
-    ax3.set_ylabel('Selected III Threshold')
+    # Plot Fixed Threshold
+    ax3.axhline(FIXED_III_THRESHOLD, color='orange', linestyle='-', linewidth=2, label=f'Fixed Threshold ({FIXED_III_THRESHOLD:.1f})')
+    
+    # Fill background
+    ax3.fill_between(plot_df.index, 0, FIXED_III_THRESHOLD, color='red', alpha=0.1, label='Zone: 0.5x Leverage')
+    ax3.fill_between(plot_df.index, FIXED_III_THRESHOLD, 1.0, color='green', alpha=0.1, label='Zone: 1.0x Leverage')
+    
+    ax3.set_title('Efficiency Ratio (III) with Fixed Leverage Regime', fontsize=12)
+    ax3.set_ylabel('Efficiency (0=Chop, 1=Trend)')
     ax3.set_xlabel('Date')
-    ax3.set_ylim(0, 0.6) # Maintain scale consistency
+    ax3.set_ylim(0, 0.6)
+    ax3.legend(loc='upper left')
     ax3.grid(True, alpha=0.3)
     
     plt.tight_layout()
@@ -205,6 +206,7 @@ def index():
         # 3. Stats
         valid_rets = result_df['strategy_return'].iloc[WINDOW_SIZE+1:]
         total_return = result_df['equity'].iloc[-1] if not result_df['equity'].empty else 1.0
+        
         # Calculate Sharpe only if returns are non-zero
         sharpe_calc = valid_rets.mean() / (valid_rets.std() + 1e-9)
         sharpe = np.sqrt(365) * sharpe_calc
@@ -231,8 +233,8 @@ def index():
         </head>
         <body>
             <div class="container">
-                <h1>AI Trading Lab: Walk-Forward Optimization</h1>
-                <p>Daily Re-Optimization (Window: {WINDOW_SIZE} days). Evaluating 800 Parameter Combos/Day.</p>
+                <h1>AI Trading Lab: Walk-Forward Optimization (1D Search)</h1>
+                <p>Daily Re-Optimization (Window: {WINDOW_SIZE} days). Optimizing 40 SMAs.</p>
                 
                 <div class="stats">
                     <span>Total Return: <span class="highlight">{total_return:.2f}x</span></span>
@@ -240,7 +242,7 @@ def index():
                 </div>
                 
                 <div style="margin-bottom: 20px; color: #aaa; font-size: 0.9em;">
-                    The strategy recalibrates every single day based on the previous {WINDOW_SIZE} days of data.
+                    The strategy recalibrates the best SMA daily, using a fixed leverage threshold of <b>III < {FIXED_III_THRESHOLD:.1f}</b> for 0.5x leverage.
                 </div>
 
                 <img src="data:image/png;base64,{plot_data}" alt="Backtest Plot">
