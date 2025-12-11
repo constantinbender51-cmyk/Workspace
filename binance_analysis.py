@@ -23,7 +23,8 @@ MAX_SMA_SCAN = 120 # Maximum SMA for the scan and the global analysis start poin
 SCAN_DELAY = 5.0 # Seconds delay after every 50 SMA calculations to respect API limits
 
 # --- Grid Search Range ---
-K_FACTOR_RANGE = np.arange(0.01, 0.81, 0.01)
+# Range increased from 0.01 to 2.0 (stop set to 2.01 to include 2.00)
+K_FACTOR_RANGE = np.arange(0.01, 2.01, 0.01)
 
 # --- Global Variables to store results (populated once at startup) ---
 GLOBAL_DATA_SOURCE = "Binance (CCXT)"
@@ -219,7 +220,7 @@ def calculate_dynamic_position(df_ind_raw, k_factor):
 
 def run_k_grid_search(df_ind_raw):
     """Runs a grid search for the optimal K_FACTOR based on Sharpe Ratio."""
-    print("\n--- Starting K-Factor Grid Search (0.01 to 0.80) ---")
+    print("\n--- Starting K-Factor Grid Search (0.01 to 2.00) ---")
     results = []
     
     for k in K_FACTOR_RANGE:
@@ -246,7 +247,7 @@ def run_k_grid_search(df_ind_raw):
             'Final_Equity': final_equity
         })
         
-        if (k * 100) % 10 == 0:
+        if (k * 100) % 50 == 0: # Print every 0.5 step
             print(f"Processed K={k:.2f}...")
 
     results_df = pd.DataFrame(results)
