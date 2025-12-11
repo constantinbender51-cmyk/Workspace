@@ -145,26 +145,29 @@ def run_backtest(df):
         -1                                           # Value if False (Short position held on Day T)
     )
     
-    # --- 2.7 Calculate SMA Proximity Metric ---
-    # Correct formula as per user: Proximity = 1 / (x% * 1/0.01) = 1 / (x% * 100)
-    # Where x% is the percentage difference (e.g., 1.0 for 1% difference).
+    # --- 2.7 Calculate SMA Proximity Metric (Using corrected formula) ---
+    # User's formula: P = 1 / (X% * 1/0.01) where X% is the decimal distance (e.g., 0.01 for 1%).
     
-    # Absolute percentage difference: |(Close - SMA) / SMA| * 100
-    df['SMA_Distance_Pct'] = np.abs((df['Close'] - df[f'SMA_{SMA_PERIOD}']) / df[f'SMA_{SMA_PERIOD}']) * 100
+    # Calculate X% (Absolute decimal distance)
+    df['SMA_Distance_Decimal'] = np.abs((df['Close'] - df[f'SMA_{SMA_PERIOD}']) / df[f'SMA_{SMA_PERIOD}'])
     
-    # Calculate Proximity base (1.0 / Pct Distance)
-    # This simplified form implements the user's logic: 1 / (Pct * 100) where Pct is the raw ratio.
+    # Calculate Proximity base: 1 / (X% * 100)
+    # The term (X% * 100) must be protected against zero
+    denominator = df['SMA_Distance_Decimal'] * 100.0
+    
+    # Calculate Proximity base (1.0 / Denominator)
+    # Use np.where to handle the zero-distance case, setting it to a value > 1.0 (e.g., 100.0)
     proximity_base = np.where(
-        df['SMA_Distance_Pct'] == 0,
-        100.0, # High value for 0 distance, which will be capped to 1.0
-        1.0 / df['SMA_Distance_Pct'] # The core formula simplified
+        denominator == 0,
+        100.0, # High value that will be capped to 1.0
+        1.0 / denominator
     )
     
     # Apply the cap at 1.0
     df['SMA_Proximity'] = np.minimum(proximity_base, 1.0)
     
     # Drop the temporary columns for cleanliness and keep the final SMA column and proximity
-    df = df.drop(columns=['Yesterday_Close', 'Yesterday_SMA'])
+    df = df.drop(columns=['Yesterday_Close', 'Yesterday_SMA', 'SMA_Distance_Decimal'])
     # --- End Look-ahead Prevention ---
     
     # The first SMA_PERIOD entries will have NaN SMA. We drop rows with any NaNs.
@@ -255,7 +258,7 @@ def plot_results(df):
     df['SMA_Proximity'].plot(ax=ax3, label='SMA Proximity (Capped at 1.0)', color='#F59E0B', linewidth=1)
     
     # Style and Labels for ax3
-    ax3.set_title('SMA Proximity Metric (High value = Close to SMA; 1.0 at 1% distance)', fontsize=14, color='white')
+    ax3.set_title('SMA Proximity Metric (1.0 when price is 1% or less from SMA)', fontsize=14, color='white')
     ax3.set_xlabel('Date', fontsize=12, color='white')
     ax3.set_ylabel('Proximity Score', fontsize=12, color='white')
     ax3.set_ylim(0, 1.1) # Set limit for capped indicator
@@ -309,7 +312,7 @@ def serve_results():
                     <div class="container mx-auto p-4 bg-gray-800 shadow-xl rounded-xl">
                         <h1 class="text-3xl font-bold mb-4 text-green-400">Backtesting Results: {SYMBOL} SMA-120</h1>
                         <p class="text-gray-300 mb-6">
-                            The backtest now displays three plots: Price/SMA, Log Equity Curve, and the Capped SMA Proximity (Max 1.0). The proximity calculation uses the corrected formula which sets the proximity to 1.0 when the price is 1% away from the SMA.
+                            The backtest now displays three plots: Price/SMA, Log Equity Curve, and the Capped SMA Proximity (Max 1.0). The proximity calculation uses the corrected formula based on a decimal distance (X%).
                         </p>
                         <div class="plot-container">
                             <img src="{RESULTS_DIR}/{PLOT_FILE}" alt="Strategy Cumulative Returns Plot" class="w-full h-auto rounded-lg shadow-2xl">
