@@ -18,8 +18,8 @@ SERVER_PORT = 8080
 RESULTS_DIR = 'results'
 ANNUALIZATION_FACTOR = 365 # Used for annualizing Sharpe Ratio for daily data
 
-# --- Fixed Optimal Parameter (Based on prior testing) ---
-OPTIMAL_AVERAGE_DISTANCE_PERIOD = 10 # Fixed as 20 days, based on your previous assessment
+# --- Static Dynamic Center Parameter ---
+STATIC_CENTER_DISTANCE = 0.010 # Fixed 1.0% center distance for the dynamic sizing multiplier
 
 # --- 1. Data Fetching Utilities ---
 
@@ -113,32 +113,25 @@ def generate_metrics(cumulative_returns, daily_returns, strategy_name):
         'Cumulative Returns': cumulative_returns
     }
 
-# --- 3. Backtesting Logic (Final Run with Optimal Parameter) ---
+# --- 3. Backtesting Logic (Dynamic Sizing with Static Center) ---
 
-def run_backtest_final(df):
+def run_backtest_static_center(df):
     """
-    Applies the 120 SMA trading strategy with dynamic center distance based on the optimal averaging window.
+    Applies the 120 SMA trading strategy with dynamic position sizing using a static center distance (1.0%).
     """
-    period = OPTIMAL_AVERAGE_DISTANCE_PERIOD
-    print(f"-> Running final backtest (Center={period}d Avg Distance) on {len(df)} candles...")
+    center = STATIC_CENTER_DISTANCE
+    print(f"-> Running final backtest (Center={center*100:.1f}% Static Distance) on {len(df)} candles...")
     
     # 1. Calculate 120 SMA & Daily Returns
     df[f'SMA_{SMA_PERIOD_120}'] = df['Close'].rolling(window=SMA_PERIOD_120).mean()
     df['Daily_Return'] = np.log(df['Close'] / df['Close'].shift(1))
 
-    # --- Calculation for Dynamic Center (Requires current data) ---
-    # Calculate the absolute daily distance from SMA 120 (decimal format)
-    df['Raw_Distance'] = np.abs((df['Close'] - df[f'SMA_{SMA_PERIOD_120}']) / df[f'SMA_{SMA_PERIOD_120}'])
-    
-    # Calculate the M-day rolling average of the distance
-    df['Rolling_Avg_Distance'] = df['Raw_Distance'].rolling(window=period).mean()
-    
-    # --- Look-ahead Prevention for all components ---
+    # --- Look-ahead Prevention ---
     df['Yesterday_Close'] = df['Close'].shift(1)
     df['Yesterday_SMA_120'] = df[f'SMA_{SMA_PERIOD_120}'].shift(1)
     
-    # Lag the rolling average distance to be used as the center for today's trade
-    df['Center_Distance'] = df['Rolling_Avg_Distance'].shift(1)
+    # Set the Center Distance to the static value for all rows
+    df['Center_Distance'] = center 
 
     # Drop NaNs after all lagging/rolling calculations
     df = df.dropna()
@@ -154,7 +147,7 @@ def run_backtest_final(df):
     # 2. Calculate Distance (D): Absolute decimal distance from the SMA (lagged)
     df['Distance'] = np.abs((df['Yesterday_Close'] - df['Yesterday_SMA_120']) / df['Yesterday_SMA_120'])
 
-    # 3. Calculate Multiplier (M) using the dynamically calculated Center
+    # 3. Calculate Multiplier (M) using the static Center
     # Scaler = 1 / Center_Distance 
     distance_scaler = 1.0 / np.maximum(df['Center_Distance'], 1e-10) # Protect against zero division
     
@@ -189,7 +182,7 @@ def run_backtest_final(df):
     
     # Strategy
     metrics.append(generate_metrics(
-        df['Cumulative_Strategy_Return'], df['Strategy_Return'], f'Dynamic Avg Dist Center ({period}d)'
+        df['Cumulative_Strategy_Return'], df['Strategy_Return'], f'Dynamic Sizing (Static {center*100:.1f}% Center)'
     ))
     
     # Print comparison table
@@ -199,7 +192,7 @@ def run_backtest_final(df):
     ])
     
     print("\n" + "=" * 60)
-    print(f"FINAL BACKTEST METRICS (Center={period}d Avg Distance)")
+    print(f"FINAL BACKTEST METRICS (Static {center*100:.1f}% Dynamic Center)")
     print("=" * 60)
     print(comparison_df.to_string(index=False))
     print("=" * 60)
@@ -307,11 +300,11 @@ def serve_results(metrics):
                 </head>
                 <body class="p-8">
                     <div class="container mx-auto p-4 bg-gray-800 shadow-xl rounded-xl">
-                        <h1 class="text-3xl font-bold mb-4 text-green-400">Backtest Results: {SYMBOL} Dynamic Avg Distance Center ({OPTIMAL_AVERAGE_DISTANCE_PERIOD}d)</h1>
+                        <h1 class="text-3xl font-bold mb-4 text-green-400">Backtest Results: {SYMBOL} Dynamic Sizing (1.0% Center)</h1>
                         
                         <div class="mb-8">
                             <h2 class="text-xl font-semibold mb-3 text-gray-200">Strategy Metrics Comparison</h2>
-                            <p class="text-gray-400 mb-4">Final backtest using 20-day rolling average distance to SMA 120 as the dynamic position sizing center.</p>
+                            <p class="text-gray-400 mb-4">Final backtest using a static 1.0% distance center for the dynamic position sizing multiplier.</p>
                             <div class="relative overflow-x-auto shadow-md sm:rounded-lg">
                                 <table class="w-full text-sm text-left text-gray-400">
                                     <thead class="text-xs uppercase bg-gray-700 text-gray-400">
@@ -371,7 +364,7 @@ if __name__ == '__main__':
         print("Error: Could not retrieve data. Exiting.")
     else:
         # 2. Run backtest and get comparison metrics
-        results_df, comparison_metrics = run_backtest_final(df_data)
+        results_df, comparison_metrics = run_backtest_static_center(df_data)
         
         # 3. Plot results
         plot_results(results_df, comparison_metrics)
