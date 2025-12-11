@@ -17,7 +17,12 @@ PLOT_FILE = 'strategy_results.png'
 SERVER_PORT = 8080 
 RESULTS_DIR = 'results'
 ANNUALIZATION_FACTOR = 365 # Used for annualizing Sharpe Ratio for daily data
-OPTIMAL_CENTER_DISTANCE = 0.013 # Fixed optimal center distance (1.3%)
+
+# --- Rolling Optimization Parameters ---
+OPTIMIZATION_STEP = 90 # Re-optimize every 90 days (approx. 3 months)
+GRID_START = 0.010     # 1.0%
+GRID_END = 0.080       # 8.0%
+GRID_STEP = 0.001      # 0.1%
 
 # --- 1. Data Fetching Utilities ---
 
@@ -49,7 +54,6 @@ def fetch_klines(symbol, interval, start_str):
 
             all_data.extend(klines)
             start_ts = klines[-1][0] + 1
-            # print(f"   Fetched up to: {dt.datetime.fromtimestamp(start_ts / 1000).strftime('%Y-%m-%d')}")
             time.sleep(0.5) 
             
             if len(klines) < 1000:
@@ -78,8 +82,8 @@ def fetch_klines(symbol, interval, start_str):
 
 def calculate_sharpe_ratio(returns, annualization_factor=ANNUALIZATION_FACTOR, risk_free_rate=0):
     """Calculates the Annualized Sharpe Ratio."""
-    if returns.empty:
-        return 0.0
+    if returns.empty or len(returns) <= 1:
+        return -np.inf # Return a very low Sharpe for invalid windows
     excess_return = returns - risk_free_rate
     mean_excess_return = excess_return.mean()
     std_dev = excess_return.std()
@@ -112,44 +116,34 @@ def generate_metrics(cumulative_returns, daily_returns, strategy_name):
         'Cumulative Returns': cumulative_returns
     }
 
-# --- 3. Backtesting Logic ---
+# --- 3. Strategy Core Logic ---
 
-def run_backtest_dynamic_sizing(df):
+def run_strategy_core(df_window, center_distance):
     """
-    Applies the 120 SMA trading strategy with dynamic position sizing using the optimal center.
+    Applies the dynamic sizing strategy to a DataFrame window for a specific center distance.
+    Returns the daily strategy returns for that window.
     """
-    print(f"-> Running dynamic 120 SMA backtest with {OPTIMAL_CENTER_DISTANCE*100:.1f}% center on {len(df)} candles...")
+    df = df_window.copy()
     
-    # Calculate 120 SMA
     df[f'SMA_{SMA_PERIOD_120}'] = df['Close'].rolling(window=SMA_PERIOD_120).mean()
-    
-    # Calculate daily returns (log returns)
     df['Daily_Return'] = np.log(df['Close'] / df['Close'].shift(1))
 
     # --- Prepare Lagged Data (Look-ahead Bias Prevention) ---
     df['Yesterday_Close'] = df['Close'].shift(1)
     df['Yesterday_SMA_120'] = df[f'SMA_{SMA_PERIOD_120}'].shift(1)
     
-    # Drop NaNs from SMAs and shifting
     df = df.dropna()
-    
-    # ----------------------------------------------------
-    # Strategy: 120 SMA Crossover with Dynamic Position Sizing
-    # ----------------------------------------------------
     
     # 1. Calculate Distance (D): Absolute decimal distance from the SMA (lagged)
     df['Distance'] = np.abs((df['Yesterday_Close'] - df['Yesterday_SMA_120']) / df['Yesterday_SMA_120'])
 
     # 2. Calculate Multiplier (M) using the provided formula:
     # M = 1 / ( (1 / (D * Scaler)) + (D * Scaler) - 1 )
-    distance_scaler = 1.0 / OPTIMAL_CENTER_DISTANCE
+    distance_scaler = 1.0 / center_distance
     scaled_distance = df['Distance'] * distance_scaler
     
-    # Use epsilon to prevent division by zero when price is exactly on the SMA (D=0)
     epsilon = 1e-6 
     denominator = (1.0 / np.maximum(scaled_distance, epsilon)) + scaled_distance - 1.0
-    
-    # Calculate Multiplier, handle possible division by zero in the outer term
     df['Multiplier'] = np.where(denominator == 0, 0, 1.0 / denominator)
 
     # 3. Determine Direction (Long/Short)
@@ -164,24 +158,122 @@ def run_backtest_dynamic_sizing(df):
     
     # 5. Calculate Strategy Returns
     df['Strategy_Return'] = df['Daily_Return'] * df['Position_Size']
-    df['Cumulative_Strategy_Return'] = np.exp(df['Strategy_Return'].cumsum())
+    
+    return df['Strategy_Return']
 
-    # ----------------------------------------------------
-    # Benchmark: Buy & Hold (B&H)
-    # ----------------------------------------------------
-    df['Cumulative_Buy_and_Hold'] = np.exp(df['Daily_Return'].cumsum())
+def run_grid_search(df_optimization_window):
+    """
+    Performs a grid search on the given optimization window to find the optimal center distance.
+    """
+    # Define grid search space (1.0% to 8.0% in 0.1% steps)
+    center_distances = [round(c, 3) for c in np.arange(GRID_START, GRID_END + GRID_STEP/2, GRID_STEP)]
+
+    best_sharpe = -np.inf
+    optimal_center = GRID_START # Default to min if search fails
+    
+    # Run search
+    for center_distance in center_distances:
+        # Calculate returns for the optimization window
+        strategy_returns = run_strategy_core(df_optimization_window, center_distance)
+        
+        # Calculate Sharpe Ratio on the returns
+        sharpe = calculate_sharpe_ratio(strategy_returns)
+        
+        if sharpe > best_sharpe:
+            best_sharpe = sharpe
+            optimal_center = center_distance
+            
+    return optimal_center
+
+def run_rolling_optimization_backtest(df_full):
+    """
+    Performs the rolling optimization and backtesting process.
+    """
+    print("-> Starting Rolling Optimization Backtest...")
+
+    # Ensure enough data exists for initial SMA calculation and first optimization window
+    min_data_needed = SMA_PERIOD_120 + OPTIMIZATION_STEP 
+    if len(df_full) < min_data_needed:
+        raise ValueError(f"Not enough data for rolling optimization. Need at least {min_data_needed} days.")
+
+    # Index where optimization begins (after warmup + first step)
+    start_index = SMA_PERIOD_120 
+    end_index = len(df_full)
+
+    # List to store daily returns from all execution windows
+    all_strategy_returns = []
+    
+    # Dictionary to store the optimal center found at each rebalance date
+    optimal_centers_history = {}
+    
+    # Loop starts at the first rebalance point after the SMA warmup
+    current_rebalance_point = start_index
+
+    while current_rebalance_point < end_index:
+        
+        # --- 1. Define Optimization Window (All past data) ---
+        # The window includes data from the start up to the current rebalance point (exclusive of data to be traded)
+        df_optimization_window = df_full.iloc[:current_rebalance_point]
+        
+        # --- 2. Run Optimization ---
+        optimal_center = run_grid_search(df_optimization_window)
+        optimal_centers_history[df_full.index[current_rebalance_point]] = optimal_center
+        
+        print(f"   Optimization up to {df_full.index[current_rebalance_point].strftime('%Y-%m-%d')} completed. Optimal Center: {optimal_center*100:.1f}%")
+
+        # --- 3. Define Execution Window ---
+        # The strategy trades the next OPTIMIZATION_STEP (90 days)
+        execution_start = current_rebalance_point
+        execution_end = min(current_rebalance_point + OPTIMIZATION_STEP, end_index)
+        
+        df_execution_window = df_full.iloc[execution_start:execution_end]
+        
+        # --- 4. Run Strategy on Execution Window with Optimal Parameter ---
+        # We need the SMA and shifted returns/close for the execution window as well.
+        # To calculate returns correctly, we need one prior row for the shift() function to work.
+        
+        # We pass the execution window and its preceding row to run_strategy_core
+        df_full_with_preceding = df_full.iloc[execution_start - 1 : execution_end]
+        
+        # strategy_returns will return data only for the execution period (start to end)
+        strategy_returns = run_strategy_core(df_full_with_preceding, optimal_center)
+        
+        # Store the returns for stitching
+        all_strategy_returns.append(strategy_returns)
+        
+        # --- 5. Advance Rebalance Point ---
+        current_rebalance_point += OPTIMIZATION_STEP
+        
+    # --- 6. Final Metric Calculation ---
+    
+    # Stitch all daily returns together
+    df_returns = pd.concat(all_strategy_returns)
+    
+    # Calculate Buy & Hold returns for the same final period
+    df_returns['Cumulative_Strategy_Return'] = np.exp(df_returns.sum().cumsum())
+    
+    # Recalculate B&H over the same period for fair comparison
+    df_full = df_full.iloc[df_returns.index[0].to_datetime64() <= df_full.index]
+    df_full['Daily_Return'] = np.log(df_full['Close'] / df_full['Close'].shift(1))
+    df_full['Cumulative_Buy_and_Hold'] = np.exp(df_full['Daily_Return'].cumsum())
+    
+    # Combine final cumulative returns
+    df_final = pd.DataFrame({
+        'Cumulative_Strategy_Return': df_returns['Cumulative_Strategy_Return'],
+        'Cumulative_Buy_and_Hold': df_full['Cumulative_Buy_and_Hold'].loc[df_returns.index]
+    })
 
     # --- Generate Metrics ---
     metrics = []
     
     # B&H
     metrics.append(generate_metrics(
-        df['Cumulative_Buy_and_Hold'], df['Daily_Return'], 'Buy & Hold (Benchmark)'
+        df_final['Cumulative_Buy_and_Hold'], df_full['Daily_Return'].loc[df_returns.index], 'Buy & Hold (Benchmark)'
     ))
     
     # Strategy
     metrics.append(generate_metrics(
-        df['Cumulative_Strategy_Return'], df['Strategy_Return'], f'Dynamic Strategy (120 SMA, {OPTIMAL_CENTER_DISTANCE*100:.1f}% Center)'
+        df_returns.sum(), df_returns.sum(), f'Rolling Dynamic Strategy (90-day re-opt)'
     ))
     
     # Print comparison table
@@ -191,16 +283,16 @@ def run_backtest_dynamic_sizing(df):
     ])
     
     print("\n" + "=" * 60)
-    print("BACKTEST METRICS COMPARISON (1.3% Center)")
+    print("BACKTEST METRICS COMPARISON (Rolling Optimization)")
     print("=" * 60)
     print(comparison_df.to_string(index=False))
     print("=" * 60)
     
-    return df, metrics
+    return df_final, df_full, metrics
 
 # --- 4. Plotting Results ---
 
-def plot_results(df, metrics):
+def plot_results(df_final, df_full, metrics):
     """
     Generates and saves the plot of the strategy, benchmark equity curves, and price/SMA.
     """
@@ -219,8 +311,8 @@ def plot_results(df, metrics):
     ax1 = fig.add_subplot(gs[0])
     
     # Plotting the Close Price and SMA
-    df['Close'].plot(ax=ax1, label='Close Price', color='#9CA3AF', linewidth=1.5, alpha=0.9, zorder=3)
-    df[f'SMA_{SMA_PERIOD_120}'].plot(ax=ax1, label=f'SMA {SMA_PERIOD_120}', color='#3B82F6', linewidth=2, zorder=4)
+    df_full['Close'].plot(ax=ax1, label='Close Price', color='#9CA3AF', linewidth=1.5, alpha=0.9, zorder=3)
+    df_full[f'SMA_{SMA_PERIOD_120}'].plot(ax=ax1, label=f'SMA {SMA_PERIOD_120}', color='#3B82F6', linewidth=2, zorder=4)
     
     # Style and Labels for ax1
     ax1.set_title(f'{SYMBOL} Price and SMA (Linear Scale)', fontsize=16, color='white')
@@ -233,8 +325,8 @@ def plot_results(df, metrics):
     ax2 = fig.add_subplot(gs[1], sharex=ax1)
     
     # Plotting the equity curves
-    df['Cumulative_Buy_and_Hold'].plot(ax=ax2, label=metrics[0]['Strategy'], color='#EF4444', linestyle='--', linewidth=1.5)
-    df['Cumulative_Strategy_Return'].plot(ax=ax2, label=metrics[1]['Strategy'], color='#3B82F6', linewidth=2.5)
+    df_final['Cumulative_Buy_and_Hold'].plot(ax=ax2, label=metrics[0]['Strategy'], color='#EF4444', linestyle='--', linewidth=1.5)
+    df_final['Cumulative_Strategy_Return'].plot(ax=ax2, label=metrics[1]['Strategy'], color='#3B82F6', linewidth=2.5)
     
     # Set Y-axis to Logarithmic Scale
     ax2.set_yscale('log')
@@ -299,10 +391,11 @@ def serve_results(metrics):
                 </head>
                 <body class="p-8">
                     <div class="container mx-auto p-4 bg-gray-800 shadow-xl rounded-xl">
-                        <h1 class="text-3xl font-bold mb-4 text-green-400">Backtest Results: {SYMBOL} Dynamic Sizing (1.3% Center)</h1>
+                        <h1 class="text-3xl font-bold mb-4 text-green-400">Backtest Results: {SYMBOL} Rolling Optimization</h1>
                         
                         <div class="mb-8">
                             <h2 class="text-xl font-semibold mb-3 text-gray-200">Strategy Metrics Comparison</h2>
+                            <p class="text-gray-400 mb-4">The dynamic sizing parameter (center distance) is re-optimized every 90 days using all past data.</p>
                             <div class="relative overflow-x-auto shadow-md sm:rounded-lg">
                                 <table class="w-full text-sm text-left text-gray-400">
                                     <thead class="text-xs uppercase bg-gray-700 text-gray-400">
@@ -362,10 +455,10 @@ if __name__ == '__main__':
         print("Error: Could not retrieve data. Exiting.")
     else:
         # 2. Run backtest and get comparison metrics
-        results_df, comparison_metrics = run_backtest_dynamic_sizing(df_data)
+        results_df_final, df_full, comparison_metrics = run_rolling_optimization_backtest(df_data)
         
         # 3. Plot results
-        plot_results(results_df, comparison_metrics)
+        plot_results(results_df_final, df_full, comparison_metrics)
 
         # 4. Start web server in the main thread
         serve_results(comparison_metrics)
