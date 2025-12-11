@@ -77,7 +77,8 @@ def get_data(symbol, since_date_str='2018-01-01'):
 
 def run_backtest(df):
     """
-    Calculates SMAs, implements the trading strategy, and computes metrics.
+    Calculates SMAs, implements the trading strategy (based purely on 120-day SMA),
+    and computes metrics.
     """
     print("Running backtest and calculating SMAs...")
     
@@ -88,7 +89,7 @@ def run_backtest(df):
     # Drop initial NaN values created by rolling windows (first 400 days)
     df = df.dropna()
 
-    # --- 3. CREATE DATASETS (Regimes) ---
+    # --- 3. CREATE DATASETS (Regimes for REPORTING only) ---
     
     # Bullish Regime: Price > 400 SMA
     df_bull = df[df['close'] > df[f'SMA_{SMA_LONG_TERM}']].copy()
@@ -96,18 +97,17 @@ def run_backtest(df):
     # Bearish Regime: Price < 400 SMA
     df_bear = df[df['close'] < df[f'SMA_{SMA_LONG_TERM}']].copy()
 
-    # --- 4. IMPLEMENT STRATEGY LOGIC ---
+    # --- 4. IMPLEMENT STRATEGY LOGIC (Purely 120-Day SMA based) ---
 
-    # Combined Strategy Logic (Signal column in original DF)
+    # Initialize Signal column
     df['Signal'] = 0.0
 
-    # Long Logic (Bullish Regime: Price > 400 SMA)
-    # Trade Long if 120 SMA is below price (Price > 120 SMA)
-    df.loc[(df['close'] > df[f'SMA_{SMA_LONG_TERM}']) & (df['close'] > df[f'SMA_{SMA_SHORT_TERM}']), 'Signal'] = 1.0
+    # Long Logic: Trades long if Price is above 120 SMA
+    df.loc[df['close'] > df[f'SMA_{SMA_SHORT_TERM}'], 'Signal'] = 1.0
 
-    # Short Logic (Bearish Regime: Price < 400 SMA)
-    # Trade Short if 120 SMA is above price (Price < 120 SMA)
-    df.loc[(df['close'] < df[f'SMA_{SMA_LONG_TERM}']) & (df['close'] < df[f'SMA_{SMA_SHORT_TERM}']), 'Signal'] = -1.0
+    # Short Logic: Trades short if Price is below 120 SMA
+    # This overwrites the previous 0.0 setting for days when a trade is active.
+    df.loc[df['close'] < df[f'SMA_{SMA_SHORT_TERM}'], 'Signal'] = -1.0
 
     # Calculate Daily Returns
     df['Daily_Return'] = df['close'].pct_change()
@@ -128,12 +128,12 @@ def run_backtest(df):
     # Total Number of Trading Days
     total_days = len(df)
     
-    # Annualized Returns (Assuming 252 trading days for crypto for calculation simplicity)
+    # Annualized Returns (Using 365 days for crypto)
     annualized_returns = (df['Cumulative_Strategy_Return'].iloc[-1] ** (365 / total_days)) - 1
     
-    # Sharpe Ratio (Using risk-free rate of 0 for simplicity)
+    # Sharpe Ratio (Using risk-free rate of 0)
     daily_volatility = df['Strategy_Return'].std()
-    sharpe_ratio = (df['Strategy_Return'].mean() / daily_volatility) * np.sqrt(365) # Using 365 for crypto
+    sharpe_ratio = (df['Strategy_Return'].mean() / daily_volatility) * np.sqrt(365)
     
     # Max Drawdown
     cumulative_max = df['Cumulative_Strategy_Return'].cummax()
@@ -154,7 +154,6 @@ def run_backtest(df):
 
         # Entry condition (position changes from 0 to 1 or -1)
         if current_pos != 0 and prev_pos == 0:
-            # Exit previous trade if still open (shouldn't happen with the logic above, but safety check)
             if trade_open is not None:
                  trades.append({
                     'entry_date': trade_open['entry_date'],
@@ -177,6 +176,15 @@ def run_backtest(df):
             })
              trade_open = None
 
+    # Close any remaining open trade at the last price
+    if trade_open is not None:
+         trades.append({
+            'entry_date': trade_open['entry_date'],
+            'exit_date': df.index.max(),
+            'position': 'Long (End of Data)' if trade_open['position'] == 1 else 'Short (End of Data)',
+            'pnl': (df['close'].iloc[-1] / trade_open['entry_price'] - 1) * trade_open['position'],
+            'win': (df['close'].iloc[-1] / trade_open['entry_price'] - 1) * trade_open['position'] > 0
+        })
 
     total_trades = len(trades)
     winning_trades = sum(1 for t in trades if t['win'])
@@ -328,7 +336,7 @@ HTML_TEMPLATE = """
                 <h2>Trade List (Last 50)</h2>
                 <div class="trade-log">
                     {% if trade_list %}
-                        {% for trade in trade_list %}
+                        {% for trade in trade_list|slice:":50" %}
                             {% set color_class = 'value' %}
                             {% if 'PnL: -' in trade %}
                                 {% set color_class = 'negative' %}
@@ -344,9 +352,9 @@ HTML_TEMPLATE = """
             </div>
         </div>
         <div class="strategy-description">
-            Strategy Logic:<br>
-            - **Bullish Regime** (Price > 400 SMA): Enter **Long** when Price > 120 SMA.<br>
-            - **Bearish Regime** (Price < 400 SMA): Enter **Short** when Price < 120 SMA.
+            Strategy Logic (Updated):<br>
+            - **Trade Signal:** Long when Price > 120 SMA, Short when Price < 120 SMA.<br>
+            - **Regime Separation:** 400 SMA is used only for reporting/analysis of Bullish (Price > 400 SMA) vs. Bearish (Price < 400 SMA) market periods.
         </div>
     </div>
 </body>
@@ -388,16 +396,13 @@ def dashboard():
     plot_data = generate_plot(df_results)
 
     # Render HTML
-    # Slice trade_list for display, as Jinja2's `slice` filter is for chunking, not list slicing.
-    display_trade_list = trade_list[:50]
-
     return render_template_string(
         HTML_TEMPLATE,
         symbol=SYMBOL,
         timeframe=TIME_FRAME,
         metrics=metrics,
         regime_metrics=regime_metrics,
-        trade_list=display_trade_list,
+        trade_list=trade_list,
         plot_data=plot_data
     )
 
