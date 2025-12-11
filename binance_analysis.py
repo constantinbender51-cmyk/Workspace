@@ -123,29 +123,28 @@ def run_strategy_core(df_window, center_distance):
     """
     Applies the dynamic sizing strategy to a DataFrame window for a specific center distance.
     Returns the daily strategy returns for that window.
+    The input df_window must contain the preceding day for lagged calculation.
     """
     df = df_window.copy()
     
-    # Calculate SMAs and daily returns
+    # 1. Calculate base components
     df[f'SMA_{SMA_PERIOD_120}'] = df['Close'].rolling(window=SMA_PERIOD_120).mean()
     df['Daily_Return'] = np.log(df['Close'] / df['Close'].shift(1))
 
-    # Prepare Lagged Data (Look-ahead Bias Prevention)
+    # 2. Prepare Lagged Data (Look-ahead Bias Prevention)
     df['Yesterday_Close'] = df['Close'].shift(1)
     df['Yesterday_SMA_120'] = df[f'SMA_{SMA_PERIOD_120}'].shift(1)
     
-    # Drop rows that don't have enough history for SMAs/lagging/daily return
+    # 3. Drop rows that don't have all required data points
     required_cols = [f'SMA_{SMA_PERIOD_120}', 'Yesterday_Close', 'Yesterday_SMA_120', 'Daily_Return']
     df_clean = df.dropna(subset=required_cols).copy()
 
     if df_clean.empty:
         return pd.Series([], dtype=np.float64)
     
-    # 1. Calculate Distance (D): Absolute decimal distance from the SMA (lagged)
+    # 4. Calculate Position Sizing Multiplier
     df_clean['Distance'] = np.abs((df_clean['Yesterday_Close'] - df_clean['Yesterday_SMA_120']) / df_clean['Yesterday_SMA_120'])
-
-    # 2. Calculate Multiplier (M) using the provided formula:
-    # M = 1 / ( (1 / (D * Scaler)) + (D * Scaler) - 1 )
+    
     distance_scaler = 1.0 / center_distance
     scaled_distance = df_clean['Distance'] * distance_scaler
     
@@ -153,20 +152,16 @@ def run_strategy_core(df_window, center_distance):
     denominator = (1.0 / np.maximum(scaled_distance, epsilon)) + scaled_distance - 1.0
     df_clean['Multiplier'] = np.where(denominator == 0, 0, 1.0 / denominator)
 
-    # 3. Determine Direction (Long/Short)
+    # 5. Determine Direction (Long/Short) and Final Returns
     df_clean['Direction'] = np.where(
         df_clean['Yesterday_Close'] > df_clean['Yesterday_SMA_120'],
         1,
         -1
     )
-
-    # 4. Final Position Size = Direction * Multiplier
     df_clean['Position_Size'] = df_clean['Direction'] * df_clean['Multiplier']
-    
-    # 5. Calculate Strategy Returns
     df_clean['Strategy_Return'] = df_clean['Daily_Return'] * df_clean['Position_Size']
     
-    # Return all valid strategy returns in the clean DataFrame
+    # Return all valid strategy returns
     return df_clean['Strategy_Return']
 
 def run_grid_search(df_optimization_window):
@@ -199,25 +194,22 @@ def run_rolling_optimization_backtest(df_full):
     """
     print("-> Starting Rolling Optimization Backtest...")
 
-    # Index 0 is the start. We need 120 days for SMA, +1 day lag = index 121 is the first day tradeable.
-    # The optimization window must be long enough to produce valid Sharpe (e.g., 90 days after warmup).
+    # The earliest index where all components (SMA, lag, return) are valid is SMA_PERIOD_120 + 1 = 121
+    FIRST_VALID_TRADE_INDEX = SMA_PERIOD_120 + 1 
     
-    MIN_DATA_FOR_SHARPE = SMA_PERIOD_120 + 1 # Min data to run run_strategy_core once
-    
-    # First Execution block starts only after a decent optimization period is available
-    execution_start_index = MIN_DATA_FOR_SHARPE + OPTIMIZATION_STEP
+    # The optimization window must be long enough to produce meaningful Sharpe results (OPTIMIZATION_STEP days).
+    # The first day of out-of-sample trading begins after the first optimization period is complete.
+    current_rebalance_index = FIRST_VALID_TRADE_INDEX + OPTIMIZATION_STEP
 
-    if len(df_full) < execution_start_index:
-        raise ValueError(f"Not enough data for rolling optimization. Need at least {execution_start_index} days (approx. {execution_start_index/365:.1f} years).")
+    if len(df_full) < current_rebalance_index:
+        raise ValueError(f"Not enough data for rolling optimization. Need at least {current_rebalance_index} days.")
 
     end_index = len(df_full)
     all_strategy_returns = []
     
-    current_rebalance_index = execution_start_index
-
     while current_rebalance_index < end_index:
         
-        # 1. OPTIMIZATION WINDOW: All history up to the current rebalance point (In-Sample)
+        # 1. OPTIMIZATION WINDOW: All history up to the execution start index (In-Sample)
         df_optimization_window = df_full.iloc[:current_rebalance_index]
         
         # 2. Run Optimization (Sharpe on historical data)
@@ -226,15 +218,18 @@ def run_rolling_optimization_backtest(df_full):
         # 3. EXECUTION WINDOW (The next OPTIMIZATION_STEP days - Out-of-Sample)
         execution_end_index = min(current_rebalance_index + OPTIMIZATION_STEP, end_index)
         
-        # Execution data must include the preceding day (current_rebalance_index - 1) for lagged calculation
+        # Execution data must include the preceding day for lagged calculation
         df_execution_data = df_full.iloc[current_rebalance_index - 1 : execution_end_index]
         
         # 4. Run Strategy on Execution Window with Optimal Parameter
         strategy_returns = run_strategy_core(df_execution_data, optimal_center)
         
-        if not strategy_returns.empty:
-            all_strategy_returns.append(strategy_returns)
-            print(f"   Rebalance up to {df_full.index[current_rebalance_index-1].strftime('%Y-%m-%d')} | Optimal Center: {optimal_center*100:.1f}% | Executed trades: {len(strategy_returns)} days")
+        # We slice to remove the preceding day's return included by run_strategy_core's logic
+        strategy_returns_only_execution = strategy_returns.iloc[1:]
+        
+        if not strategy_returns_only_execution.empty:
+            all_strategy_returns.append(strategy_returns_only_execution)
+            print(f"   Rebalance up to {df_full.index[current_rebalance_index-1].strftime('%Y-%m-%d')} | Optimal Center: {optimal_center*100:.1f}% | Executed trades: {len(strategy_returns_only_execution)} days")
         else:
              print(f"   Rebalance up to {df_full.index[current_rebalance_index-1].strftime('%Y-%m-%d')} | WARNING: No valid returns generated for execution window. Skipping this period.")
 
@@ -262,7 +257,6 @@ def run_rolling_optimization_backtest(df_full):
     df_full_sliced['Cumulative_Buy_and_Hold'] = np.exp(df_full_sliced['Daily_Return'].cumsum())
     
     # Combine final cumulative returns, ensuring matching indices
-    # We must match the index of the returns that were actually generated
     bh_daily_returns = df_full_sliced['Daily_Return'].loc[df_returns_stitched.index].dropna()
     strategy_daily_returns = df_returns_stitched.loc[bh_daily_returns.index]
     
@@ -276,12 +270,12 @@ def run_rolling_optimization_backtest(df_full):
     
     # B&H
     metrics.append(generate_metrics(
-        df_final['Cumulative_Buy_and_Hold'], bh_daily_returns, 'Buy & Hold (Benchmark)'
+        df_final['Cumulative_Buy_and_Hold'].loc[bh_daily_returns.index], bh_daily_returns, 'Buy & Hold (Benchmark)'
     ))
     
     # Strategy
     metrics.append(generate_metrics(
-        df_final['Cumulative_Strategy_Return'], strategy_daily_returns, f'Rolling Dynamic Strategy (90-day re-opt)'
+        df_final['Cumulative_Strategy_Return'].loc[strategy_daily_returns.index], strategy_daily_returns, f'Rolling Dynamic Strategy (90-day re-opt)'
     ))
     
     # Print comparison table
