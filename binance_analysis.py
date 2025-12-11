@@ -13,7 +13,8 @@ from matplotlib.ticker import ScalarFormatter
 SYMBOL = 'BTCUSDT'
 INTERVAL = '1d'
 START_DATE = '1 Jan, 2018'
-SMA_PERIOD = 120
+SMA_PERIOD = 120 # Trading SMA
+SMA_PERIOD_40 = 40 # New SMA for plotting only
 PLOT_FILE = 'strategy_results.png'
 SERVER_PORT = 8080
 RESULTS_DIR = 'results'
@@ -126,8 +127,9 @@ def run_backtest(df):
     """
     print(f"-> Running backtest on {len(df)} candles...")
     
-    # 2.1 Calculate the 120-day Simple Moving Average (SMA)
+    # Calculate the SMAs (including the new 40 SMA)
     df[f'SMA_{SMA_PERIOD}'] = df['Close'].rolling(window=SMA_PERIOD).mean()
+    df[f'SMA_{SMA_PERIOD_40}'] = df['Close'].rolling(window=SMA_PERIOD_40).mean() # New SMA calculation
     
     # 2.2 Calculate daily returns (log returns are often preferred for backtesting)
     df['Daily_Return'] = np.log(df['Close'] / df['Close'].shift(1))
@@ -145,12 +147,11 @@ def run_backtest(df):
         -1                                           # Value if False (Short position held on Day T)
     )
     
-    # --- 2.7 Calculate SMA Proximity Metric ---
+    # --- 2.7 Calculate SMA Proximity Metric (120 SMA) ---
     # Scaler is 1 / 0.02 = 50.0
     PROXIMITY_SCALER = 50.0 
     
     # Calculate X% (Absolute decimal distance)
-    # Note: Fixed potential typo on SMA_SNA_PERIOD to SMA_PERIOD
     df['SMA_Distance_Decimal'] = np.abs((df['Close'] - df[f'SMA_{SMA_PERIOD}']) / df[f'SMA_{SMA_PERIOD}']) 
     
     # Calculate Proximity base: 1 / (X% * Scaler)
@@ -220,11 +221,11 @@ def plot_results(df):
     fig = plt.figure(figsize=(14, 15)) 
     gs = fig.add_gridspec(3, 1, hspace=0.3, height_ratios=[4, 3, 1])
     
-    # --- Top Subplot (ax1): Price and SMA (Linear Scale) ---
+    # --- Top Subplot (ax1): Price and SMAs (Linear Scale) ---
     ax1 = fig.add_subplot(gs[0])
     
-    # --- Shading for Max Proximity ---
-    # Identify days where proximity is 1.0
+    # --- Shading for Max Proximity (120 SMA) ---
+    # Identify days where proximity is 1.0 (Close proximity to 120 SMA)
     proximity_max = df['SMA_Proximity'] >= 1.0
 
     # Identify start and end of blocks
@@ -239,17 +240,18 @@ def plot_results(df):
         
         # Only label the first span for the legend
         if not shaded_label:
-            ax1.axvspan(start_date, end_dt, color='#3B82F6', alpha=0.2, label='Max Proximity (1.0) Days')
+            ax1.axvspan(start_date, end_dt, color='#3B82F6', alpha=0.2, label=f'{SMA_PERIOD} SMA Close Days (Blue)')
             shaded_label = True
         else:
             ax1.axvspan(start_date, end_dt, color='#3B82F6', alpha=0.2)
             
-    # Plotting the Close Price and SMA (must be plotted *after* shading)
+    # Plotting the Close Price and SMAs (must be plotted *after* shading)
     df['Close'].plot(ax=ax1, label='Close Price', color='#9CA3AF', linewidth=1.5, alpha=0.9, zorder=3)
+    df[f'SMA_{SMA_PERIOD_40}'].plot(ax=ax1, label=f'SMA {SMA_PERIOD_40}', color='#F97316', linewidth=1.5, linestyle='-', zorder=4) # New 40 SMA
     df[f'SMA_{SMA_PERIOD}'].plot(ax=ax1, label=f'SMA {SMA_PERIOD}', color='#3B82F6', linewidth=2, zorder=4)
     
     # Style and Labels for ax1
-    ax1.set_title(f'{SYMBOL} Price and SMA (Linear Scale)', fontsize=16, color='white')
+    ax1.set_title(f'{SYMBOL} Price and SMAs (Linear Scale)', fontsize=16, color='white')
     ax1.set_xlabel('') 
     ax1.set_ylabel('Price (USDT)', fontsize=12, color='white')
     ax1.legend(loc='upper left', fontsize=10)
@@ -332,9 +334,13 @@ def serve_results():
                 </head>
                 <body class="p-8">
                     <div class="container mx-auto p-4 bg-gray-800 shadow-xl rounded-xl">
-                        <h1 class="text-3xl font-bold mb-4 text-green-400">Backtesting Results: {SYMBOL} SMA-120</h1>
+                        <h1 class="text-3xl font-bold mb-4 text-green-400">Backtesting Results: {SYMBOL} SMA-40/120</h1>
                         <p class="text-gray-300 mb-6">
-                            The backtest now displays three plots: Price/SMA, Log Equity Curve, and the Capped SMA Proximity (Max 1.0). Days when the proximity is maxed out are shaded blue on the Price/SMA plot.
+                            The plot now shows two SMAs: the 40-Day SMA (orange) and the 120-Day SMA (blue, used for trading).
+                            <br>
+                            - Blue shading indicates **close** proximity (<= 2%) to the 120-Day SMA.
+                            <br>
+                            - The bottom plot tracks the inverse proximity score for the 120 SMA.
                         </p>
                         <div class="plot-container">
                             <img src="{RESULTS_DIR}/{PLOT_FILE}" alt="Strategy Cumulative Returns Plot" class="w-full h-auto rounded-lg shadow-2xl">
