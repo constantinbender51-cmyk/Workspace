@@ -15,7 +15,7 @@ TIMEFRAME = '1d' # Daily candles
 START_DATE = '2018-01-01'
 SMA_WINDOWS_PLOT = [120] 
 DC_WINDOW = 20  # Donchian Channel Period (N)
-STOP_LOSS_PCT = 0.05 # 5% stop loss from previous day's close
+STOP_LOSS_PCT = 0.05 # Fixed 5% stop loss from previous day's close (per user request)
 # K_FACTOR will be dynamically set by the optimal value found in the grid search or manually provided
 POSITION_SIZE_MAX = 1.0  # Maximum position size limit
 PORT = 8080
@@ -168,13 +168,13 @@ def get_strategy_returns_scan(df_raw, sma_window):
 def calculate_dynamic_position(df_ind_raw, k_factor):
     """
     Calculates position size based on volatility (DC width relative to price),
-    and sets the direction based on SMA 120, incorporating Stop Loss logic.
+    and sets the direction based on SMA 120, incorporating FIXED 5% Stop Loss logic.
     
     Size = 1 - (DC_Width / Close)^k_factor
     """
     df = df_ind_raw.copy()
     
-    # 1. Calculate Relative Volatility: DC Width / Price
+    # 1. Calculate Relative Volatility for Position Sizing
     df['DC_Width'] = df['DC_Upper'] - df['DC_Lower']
     df['Relative_Width'] = df['DC_Width'] / df['Close']
     
@@ -200,14 +200,16 @@ def calculate_dynamic_position(df_ind_raw, k_factor):
     # Calculate daily asset return
     df['Daily_Return'] = df['Close'].pct_change().fillna(0)
     
-    # --- Stop Loss Logic (SL is hit based on intraday OHLC) ---
+    # --- Stop Loss Logic (SL FIXED at 5% from Previous Close) ---
+    
+    LOSS_RATE_FIXED = STOP_LOSS_PCT # 0.05
     
     # A. Long SL Hit Check: Low < SL Price (Prev Close * (1 - SL%))
-    SL_Price_Long = df['Previous_Close'] * (1 - STOP_LOSS_PCT)
+    SL_Price_Long = df['Previous_Close'] * (1 - LOSS_RATE_FIXED)
     is_long_sl_hit = (df['Held_Position'] > 0) & (df['Low'] < SL_Price_Long)
 
     # B. Short SL Hit Check: High > SL Price (Prev Close * (1 + SL%))
-    SL_Price_Short = df['Previous_Close'] * (1 + STOP_LOSS_PCT)
+    SL_Price_Short = df['Previous_Close'] * (1 + LOSS_RATE_FIXED)
     is_short_sl_hit = (df['Held_Position'] < 0) & (df['High'] > SL_Price_Short)
 
     df['SL_Hit'] = is_long_sl_hit | is_short_sl_hit
@@ -216,17 +218,16 @@ def calculate_dynamic_position(df_ind_raw, k_factor):
     # Default return: Daily asset return * Held Position
     df['Strategy_Return'] = df['Daily_Return'] * df['Held_Position']
 
-    # If SL is hit, the return is capped at the maximum allowed loss (STOP_LOSS_PCT)
-    # Loss = -STOP_LOSS_PCT * |Held Position|
+    # If SL is hit, the return is capped at the maximum allowed loss (FIXED 5% rate)
+    # Loss = -FIXED_RATE * |Held Position|
     
     # Apply SL for long positions
-    loss_long = -STOP_LOSS_PCT * df['Held_Position']
-    df.loc[is_long_sl_hit, 'Strategy_Return'] = loss_long
+    loss_long_capped = -LOSS_RATE_FIXED * df['Held_Position']
+    df.loc[is_long_sl_hit, 'Strategy_Return'] = loss_long_capped
     
     # Apply SL for short positions
-    # Note: Held_Position is negative for shorts, so we use its absolute value for size.
-    loss_short = -STOP_LOSS_PCT * np.abs(df['Held_Position'])
-    df.loc[is_short_sl_hit, 'Strategy_Return'] = loss_short
+    loss_short_capped = -LOSS_RATE_FIXED * np.abs(df['Held_Position'])
+    df.loc[is_short_sl_hit, 'Strategy_Return'] = loss_short_capped
     
     # --- End Stop Loss Logic ---
     
@@ -284,9 +285,10 @@ def run_k_grid_search(df_ind_raw):
     results_df = pd.DataFrame(results)
     
     if results_df.empty:
-        return 0.2, results_df, "" # Return default K if search failed
+        # If search fails, we still rely on the user's defined K=0.35
+        return 0.35, results_df, "" 
 
-    # Note: We still calculate the actual best K from the run but will force 2.5 for the main strategy run.
+    # Note: We still calculate the actual best K from the run but will force 0.35 for the main strategy run.
     best_k_row_actual = results_df.sort_values(by='Sharpe_Ratio', ascending=False).iloc[0]
     
     # Generate Plot
@@ -465,7 +467,7 @@ def create_plot(df, sma_window, k_factor):
     ax1.grid(True, linestyle='--', alpha=0.6)
     ax1.legend(loc='upper left', fontsize=8)
     ax1.set_yscale('log')
-    ax1.set_title(f'SMA {sma_window} Signal with Dynamic Sizing (Optimal K={k_factor:.3f}) - Black Overlay: SL Hit @ {STOP_LOSS_PCT*100:.0f}%', fontsize=12)
+    ax1.set_title(f'SMA {sma_window} Signal w/ Dynamic Sizing (K={k_factor:.3f}) - Black Overlay: SL Hit @ 5%', fontsize=12)
 
     # --- Equity Plot (Bottom Panel) ---
     ax2 = axes[1]
@@ -502,7 +504,7 @@ def setup_analysis():
     
     MAIN_SMA_WINDOW = 120 
     # Use the K value provided by the user for the final strategy run
-    FORCED_OPTIMAL_K = 2.5 
+    FORCED_OPTIMAL_K = 0.35 
 
     # --- Part 1: Data Fetching and Indicator Calculation ---
     try:
@@ -544,7 +546,7 @@ def setup_analysis():
         
     # --- Part 3: K-Factor Grid Search ---
     try:
-        # Run search to generate plot, but the final K will be forced to 2.5
+        # Run search to generate plot, but the final K will be forced to 0.35
         _, results_df_k, GLOBAL_K_ANALYSIS_IMG = run_k_grid_search(df_ind)
         GLOBAL_OPTIMAL_K = FORCED_OPTIMAL_K
         
@@ -693,7 +695,7 @@ def analysis_dashboard():
             </div>
             
             <p class="mt-8 text-sm text-gray-600 border-t pt-4">
-                **Strategy Logic:** Direction is determined by SMA 120 crossover. Position size is calculated dynamically (K={GLOBAL_OPTIMAL_K:.3f}): {position_sizing_formula}. **Stop Loss (SL) is implemented at {STOP_LOSS_PCT*100:.0f}% deviation from the previous close against the position.**
+                **Strategy Logic:** Direction is determined by SMA 120 crossover. Position size is calculated dynamically (K={GLOBAL_OPTIMAL_K:.3f}): {position_sizing_formula}. **Stop Loss (SL) is implemented at a fixed {STOP_LOSS_PCT*100:.0f}% deviation from the previous close against the position.**
             </p>
         </div>
     </body>
