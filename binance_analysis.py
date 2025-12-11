@@ -180,11 +180,12 @@ def calculate_sharpe_ratios_scan(df_raw, min_sma, max_sma):
             continue
             
         returns = df_strategy['Strategy_Return']
-        
-        avg_daily_return = returns.mean()
+            
+        # Standard deviation check ensures calculation stability
         std_dev_daily_return = returns.std()
         
         if std_dev_daily_return > 0:
+            avg_daily_return = returns.mean()
             sharpe_ratio = (avg_daily_return / std_dev_daily_return) * np.sqrt(ANNUAL_TRADING_DAYS)
         else:
             sharpe_ratio = 0.0 
@@ -268,7 +269,7 @@ def create_analysis_visualization(results_df):
 
 def create_plot(df, strategy_sma):
     """Generates the main SMA 120 strategy plot (Close Price + Equity Curve)
-       and highlights days where the strategy is FLAT (position 0)."""
+       and highlights days where the position is reduced (red overlay)."""
     
     df_plot = df.copy() 
     sma_120_col = f'SMA_{strategy_sma}'
@@ -280,7 +281,7 @@ def create_plot(df, strategy_sma):
     # --- Price and SMA (Top Panel) ---
     ax1 = axes[0]
     
-    # 1. Background Coloring: Strategy Position (+1, -1, or 0)
+    # 1. Background Coloring: Strategy Position (+1, -1, +0.5, -0.5)
     pos_series = df_plot['Held_Position'] 
     
     change_indices = pos_series.index[pos_series.diff() != 0]
@@ -293,36 +294,25 @@ def create_plot(df, strategy_sma):
         color = None
         alpha = 0.08
         
-        if current_pos == POSITION_SIZE:
+        if current_pos > 0:
             color = 'green'
-        elif current_pos == -POSITION_SIZE:
+        elif current_pos < 0:
             color = 'red'
         elif current_pos == 0:
-            color = 'gold' # Highlight FLAT period
-            alpha = 0.15
+            color = 'gold' # Only happens if the base signal was 0 or a bug
+            alpha = 0.15 
             
         if color:
             end_adjusted = end + pd.Timedelta(days=1)
             ax1.axvspan(start, end_adjusted, facecolor=color, alpha=alpha, zorder=0)
 
-    # 2. Highlight Ambiguous/No-Trade Days (Red)
-    # This uses the original condition to show WHY the strategy went flat (if flat) or shouldn't trade.
-    
-    # Condition A: Price within 3% band of SMA 40
-    condition_A = np.abs((df_plot['Close'] - df_plot[sma_40_col]) / df_plot[sma_40_col]) <= BAND_PERCENTAGE
-    
-    # Condition B: Price is strictly between SMA 40 and SMA 120
-    condition_B = (
-        (df_plot['Close'] > df_plot[sma_40_col]) & (df_plot['Close'] < df_plot[sma_120_col]) |
-        (df_plot['Close'] < df_plot[sma_40_col]) & (df_plot['Close'] > df_plot[sma_120_col])
-    )
-    
-    # Combined Condition (A OR B)
-    combined_days = df_plot[condition_A | condition_B].index
+    # 2. Highlight Reduced Position Days (Red Overlay)
+    # Highlight days where the magnitude of the position is 0.5 (reduced risk)
+    reduced_pos_days = df_plot[np.abs(df_plot['Held_Position']) == 0.5].index
     
     # Draw a distinct red marker on these specific days
-    for day in combined_days:
-        # Use a strong red background for emphasis
+    for day in reduced_pos_days:
+        # Use a strong red background for emphasis on the reduced risk period
         ax1.axvspan(day, day + pd.Timedelta(days=1), facecolor='#DC143C', alpha=0.3, zorder=1) 
     
     # 3. Price and SMAs 
@@ -338,7 +328,7 @@ def create_plot(df, strategy_sma):
     ax1.grid(True, linestyle='--', alpha=0.6)
     ax1.legend(loc='upper left', fontsize=8)
     ax1.set_yscale('log')
-    ax1.set_title(f'SMA {strategy_sma} Strategy (Ambiguity Rule: FLAT if near SMA 40 or between SMAs)', fontsize=12)
+    ax1.set_title(f'SMA {strategy_sma} Strategy (Red Overlay: Reduced Position 0.5)', fontsize=12)
 
     # --- Equity Plot (Bottom Panel) ---
     ax2 = axes[1]
@@ -425,7 +415,7 @@ def setup_analysis():
         print(f"--- FATAL ERROR DURING SHARPE SCAN ---\n{GLOBAL_ERROR}", file=sys.stderr)
         return
 
-    # --- Part 3: Main Strategy Backtest (SMA 120) with Flat Rule ---
+    # --- Part 3: Main Strategy Backtest (SMA 120) with Reduced Position Rule ---
     try:
         MAIN_SMA_WINDOW = 120
         COMPARE_SMA_WINDOW = 40
@@ -465,9 +455,10 @@ def setup_analysis():
             condition_B = (current_price > current_sma_40 and current_price < current_sma_120) or \
                           (current_price < current_sma_40 and current_price > current_sma_120)
 
-            # Rule: If A OR B is true, stay FLAT (Position 0)
+            # Rule: If A OR B is true, reduce position size to 0.5 (maintaining direction)
             if condition_A or condition_B:
-                pos = 0 # Forced flat
+                # Reduced position size: 0.5 * sign(base_pos_120). If base_pos_120 is 0, it remains 0.
+                pos = base_pos_120 * 0.5
             else:
                 pos = base_pos_120 # Normal SMA 120 logic
             
@@ -488,15 +479,25 @@ def setup_analysis():
 
         # 5. Determine current status
         current_position = df_final['Held_Position'].iloc[-1]
-        GLOBAL_STATUS = "LONG" if current_position == POSITION_SIZE else ("SHORT" if current_position == -POSITION_SIZE else "FLAT")
-
+        
+        if current_position == POSITION_SIZE:
+            GLOBAL_STATUS = "LONG (Full: +1.0)"
+        elif current_position == -POSITION_SIZE:
+            GLOBAL_STATUS = "SHORT (Full: -1.0)"
+        elif current_position == POSITION_SIZE * 0.5:
+            GLOBAL_STATUS = "LONG (Reduced: +0.5)"
+        elif current_position == -POSITION_SIZE * 0.5:
+            GLOBAL_STATUS = "SHORT (Reduced: -0.5)"
+        else:
+            GLOBAL_STATUS = "FLAT (0)"
+            
         # 6. Create Plot
         GLOBAL_IMG_BASE64, GLOBAL_TOTAL_RETURN = create_plot(df_final, MAIN_SMA_WINDOW)
         
         # 7. Populate Global Results
         # Create summary table
         summary_df = df_final[['Close', f'SMA_{MAIN_SMA_WINDOW}', f'SMA_{COMPARE_SMA_WINDOW}', 'Held_Position', 'Equity', 'Strategy_Return', 'Strategy_Return_40']].tail(10)
-        summary_df = summary_df.rename(columns={f'SMA_{MAIN_SMA_WINDOW}': 'SMA 120', f'SMA_{COMPARE_SMA_WINDOW}': 'SMA 40', 'Held_Position': 'Pos Final', 'Strategy_Return': 'Ret Final', 'Strategy_Return_40': 'Ret 40'})
+        summary_df = summary_df.rename(columns={f'SMA_{MAIN_SMA_WINDOW}': 'SMA 120', f'SMA_{COMPARE_SMA_WINDOW}': 'SMA 40', 'Held_Position': 'Pos Held', 'Strategy_Return': 'Ret Final', 'Strategy_Return_40': 'Ret 40'})
         
         GLOBAL_SUMMARY_TABLE = summary_df.to_html(classes='table-auto w-full text-sm text-left', 
                                                   float_format=lambda x: f'{x:,.4f}') 
@@ -601,7 +602,7 @@ def analysis_dashboard():
             </div>
             
             <p class="mt-8 text-sm text-gray-600 border-t pt-4">
-                **Strategy:** Long if Close > SMA, Short if Close $\le$ SMA. **Flat Ambiguity Rule Applied:** Strategy is forced **FLAT (Pos 0)** if price is within 3% of SMA 40 OR between SMA 40 and SMA 120.
+                **Strategy:** Long if Close > SMA, Short if Close $\le$ SMA. **Reduced Position Rule Applied:** Strategy position is halved (e.g., +1 $\to$ +0.5) if price is within 3% of SMA 40 OR between SMA 40 and SMA 120. **The red overlay highlights these reduced risk days.**
             </p>
         </div>
     </body>
