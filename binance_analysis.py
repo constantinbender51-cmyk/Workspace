@@ -18,8 +18,9 @@ SERVER_PORT = 8080
 RESULTS_DIR = 'results'
 ANNUALIZATION_FACTOR = 365 # Used for annualizing Sharpe Ratio for daily data
 
-# --- Static Dynamic Center Parameter ---
+# --- Strategy Parameters ---
 STATIC_CENTER_DISTANCE = 0.010 # Fixed 1.0% center distance for the dynamic sizing multiplier
+LEVERAGE_FACTOR = 5.0        # APPLYING 5x LEVERAGE
 
 # --- 1. Data Fetching Utilities ---
 
@@ -120,7 +121,9 @@ def run_backtest_static_center(df):
     Applies the 120 SMA trading strategy with dynamic position sizing using a static center distance (1.0%).
     """
     center = STATIC_CENTER_DISTANCE
-    print(f"-> Running final backtest (Center={center*100:.1f}% Static Distance) on {len(df)} candles...")
+    leverage = LEVERAGE_FACTOR
+    
+    print(f"-> Running final backtest (Center={center*100:.1f}%, Leverage={leverage:.1f}x) on {len(df)} candles...")
     
     # 1. Calculate 120 SMA & Daily Returns
     df[f'SMA_{SMA_PERIOD_120}'] = df['Close'].rolling(window=SMA_PERIOD_120).mean()
@@ -160,10 +163,14 @@ def run_backtest_static_center(df):
     # Calculate Multiplier (Position Size Magnitude)
     df['Multiplier'] = np.where(denominator == 0, 0, 1.0 / denominator)
 
-    # 4. Final Position Size = Direction * Multiplier
-    df['Position_Size'] = df['Direction'] * df['Multiplier']
+    # 4. Final Position Size (Before Leverage) = Direction * Multiplier
+    df['Position_Size_Base'] = df['Direction'] * df['Multiplier']
     
-    # 5. Calculate Strategy Returns
+    # 5. Apply Leverage
+    df['Position_Size'] = df['Position_Size_Base'] * leverage
+    
+    # 6. Calculate Strategy Returns
+    # Note: Leverage only scales the returns, it doesn't fundamentally change the Sharpe Ratio unless transaction costs/margin calls are introduced, which they are not here.
     df['Strategy_Return'] = df['Daily_Return'] * df['Position_Size']
     df['Cumulative_Strategy_Return'] = np.exp(df['Strategy_Return'].cumsum())
 
@@ -182,7 +189,7 @@ def run_backtest_static_center(df):
     
     # Strategy
     metrics.append(generate_metrics(
-        df['Cumulative_Strategy_Return'], df['Strategy_Return'], f'Dynamic Sizing (Static {center*100:.1f}% Center)'
+        df['Cumulative_Strategy_Return'], df['Strategy_Return'], f'Dynamic Sizing (1.0% Center, {leverage:.1f}x Lev.)'
     ))
     
     # Print comparison table
@@ -192,7 +199,7 @@ def run_backtest_static_center(df):
     ])
     
     print("\n" + "=" * 60)
-    print(f"FINAL BACKTEST METRICS (Static {center*100:.1f}% Dynamic Center)")
+    print(f"FINAL BACKTEST METRICS (Static {center*100:.1f}% Dynamic Center, {leverage:.1f}x Lev.)")
     print("=" * 60)
     print(comparison_df.to_string(index=False))
     print("=" * 60)
@@ -241,7 +248,9 @@ def plot_results(df, metrics):
     ax2.set_yscale('log')
     
     # Style and Labels for ax2
-    ax2.set_title('Cumulative Return (Log Scale)', fontsize=14, color='white')
+    center = STATIC_CENTER_DISTANCE
+    leverage = LEVERAGE_FACTOR
+    ax2.set_title(f'Cumulative Return (Log Scale) - Leveraged Strategy ({leverage:.1f}x)', fontsize=14, color='white')
     ax2.set_xlabel('Date', fontsize=12, color='white')
     ax2.set_ylabel('Cumulative Return (Log Scale - Multiplier)', fontsize=12, color='white')
     ax2.legend(loc='upper left', fontsize=10)
@@ -300,11 +309,11 @@ def serve_results(metrics):
                 </head>
                 <body class="p-8">
                     <div class="container mx-auto p-4 bg-gray-800 shadow-xl rounded-xl">
-                        <h1 class="text-3xl font-bold mb-4 text-green-400">Backtest Results: {SYMBOL} Dynamic Sizing (1.0% Center)</h1>
+                        <h1 class="text-3xl font-bold mb-4 text-green-400">Backtest Results: {SYMBOL} Dynamic Sizing ({LEVERAGE_FACTOR:.1f}x Leverage)</h1>
                         
                         <div class="mb-8">
                             <h2 class="text-xl font-semibold mb-3 text-gray-200">Strategy Metrics Comparison</h2>
-                            <p class="text-gray-400 mb-4">Final backtest using a static 1.0% distance center for the dynamic position sizing multiplier.</p>
+                            <p class="text-gray-400 mb-4">Final backtest using a static 1.0% distance center for the dynamic position sizing multiplier, leveraged 5.0x.</p>
                             <div class="relative overflow-x-auto shadow-md sm:rounded-lg">
                                 <table class="w-full text-sm text-left text-gray-400">
                                     <thead class="text-xs uppercase bg-gray-700 text-gray-400">
