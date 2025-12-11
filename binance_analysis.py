@@ -11,13 +11,18 @@ SYMBOL = 'BTCUSDT'
 INTERVAL = '1d'
 START_DATE = '1 Jan, 2018'
 SMA_PERIOD_120 = 120 
-MOMENTUM_PERIOD = 60 # Lookback period for calculating the dynamic center distance (60 days)
 ANNUALIZATION_FACTOR = 365 # Used for annualizing Sharpe Ratio for daily data
 
-# --- Grid Search Parameters ---
+# --- Grid Search Parameters (2D Search) ---
+# K Factor Search Space (Scaling factor for Center Distance)
 GRID_K_START = 0.00
 GRID_K_END = 0.50
 GRID_K_STEP = 0.001
+
+# Momentum Period (M) Search Space (Lookback for Momentum)
+GRID_M_START = 1
+GRID_M_END = 120
+GRID_M_STEP = 5
 
 # --- 1. Data Fetching Utilities ---
 
@@ -97,9 +102,9 @@ def calculate_total_return(cumulative_returns):
 
 # --- 3. Backtesting Logic for Grid Search ---
 
-def run_strategy_for_optimization(df_data, k_factor):
+def run_strategy_for_optimization(df_data, k_factor, momentum_period):
     """
-    Applies the dynamic sizing strategy for a specific k_factor and returns Sharpe Ratio/Total Return.
+    Applies the dynamic sizing strategy for a specific k_factor and momentum_period.
     """
     df = df_data.copy()
     
@@ -111,11 +116,11 @@ def run_strategy_for_optimization(df_data, k_factor):
     df['Yesterday_Close'] = df['Close'].shift(1)
     df['Yesterday_SMA_120'] = df[f'SMA_{SMA_PERIOD_120}'].shift(1)
     
-    # Calculate 60-day momentum
-    df['Momentum_60d'] = (df['Close'] / df['Close'].shift(MOMENTUM_PERIOD)) - 1
+    # Calculate M-day momentum
+    df['Momentum_M'] = (df['Close'] / df['Close'].shift(momentum_period)) - 1
     
-    # Dynamic Center = k * |Momentum_60d| (Lagged)
-    df['Center_Distance'] = k_factor * np.abs(df['Momentum_60d'].shift(1))
+    # Dynamic Center = k * |Momentum_M| (Lagged)
+    df['Center_Distance'] = k_factor * np.abs(df['Momentum_M'].shift(1))
 
     # Drop NaNs after all lagging/rolling calculations
     df = df.dropna()
@@ -133,7 +138,7 @@ def run_strategy_for_optimization(df_data, k_factor):
     scaled_distance = df['Distance'] * distance_scaler
     
     epsilon = 1e-6 
-    # M = 1 / ( (1 / (D * Scaler)) + (D * Scaler) - 1 )
+    # M_magnitude = 1 / ( (1 / (D * Scaler)) + (D * Scaler) - 1 )
     denominator = (1.0 / np.maximum(scaled_distance, epsilon)) + scaled_distance - 1.0
     
     # Calculate Multiplier (Position Size Magnitude)
@@ -161,52 +166,63 @@ def run_strategy_for_optimization(df_data, k_factor):
 
 def run_grid_search(df):
     """
-    Performs a grid search over the first 50% of the data to find the optimal k factor.
+    Performs a 2D grid search over the K factor and Momentum Period (M).
     """
-    print("\n" + "=" * 60)
-    print("STARTING GRID SEARCH OPTIMIZATION (IN-SAMPLE: FIRST 50% OF DATA)")
+    print("\n" + "=" * 80)
+    print("STARTING 2D GRID SEARCH OPTIMIZATION (IN-SAMPLE: FIRST 50% OF DATA)")
     print("Target Metric: Annualized Sharpe Ratio")
-    print(f"Parameter Range (k): {GRID_K_START:.3f} to {GRID_K_END:.3f} in {GRID_K_STEP:.3f} steps")
-    print("=" * 60)
+    print(f"K Factor Range: {GRID_K_START:.3f} to {GRID_K_END:.3f} in {GRID_K_STEP:.3f} steps")
+    print(f"Momentum Period (M) Range: {GRID_M_START} to {GRID_M_END} in {GRID_M_STEP} day steps")
+    print("=" * 80)
     
     # 1. Slice data to first 50% (In-Sample period)
     half_index = len(df) // 2
     df_in_sample = df.iloc[:half_index].copy()
     
-    # 2. Define grid search space (0.00 to 0.50 in 0.001 steps)
+    # 2. Define grid search spaces
     k_factors = [round(k, 3) for k in np.arange(GRID_K_START, GRID_K_END + GRID_K_STEP/2, GRID_K_STEP)]
+    momentum_periods = list(range(GRID_M_START, GRID_M_END + 1, GRID_M_STEP))
 
     best_sharpe = -np.inf
     optimal_k = 0.0
+    optimal_M = 1
     
-    # 3. Run search
+    # 3. Run 2D search
+    total_runs = len(k_factors) * len(momentum_periods)
+    current_run = 0
+
     for k_factor in k_factors:
-        try:
-            sharpe, total_return = run_strategy_for_optimization(df_in_sample, k_factor)
+        for momentum_period in momentum_periods:
+            current_run += 1
             
-            # Print intermediate results sparingly
-            # if k_factor % 0.05 == 0:
-            #     print(f"   k={k_factor:.3f} -> Sharpe: {sharpe:.4f}")
+            # Print progress every 100 runs
+            if current_run % 100 == 0:
+                 print(f"   Running optimization... Progress: {current_run}/{total_runs}")
+
+            try:
+                sharpe, total_return = run_strategy_for_optimization(df_in_sample, k_factor, momentum_period)
+                
+                if sharpe > best_sharpe:
+                    best_sharpe = sharpe
+                    optimal_k = k_factor
+                    optimal_M = momentum_period
             
-            if sharpe > best_sharpe:
-                best_sharpe = sharpe
-                optimal_k = k_factor
-        
-        except Exception as e:
-            print(f"Error for k={k_factor:.3f}: {e}")
-            continue
+            except Exception:
+                # Silently skip errors (usually from insufficient data length for a large M)
+                continue
 
     if best_sharpe == -np.inf:
         print("\nOptimization failed: No valid Sharpe ratio could be calculated.")
         return None
         
-    print("\n" + "=" * 60)
+    print("\n" + "=" * 80)
     print("OPTIMIZATION COMPLETE")
     print(f"Optimal Factor k (Sharpe Max): {optimal_k:.3f}")
+    print(f"Optimal Momentum Period M (Sharpe Max): {optimal_M} days")
     print(f"Max Annualized Sharpe Ratio (In-Sample): {best_sharpe:.4f}")
-    print("=" * 60)
+    print("=" * 80)
     
-    return optimal_k
+    return optimal_k, optimal_M
 
 # --- Main Execution ---
 
@@ -217,10 +233,11 @@ if __name__ == '__main__':
     if df_data.empty:
         print("Error: Could not retrieve data. Exiting.")
     else:
-        # 2. Run grid search
-        optimal_k = run_grid_search(df_data)
+        # 2. Run 2D grid search
+        optimal_params = run_grid_search(df_data)
         
-        if optimal_k is not None:
-             print(f"\nOptimization successful. Optimal k factor found: {optimal_k:.3f}")
+        if optimal_params is not None:
+             optimal_k, optimal_M = optimal_params
+             print(f"\nOptimization successful. Optimal parameters found: k={optimal_k:.3f}, M={optimal_M} days.")
         else:
-             print("\nOptimization failed to find a valid optimal k factor.")
+             print("\nOptimization failed to find a valid optimal parameter set.")
