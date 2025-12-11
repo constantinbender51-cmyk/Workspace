@@ -13,7 +13,8 @@ from matplotlib.ticker import ScalarFormatter
 SYMBOL = 'BTCUSDT'
 INTERVAL = '1d'
 START_DATE = '1 Jan, 2018'
-SMA_PERIOD = 120
+SMA_PERIOD_120 = 120 # SMA used for the trading rule
+SMA_PERIOD_360 = 360 # New SMA for proximity visualization
 PLOT_FILE = 'strategy_results.png'
 SERVER_PORT = 8080
 RESULTS_DIR = 'results'
@@ -126,8 +127,11 @@ def run_backtest(df):
     """
     print(f"-> Running backtest on {len(df)} candles...")
     
-    # 2.1 Calculate the 120-day Simple Moving Average (SMA)
-    df[f'SMA_{SMA_PERIOD}'] = df['Close'].rolling(window=SMA_PERIOD).mean()
+    # 2.1 Calculate the 120-day SMA (used for trading rule)
+    df[f'SMA_{SMA_PERIOD_120}'] = df['Close'].rolling(window=SMA_PERIOD_120).mean()
+    
+    # 2.1.5 Calculate the 360-day SMA (used for visualization)
+    df[f'SMA_{SMA_PERIOD_360}'] = df['Close'].rolling(window=SMA_PERIOD_360).mean()
     
     # 2.2 Calculate daily returns (log returns are often preferred for backtesting)
     df['Daily_Return'] = np.log(df['Close'] / df['Close'].shift(1))
@@ -135,43 +139,36 @@ def run_backtest(df):
     # --- Look-ahead Bias Prevention (Explicit shift) ---
     # For a decision on day T (applied to returns of day T), we use Close(T-1) and SMA(T-1)
     df['Yesterday_Close'] = df['Close'].shift(1)
-    df['Yesterday_SMA'] = df[f'SMA_{SMA_PERIOD}'].shift(1)
+    df['Yesterday_SMA'] = df[f'SMA_{SMA_PERIOD_120}'].shift(1)
     
     # 2.3 Generate Trading Signals (Position for day T)
-    # Rule: Position on day T is based on (Close(T-1) vs SMA(T-1))
+    # Rule: Position on day T is based on (Close(T-1) vs 120 SMA(T-1))
     df['Position'] = np.where(
-        df['Yesterday_Close'] > df['Yesterday_SMA'],  # Condition: Close(T-1) > SMA(T-1)
+        df['Yesterday_Close'] > df['Yesterday_SMA'],  # Condition: Close(T-1) > SMA_120(T-1)
         1,                                           # Value if True (Long position held on Day T)
         -1                                           # Value if False (Short position held on Day T)
     )
     
-    # --- 2.7 Calculate SMA Proximity Metric ---
+    # --- 2.7 Calculate SMA Proximity Metrics ---
     # Scaler is 1 / 0.02 = 50.0
     PROXIMITY_SCALER = 50.0 
     
-    # Calculate X% (Absolute decimal distance)
-    # Note: Fixed potential typo on SMA_SNA_PERIOD to SMA_PERIOD
-    df['SMA_Distance_Decimal'] = np.abs((df['Close'] - df[f'SMA_{SMA_PERIOD}']) / df[f'SMA_{SMA_PERIOD}']) 
+    # --- 120 SMA Proximity (for bottom plot) ---
+    df['SMA_Distance_Decimal_120'] = np.abs((df['Close'] - df[f'SMA_{SMA_PERIOD_120}']) / df[f'SMA_{SMA_PERIOD_120}']) 
+    denominator_120 = df['SMA_Distance_Decimal_120'] * PROXIMITY_SCALER
+    proximity_base_120 = np.where(denominator_120 == 0, 100.0, 1.0 / denominator_120)
+    df['SMA_Proximity'] = np.minimum(proximity_base_120, 1.0) # Renamed to original name for plotting consistency
+
+    # --- 360 SMA Proximity (for yellow shading) ---
+    df['SMA_Distance_Decimal_360'] = np.abs((df['Close'] - df[f'SMA_{SMA_PERIOD_360}']) / df[f'SMA_{SMA_PERIOD_360}']) 
+    denominator_360 = df['SMA_Distance_Decimal_360'] * PROXIMITY_SCALER
+    proximity_base_360 = np.where(denominator_360 == 0, 100.0, 1.0 / denominator_360)
+    df['SMA_Proximity_360'] = np.minimum(proximity_base_360, 1.0)
     
-    # Calculate Proximity base: 1 / (X% * Scaler)
-    denominator = df['SMA_Distance_Decimal'] * PROXIMITY_SCALER
+    # Drop the temporary columns for cleanliness and keep the final SMA columns and proximities
+    df = df.drop(columns=['Yesterday_Close', 'Yesterday_SMA', 'SMA_Distance_Decimal_120', 'SMA_Distance_Decimal_360'])
     
-    # Calculate Proximity base (1.0 / Denominator)
-    # Use np.where to handle the zero-distance case, setting it to a value > 1.0 (e.g., 100.0)
-    proximity_base = np.where(
-        denominator == 0,
-        100.0, # High value that will be capped to 1.0
-        1.0 / denominator
-    )
-    
-    # Apply the cap at 1.0
-    df['SMA_Proximity'] = np.minimum(proximity_base, 1.0)
-    
-    # Drop the temporary columns for cleanliness and keep the final SMA column and proximity
-    df = df.drop(columns=['Yesterday_Close', 'Yesterday_SMA', 'SMA_Distance_Decimal'])
-    # --- End Look-ahead Prevention ---
-    
-    # The first SMA_PERIOD entries will have NaN SMA. We drop rows with any NaNs.
+    # The first SMA_PERIOD_360 entries will have NaN SMA. We drop rows with any NaNs.
     df = df.dropna()
     
     # 2.4 Calculate Strategy Returns
@@ -220,36 +217,45 @@ def plot_results(df):
     fig = plt.figure(figsize=(14, 15)) 
     gs = fig.add_gridspec(3, 1, hspace=0.3, height_ratios=[4, 3, 1])
     
-    # --- Top Subplot (ax1): Price and SMA (Linear Scale) ---
+    # --- Top Subplot (ax1): Price and SMAs (Linear Scale) ---
     ax1 = fig.add_subplot(gs[0])
     
-    # --- Shading for Max Proximity ---
-    # Identify days where proximity is 1.0
-    proximity_max = df['SMA_Proximity'] >= 1.0
+    # --- Shading for 120 SMA Max Proximity (BLUE) ---
+    proximity_120_max = df['SMA_Proximity'] >= 1.0
+    start_indices_120 = df.index[proximity_120_max & (~proximity_120_max.shift(1, fill_value=False))]
+    end_indices_120 = df.index[proximity_120_max & (~proximity_120_max.shift(-1, fill_value=False))]
 
-    # Identify start and end of blocks
-    start_indices = df.index[proximity_max & (~proximity_max.shift(1, fill_value=False))]
-    end_indices = df.index[proximity_max & (~proximity_max.shift(-1, fill_value=False))]
-
-    # Add shading to ax1
-    shaded_label = False
-    for start_date, end_date in zip(start_indices, end_indices):
-        # To shade the entire day block, extend the end date by one day
+    shaded_label_120 = False
+    for start_date, end_date in zip(start_indices_120, end_indices_120):
         end_dt = end_date + dt.timedelta(days=1)
-        
-        # Only label the first span for the legend
-        if not shaded_label:
-            ax1.axvspan(start_date, end_dt, color='#3B82F6', alpha=0.2, label='Max Proximity (1.0) Days')
-            shaded_label = True
+        if not shaded_label_120:
+            ax1.axvspan(start_date, end_dt, color='#3B82F6', alpha=0.2, label=f'{SMA_PERIOD_120} SMA Max Proximity Days (Blue)')
+            shaded_label_120 = True
         else:
             ax1.axvspan(start_date, end_dt, color='#3B82F6', alpha=0.2)
             
-    # Plotting the Close Price and SMA (must be plotted *after* shading)
-    df['Close'].plot(ax=ax1, label='Close Price', color='#9CA3AF', linewidth=1.5, alpha=0.9, zorder=3)
-    df[f'SMA_{SMA_PERIOD}'].plot(ax=ax1, label=f'SMA {SMA_PERIOD}', color='#3B82F6', linewidth=2, zorder=4)
+    # --- Shading for 360 SMA Max Proximity (YELLOW) ---
+    proximity_360_max = df['SMA_Proximity_360'] >= 1.0
+    start_indices_360 = df.index[proximity_360_max & (~proximity_360_max.shift(1, fill_value=False))]
+    end_indices_360 = df.index[proximity_360_max & (~proximity_360_max.shift(-1, fill_value=False))]
     
+    shaded_label_360 = False
+    for start_date, end_date in zip(start_indices_360, end_indices_360):
+        end_dt = end_date + dt.timedelta(days=1)
+        if not shaded_label_360:
+            # Using Gold/Yellow color for visibility on dark background
+            ax1.axvspan(start_date, end_dt, color='#FACC15', alpha=0.25, label=f'{SMA_PERIOD_360} SMA Max Proximity Days (Yellow)') 
+            shaded_label_360 = True
+        else:
+            ax1.axvspan(start_date, end_dt, color='#FACC15', alpha=0.25)
+            
+    # Plotting the Close Price and SMAs (must be plotted *after* shading)
+    df['Close'].plot(ax=ax1, label='Close Price', color='#9CA3AF', linewidth=1.5, alpha=0.9, zorder=3)
+    df[f'SMA_{SMA_PERIOD_120}'].plot(ax=ax1, label=f'SMA {SMA_PERIOD_120}', color='#3B82F6', linewidth=2, zorder=4)
+    df[f'SMA_{SMA_PERIOD_360}'].plot(ax=ax1, label=f'SMA {SMA_PERIOD_360}', color='#FACC15', linewidth=2, linestyle='--', zorder=4)
+
     # Style and Labels for ax1
-    ax1.set_title(f'{SYMBOL} Price and SMA (Linear Scale)', fontsize=16, color='white')
+    ax1.set_title(f'{SYMBOL} Price and SMAs (Linear Scale)', fontsize=16, color='white')
     ax1.set_xlabel('') 
     ax1.set_ylabel('Price (USDT)', fontsize=12, color='white')
     ax1.legend(loc='upper left', fontsize=10)
@@ -259,7 +265,7 @@ def plot_results(df):
     ax2 = fig.add_subplot(gs[1], sharex=ax1) # Share X-axis with ax1
     
     # Plotting the equity curves
-    df['Cumulative_Strategy_Return'].plot(ax=ax2, label=f'SMA {SMA_PERIOD} Strategy', color='#10B981', linewidth=2)
+    df['Cumulative_Strategy_Return'].plot(ax=ax2, label=f'SMA {SMA_PERIOD_120} Strategy', color='#10B981', linewidth=2)
     df['Buy_and_Hold_Return'].plot(ax=ax2, label='Buy & Hold (Benchmark)', color='#EF4444', linestyle='--', linewidth=1.5)
     
     # Set Y-axis to Logarithmic Scale
@@ -276,11 +282,11 @@ def plot_results(df):
     # --- Bottom Subplot (ax3): SMA Proximity ---
     ax3 = fig.add_subplot(gs[2], sharex=ax1) # Share X-axis with ax1
     
-    # Plotting SMA Proximity
-    df['SMA_Proximity'].plot(ax=ax3, label='SMA Proximity (Capped at 1.0)', color='#F59E0B', linewidth=1)
+    # Plotting SMA Proximity (120 SMA)
+    df['SMA_Proximity'].plot(ax=ax3, label=f'SMA {SMA_PERIOD_120} Proximity (Capped at 1.0)', color='#F59E0B', linewidth=1)
     
     # Style and Labels for ax3
-    ax3.set_title('SMA Proximity Metric (1.0 when price is 2% or less from SMA)', fontsize=14, color='white')
+    ax3.set_title(f'SMA {SMA_PERIOD_120} Proximity Metric (1.0 when price is 2% or less from SMA)', fontsize=14, color='white')
     ax3.set_xlabel('Date', fontsize=12, color='white')
     ax3.set_ylabel('Proximity Score', fontsize=12, color='white')
     ax3.set_ylim(0, 1.1) # Set limit for capped indicator
@@ -332,9 +338,13 @@ def serve_results():
                 </head>
                 <body class="p-8">
                     <div class="container mx-auto p-4 bg-gray-800 shadow-xl rounded-xl">
-                        <h1 class="text-3xl font-bold mb-4 text-green-400">Backtesting Results: {SYMBOL} SMA-120</h1>
+                        <h1 class="text-3xl font-bold mb-4 text-green-400">Backtesting Results: {SYMBOL} SMA-120/360</h1>
                         <p class="text-gray-300 mb-6">
-                            The backtest now displays three plots: Price/SMA, Log Equity Curve, and the Capped SMA Proximity (Max 1.0). Days when the proximity is maxed out are shaded blue on the Price/SMA plot.
+                            The plot now shows three SMAs: Close Price, 120-Day SMA (solid blue), and 360-Day SMA (dashed yellow).
+                            <br>
+                            - Blue shading indicates max (1.0) proximity to the 120-Day SMA.
+                            <br>
+                            - Yellow shading indicates max (1.0) proximity to the 360-Day SMA.
                         </p>
                         <div class="plot-container">
                             <img src="{RESULTS_DIR}/{PLOT_FILE}" alt="Strategy Cumulative Returns Plot" class="w-full h-auto rounded-lg shadow-2xl">
