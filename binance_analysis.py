@@ -329,7 +329,12 @@ HTML_TEMPLATE = """
                 <div class="trade-log">
                     {% if trade_list %}
                         {% for trade in trade_list|slice:":50" %}
-                            {% set color_class = 'positive' if 'PnL: -' not in trade and 'PnL: 0.00%' not in trade else ('negative' if 'PnL: -' in trade else 'value') %}
+                            {% set color_class = 'value' %}
+                            {% if 'PnL: -' in trade %}
+                                {% set color_class = 'negative' %}
+                            {% elif 'PnL: 0.00%' not in trade %}
+                                {% set color_class = 'positive' %}
+                            {% endif %}
                             <p class="{{ color_class }}">{{ trade }}</p>
                         {% endfor %}
                     {% else %}
@@ -401,4 +406,3 @@ if __name__ == '__main__':
     # Required libraries: pip install pandas numpy matplotlib flask ccxt
     # Set debug=False and use_reloader=False for cleaner execution
     app.run(host='0.0.0.0', port=8080, debug=False, use_reloader=False)
-
