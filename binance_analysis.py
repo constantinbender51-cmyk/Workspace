@@ -17,6 +17,7 @@ PLOT_FILE = 'strategy_results.png'
 SERVER_PORT = 8080
 RESULTS_DIR = 'results'
 ANNUALIZATION_FACTOR = 365 # Used for annualizing Sharpe Ratio for daily data
+DISTANCE_SCALER = 20.0 # Equal to 1 / 0.05 (centers position sizing around 5% distance)
 
 # --- 1. Data Fetching Utilities ---
 
@@ -69,7 +70,6 @@ def fetch_klines(symbol, interval, start_str):
     df['Open Time'] = pd.to_datetime(df['Open Time'], unit='ms')
     df['Close'] = pd.to_numeric(df['Close'])
     df = df.set_index('Open Time')
-    # Keep Close and Open for plotting the candles
     df = df[['Open', 'Close']].astype(float)
     
     return df.dropna()
@@ -116,9 +116,9 @@ def generate_metrics(cumulative_returns, daily_returns, strategy_name):
 
 def run_backtest(df):
     """
-    Applies the single 120 SMA trading strategy and generates metrics.
+    Applies the 120 SMA trading strategy with dynamic position sizing and generates metrics.
     """
-    print(f"-> Running single 120 SMA backtest on {len(df)} candles...")
+    print(f"-> Running dynamic 120 SMA backtest on {len(df)} candles...")
     
     # Calculate 120 SMA
     df[f'SMA_{SMA_PERIOD_120}'] = df['Close'].rolling(window=SMA_PERIOD_120).mean()
@@ -134,14 +134,33 @@ def run_backtest(df):
     df = df.dropna()
     
     # ----------------------------------------------------
-    # Strategy: Simple 120 SMA Crossover (Long/Short)
+    # Strategy: 120 SMA Crossover with Dynamic Position Sizing
     # ----------------------------------------------------
-    df['Position'] = np.where(
+    
+    # 1. Calculate Distance (D): Absolute decimal distance from the SMA
+    df['Distance'] = np.abs((df['Yesterday_Close'] - df['Yesterday_SMA_120']) / df['Yesterday_SMA_120'])
+
+    # 2. Calculate Multiplier (M) using the provided formula:
+    # M = 1 / ( (1 / (D * 20)) + (D * 20) - 1 )
+    scaled_distance = df['Distance'] * DISTANCE_SCALER
+    
+    # Use epsilon to prevent division by zero when price is exactly on the SMA (D=0)
+    epsilon = 1e-6 
+    denominator = (1.0 / np.maximum(scaled_distance, epsilon)) + scaled_distance - 1.0
+    df['Multiplier'] = 1.0 / denominator
+
+    # 3. Determine Direction (Long/Short)
+    df['Direction'] = np.where(
         df['Yesterday_Close'] > df['Yesterday_SMA_120'],
         1,
         -1
     )
-    df['Strategy_Return'] = df['Daily_Return'] * df['Position']
+
+    # 4. Final Position Size = Direction * Multiplier
+    df['Position_Size'] = df['Direction'] * df['Multiplier']
+    
+    # 5. Calculate Strategy Returns
+    df['Strategy_Return'] = df['Daily_Return'] * df['Position_Size']
     df['Cumulative_Strategy_Return'] = np.exp(df['Strategy_Return'].cumsum())
 
     # ----------------------------------------------------
@@ -159,7 +178,7 @@ def run_backtest(df):
     
     # Strategy
     metrics.append(generate_metrics(
-        df['Cumulative_Strategy_Return'], df['Strategy_Return'], f'Strategy (120 SMA Crossover)'
+        df['Cumulative_Strategy_Return'], df['Strategy_Return'], f'Dynamic Strategy (120 SMA, 5% Center)'
     ))
     
     # Print comparison table
@@ -277,7 +296,7 @@ def serve_results(metrics):
                 </head>
                 <body class="p-8">
                     <div class="container mx-auto p-4 bg-gray-800 shadow-xl rounded-xl">
-                        <h1 class="text-3xl font-bold mb-4 text-green-400">Backtest Results: {SYMBOL} 120 SMA Crossover</h1>
+                        <h1 class="text-3xl font-bold mb-4 text-green-400">Backtest Results: {SYMBOL} 120 SMA Dynamic Sizing</h1>
                         
                         <div class="mb-8">
                             <h2 class="text-xl font-semibold mb-3 text-gray-200">Strategy Metrics Comparison</h2>
