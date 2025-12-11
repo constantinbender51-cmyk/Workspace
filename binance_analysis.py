@@ -15,7 +15,7 @@ TIMEFRAME = '1d' # Daily candles
 START_DATE = '2018-01-01'
 SMA_WINDOWS_PLOT = [120] 
 DC_WINDOW = 20  # Donchian Channel Period (N)
-# K_FACTOR will be dynamically set by the optimal value found in the grid search
+# K_FACTOR will be dynamically set by the optimal value found in the grid search or manually provided
 POSITION_SIZE_MAX = 1.0  # Maximum position size limit
 PORT = 8080
 ANNUAL_TRADING_DAYS = 252 # Used for annualizing Sharpe Ratio
@@ -23,7 +23,7 @@ MAX_SMA_SCAN = 120 # Maximum SMA for the scan and the global analysis start poin
 SCAN_DELAY = 5.0 # Seconds delay after every 50 SMA calculations to respect API limits
 
 # --- Grid Search Range ---
-# Range expanded to 0.01 to 5.00
+# Range up to 5.00
 K_FACTOR_RANGE = np.arange(0.01, 5.01, 0.01)
 
 # --- Global Variables to store results (populated once at startup) ---
@@ -183,7 +183,7 @@ def calculate_dynamic_position(df_ind_raw, k_factor):
 
     df['Size_Decider'] = np.where(
         valid_conditions,
-        # Removed redundant upper=POSITION_SIZE_MAX clip. Clip lower=0 remains for safety.
+        # Clip lower=0 remains for safety against negative sizes when volatility is high.
         (1 - np.power(df['Relative_Width'], k_factor)).clip(lower=0),
         0.0 
     )
@@ -256,19 +256,18 @@ def run_k_grid_search(df_ind_raw):
     if results_df.empty:
         return 0.2, results_df, "" # Return default K if search failed
 
-    best_k_row = results_df.sort_values(by='Sharpe_Ratio', ascending=False).iloc[0]
-    optimal_k = best_k_row['K_Factor']
-    
-    print(f"--- K-Factor Search Complete. Optimal K: {optimal_k:.3f} ---")
+    # Note: We still calculate the actual best K from the run but will force 2.5 for the main strategy run.
+    best_k_row_actual = results_df.sort_values(by='Sharpe_Ratio', ascending=False).iloc[0]
     
     # Generate Plot
     fig, ax = plt.subplots(1, 1, figsize=(10, 4))
     ax.plot(results_df['K_Factor'], results_df['Sharpe_Ratio'], 
             color='#5a3d90', linewidth=2)
     
-    ax.scatter(optimal_k, best_k_row['Sharpe_Ratio'], color='red', s=50, zorder=5)
-    ax.text(optimal_k, best_k_row['Sharpe_Ratio'] * 1.05, 
-            f'Optimal K: {optimal_k:.3f}', fontsize=9, color='red', ha='center')
+    # Highlight the calculated best K on the plot
+    ax.scatter(best_k_row_actual['K_Factor'], best_k_row_actual['Sharpe_Ratio'], color='red', s=50, zorder=5)
+    ax.text(best_k_row_actual['K_Factor'], best_k_row_actual['Sharpe_Ratio'] * 1.05, 
+            f'Calculated Optimal K: {best_k_row_actual["K_Factor"]:.3f}', fontsize=9, color='red', ha='center')
 
     ax.set_xlabel('K-Factor (Exponent)', fontsize=10)
     ax.set_ylabel('Annualized Sharpe Ratio', fontsize=10)
@@ -282,7 +281,7 @@ def run_k_grid_search(df_ind_raw):
     plt.close(fig)
     img_base64 = base64.b64encode(buf.read()).decode('utf-8')
     
-    return optimal_k, results_df, img_base64
+    return best_k_row_actual['K_Factor'], results_df, img_base64
 
 # --- Comprehensive SMA Scan and Sharpe Ratio Calculation ---
 
@@ -467,6 +466,8 @@ def setup_analysis():
     global GLOBAL_IMG_BASE64, GLOBAL_ANALYSIS_IMG, GLOBAL_K_ANALYSIS_IMG, GLOBAL_SUMMARY_TABLE, GLOBAL_TOTAL_RETURN, GLOBAL_STATUS, GLOBAL_ERROR, GLOBAL_TOP_10_MD, GLOBAL_SHARPE, GLOBAL_OPTIMAL_K
     
     MAIN_SMA_WINDOW = 120 
+    # Use the K value provided by the user for the final strategy run
+    FORCED_OPTIMAL_K = 2.5 
 
     # --- Part 1: Data Fetching and Indicator Calculation ---
     try:
@@ -508,17 +509,19 @@ def setup_analysis():
         
     # --- Part 3: K-Factor Grid Search ---
     try:
-        GLOBAL_OPTIMAL_K, results_df_k, GLOBAL_K_ANALYSIS_IMG = run_k_grid_search(df_ind)
-
+        # Run search to generate plot, but the final K will be forced to 2.5
+        _, results_df_k, GLOBAL_K_ANALYSIS_IMG = run_k_grid_search(df_ind)
+        GLOBAL_OPTIMAL_K = FORCED_OPTIMAL_K
+        
     except Exception as e:
         GLOBAL_ERROR = f"Fatal K-Factor Grid Search Error: {e}\n\nTraceback:\n{traceback.format_exc()}"
         print(f"--- FATAL ERROR DURING K-FACTOR SEARCH ---\n{GLOBAL_ERROR}", file=sys.stderr)
-        # Fall back to default K=0.2 if search fails
-        GLOBAL_OPTIMAL_K = 0.2
+        GLOBAL_OPTIMAL_K = FORCED_OPTIMAL_K
         return
 
     # --- Part 4: Run Main Strategy with Optimal K ---
     try:
+        print(f"--- Running main strategy with forced Optimal K: {GLOBAL_OPTIMAL_K} ---")
         
         df_final = calculate_dynamic_position(df_ind, GLOBAL_OPTIMAL_K)
         
@@ -545,7 +548,7 @@ def setup_analysis():
         GLOBAL_SUMMARY_TABLE = summary_df.to_html(classes='table-auto w-full text-sm text-left', 
                                                   float_format=lambda x: f'{x:,.4f}') 
         
-        print(f"--- Optimal K Strategy Sharpe Ratio: {GLOBAL_SHARPE:.3f} ---")
+        print(f"--- Strategy Sharpe Ratio (K={GLOBAL_OPTIMAL_K}): {GLOBAL_SHARPE:.3f} ---")
         print("--- ANALYSIS COMPLETE ---")
 
     except Exception as e:
@@ -617,7 +620,7 @@ def analysis_dashboard():
                     <p class="text-2xl font-bold text-blue-800">{SYMBOL} ({TIMEFRAME})</p>
                 </div>
                 <div class="bg-yellow-50 p-4 rounded-lg shadow-md">
-                    <p class="text-lg font-medium text-yellow-600">Optimal K-Factor</p>
+                    <p class="text-lg font-medium text-yellow-600">Optimal K-Factor (User Defined)</p>
                     <p class="text-2xl font-bold text-yellow-800">{GLOBAL_OPTIMAL_K:.3f}</p>
                 </div>
                 <div class="bg-green-50 p-4 rounded-lg shadow-md">
@@ -633,7 +636,7 @@ def analysis_dashboard():
             <div class="grid lg:grid-cols-2 gap-8 mb-8">
                 
                 <div class="order-1">
-                    <h2 class="text-2xl font-semibold text-gray-700 mb-4">Dynamic Position Sizing (Optimal K)</h2>
+                    <h2 class="text-2xl font-semibold text-gray-700 mb-4">Dynamic Position Sizing (K={GLOBAL_OPTIMAL_K:.3f})</h2>
                     <div class="bg-gray-50 p-2 rounded-lg shadow-inner overflow-hidden">
                         <img src="data:image/png;base64,{GLOBAL_IMG_BASE64}" alt="Trading Strategy Backtest Plot" class="w-full h-auto rounded-lg"/>
                     </div>
@@ -653,7 +656,7 @@ def analysis_dashboard():
             </div>
             
             <p class="mt-8 text-sm text-gray-600 border-t pt-4">
-                **Strategy Logic:** The direction is determined by the SMA 120 crossover. The position size is calculated dynamically using the volatility ratio raised to the optimal K-factor: {position_sizing_formula}. Lower volatility leads to a larger position size (max 1.0).
+                **Strategy Logic:** The direction is determined by the SMA 120 crossover. The position size is calculated dynamically using the volatility ratio raised to the optimal K-factor (K={GLOBAL_OPTIMAL_K:.3f}): {position_sizing_formula}. Lower volatility leads to a larger position size (max 1.0).
             </p>
         </div>
     </body>
