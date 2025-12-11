@@ -13,15 +13,13 @@ SYMBOL = 'BTCUSDT'
 INTERVAL = '1d'
 START_DATE = '1 Jan, 2018'
 SMA_PERIOD_120 = 120 
-PLOT_FILE = 'strategy_results.png' # Retained for consistency
-SERVER_PORT = 8080 # Retained for consistency
+PLOT_FILE = 'strategy_results.png'
+SERVER_PORT = 8080 
 RESULTS_DIR = 'results'
 ANNUALIZATION_FACTOR = 365 # Used for annualizing Sharpe Ratio for daily data
 
-# --- Grid Search Parameters ---
-GRID_M_START = 7
-GRID_M_END = 60
-GRID_M_STEP = 1
+# --- Fixed Optimal Parameter (Based on prior testing) ---
+OPTIMAL_AVERAGE_DISTANCE_PERIOD = 20 # Fixed as 20 days, based on your previous assessment
 
 # --- 1. Data Fetching Utilities ---
 
@@ -82,7 +80,7 @@ def fetch_klines(symbol, interval, start_str):
 def calculate_sharpe_ratio(returns, annualization_factor=ANNUALIZATION_FACTOR, risk_free_rate=0):
     """Calculates the Annualized Sharpe Ratio."""
     if returns.empty or len(returns) <= 1:
-        return -np.inf 
+        return 0.0 
     excess_return = returns - risk_free_rate
     mean_excess_return = excess_return.mean()
     std_dev = excess_return.std()
@@ -93,131 +91,277 @@ def calculate_sharpe_ratio(returns, annualization_factor=ANNUALIZATION_FACTOR, r
     sharpe = (mean_excess_return * annualization_factor) / (std_dev * np.sqrt(annualization_factor))
     return sharpe
 
-def calculate_total_return(cumulative_returns):
-    """Calculates the Total Return in percentage."""
+def calculate_max_drawdown(cumulative_returns):
+    """Calculates the Maximum Drawdown (MDD) in percentage."""
     if cumulative_returns.empty:
         return 0.0
-    return (cumulative_returns.iloc[-1] - 1) * 100
+    peak = cumulative_returns.cummax()
+    drawdown = (peak - cumulative_returns) / peak
+    return drawdown.max() * 100
 
-# --- 3. Backtesting Logic for Grid Search ---
+def generate_metrics(cumulative_returns, daily_returns, strategy_name):
+    """Aggregates all metrics for a given strategy."""
+    total_return = (cumulative_returns.iloc[-1] - 1) * 100
+    sharpe = calculate_sharpe_ratio(daily_returns)
+    max_dd = calculate_max_drawdown(cumulative_returns)
+    
+    return {
+        'Strategy': strategy_name,
+        'Total Return (%)': f'{total_return:.2f}',
+        'Annualized Sharpe': f'{sharpe:.2f}',
+        'Max Drawdown (%)': f'{max_dd:.2f}',
+        'Cumulative Returns': cumulative_returns
+    }
 
-def run_strategy_for_optimization(df, avg_dist_period):
+# --- 3. Backtesting Logic (Final Run with Optimal Parameter) ---
+
+def run_backtest_final(df):
     """
-    Applies the 120 SMA trading strategy with dynamic center distance based on M-day average distance.
-    Returns Sharpe Ratio and Total Return.
+    Applies the 120 SMA trading strategy with dynamic center distance based on the optimal averaging window.
     """
-    df_data = df.copy()
+    period = OPTIMAL_AVERAGE_DISTANCE_PERIOD
+    print(f"-> Running final backtest (Center={period}d Avg Distance) on {len(df)} candles...")
     
     # 1. Calculate 120 SMA & Daily Returns
-    df_data[f'SMA_{SMA_PERIOD_120}'] = df_data['Close'].rolling(window=SMA_PERIOD_120).mean()
-    df_data['Daily_Return'] = np.log(df_data['Close'] / df_data['Close'].shift(1))
+    df[f'SMA_{SMA_PERIOD_120}'] = df['Close'].rolling(window=SMA_PERIOD_120).mean()
+    df['Daily_Return'] = np.log(df['Close'] / df['Close'].shift(1))
 
     # --- Calculation for Dynamic Center (Requires current data) ---
     # Calculate the absolute daily distance from SMA 120 (decimal format)
-    df_data['Raw_Distance'] = np.abs((df_data['Close'] - df_data[f'SMA_{SMA_PERIOD_120}']) / df_data[f'SMA_{SMA_PERIOD_120}'])
+    df['Raw_Distance'] = np.abs((df['Close'] - df[f'SMA_{SMA_PERIOD_120}']) / df[f'SMA_{SMA_PERIOD_120}'])
     
     # Calculate the M-day rolling average of the distance
-    df_data['Rolling_Avg_Distance'] = df_data['Raw_Distance'].rolling(window=avg_dist_period).mean()
+    df['Rolling_Avg_Distance'] = df['Raw_Distance'].rolling(window=period).mean()
     
     # --- Look-ahead Prevention for all components ---
-    df_data['Yesterday_Close'] = df_data['Close'].shift(1)
-    df_data['Yesterday_SMA_120'] = df_data[f'SMA_{SMA_PERIOD_120}'].shift(1)
+    df['Yesterday_Close'] = df['Close'].shift(1)
+    df['Yesterday_SMA_120'] = df[f'SMA_{SMA_PERIOD_120}'].shift(1)
     
     # Lag the rolling average distance to be used as the center for today's trade
-    df_data['Center_Distance'] = df_data['Rolling_Avg_Distance'].shift(1)
+    df['Center_Distance'] = df['Rolling_Avg_Distance'].shift(1)
 
     # Drop NaNs after all lagging/rolling calculations
-    df_clean = df_data.dropna().copy()
-    
-    if df_clean.empty:
-        return -np.inf, 0.0
+    df = df.dropna()
     
     # ----------------------------------------------------
     # Strategy: Dynamic Position Sizing
     # ----------------------------------------------------
     
     # 1. Determine Position Direction based on SMA crossover (Lagged)
-    df_clean['Bullish'] = df_clean['Yesterday_Close'] > df_clean['Yesterday_SMA_120']
-    df_clean['Direction'] = np.where(df_clean['Bullish'], 1, -1)
+    df['Bullish'] = df['Yesterday_Close'] > df['Yesterday_SMA_120']
+    df['Direction'] = np.where(df['Bullish'], 1, -1)
     
     # 2. Calculate Distance (D): Absolute decimal distance from the SMA (lagged)
-    df_clean['Distance'] = np.abs((df_clean['Yesterday_Close'] - df_clean['Yesterday_SMA_120']) / df_clean['Yesterday_SMA_120'])
+    df['Distance'] = np.abs((df['Yesterday_Close'] - df['Yesterday_SMA_120']) / df['Yesterday_SMA_120'])
 
     # 3. Calculate Multiplier (M) using the dynamically calculated Center
     # Scaler = 1 / Center_Distance 
-    distance_scaler = 1.0 / np.maximum(df_clean['Center_Distance'], 1e-10) # Protect against zero division
+    distance_scaler = 1.0 / np.maximum(df['Center_Distance'], 1e-10) # Protect against zero division
     
-    scaled_distance = df_clean['Distance'] * distance_scaler
+    scaled_distance = df['Distance'] * distance_scaler
     
     epsilon = 1e-6 
     # M_magnitude = 1 / ( (1 / (D * Scaler)) + (D * Scaler) - 1 )
     denominator = (1.0 / np.maximum(scaled_distance, epsilon)) + scaled_distance - 1.0
     
     # Calculate Multiplier (Position Size Magnitude)
-    df_clean['Multiplier'] = np.where(denominator == 0, 0, 1.0 / denominator)
+    df['Multiplier'] = np.where(denominator == 0, 0, 1.0 / denominator)
 
     # 4. Final Position Size = Direction * Multiplier
-    df_clean['Position_Size'] = df_clean['Direction'] * df_clean['Multiplier']
+    df['Position_Size'] = df['Direction'] * df['Multiplier']
     
     # 5. Calculate Strategy Returns
-    df_clean['Strategy_Return'] = df_clean['Daily_Return'] * df_clean['Position_Size']
-    df_clean['Cumulative_Strategy_Return'] = np.exp(df_clean['Strategy_Return'].cumsum())
-    
-    # Calculate metrics
-    sharpe = calculate_sharpe_ratio(df_clean['Strategy_Return'])
-    total_return = calculate_total_return(df_clean['Cumulative_Strategy_Return'])
-    
-    return sharpe, total_return
+    df['Strategy_Return'] = df['Daily_Return'] * df['Position_Size']
+    df['Cumulative_Strategy_Return'] = np.exp(df['Strategy_Return'].cumsum())
 
-def run_grid_search(df):
-    """
-    Performs a grid search over the first 50% of the data to find the optimal averaging window.
-    """
+    # ----------------------------------------------------
+    # Benchmark: Buy & Hold (B&H)
+    # ----------------------------------------------------
+    df['Cumulative_Buy_and_Hold'] = np.exp(df['Daily_Return'].cumsum())
+
+    # --- Generate Metrics ---
+    metrics = []
+    
+    # B&H
+    metrics.append(generate_metrics(
+        df['Cumulative_Buy_and_Hold'], df['Daily_Return'], 'Buy & Hold (Benchmark)'
+    ))
+    
+    # Strategy
+    metrics.append(generate_metrics(
+        df['Cumulative_Strategy_Return'], df['Strategy_Return'], f'Dynamic Avg Dist Center ({period}d)'
+    ))
+    
+    # Print comparison table
+    comparison_df = pd.DataFrame([
+        {k: v for k, v in m.items() if k != 'Cumulative Returns'} 
+        for m in metrics
+    ])
+    
     print("\n" + "=" * 60)
-    print("STARTING GRID SEARCH OPTIMIZATION (IN-SAMPLE: FIRST 50% OF DATA)")
-    print("Target Metric: Annualized Sharpe Ratio")
-    print(f"Window (M) Range: {GRID_M_START} to {GRID_M_END} in {GRID_M_STEP} day steps")
+    print(f"FINAL BACKTEST METRICS (Center={period}d Avg Distance)")
+    print("=" * 60)
+    print(comparison_df.to_string(index=False))
     print("=" * 60)
     
-    # 1. Slice data to first 50% (In-Sample period)
-    half_index = len(df) // 2
-    df_in_sample = df.iloc[:half_index].copy()
-    
-    # 2. Define grid search space (7 to 60 in 1 steps)
-    avg_dist_periods = list(range(GRID_M_START, GRID_M_END + 1, GRID_M_STEP))
+    return df, metrics
 
-    best_sharpe = -np.inf
-    optimal_M = GRID_M_START
+# --- 4. Plotting Results ---
+
+def plot_results(df, metrics):
+    """
+    Generates and saves the plot of the strategy, benchmark equity curves, and price/SMA.
+    """
+    print(f"-> Generating plot in '{RESULTS_DIR}/{PLOT_FILE}'...")
     
-    # 3. Run search
-    for avg_dist_period in avg_dist_periods:
-        try:
-            sharpe, total_return = run_strategy_for_optimization(df_in_sample, avg_dist_period)
+    os.makedirs(RESULTS_DIR, exist_ok=True)
+    plot_path = os.path.join(RESULTS_DIR, PLOT_FILE)
+
+    plt.style.use('dark_background')
+    
+    # Create a figure with two subplots: Price/SMA (top) and Equity Curve (bottom)
+    fig = plt.figure(figsize=(14, 10)) 
+    gs = fig.add_gridspec(2, 1, hspace=0.25, height_ratios=[1, 1])
+    
+    # --- Top Subplot (ax1): Price and SMA (Linear Scale) ---
+    ax1 = fig.add_subplot(gs[0])
+    
+    # Plotting the Close Price and SMA
+    df['Close'].plot(ax=ax1, label='Close Price', color='#9CA3AF', linewidth=1.5, alpha=0.9, zorder=3)
+    df[f'SMA_{SMA_PERIOD_120}'].plot(ax=ax1, label=f'SMA {SMA_PERIOD_120}', color='#3B82F6', linewidth=2, zorder=4)
+    
+    # Style and Labels for ax1
+    ax1.set_title(f'{SYMBOL} Price and SMA (Linear Scale)', fontsize=16, color='white')
+    ax1.set_xlabel('') 
+    ax1.set_ylabel('Price (USDT)', fontsize=12, color='white')
+    ax1.legend(loc='upper left', fontsize=10)
+    ax1.grid(True, linestyle=':', alpha=0.5, color='#374151', which='both')
+    
+    # --- Bottom Subplot (ax2): Equity Curve (Log Scale) ---
+    ax2 = fig.add_subplot(gs[1], sharex=ax1)
+    
+    # Plotting the equity curves
+    df['Cumulative_Buy_and_Hold'].plot(ax=ax2, label=metrics[0]['Strategy'], color='#EF4444', linestyle='--', linewidth=1.5)
+    df['Cumulative_Strategy_Return'].plot(ax=ax2, label=metrics[1]['Strategy'], color='#3B82F6', linewidth=2.5)
+    
+    # Set Y-axis to Logarithmic Scale
+    ax2.set_yscale('log')
+    
+    # Style and Labels for ax2
+    ax2.set_title('Cumulative Return (Log Scale)', fontsize=14, color='white')
+    ax2.set_xlabel('Date', fontsize=12, color='white')
+    ax2.set_ylabel('Cumulative Return (Log Scale - Multiplier)', fontsize=12, color='white')
+    ax2.legend(loc='upper left', fontsize=10)
+    ax2.grid(True, linestyle=':', alpha=0.5, color='#374151', which='both')
+    ax2.yaxis.set_major_formatter(ScalarFormatter()) 
+
+    # Remove tick labels from the upper plot's x-axis for a cleaner look
+    plt.setp(ax1.get_xticklabels(), visible=False)
+
+    # Save the plot
+    plt.savefig(plot_path, bbox_inches='tight', dpi=150)
+    plt.close(fig)
+    print("-> Plot saved successfully.")
+
+# --- 5. Web Server ---
+
+def serve_results(metrics):
+    """
+    Starts a simple HTTP server to host the results page.
+    """
+    print(f"\n==========================================================")
+    print(f"🚀 Starting Web Server on http://localhost:{SERVER_PORT}/")
+    print(f"==========================================================")
+    
+    metric_rows = ""
+    for m in metrics:
+        metric_rows += f"""
+        <tr class="bg-gray-700 hover:bg-gray-600">
+            <td class="px-6 py-3 font-medium text-white">{m['Strategy']}</td>
+            <td class="px-6 py-3">{m['Total Return (%)']}%</td>
+            <td class="px-6 py-3">{m['Annualized Sharpe']}</td>
+            <td class="px-6 py-3">{m['Max Drawdown (%)']}%</td>
+        </tr>
+        """
+
+    class ResultsHandler(SimpleHTTPRequestHandler):
+        def do_GET(self):
+            if self.path == '/':
+                self.send_response(200)
+                self.send_header('Content-type', 'text/html')
+                self.end_headers()
+                
+                html_content = f"""
+                <!DOCTYPE html>
+                <html lang="en">
+                <head>
+                    <meta charset="UTF-8">
+                    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+                    <title>Trading Strategy Results</title>
+                    <script src="https://cdn.tailwindcss.com"></script>
+                    <style>
+                        body {{ font-family: 'Inter', sans-serif; background-color: #1F2937; color: #F3F4F6; }}
+                        .container {{ max-width: 1024px; }}
+                        .plot-container {{ background-color: #374151; border-radius: 0.5rem; padding: 1rem; }}
+                    </style>
+                </head>
+                <body class="p-8">
+                    <div class="container mx-auto p-4 bg-gray-800 shadow-xl rounded-xl">
+                        <h1 class="text-3xl font-bold mb-4 text-green-400">Backtest Results: {SYMBOL} Dynamic Avg Distance Center ({OPTIMAL_AVERAGE_DISTANCE_PERIOD}d)</h1>
+                        
+                        <div class="mb-8">
+                            <h2 class="text-xl font-semibold mb-3 text-gray-200">Strategy Metrics Comparison</h2>
+                            <p class="text-gray-400 mb-4">Final backtest using 20-day rolling average distance to SMA 120 as the dynamic position sizing center.</p>
+                            <div class="relative overflow-x-auto shadow-md sm:rounded-lg">
+                                <table class="w-full text-sm text-left text-gray-400">
+                                    <thead class="text-xs uppercase bg-gray-700 text-gray-400">
+                                        <tr>
+                                            <th scope="col" class="px-6 py-3">Strategy</th>
+                                            <th scope="col" class="px-6 py-3">Total Return</th>
+                                            <th scope="col" class="px-6 py-3">Sharpe Ratio</th>
+                                            <th scope="col" class="px-6 py-3">Max Drawdown</th>
+                                        </tr>
+                                    </thead>
+                                    <tbody>
+                                        {metric_rows}
+                                    </tbody>
+                                </table>
+                            </div>
+                        </div>
+
+                        <div class="plot-container">
+                            <h2 class="text-xl font-semibold mb-3 text-gray-200">Price Action & Cumulative Returns</h2>
+                            <img src="{RESULTS_DIR}/{PLOT_FILE}" alt="Strategy Cumulative Returns Plot" class="w-full h-auto rounded-lg shadow-2xl">
+                        </div>
+                        <div class="mt-6 p-4 bg-gray-700 rounded-lg">
+                            <p class="text-xl font-semibold">Server Running on Port {SERVER_PORT}</p>
+                            <p class="text-sm text-gray-400">Close the terminal window to stop the server.</p>
+                        </div>
+                    </div>
+                </body>
+                </html>
+                """
+                self.wfile.write(bytes(html_content, "utf8"))
             
-            if sharpe > best_sharpe:
-                best_sharpe = sharpe
-                optimal_M = avg_dist_period
-        
-        except Exception as e:
-            # Silently handle errors for periods that might be too short for the 120 SMA
-            continue 
+            elif self.path.startswith('/' + RESULTS_DIR):
+                SimpleHTTPRequestHandler.do_GET(self)
+            
+            else:
+                self.send_response(404)
+                self.end_headers()
+                self.wfile.write(b'404 Not Found')
 
-    if best_sharpe == -np.inf:
-        print("\nOptimization failed: No valid Sharpe ratio could be calculated.")
-        return None
-        
-    print("\n" + "=" * 60)
-    print("OPTIMIZATION COMPLETE")
-    print(f"Optimal Averaging Window M (Sharpe Max): {optimal_M} days")
-    print(f"Max Annualized Sharpe Ratio (In-Sample): {best_sharpe:.4f}")
-    print("=" * 60)
+        def translate_path(self, path):
+            return os.path.join(os.getcwd(), path.lstrip('/'))
+
     
-    return optimal_M
+    with HTTPServer(("", SERVER_PORT), ResultsHandler) as httpd:
+        try:
+            httpd.serve_forever()
+        except KeyboardInterrupt:
+            print("\n-> Server stopped by user.")
 
 # --- Main Execution ---
-
-# Note: Plotting and web-serving functions are intentionally excluded from the main execution
-# block in optimization mode.
 
 if __name__ == '__main__':
     # 1. Fetch data
@@ -226,10 +370,11 @@ if __name__ == '__main__':
     if df_data.empty:
         print("Error: Could not retrieve data. Exiting.")
     else:
-        # 2. Run grid search
-        optimal_M = run_grid_search(df_data)
+        # 2. Run backtest and get comparison metrics
+        results_df, comparison_metrics = run_backtest_final(df_data)
         
-        if optimal_M is not None:
-             print(f"\nOptimization successful. Optimal Averaging Window found: {optimal_M} days.")
-        else:
-             print("\nOptimization failed to find a valid optimal Averaging Window.")
+        # 3. Plot results
+        plot_results(results_df, comparison_metrics)
+
+        # 4. Start web server in the main thread
+        serve_results(comparison_metrics)
