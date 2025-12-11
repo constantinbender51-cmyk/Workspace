@@ -266,7 +266,7 @@ def create_analysis_visualization(results_df):
 
 def create_plot(df, strategy_sma):
     """Generates the main SMA 120 strategy plot (Close Price + Equity Curve)
-       and highlights intersection days (SMA 120 Loss & SMA 40 Profit)."""
+       and highlights intersection and FLAT days."""
     
     df_plot = df.copy() 
     strategy_sma_col = f'SMA_{strategy_sma}'
@@ -277,29 +277,37 @@ def create_plot(df, strategy_sma):
     # --- Price and SMA (Top Panel) ---
     ax1 = axes[0]
     
-    # 1. Background Coloring (SMA 120 Position)
-    pos_series = df_plot['Position']
+    # 1. Background Coloring: Strategy Position (+1, -1, or 0)
+    
+    # Combine the complex position logic and the specific red highlight into one loop
+    pos_series = df_plot['Held_Position']
+    intersection_days = df_plot[(df_plot['Strategy_Return_Unfiltered'] < 0) & (df_plot['Strategy_Return_40'] > 0)].index
+    
     change_indices = pos_series.index[pos_series.diff() != 0]
     segment_starts = pd.Index([pos_series.index[0]]).append(change_indices)
     segment_ends = change_indices.append(pd.Index([pos_series.index[-1]]))
     
-    # Light green/red background for Long/Short positions of SMA 120
     for start, end in zip(segment_starts, segment_ends):
         current_pos = pos_series.loc[start]
-        if current_pos == POSITION_SIZE: color = 'green'; alpha = 0.08
-        elif current_pos == -POSITION_SIZE: color = 'red'; alpha = 0.08
-        else: continue
+        
+        color = None
+        alpha = 0.08
+        
+        if current_pos == POSITION_SIZE:
+            color = 'green'
+        elif current_pos == -POSITION_SIZE:
+            color = 'red'
+        elif current_pos == 0:
+            color = 'gold' # Highlight FLAT period
             
-        end_adjusted = end + pd.Timedelta(days=1)
-        ax1.axvspan(start, end_adjusted, facecolor=color, alpha=alpha, zorder=0)
+        if color:
+            end_adjusted = end + pd.Timedelta(days=1)
+            ax1.axvspan(start, end_adjusted, facecolor=color, alpha=alpha, zorder=0)
 
-    # 2. Highlight Intersection Days (SMA 120 LOSS AND SMA 40 PROFIT)
-    # Condition: SMA 120 strategy lost (< 0) AND SMA 40 strategy gained (> 0)
-    intersection_days = df_plot[(df_plot['Strategy_Return'] < 0) & (df_plot['Strategy_Return_40'] > 0)].index
-    
+    # 2. Highlight Entry/Loss days (SMA 120 Loss & SMA 40 Profit)
     # Draw a distinct red marker on these specific days
     for day in intersection_days:
-        # Use a solid, stronger red background for emphasis on intersection
+        # Use a strong red background for emphasis on the loss/profit intersection trigger
         ax1.axvspan(day, day + pd.Timedelta(days=1), facecolor='#DC143C', alpha=0.3, zorder=1) 
     
     # 3. Price and SMA 120 
@@ -312,7 +320,7 @@ def create_plot(df, strategy_sma):
     ax1.grid(True, linestyle='--', alpha=0.6)
     ax1.legend(loc='upper left', fontsize=8)
     ax1.set_yscale('log')
-    ax1.set_title(f'SMA {strategy_sma} Strategy (Red Highlight: Loss day for SMA 120, Profit day for SMA 40)', fontsize=12)
+    ax1.set_title(f'SMA {strategy_sma} Strategy with Flat Recovery Rule (Yellow = FLAT)', fontsize=12)
 
     # --- Equity Plot (Bottom Panel) ---
     ax2 = axes[1]
@@ -399,34 +407,89 @@ def setup_analysis():
         print(f"--- FATAL ERROR DURING SHARPE SCAN ---\n{GLOBAL_ERROR}", file=sys.stderr)
         return
 
-    # --- Part 3: Main Strategy Backtest (SMA 120) and Comparison ---
+    # --- Part 3: Main Strategy Backtest (SMA 120) with State Machine ---
     try:
         MAIN_SMA_WINDOW = 120
         COMPARE_SMA_WINDOW = 40
         
-        # 1. Get SMA 120 Results (main strategy)
-        df_final = get_strategy_returns(df_ind, MAIN_SMA_WINDOW)
-        
-        # 2. Get SMA 40 Results (comparison strategy)
+        # Get base returns for SMA 120 and SMA 40 (only the tradable period, Day 1001 onwards)
+        df_120 = get_strategy_returns(df_ind, MAIN_SMA_WINDOW)
         df_40 = get_strategy_returns(df_ind, COMPARE_SMA_WINDOW)
         
-        # 3. Merge SMA 40 returns onto the main dataframe for plotting comparison
-        df_final['Strategy_Return_40'] = df_40['Strategy_Return']
+        # Merge necessary columns for the state machine
+        df_combined = df_120[['Close', 'Daily_Return', f'SMA_{MAIN_SMA_WINDOW}', 'Buy_Hold_Equity']].copy()
+        df_combined['Position_120_Base'] = df_120['Position']
+        df_combined['Strategy_Return_Unfiltered'] = df_120['Strategy_Return'] # Base return before flat rule
+        df_combined['Strategy_Return_40'] = df_40['Strategy_Return']
+        
+        # --- ITERATIVE STATE MACHINE EXECUTION ---
+        
+        is_flat_recovery = False
+        final_position = []
 
-        # 4. Determine current status
-        current_position = df_final['Position'].iloc[-1]
-        GLOBAL_STATUS = "LONG" if current_position == POSITION_SIZE else "SHORT"
+        # Iterate day by day over the combined dataframe (tradable period)
+        for i in range(len(df_combined)):
+            
+            # --- Inputs (Yesterday's Results) ---
+            yesterday_ret_120 = df_combined['Strategy_Return_Unfiltered'].iloc[i-1] if i > 0 else 0
+            yesterday_ret_40 = df_combined['Strategy_Return_40'].iloc[i-1] if i > 0 else 0
+            
+            # --- Inputs (Today's Prices) ---
+            current_price = df_combined['Close'].iloc[i]
+            current_sma_120 = df_combined[f'SMA_{MAIN_SMA_WINDOW}'].iloc[i]
+            base_pos_120 = df_combined['Position_120_Base'].iloc[i]
 
-        # 5. Create Plot
+            # 1. Check for entry into FLAT state (only check if NOT already in recovery)
+            if not is_flat_recovery:
+                # Entry condition: SMA 120 Lost (< 0) AND SMA 40 Profited (> 0) on YESTERDAY'S trade
+                if (yesterday_ret_120 < 0) and (yesterday_ret_40 > 0):
+                    is_flat_recovery = True
+            
+            # 2. Check for exit from FLAT state (if currently in recovery)
+            if is_flat_recovery:
+                # Exit condition: (SMA 120 - Price) / Price <= 0.02
+                if current_price != 0:
+                    deviation = (current_sma_120 - current_price) / current_price
+                    if deviation <= 0.02:
+                        is_flat_recovery = False
+                
+            # 3. Determine final position
+            if is_flat_recovery:
+                pos = 0 # Forced flat
+            else:
+                pos = base_pos_120 # Normal SMA 120 logic
+            
+            final_position.append(pos)
+
+        # 4. Apply final position and recalculate equity
+        df_combined['Final_Position'] = final_position
+        
+        # Shift position back 1 day to represent the position HELD for the day's return
+        # The position for day T must be decided by day T-1's close. 
+        # Since the loop runs on day-by-day T, the result `pos` is for day T. 
+        # We need to shift it to represent the position held for day T's return.
+        df_combined['Held_Position'] = df_combined['Final_Position'].shift(1).fillna(0) 
+
+        # Recalculate Strategy Return based on the Held Position
+        df_combined['Strategy_Return'] = df_combined['Daily_Return'] * df_combined['Held_Position']
+        df_combined['Equity'] = (1 + df_combined['Strategy_Return']).cumprod()
+        
+        df_final = df_combined.copy() # Use the combined DF as the new final DF
+
+        # 5. Determine current status
+        current_position = df_final['Held_Position'].iloc[-1]
+        GLOBAL_STATUS = "LONG" if current_position == POSITION_SIZE else ("SHORT" if current_position == -POSITION_SIZE else "FLAT")
+
+        # 6. Create Plot
         GLOBAL_IMG_BASE64, GLOBAL_TOTAL_RETURN = create_plot(df_final, MAIN_SMA_WINDOW)
         
-        # 6. Populate Global Results
-        # Create summary table (simplified)
-        summary_df = df_final[['Close', f'SMA_{MAIN_SMA_WINDOW}', 'Position', 'Equity', 'Strategy_Return', 'Strategy_Return_40']].tail(10)
-        summary_df = summary_df.rename(columns={f'SMA_{MAIN_SMA_WINDOW}': 'SMA 120', 'Strategy_Return': 'Ret 120', 'Strategy_Return_40': 'Ret 40'})
+        # 7. Populate Global Results
+        # Create summary table
+        summary_df = df_final[['Close', f'SMA_{MAIN_SMA_WINDOW}', 'Held_Position', 'Equity', 'Strategy_Return_Unfiltered', 'Strategy_Return', 'Strategy_Return_40']].tail(10)
+        summary_df = summary_df.rename(columns={f'SMA_{MAIN_SMA_WINDOW}': 'SMA 120', 'Held_Position': 'Pos Final', 'Strategy_Return_Unfiltered': 'Ret 120 (Base)', 'Strategy_Return': 'Ret Final', 'Strategy_Return_40': 'Ret 40'})
         
         GLOBAL_SUMMARY_TABLE = summary_df.to_html(classes='table-auto w-full text-sm text-left', 
-                                                  float_format=lambda x: f'{x:,.4f}') # Increased precision for returns
+                                                  float_format=lambda x: f'{x:,.4f}') 
         
         print("--- ANALYSIS COMPLETE ---")
 
@@ -522,13 +585,13 @@ def analysis_dashboard():
                 </div>
             </div>
             
-            <h2 class="text-2xl font-semibold text-gray-700 mt-8 mb-4">Recent SMA 120 vs. SMA 40 Comparison</h2>
+            <h2 class="text-2xl font-semibold text-gray-700 mt-8 mb-4">Recent Strategy Performance & Comparison</h2>
             <div class="overflow-x-auto rounded-lg shadow-md border border-gray-200">
                 {GLOBAL_SUMMARY_TABLE}
             </div>
             
             <p class="mt-8 text-sm text-gray-600 border-t pt-4">
-                **Strategy:** Long if Close > SMA, Short if Close $\le$ SMA. The optimization chart shows how Sharpe Ratio and final compounded equity change across all moving average periods. **All SMA backtests start on the same day (after 1000 days of data warmup).**
+                **Strategy:** Long if Close > SMA, Short if Close $\le$ SMA. **Flat Recovery Rule Applied:** If SMA 120 lost and SMA 40 gained yesterday, stay FLAT until price closes within 2% of SMA 120.
             </p>
         </div>
     </body>
