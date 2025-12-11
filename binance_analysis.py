@@ -7,6 +7,7 @@ import datetime as dt
 import os
 import threading
 from http.server import SimpleHTTPRequestHandler, HTTPServer
+from matplotlib.ticker import ScalarFormatter
 
 # --- Configuration ---
 SYMBOL = 'BTCUSDT'
@@ -22,6 +23,7 @@ RESULTS_DIR = 'results'
 def date_to_milliseconds(date_str):
     """Convert date string to UTC timestamp in milliseconds"""
     # Helper to convert human-readable date to Binance's millisecond timestamp
+    # Note: Using a fixed date format for consistency
     return int(dt.datetime.strptime(date_str, '%d %b, %Y').timestamp() * 1000)
 
 def fetch_klines(symbol, interval, start_str):
@@ -109,7 +111,6 @@ def run_backtest(df):
 
     # 2.3 Generate Trading Signals (Position)
     # Rule: Price > SMA = Long (+1), Price < SMA = Short (-1)
-    # We must use T-1 data to avoid look-ahead bias.
     # Signal on day T is based on the comparison of Close(T-1) vs. SMA(T-1)
     
     # Calculate the position for the *next* day based on today's closing data
@@ -155,6 +156,7 @@ def run_backtest(df):
 def plot_results(df):
     """
     Generates and saves the plot of the strategy's equity curve.
+    Uses a logarithmic Y-scale.
     """
     print(f"-> Generating plot in '{RESULTS_DIR}/{PLOT_FILE}'...")
     
@@ -169,18 +171,19 @@ def plot_results(df):
     df['Cumulative_Strategy_Return'].plot(ax=ax, label=f'SMA {SMA_PERIOD} Strategy', color='#10B981', linewidth=2)
     df['Buy_and_Hold_Return'].plot(ax=ax, label='Buy & Hold (Benchmark)', color='#EF4444', linestyle='--', linewidth=1.5)
     
+    # Set Y-axis to Logarithmic Scale as requested
+    ax.set_yscale('log')
+    
     # Style and Labels
-    ax.set_title(f'{SYMBOL} 120-Day SMA Strategy Equity Curve (Since 2018)', fontsize=16, color='white')
+    ax.set_title(f'{SYMBOL} 120-Day SMA Strategy Equity Curve (Log Scale Since 2018)', fontsize=16, color='white')
     ax.set_xlabel('Date', fontsize=12, color='white')
-    ax.set_ylabel('Cumulative Return (Logarithmic)', fontsize=12, color='white')
+    ax.set_ylabel('Cumulative Return (Log Scale - Multiplier)', fontsize=12, color='white')
     ax.legend(loc='upper left', fontsize=10)
-    ax.grid(True, linestyle=':', alpha=0.5, color='#374151')
+    ax.grid(True, linestyle=':', alpha=0.5, color='#374151', which='both')
     
-    # Format axes to percentages
-    from matplotlib.ticker import FuncFormatter
-    formatter = FuncFormatter(lambda y, _: f'{y*100:.0f}%')
-    ax.yaxis.set_major_formatter(formatter)
-    
+    # Ensure non-scientific notation on the log scale
+    ax.yaxis.set_major_formatter(ScalarFormatter())
+
     # Save the plot
     plt.savefig(plot_path, bbox_inches='tight', dpi=150)
     plt.close(fig)
@@ -224,7 +227,7 @@ def serve_results():
                     <div class="container mx-auto p-4 bg-gray-800 shadow-xl rounded-xl">
                         <h1 class="text-3xl font-bold mb-4 text-green-400">Backtesting Results: {SYMBOL} SMA-120</h1>
                         <p class="text-gray-300 mb-6">
-                            The backtest calculated daily returns for the strategy: Long if yesterday's Close > 120-Day SMA, Short if Close < 120-Day SMA.
+                            The backtest calculated daily returns for the strategy: Long if yesterday's Close > 120-Day SMA, Short if Close < 120-Day SMA. The Y-axis is set to a <strong>Logarithmic Scale</strong> to better show compounded returns.
                         </p>
                         <div class="plot-container">
                             <img src="{RESULTS_DIR}/{PLOT_FILE}" alt="Strategy Cumulative Returns Plot" class="w-full h-auto rounded-lg shadow-2xl">
@@ -261,7 +264,6 @@ def serve_results():
             httpd.serve_forever()
         except KeyboardInterrupt:
             print("\n-> Server stopped by user.")
-
 
 # --- Main Execution ---
 
