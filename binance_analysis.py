@@ -16,8 +16,8 @@ ANNUALIZATION_FACTOR = 365 # Used for annualizing Sharpe Ratio for daily data
 
 # --- Grid Search Parameters ---
 GRID_K_START = 0.00
-GRID_K_END = 4.00
-GRID_K_STEP = 0.01
+GRID_K_END = 0.50
+GRID_K_STEP = 0.001
 
 # --- 1. Data Fetching Utilities ---
 
@@ -166,15 +166,15 @@ def run_grid_search(df):
     print("\n" + "=" * 60)
     print("STARTING GRID SEARCH OPTIMIZATION (IN-SAMPLE: FIRST 50% OF DATA)")
     print("Target Metric: Annualized Sharpe Ratio")
-    print(f"Parameter Range (k): {GRID_K_START:.2f} to {GRID_K_END:.2f} in {GRID_K_STEP:.2f} steps")
+    print(f"Parameter Range (k): {GRID_K_START:.3f} to {GRID_K_END:.3f} in {GRID_K_STEP:.3f} steps")
     print("=" * 60)
     
     # 1. Slice data to first 50% (In-Sample period)
     half_index = len(df) // 2
     df_in_sample = df.iloc[:half_index].copy()
     
-    # 2. Define grid search space (0.00 to 4.00 in 0.01 steps)
-    k_factors = [round(k, 2) for k in np.arange(GRID_K_START, GRID_K_END + GRID_K_STEP/2, GRID_K_STEP)]
+    # 2. Define grid search space (0.00 to 0.50 in 0.001 steps)
+    k_factors = [round(k, 3) for k in np.arange(GRID_K_START, GRID_K_END + GRID_K_STEP/2, GRID_K_STEP)]
 
     best_sharpe = -np.inf
     optimal_k = 0.0
@@ -185,15 +185,15 @@ def run_grid_search(df):
             sharpe, total_return = run_strategy_for_optimization(df_in_sample, k_factor)
             
             # Print intermediate results sparingly
-            # if k_factor % 0.5 == 0:
-            #     print(f"   k={k_factor:.2f} -> Sharpe: {sharpe:.4f}")
+            # if k_factor % 0.05 == 0:
+            #     print(f"   k={k_factor:.3f} -> Sharpe: {sharpe:.4f}")
             
             if sharpe > best_sharpe:
                 best_sharpe = sharpe
                 optimal_k = k_factor
         
         except Exception as e:
-            print(f"Error for k={k_factor:.2f}: {e}")
+            print(f"Error for k={k_factor:.3f}: {e}")
             continue
 
     if best_sharpe == -np.inf:
@@ -202,7 +202,7 @@ def run_grid_search(df):
         
     print("\n" + "=" * 60)
     print("OPTIMIZATION COMPLETE")
-    print(f"Optimal Factor k (Sharpe Max): {optimal_k:.2f}")
+    print(f"Optimal Factor k (Sharpe Max): {optimal_k:.3f}")
     print(f"Max Annualized Sharpe Ratio (In-Sample): {best_sharpe:.4f}")
     print("=" * 60)
     
@@ -221,6 +221,6 @@ if __name__ == '__main__':
         optimal_k = run_grid_search(df_data)
         
         if optimal_k is not None:
-             print(f"\nOptimization successful. Optimal k factor found: {optimal_k:.2f}")
+             print(f"\nOptimization successful. Optimal k factor found: {optimal_k:.3f}")
         else:
              print("\nOptimization failed to find a valid optimal k factor.")
