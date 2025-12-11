@@ -106,7 +106,6 @@ def run_backtest(df):
     df.loc[df['close'] > df[f'SMA_{SMA_SHORT_TERM}'], 'Signal'] = 1.0
 
     # Short Logic: Trades short if Price is below 120 SMA
-    # This overwrites the previous 0.0 setting for days when a trade is active.
     df.loc[df['close'] < df[f'SMA_{SMA_SHORT_TERM}'], 'Signal'] = -1.0
 
     # Calculate Daily Returns
@@ -336,7 +335,7 @@ HTML_TEMPLATE = """
                 <h2>Trade List (Last 50)</h2>
                 <div class="trade-log">
                     {% if trade_list %}
-                        {% for trade in trade_list|slice:":50" %}
+                        {% for trade in trade_list %}
                             {% set color_class = 'value' %}
                             {% if 'PnL: -' in trade %}
                                 {% set color_class = 'negative' %}
@@ -390,7 +389,12 @@ def dashboard():
         """
         return render_template_string(error_msg), 500
 
-    df_results, metrics, trade_list, regime_metrics = run_backtest(df)
+    # Run the backtest and get the full list of trades
+    df_results, metrics, trade_list_full, regime_metrics = run_backtest(df)
+    
+    # FIX: Pre-slice the trade list in Python before passing to Jinja2
+    # This resolves the TemplateSyntaxError caused by complex filter usage.
+    trade_list = trade_list_full[:50] 
 
     # Generate plot
     plot_data = generate_plot(df_results)
@@ -402,7 +406,7 @@ def dashboard():
         timeframe=TIME_FRAME,
         metrics=metrics,
         regime_metrics=regime_metrics,
-        trade_list=trade_list,
+        trade_list=trade_list, # Passing the pre-sliced list
         plot_data=plot_data
     )
 
