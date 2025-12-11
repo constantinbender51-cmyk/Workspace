@@ -13,8 +13,7 @@ SYMBOL = 'BTCUSDT'
 INTERVAL = '1d'
 START_DATE = '1 Jan, 2018'
 SMA_PERIOD_120 = 120 
-SMA_PERIOD_40 = 40 
-PLOT_FILE = 'strategy_comparison.png'
+PLOT_FILE = 'strategy_results.png'
 SERVER_PORT = 8080
 RESULTS_DIR = 'results'
 ANNUALIZATION_FACTOR = 365 # Used for annualizing Sharpe Ratio for daily data
@@ -94,11 +93,8 @@ def calculate_max_drawdown(cumulative_returns):
     """Calculates the Maximum Drawdown (MDD) in percentage."""
     if cumulative_returns.empty:
         return 0.0
-    # Calculate the running maximum (peak)
     peak = cumulative_returns.cummax()
-    # Calculate the drawdown
     drawdown = (peak - cumulative_returns) / peak
-    # Return the maximum drawdown percentage
     return drawdown.max() * 100
 
 def generate_metrics(cumulative_returns, daily_returns, strategy_name):
@@ -117,54 +113,36 @@ def generate_metrics(cumulative_returns, daily_returns, strategy_name):
 
 # --- 3. Backtesting Logic ---
 
-def run_backtest_comparison(df):
+def run_backtest(df):
     """
-    Applies both trading strategies and generates comparison metrics.
+    Applies the single 120 SMA trading strategy and generates metrics.
     """
-    print(f"-> Running comparative backtest on {len(df)} candles...")
+    print(f"-> Running single 120 SMA backtest on {len(df)} candles...")
     
-    # Calculate SMAs
+    # Calculate 120 SMA
     df[f'SMA_{SMA_PERIOD_120}'] = df['Close'].rolling(window=SMA_PERIOD_120).mean()
-    df[f'SMA_{SMA_PERIOD_40}'] = df['Close'].rolling(window=SMA_PERIOD_40).mean()
     
-    # Calculate daily returns (log returns are used for additive compounding)
+    # Calculate daily returns (log returns)
     df['Daily_Return'] = np.log(df['Close'] / df['Close'].shift(1))
 
     # --- Prepare Lagged Data (Look-ahead Bias Prevention) ---
     df['Yesterday_Close'] = df['Close'].shift(1)
     df['Yesterday_SMA_120'] = df[f'SMA_{SMA_PERIOD_120}'].shift(1)
-    df['Yesterday_SMA_40'] = df[f'SMA_{SMA_PERIOD_40}'].shift(1)
     
     # Drop NaNs from SMAs and shifting
     df = df.dropna()
     
     # ----------------------------------------------------
-    # Strategy A: Simple 120 SMA Crossover (Long/Short)
+    # Strategy: Simple 120 SMA Crossover (Long/Short)
     # ----------------------------------------------------
-    df['Position_A'] = np.where(
+    df['Position'] = np.where(
         df['Yesterday_Close'] > df['Yesterday_SMA_120'],
         1,
         -1
     )
-    df['Strategy_Return_A'] = df['Daily_Return'] * df['Position_A']
-    df['Cumulative_Strategy_Return_A'] = np.exp(df['Strategy_Return_A'].cumsum())
+    df['Strategy_Return'] = df['Daily_Return'] * df['Position']
+    df['Cumulative_Strategy_Return'] = np.exp(df['Strategy_Return'].cumsum())
 
-    # ----------------------------------------------------
-    # Strategy B: 120 SMA Crossover with 40 SMA Filter (Long/Short/Flat)
-    # ----------------------------------------------------
-    long_condition = (df['Yesterday_Close'] > df['Yesterday_SMA_120']) & \
-                     (df['Yesterday_Close'] >= df['Yesterday_SMA_40'])
-    
-    short_condition = (df['Yesterday_Close'] < df['Yesterday_SMA_120']) & \
-                      (df['Yesterday_Close'] <= df['Yesterday_SMA_40'])
-    
-    df['Position_B'] = 0
-    df.loc[long_condition, 'Position_B'] = 1
-    df.loc[short_condition, 'Position_B'] = -1
-    
-    df['Strategy_Return_B'] = df['Daily_Return'] * df['Position_B']
-    df['Cumulative_Strategy_Return_B'] = np.exp(df['Strategy_Return_B'].cumsum())
-    
     # ----------------------------------------------------
     # Benchmark: Buy & Hold (B&H)
     # ----------------------------------------------------
@@ -178,14 +156,9 @@ def run_backtest_comparison(df):
         df['Cumulative_Buy_and_Hold'], df['Daily_Return'], 'Buy & Hold (Benchmark)'
     ))
     
-    # Strategy A
+    # Strategy
     metrics.append(generate_metrics(
-        df['Cumulative_Strategy_Return_A'], df['Strategy_Return_A'], f'Strategy A (120 SMA Crossover)'
-    ))
-    
-    # Strategy B
-    metrics.append(generate_metrics(
-        df['Cumulative_Strategy_Return_B'], df['Strategy_Return_B'], f'Strategy B (120/40 SMA Filter)'
+        df['Cumulative_Strategy_Return'], df['Strategy_Return'], f'Strategy (120 SMA Crossover)'
     ))
     
     # Print comparison table
@@ -206,10 +179,9 @@ def run_backtest_comparison(df):
 
 def plot_results(df, metrics):
     """
-    Generates and saves the plot of the strategies' equity curves.
-    Uses a logarithmic Y-scale.
+    Generates and saves the plot of the strategy and benchmark equity curves.
     """
-    print(f"-> Generating comparison plot in '{RESULTS_DIR}/{PLOT_FILE}'...")
+    print(f"-> Generating plot in '{RESULTS_DIR}/{PLOT_FILE}'...")
     
     os.makedirs(RESULTS_DIR, exist_ok=True)
     plot_path = os.path.join(RESULTS_DIR, PLOT_FILE)
@@ -218,15 +190,14 @@ def plot_results(df, metrics):
     fig, ax = plt.subplots(figsize=(14, 8))
     
     # Plotting the equity curves
-    df['Cumulative_Buy_and_Hold'].plot(ax=ax, label='Buy & Hold (Benchmark)', color='#EF4444', linestyle='--', linewidth=1.5)
-    df['Cumulative_Strategy_Return_A'].plot(ax=ax, label=metrics[1]['Strategy'], color='#3B82F6', linewidth=2)
-    df['Cumulative_Strategy_Return_B'].plot(ax=ax, label=metrics[2]['Strategy'], color='#10B981', linewidth=2.5)
+    df['Cumulative_Buy_and_Hold'].plot(ax=ax, label=metrics[0]['Strategy'], color='#EF4444', linestyle='--', linewidth=1.5)
+    df['Cumulative_Strategy_Return'].plot(ax=ax, label=metrics[1]['Strategy'], color='#3B82F6', linewidth=2.5)
     
     # Set Y-axis to Logarithmic Scale
     ax.set_yscale('log')
     
     # Style and Labels
-    ax.set_title(f'{SYMBOL} Strategy Comparison Equity Curves (Log Scale Since 2018)', fontsize=16, color='white')
+    ax.set_title(f'{SYMBOL} 120 SMA Crossover vs. Buy & Hold (Log Scale Since 2018)', fontsize=16, color='white')
     ax.set_xlabel('Date', fontsize=12, color='white')
     ax.set_ylabel('Cumulative Return (Log Scale - Multiplier)', fontsize=12, color='white')
     ax.legend(loc='upper left', fontsize=10)
@@ -274,7 +245,7 @@ def serve_results(metrics):
                 <head>
                     <meta charset="UTF-8">
                     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-                    <title>Trading Strategy Comparison</title>
+                    <title>Trading Strategy Results</title>
                     <script src="https://cdn.tailwindcss.com"></script>
                     <style>
                         body {{ font-family: 'Inter', sans-serif; background-color: #1F2937; color: #F3F4F6; }}
@@ -284,7 +255,7 @@ def serve_results(metrics):
                 </head>
                 <body class="p-8">
                     <div class="container mx-auto p-4 bg-gray-800 shadow-xl rounded-xl">
-                        <h1 class="text-3xl font-bold mb-4 text-green-400">Backtest Comparison: {SYMBOL} SMA Strategies</h1>
+                        <h1 class="text-3xl font-bold mb-4 text-green-400">Backtest Results: {SYMBOL} 120 SMA Crossover</h1>
                         
                         <div class="mb-8">
                             <h2 class="text-xl font-semibold mb-3 text-gray-200">Strategy Metrics Comparison</h2>
@@ -346,8 +317,8 @@ if __name__ == '__main__':
     if df_data.empty:
         print("Error: Could not retrieve data. Exiting.")
     else:
-        # 2. Run both backtests and get comparison metrics
-        results_df, comparison_metrics = run_backtest_comparison(df_data)
+        # 2. Run backtest and get comparison metrics
+        results_df, comparison_metrics = run_backtest(df_data)
         
         # 3. Plot results
         plot_results(results_df, comparison_metrics)
