@@ -21,6 +21,7 @@ ANNUALIZATION_FACTOR = 365 # Used for annualizing Sharpe Ratio for daily data
 # --- Strategy Parameters ---
 STATIC_CENTER_DISTANCE = 0.010 # Fixed 1.0% center distance for the dynamic sizing multiplier
 LEVERAGE_FACTOR = 5.0        # APPLYING 5x LEVERAGE
+STOP_LOSS_PERCENT = 0.05     # 5% Stop Loss based on previous day's close
 
 # --- 1. Data Fetching Utilities ---
 
@@ -70,9 +71,10 @@ def fetch_klines(symbol, interval, start_str):
     ])
 
     df['Open Time'] = pd.to_datetime(df['Open Time'], unit='ms')
-    df['Close'] = pd.to_numeric(df['Close'])
+    # Convert necessary columns to float, keeping High and Low for SL check
+    df[['Open', 'High', 'Low', 'Close']] = df[['Open', 'High', 'Low', 'Close']].astype(float)
     df = df.set_index('Open Time')
-    df = df[['Open', 'Close']].astype(float)
+    df = df[['Open', 'High', 'Low', 'Close']]
     
     return df.dropna()
 
@@ -118,16 +120,18 @@ def generate_metrics(cumulative_returns, daily_returns, strategy_name):
 
 def run_backtest_static_center(df):
     """
-    Applies the 120 SMA trading strategy with dynamic position sizing using a static center distance (1.0%).
+    Applies the 120 SMA trading strategy with dynamic position sizing using a static center distance (1.0%)
+    and a 5% stop-loss based on the previous close (entry price).
     """
     center = STATIC_CENTER_DISTANCE
     leverage = LEVERAGE_FACTOR
     
-    print(f"-> Running final backtest (Center={center*100:.1f}%, Leverage={leverage:.1f}x) on {len(df)} candles...")
+    print(f"-> Running final backtest (Center={center*100:.1f}%, Leverage={leverage:.1f}x, SL={STOP_LOSS_PERCENT*100:.0f}%) on {len(df)} candles...")
     
-    # 1. Calculate 120 SMA & Daily Returns
+    # 1. Calculate 120 SMA 
     df[f'SMA_{SMA_PERIOD_120}'] = df['Close'].rolling(window=SMA_PERIOD_120).mean()
-    df['Daily_Return'] = np.log(df['Close'] / df['Close'].shift(1))
+    # Daily_Return_Raw is used if SL is NOT hit
+    df['Daily_Return_Raw'] = np.log(df['Close'] / df['Close'].shift(1))
 
     # --- Look-ahead Prevention ---
     df['Yesterday_Close'] = df['Close'].shift(1)
@@ -151,45 +155,64 @@ def run_backtest_static_center(df):
     df['Distance'] = np.abs((df['Yesterday_Close'] - df['Yesterday_SMA_120']) / df['Yesterday_SMA_120'])
 
     # 3. Calculate Multiplier (M) using the static Center
-    # Scaler = 1 / Center_Distance 
-    distance_scaler = 1.0 / np.maximum(df['Center_Distance'], 1e-10) # Protect against zero division
-    
+    distance_scaler = 1.0 / np.maximum(df['Center_Distance'], 1e-10) 
     scaled_distance = df['Distance'] * distance_scaler
     
     epsilon = 1e-6 
-    # M_magnitude = 1 / ( (1 / (D * Scaler)) + (D * Scaler) - 1 )
     denominator = (1.0 / np.maximum(scaled_distance, epsilon)) + scaled_distance - 1.0
-    
-    # Calculate Multiplier (Position Size Magnitude)
     df['Multiplier'] = np.where(denominator == 0, 0, 1.0 / denominator)
 
     # 4. Final Position Size (Before Leverage) = Direction * Multiplier
     df['Position_Size_Base'] = df['Direction'] * df['Multiplier']
     
-    # 5. Apply Leverage
-    df['Position_Size'] = df['Position_Size_Base'] * leverage
+    # ----------------------------------------------------
+    # 5. Stop Loss Logic (SL% against entry price = Yesterday_Close)
+    # ----------------------------------------------------
+    df['Entry_Price'] = df['Yesterday_Close']
     
-    # 6. Calculate Strategy Returns
-    # Note: Leverage only scales the returns, it doesn't fundamentally change the Sharpe Ratio unless transaction costs/margin calls are introduced, which they are not here.
-    df['Strategy_Return'] = df['Daily_Return'] * df['Position_Size']
+    # Stop Price calculation: Long SL: Entry * (1-S), Short SL: Entry * (1+S)
+    df['Stop_Price'] = np.where(
+        df['Direction'] == 1,
+        df['Entry_Price'] * (1 - STOP_LOSS_PERCENT),
+        df['Entry_Price'] * (1 + STOP_LOSS_PERCENT)
+    )
+    
+    # Check for Stop Loss Trigger (Current day's High/Low moves into SL zone)
+    # Long (Dir=1): SL hits if Low <= Stop_Price
+    # Short (Dir=-1): SL hits if High >= Stop_Price
+    df['SL_Triggered'] = np.where(
+        df['Direction'] == 1,
+        df['Low'] <= df['Stop_Price'],
+        df['High'] >= df['Stop_Price']
+    )
+    
+    # Calculate Daily Return after applying SL cap (log return)
+    df['Return_After_SL'] = np.where(
+        df['SL_Triggered'],
+        np.log(df['Stop_Price'] / df['Entry_Price']), 
+        df['Daily_Return_Raw'] 
+    )
+    
+    # 6. Apply Leverage
+    df['Strategy_Return'] = df['Return_After_SL'] * df['Position_Size_Base'] * leverage
     df['Cumulative_Strategy_Return'] = np.exp(df['Strategy_Return'].cumsum())
 
     # ----------------------------------------------------
     # Benchmark: Buy & Hold (B&H)
     # ----------------------------------------------------
-    df['Cumulative_Buy_and_Hold'] = np.exp(df['Daily_Return'].cumsum())
+    df['Cumulative_Buy_and_Hold'] = np.exp(df['Daily_Return_Raw'].cumsum())
 
     # --- Generate Metrics ---
     metrics = []
     
     # B&H
     metrics.append(generate_metrics(
-        df['Cumulative_Buy_and_Hold'], df['Daily_Return'], 'Buy & Hold (Benchmark)'
+        df['Cumulative_Buy_and_Hold'], df['Daily_Return_Raw'], 'Buy & Hold (Benchmark)'
     ))
     
     # Strategy
     metrics.append(generate_metrics(
-        df['Cumulative_Strategy_Return'], df['Strategy_Return'], f'Dynamic Sizing (1.0% Center, {leverage:.1f}x Lev.)'
+        df['Cumulative_Strategy_Return'], df['Strategy_Return'], f'Dynamic Sizing (1.0% Center, {leverage:.1f}x Lev., SL {STOP_LOSS_PERCENT*100:.0f}%)'
     ))
     
     # Print comparison table
@@ -199,7 +222,7 @@ def run_backtest_static_center(df):
     ])
     
     print("\n" + "=" * 60)
-    print(f"FINAL BACKTEST METRICS (Static {center*100:.1f}% Dynamic Center, {leverage:.1f}x Lev.)")
+    print(f"FINAL BACKTEST METRICS (Static {center*100:.1f}% Dynamic Center, {leverage:.1f}x Lev., SL {STOP_LOSS_PERCENT*100:.0f}%)")
     print("=" * 60)
     print(comparison_df.to_string(index=False))
     print("=" * 60)
@@ -250,7 +273,7 @@ def plot_results(df, metrics):
     # Style and Labels for ax2
     center = STATIC_CENTER_DISTANCE
     leverage = LEVERAGE_FACTOR
-    ax2.set_title(f'Cumulative Return (Log Scale) - Leveraged Strategy ({leverage:.1f}x)', fontsize=14, color='white')
+    ax2.set_title(f'Cumulative Return (Log Scale) - Leveraged Strategy ({leverage:.1f}x) with 5% SL', fontsize=14, color='white')
     ax2.set_xlabel('Date', fontsize=12, color='white')
     ax2.set_ylabel('Cumulative Return (Log Scale - Multiplier)', fontsize=12, color='white')
     ax2.legend(loc='upper left', fontsize=10)
@@ -309,11 +332,11 @@ def serve_results(metrics):
                 </head>
                 <body class="p-8">
                     <div class="container mx-auto p-4 bg-gray-800 shadow-xl rounded-xl">
-                        <h1 class="text-3xl font-bold mb-4 text-green-400">Backtest Results: {SYMBOL} Dynamic Sizing ({LEVERAGE_FACTOR:.1f}x Leverage)</h1>
+                        <h1 class="text-3xl font-bold mb-4 text-green-400">Backtest Results: {SYMBOL} Dynamic Sizing ({LEVERAGE_FACTOR:.1f}x Leverage, 5% SL)</h1>
                         
                         <div class="mb-8">
                             <h2 class="text-xl font-semibold mb-3 text-gray-200">Strategy Metrics Comparison</h2>
-                            <p class="text-gray-400 mb-4">Final backtest using a static 1.0% distance center for the dynamic position sizing multiplier, leveraged 5.0x.</p>
+                            <p class="text-gray-400 mb-4">Final backtest using a static 1.0% distance center for the dynamic position sizing multiplier, leveraged 5.0x, with a 5% fixed stop-loss.</p>
                             <div class="relative overflow-x-auto shadow-md sm:rounded-lg">
                                 <table class="w-full text-sm text-left text-gray-400">
                                     <thead class="text-xs uppercase bg-gray-700 text-gray-400">
