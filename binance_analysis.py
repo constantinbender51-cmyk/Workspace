@@ -20,6 +20,7 @@ PORT = 8080
 ANNUAL_TRADING_DAYS = 252 # Used for annualizing Sharpe Ratio
 MAX_SMA_SCAN = 400 # Maximum SMA for the scan and the global analysis start point
 SCAN_DELAY = 5.0 # Seconds delay after every 50 SMA calculations to respect API limits
+BAND_PERCENTAGE = 0.03 # 3% band for SMA 40
 
 # --- Global Variables to store results (populated once at startup) ---
 GLOBAL_DATA_SOURCE = "Binance (CCXT)"
@@ -267,12 +268,11 @@ def create_analysis_visualization(results_df):
 
 def create_plot(df, strategy_sma):
     """Generates the main SMA 120 strategy plot (Close Price + Equity Curve)
-       and highlights days where price is within 3% of SMA 40 OR between SMAs 40/120."""
+       and highlights days where the strategy is FLAT (position 0)."""
     
     df_plot = df.copy() 
     sma_120_col = f'SMA_{strategy_sma}'
     sma_40_col = 'SMA_40'
-    BAND_PERCENTAGE = 0.03 # 3% band
 
     fig, axes = plt.subplots(2, 1, figsize=(10, 4), sharex=True, 
                              gridspec_kw={'height_ratios': [3, 2]})
@@ -280,13 +280,13 @@ def create_plot(df, strategy_sma):
     # --- Price and SMA (Top Panel) ---
     ax1 = axes[0]
     
-    # 1. Background Coloring: Strategy Position (+1 or -1)
-    pos_series = df_plot['Position'] # Base position used for continuous trading
+    # 1. Background Coloring: Strategy Position (+1, -1, or 0)
+    pos_series = df_plot['Held_Position'] 
+    
     change_indices = pos_series.index[pos_series.diff() != 0]
     segment_starts = pd.Index([pos_series.index[0]]).append(change_indices)
     segment_ends = change_indices.append(pd.Index([pos_series.index[-1]]))
     
-    # Light green/red background for Long/Short positions of SMA 120
     for start, end in zip(segment_starts, segment_ends):
         current_pos = pos_series.loc[start]
         
@@ -297,12 +297,16 @@ def create_plot(df, strategy_sma):
             color = 'green'
         elif current_pos == -POSITION_SIZE:
             color = 'red'
+        elif current_pos == 0:
+            color = 'gold' # Highlight FLAT period
+            alpha = 0.15
             
         if color:
             end_adjusted = end + pd.Timedelta(days=1)
             ax1.axvspan(start, end_adjusted, facecolor=color, alpha=alpha, zorder=0)
 
-    # 2. Highlight Days based on combined condition (3% band OR between SMAs 40/120)
+    # 2. Highlight Ambiguous/No-Trade Days (Red)
+    # This uses the original condition to show WHY the strategy went flat (if flat) or shouldn't trade.
     
     # Condition A: Price within 3% band of SMA 40
     condition_A = np.abs((df_plot['Close'] - df_plot[sma_40_col]) / df_plot[sma_40_col]) <= BAND_PERCENTAGE
@@ -334,7 +338,7 @@ def create_plot(df, strategy_sma):
     ax1.grid(True, linestyle='--', alpha=0.6)
     ax1.legend(loc='upper left', fontsize=8)
     ax1.set_yscale('log')
-    ax1.set_title(f'SMA {strategy_sma} Crossover Strategy (Red Highlight: Price Near SMA 40 OR Between SMAs)', fontsize=12)
+    ax1.set_title(f'SMA {strategy_sma} Strategy (Ambiguity Rule: FLAT if near SMA 40 or between SMAs)', fontsize=12)
 
     # --- Equity Plot (Bottom Panel) ---
     ax2 = axes[1]
@@ -421,32 +425,78 @@ def setup_analysis():
         print(f"--- FATAL ERROR DURING SHARPE SCAN ---\n{GLOBAL_ERROR}", file=sys.stderr)
         return
 
-    # --- Part 3: Main Strategy Backtest (SMA 120) (Continuous Trading) ---
+    # --- Part 3: Main Strategy Backtest (SMA 120) with Flat Rule ---
     try:
         MAIN_SMA_WINDOW = 120
         COMPARE_SMA_WINDOW = 40
         
-        # 1. Get SMA 120 Results (main strategy)
-        df_final = get_strategy_returns(df_ind, MAIN_SMA_WINDOW) # df_final has 'Position' and 'Strategy_Return'
+        # 1. Get Base SMA 120 Results (Continuous Trading)
+        df_base = get_strategy_returns(df_ind, MAIN_SMA_WINDOW) 
         
-        # 2. Get SMA 40 Returns for comparison table
+        # 2. Get SMA 40 Returns (needed for calculation)
         df_40 = get_strategy_returns(df_ind, COMPARE_SMA_WINDOW)
         
-        # 3. Merge SMA 40 returns and SMA 40 column for visualization/table
-        df_final['Strategy_Return_40'] = df_40['Strategy_Return']
-        df_final[f'SMA_{COMPARE_SMA_WINDOW}'] = df_ind[f'SMA_{COMPARE_SMA_WINDOW}'].iloc[MAX_SMA_SCAN:].copy()
+        # Global start index for the tradable period (MAX_SMA_SCAN)
+        tradable_start_index = MAX_SMA_SCAN 
         
-        # 4. Determine current status
-        current_position = df_final['Position'].iloc[-1]
-        GLOBAL_STATUS = "LONG" if current_position == POSITION_SIZE else "SHORT"
+        # Merge necessary SMA values for the state machine logic
+        df_combined = df_base[['Close', 'Daily_Return', 'Buy_Hold_Equity', 'Position']].copy()
+        df_combined[f'SMA_{MAIN_SMA_WINDOW}'] = df_ind[f'SMA_{MAIN_SMA_WINDOW}'].iloc[tradable_start_index:].copy()
+        df_combined[f'SMA_{COMPARE_SMA_WINDOW}'] = df_ind[f'SMA_{COMPARE_SMA_WINDOW}'].iloc[tradable_start_index:].copy()
+        df_combined['Strategy_Return_40'] = df_40['Strategy_Return']
+        
+        # --- ITERATIVE STATE MACHINE EXECUTION ---
+        
+        BAND_PERCENTAGE = 0.03
+        final_position = []
 
-        # 5. Create Plot (Uses simplified plotting logic)
+        # Iterate day by day over the combined dataframe (tradable period)
+        for i in range(len(df_combined)):
+            
+            current_price = df_combined['Close'].iloc[i]
+            current_sma_120 = df_combined[f'SMA_{MAIN_SMA_WINDOW}'].iloc[i]
+            current_sma_40 = df_combined[f'SMA_{COMPARE_SMA_WINDOW}'].iloc[i]
+            base_pos_120 = df_combined['Position'].iloc[i]
+
+            # Condition A: Price within 3% band of SMA 40
+            condition_A = np.abs((current_price - current_sma_40) / current_sma_40) <= BAND_PERCENTAGE
+            
+            # Condition B: Price is strictly between SMA 40 and SMA 120
+            condition_B = (current_price > current_sma_40 and current_price < current_sma_120) or \
+                          (current_price < current_sma_40 and current_price > current_sma_120)
+
+            # Rule: If A OR B is true, stay FLAT (Position 0)
+            if condition_A or condition_B:
+                pos = 0 # Forced flat
+            else:
+                pos = base_pos_120 # Normal SMA 120 logic
+            
+            final_position.append(pos)
+
+        # 4. Apply final position and recalculate equity
+        df_combined['Final_Position'] = final_position
+        
+        # Shift position back 1 day to represent the position HELD for the day's return
+        df_combined['Held_Position'] = df_combined['Final_Position'].shift(1).fillna(0) 
+
+        # Recalculate Strategy Return based on the Held Position
+        df_combined['Daily_Return_Clean'] = df_combined['Daily_Return'].fillna(0)
+        df_combined['Strategy_Return'] = df_combined['Daily_Return_Clean'] * df_combined['Held_Position']
+        df_combined['Equity'] = (1 + df_combined['Strategy_Return']).cumprod()
+        
+        df_final = df_combined.copy() # Use the combined DF as the new final DF
+
+        # 5. Determine current status
+        current_position = df_final['Held_Position'].iloc[-1]
+        GLOBAL_STATUS = "LONG" if current_position == POSITION_SIZE else ("SHORT" if current_position == -POSITION_SIZE else "FLAT")
+
+        # 6. Create Plot
         GLOBAL_IMG_BASE64, GLOBAL_TOTAL_RETURN = create_plot(df_final, MAIN_SMA_WINDOW)
         
-        # 6. Populate Global Results
-        # Create summary table (simplified)
-        summary_df = df_final[['Close', f'SMA_{MAIN_SMA_WINDOW}', f'SMA_{COMPARE_SMA_WINDOW}', 'Position', 'Equity', 'Strategy_Return', 'Strategy_Return_40']].tail(10)
-        summary_df = summary_df.rename(columns={f'SMA_{MAIN_SMA_WINDOW}': 'SMA 120', f'SMA_{COMPARE_SMA_WINDOW}': 'SMA 40', 'Position': 'Pos Final', 'Strategy_Return': 'Ret Final', 'Strategy_Return_40': 'Ret 40'})
+        # 7. Populate Global Results
+        # Create summary table
+        summary_df = df_final[['Close', f'SMA_{MAIN_SMA_WINDOW}', f'SMA_{COMPARE_SMA_WINDOW}', 'Held_Position', 'Equity', 'Strategy_Return', 'Strategy_Return_40']].tail(10)
+        summary_df = summary_df.rename(columns={f'SMA_{MAIN_SMA_WINDOW}': 'SMA 120', f'SMA_{COMPARE_SMA_WINDOW}': 'SMA 40', 'Held_Position': 'Pos Final', 'Strategy_Return': 'Ret Final', 'Strategy_Return_40': 'Ret 40'})
         
         GLOBAL_SUMMARY_TABLE = summary_df.to_html(classes='table-auto w-full text-sm text-left', 
                                                   float_format=lambda x: f'{x:,.4f}') 
@@ -551,7 +601,7 @@ def analysis_dashboard():
             </div>
             
             <p class="mt-8 text-sm text-gray-600 border-t pt-4">
-                **Strategy:** Long if Close > SMA, Short if Close $\le$ SMA. The strategy runs continuously (no flat period). **The red background highlights where the price is within a 3% band of SMA 40 OR between SMA 40 and SMA 120.**
+                **Strategy:** Long if Close > SMA, Short if Close $\le$ SMA. **Flat Ambiguity Rule Applied:** Strategy is forced **FLAT (Pos 0)** if price is within 3% of SMA 40 OR between SMA 40 and SMA 120.
             </p>
         </div>
     </body>
