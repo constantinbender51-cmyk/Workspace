@@ -19,7 +19,7 @@ RESULTS_DIR = 'results'
 ANNUALIZATION_FACTOR = 365 # Used for annualizing Sharpe Ratio for daily data
 
 # --- Static Parameter ---
-STATIC_CENTER_DISTANCE = 0.030 # Set center distance to 2.0%
+STATIC_CENTER_DISTANCE = 0.040 # Set center distance to 2.0%
 
 # --- 1. Data Fetching Utilities ---
 
