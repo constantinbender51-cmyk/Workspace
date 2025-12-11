@@ -352,5 +352,212 @@ def create_plot(df, strategy_sma):
     # Save plot to buffer
     buf = io.BytesIO()
     plt.savefig(buf, format='png')
-    buf.seek(
+    buf.seek(0)
+    plt.close(fig)
+    
+    img_base64 = base64.b64encode(buf.read()).decode('utf-8')
+    return img_base64, final_strategy_return
+
+# --- Setup Function (Runs once at startup) ---
+
+def setup_analysis():
+    """Runs the full backtest analysis, SMA scan, and populates global variables."""
+    global GLOBAL_IMG_BASE64, GLOBAL_ANALYSIS_IMG, GLOBAL_SUMMARY_TABLE, GLOBAL_TOTAL_RETURN, GLOBAL_STATUS, GLOBAL_ERROR, GLOBAL_TOP_10_MD
+    
+    # --- Part 1: Data Fetching and Indicator Calculation ---
+    try:
+        # 1. API Fetch - Called only once
+        df_raw = fetch_binance_data(SYMBOL, TIMEFRAME, START_DATE)
+        
+        # 2. SLICING LOGIC: Slice to the first 70% of data
+        split_idx = int(len(df_raw) * 0.70)
+        df_raw_sliced = df_raw.iloc[:split_idx]
+        print(f"--- DATA SLICED: Running analysis on first {len(df_raw_sliced)} candles (70% of total) ---")
+        
+        # Check if the 70% slice is still long enough for the MAX_SMA_SCAN
+        if len(df_raw_sliced) < MAX_SMA_SCAN + 10:
+             raise ValueError(f"70% data slice is too short ({len(df_raw_sliced)} days). Max SMA {MAX_SMA_SCAN} requires more data.")
+        
+        # 3. Calculate necessary indicators on the sliced data
+        df_ind = calculate_indicators(df_raw_sliced, SMA_WINDOWS_PLOT)
+        
+    except Exception as e:
+        GLOBAL_ERROR = f"Fatal Data/Indicator Error: {e}\n\nTraceback:\n{traceback.format_exc()}"
+        print(f"--- FATAL ERROR DURING DATA SETUP ---\n{GLOBAL_ERROR}", file=sys.stderr)
+        return
+
+    # --- Part 2: Comprehensive Sharpe Ratio Scan (SMA 1 to MAX_SMA_SCAN) ---
+    try:
+        # Pass the 70% slice for the scan (no API calls in this function)
+        results_df = calculate_sharpe_ratios_scan(df_raw_sliced, min_sma=1, max_sma=MAX_SMA_SCAN)
+        
+        # Generate the visualization
+        GLOBAL_ANALYSIS_IMG = create_analysis_visualization(results_df.sort_values(by='SMA_Window', ascending=True))
+        
+        # Generate Markdown table for the Top 10 results (for console and reference)
+        top_10_df = results_df.sort_values(by='Sharpe_Ratio', ascending=False).head(10).copy()
+        top_10_df['Sharpe_Ratio'] = top_10_df['Sharpe_Ratio'].apply(lambda x: f'{x:.3f}')
+        top_10_df['Final_Equity'] = top_10_df['Final_Equity'].apply(lambda x: f'{x:.2f}x')
+        top_10_df = top_10_df.rename(columns={
+            'SMA_Window': 'SMA Window', 
+            'Sharpe_Ratio': 'Sharpe Ratio', 
+            'Final_Equity': 'Final Equity (x)'
+        })
+        
+        GLOBAL_TOP_10_MD = f"""
+## Top 10 SMA Crossover Strategies (Sharpe Ratio)
+{top_10_df.to_markdown(index=False)}
+"""
+        print(GLOBAL_TOP_10_MD)
+
+
+    except Exception as e:
+        GLOBAL_ERROR = f"Fatal Sharpe Scan Error: {e}\n\nTraceback:\n{traceback.format_exc()}"
+        print(f"--- FATAL ERROR DURING SHARPE SCAN ---\n{GLOBAL_ERROR}", file=sys.stderr)
+        return
+
+    # --- Part 3: Main Strategy Backtest (SMA 120) (No State Machine) ---
+    try:
+        MAIN_SMA_WINDOW = 120
+        COMPARE_SMA_WINDOW = 40
+        
+        # 1. Get SMA 120 Results (main strategy)
+        df_final = get_strategy_returns(df_ind, MAIN_SMA_WINDOW) # df_final has 'Position' and 'Strategy_Return'
+        
+        # 2. Get SMA 40 Returns for comparison table (no rule used)
+        df_40 = get_strategy_returns(df_ind, COMPARE_SMA_WINDOW)
+        
+        # 3. Merge SMA 40 returns and SMA 40 column for visualization/table
+        df_final['Strategy_Return_40'] = df_40['Strategy_Return']
+        df_final[f'SMA_{COMPARE_SMA_WINDOW}'] = df_ind[f'SMA_{COMPARE_SMA_WINDOW}'].iloc[MAX_SMA_SCAN:].copy()
+        
+        # 4. Determine current status
+        current_position = df_final['Position'].iloc[-1]
+        GLOBAL_STATUS = "LONG" if current_position == POSITION_SIZE else "SHORT"
+
+        # 5. Create Plot (Uses simplified plotting logic)
+        GLOBAL_IMG_BASE64, GLOBAL_TOTAL_RETURN = create_plot(df_final, MAIN_SMA_WINDOW)
+        
+        # 6. Populate Global Results
+        # Create summary table (simplified)
+        summary_df = df_final[['Close', f'SMA_{MAIN_SMA_WINDOW}', f'SMA_{COMPARE_SMA_WINDOW}', 'Position', 'Equity', 'Strategy_Return', 'Strategy_Return_40']].tail(10)
+        summary_df = summary_df.rename(columns={f'SMA_{MAIN_SMA_WINDOW}': 'SMA 120', f'SMA_{COMPARE_SMA_WINDOW}': 'SMA 40', 'Position': 'Pos Final', 'Strategy_Return': 'Ret Final', 'Strategy_Return_40': 'Ret 40'})
+        
+        GLOBAL_SUMMARY_TABLE = summary_df.to_html(classes='table-auto w-full text-sm text-left', 
+                                                  float_format=lambda x: f'{x:,.4f}') 
+        
+        print("--- ANALYSIS COMPLETE ---")
+
+    except Exception as e:
+        GLOBAL_ERROR = f"Fatal Main Backtest Error (SMA 120): {e}\n\nTraceback:\n{traceback.format_exc()}"
+        print(f"--- FATAL ERROR DURING MAIN BACKTEST ---\n{GLOBAL_ERROR}", file=sys.stderr)
+        return
+
+
+# --- Flask Web Server ---
+from flask import Flask, render_template_string
+
+app = Flask(__name__)
+
+@app.route('/')
+def analysis_dashboard():
+    """Renders the dashboard using pre-calculated global variables."""
+    
+    if GLOBAL_ERROR:
+        return render_template_string(f"""
+            <div class="p-8 text-center bg-white rounded-xl shadow-lg m-auto max-w-lg">
+                <h1 class="text-3xl font-bold text-red-600 mb-4">Analysis Failed at Startup</h1>
+                <p class="text-gray-700">The backtest and plotting could not be completed when the server started. This is usually due to a network error, Binance API limit, or missing data.</p>
+                <p class="mt-6 p-4 bg-red-100 text-red-800 rounded-lg text-left overflow-x-auto text-sm whitespace-pre-wrap"><strong>Details:</strong> {GLOBAL_ERROR}</p>
+            </div>
+        """)
+        
+    # HTML Template with Tailwind CSS for modern look and responsiveness
+    html_content = f"""
+    <!DOCTYPE html>
+    <html lang="en">
+    <head>
+        <meta charset="UTF-8">
+        <meta name="viewport" content="width=device-width, initial-scale=1.0">
+        <title>SMA Strategy Optimization</title>
+        <script src="https://cdn.tailwindcss.com"></script>
+        <style>
+            .table-auto th, .table-auto td {{
+                padding: 8px 12px;
+                border: 1px solid #e5e7eb;
+                text-align: right;
+            }}
+            .table-auto th {{
+                text-align: left;
+                background-color: #f3f4f6;
+                font-weight: 600;
+            }}
+            .data-source-tag {{
+                font-size: 0.75rem;
+                padding: 0.25rem 0.5rem;
+                border-radius: 0.5rem;
+                font-weight: bold;
+                margin-left: 1rem;
+            }}
+        </style>
+    </head>
+    <body class="bg-gray-100 p-4 sm:p-8 font-sans">
+        <div class="max-w-7xl mx-auto bg-white p-6 sm:p-10 rounded-xl shadow-2xl">
+            <h1 class="text-4xl font-extrabold text-blue-700 mb-6 border-b-4 border-blue-200 pb-2">
+                SMA Crossover Strategy Optimization Dashboard
+                <span class="data-source-tag bg-blue-200 text-blue-800">{GLOBAL_DATA_SOURCE}</span>
+            </h1>
+
+            <div class="grid md:grid-cols-3 gap-6 mb-8">
+                <div class="bg-blue-50 p-4 rounded-lg shadow-md">
+                    <p class="text-lg font-medium text-blue-600">Symbol</p>
+                    <p class="text-2xl font-bold text-blue-800">{SYMBOL} ({TIMEFRAME})</p>
+                </div>
+                <div class="bg-green-50 p-4 rounded-lg shadow-md">
+                    <p class="text-lg font-medium text-green-600">SMA 120 Strategy Return</p>
+                    <p class="text-2xl font-bold text-green-800">{GLOBAL_TOTAL_RETURN:.2f}%</p>
+                </div>
+                <div class="bg-red-50 p-4 rounded-lg shadow-md">
+                    <p class="text-lg font-medium text-red-600">Current Position (SMA 120)</p>
+                    <p class="text-2xl font-bold text-red-800">{GLOBAL_STATUS}</p>
+                </div>
+            </div>
+            
+            <div class="grid lg:grid-cols-2 gap-8 mb-8">
+                
+                <div class="order-1">
+                    <h2 class="text-2xl font-semibold text-gray-700 mb-4">Current Strategy (SMA 120)</h2>
+                    <div class="bg-gray-50 p-2 rounded-lg shadow-inner overflow-hidden">
+                        <img src="data:image/png;base64,{GLOBAL_IMG_BASE64}" alt="Trading Strategy Backtest Plot" class="w-full h-auto rounded-lg"/>
+                    </div>
+                </div>
+
+                <div class="order-2">
+                    <h2 class="text-2xl font-semibold text-gray-700 mb-4">SMA Optimization Scan (1 to {MAX_SMA_SCAN} on 70% Data)</h2>
+                    <div class="bg-gray-50 p-2 rounded-lg shadow-inner overflow-hidden">
+                        <img src="data:image/png;base64,{GLOBAL_ANALYSIS_IMG}" alt="SMA Sharpe Ratio and Equity Analysis Plot" class="w-full h-auto rounded-lg"/>
+                    </div>
+                </div>
+            </div>
+            
+            <h2 class="text-2xl font-semibold text-gray-700 mt-8 mb-4">Recent Strategy Performance & Comparison</h2>
+            <div class="overflow-x-auto rounded-lg shadow-md border border-gray-200">
+                {GLOBAL_SUMMARY_TABLE}
+            </div>
+            
+            <p class="mt-8 text-sm text-gray-600 border-t pt-4">
+                **Strategy:** Long if Close > SMA, Short if Close $\le$ SMA. The strategy runs continuously (no flat period). **The red background highlights where the price is between SMA 40 and SMA 120.**
+            </p>
+        </div>
+    </body>
+    </html>
+    """
+    return render_template_string(html_content)
+
+if __name__ == '__main__':
+    # 1. Run the entire data analysis and calculation process once at startup
+    setup_analysis()
+    
+    # 2. Start the Flask server to serve the pre-calculated results
+    app.run(host='0.0.0.0', port=PORT, debug=True, use_reloader=False)
 
