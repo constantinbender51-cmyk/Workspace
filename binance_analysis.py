@@ -13,22 +13,22 @@ import traceback
 SYMBOL = 'BTC/USDT'
 TIMEFRAME = '1d' # Daily candles
 START_DATE = '2018-01-01'
-SMA_WINDOWS_PLOT = [120] 
-DC_WINDOW = 20  # Donchian Channel Period
-POSITION_SIZE = 1  # Unit of asset traded (+1 for Long, -1 for Short)
+# SMAs required for the new position logic
+REQUIRED_SMAS = [40, 120, 400] 
+DC_WINDOW = 20  # Donchian Channel Period (Unused but kept)
+POSITION_SIZE = 1  # Unit of asset traded 
 PORT = 8080
 ANNUAL_TRADING_DAYS = 252 # Used for annualizing Sharpe Ratio
 MAX_SMA_SCAN = 400 # Maximum SMA for the scan and the global analysis start point
 SCAN_DELAY = 5.0 # Seconds delay after every 50 SMA calculations to respect API limits
-BAND_PERCENTAGE = 0.03 # 3% band for SMA 365 visualization
 
 # --- Global Variables to store results (populated once at startup) ---
 GLOBAL_DATA_SOURCE = "Binance (CCXT)"
-GLOBAL_IMG_BASE64 = ""      # Image for SMA 120 Strategy Plot
+GLOBAL_IMG_BASE64 = ""      # Image for Strategy Plot
 GLOBAL_ANALYSIS_IMG = ""    # Image for Sharpe/Equity Scan Plot
 GLOBAL_SUMMARY_TABLE = ""
 GLOBAL_TOTAL_RETURN = 0.0
-GLOBAL_SHARPE = 0.0         # Annualized Sharpe Ratio for SMA 120 strategy
+GLOBAL_SHARPE = 0.0         # Annualized Sharpe Ratio for the Ternary strategy
 GLOBAL_STATUS = "PENDING"
 GLOBAL_ERROR = None
 GLOBAL_TOP_10_MD = ""       # Markdown for the top 10 results
@@ -79,7 +79,7 @@ def fetch_binance_data(symbol, timeframe, start_date):
             print(f"An error occurred during CCXT fetching: {e}")
             raise 
             
-    # Check minimum data needed for the longest SMA scan (MAX_SMA_SCAN)
+    # Check minimum data needed for the longest SMA scan (MAX_SMA_SCAN = 400)
     if len(all_ohlcv) < MAX_SMA_SCAN + 10: 
         raise ValueError(f"Not enough data fetched. Required >{MAX_SMA_SCAN + 10}, received {len(all_ohlcv)}.")
         
@@ -95,18 +95,13 @@ def fetch_binance_data(symbol, timeframe, start_date):
 # --- Indicator Calculation ---
 
 def calculate_indicators(df, windows_to_calculate):
-    """Calculates specified SMAs and Donchian Channels. Ensures 120 and 365 are present."""
-    # Ensure 120 and 365 are calculated for the core strategy and plotting
-    required_smas = set(windows_to_calculate + [120, 365])
+    """Calculates specified SMAs and Donchian Channels. Ensures required SMAs are present."""
+    # Ensure all SMAs needed for the position logic and scan are calculated
+    all_smas = set(windows_to_calculate + REQUIRED_SMAS)
     
-    for window in required_smas:
+    for window in all_smas:
         if f'SMA_{window}' not in df.columns:
             df[f'SMA_{window}'] = df['Close'].rolling(window=window).mean()
-    
-    # Calculate D-Channels (not plotted, but useful if the strategy changes)
-    df['DC_Upper'] = df['High'].rolling(window=DC_WINDOW).max()
-    df['DC_Lower'] = df['Low'].rolling(window=DC_WINDOW).min()
-    df['DC_Mid'] = (df['DC_Upper'] + df['DC_Lower']) / 2
     
     return df
 
@@ -114,9 +109,8 @@ def calculate_indicators(df, windows_to_calculate):
 
 def get_strategy_returns(df_raw, sma_window):
     """
-    Calculates returns for a Long/Short strategy based on a single given SMA window.
-    Enforces a global start time for equity/Sharpe calculation (MAX_SMA_SCAN day).
-    *** Operates only on the in-memory df_raw (no API calls) ***
+    Calculates returns for a simple Long/Short strategy based on a single given SMA window.
+    Used for the initial Sharpe Scan (1 to 400).
     """
     df = df_raw.copy()
     sma_col = f'SMA_{sma_window}'
@@ -125,7 +119,7 @@ def get_strategy_returns(df_raw, sma_window):
     if sma_col not in df.columns:
         df[sma_col] = df['Close'].rolling(window=sma_window).mean()
     
-    # 2. Strategy Logic: Long (+1) if Close > SMA, Short (-1) if Close <= SMA (Continuous trading)
+    # 2. Strategy Logic: Long (+1) if Close > SMA, Short (-1) if Close <= SMA
     df.loc[:, 'Next_Day_Position'] = np.where(df['Close'] > df[sma_col], 
                                               POSITION_SIZE,      # +1 for Long
                                               -POSITION_SIZE)     # -1 for Short
@@ -141,19 +135,14 @@ def get_strategy_returns(df_raw, sma_window):
     df.loc[:, 'Strategy_Return'] = daily_returns_clean * df['Position']
     
     # 4. Enforce Global Start for Tradable Period (Index MAX_SMA_SCAN)
-    
-    # Returns/Equity must start on the first day the longest SMA decision is fully informed (Day MAX_SMA_SCAN + 1).
     tradable_start_index = MAX_SMA_SCAN 
     
     if len(df) <= tradable_start_index:
         return pd.DataFrame() 
         
-    # Slice the DataFrame to the tradable period (Day 401 onwards)
     df_tradable = df.iloc[tradable_start_index:].copy()
     
     # 5. Calculate Cumulative Equity (starting fresh from 1.0)
-    
-    # Strategy Equity: Calculated using geometric return.
     strategy_returns_tradable = df_tradable['Strategy_Return']
     df_tradable.loc[:, 'Equity'] = (1 + strategy_returns_tradable).cumprod()
     
@@ -161,6 +150,51 @@ def get_strategy_returns(df_raw, sma_window):
     start_price_bh = df_tradable['Close'].iloc[0]
     df_tradable.loc[:, 'Buy_Hold_Equity'] = df_tradable['Close'] / start_price_bh
 
+    return df_tradable
+
+# --- Ternary Consensus Position Calculation (New Core Logic) ---
+
+def calculate_ternary_position(df_ind_raw):
+    """
+    Calculates the final position based on consensus of SMA 40, 120, and 400.
+    
+    Final Position = (Signal_40 + Signal_120 + Signal_400) / 3
+    Where Signal = +1 (price > SMA) or -1 (price <= SMA).
+    """
+    df = df_ind_raw.copy()
+    
+    # Calculate Signals: +1 for Bullish, -1 for Bearish
+    df['Signal_40'] = np.where(df['Close'] > df['SMA_40'], 1, -1)
+    df['Signal_120'] = np.where(df['Close'] > df['SMA_120'], 1, -1)
+    df['Signal_400'] = np.where(df['Close'] > df['SMA_400'], 1, -1)
+    
+    # Calculate Final Position (as a fraction of POSITION_SIZE=1)
+    df['Final_Position'] = (df['Signal_40'] + df['Signal_120'] + df['Signal_400']) / 3
+    
+    # Position HELD for the day t return is based on the decision from day t-1.
+    df['Held_Position'] = df['Final_Position'].shift(1).fillna(0)
+    
+    # Calculate Strategy Return
+    df['Daily_Return'] = df['Close'].pct_change()
+    daily_returns_clean = df['Daily_Return'].fillna(0)
+    df['Strategy_Return'] = daily_returns_clean * df['Held_Position']
+    
+    # Enforce Global Start for Tradable Period (Index MAX_SMA_SCAN)
+    tradable_start_index = MAX_SMA_SCAN 
+    
+    if len(df) <= tradable_start_index:
+        return pd.DataFrame() 
+        
+    df_tradable = df.iloc[tradable_start_index:].copy()
+    
+    # Calculate Cumulative Equity (starting fresh from 1.0)
+    strategy_returns_tradable = df_tradable['Strategy_Return']
+    df_tradable.loc[:, 'Equity'] = (1 + strategy_returns_tradable).cumprod()
+    
+    # Buy & Hold Benchmark
+    start_price_bh = df_tradable['Close'].iloc[0]
+    df_tradable.loc[:, 'Buy_Hold_Equity'] = df_tradable['Close'] / start_price_bh
+    
     return df_tradable
 
 # --- Comprehensive SMA Scan and Sharpe Ratio Calculation ---
@@ -171,10 +205,10 @@ def calculate_sharpe_ratios_scan(df_raw, min_sma, max_sma):
     """
     results = []
     
-    print(f"\n--- Starting SMA Scan (Sharpe Ratio Calculation from SMA {min_sma} to {max_sma}) ---")
+    print(f"\n--- Starting SMA Scan (SMA {min_sma} to {max_sma}) ---")
     
     for sma_w in range(min_sma, max_sma + 1):
-        # Passes the sliced data (no API call)
+        # We use the simple, individual SMA strategy returns here for the scan chart
         df_strategy = get_strategy_returns(df_raw, sma_w)
         
         if df_strategy.empty:
@@ -182,7 +216,6 @@ def calculate_sharpe_ratios_scan(df_raw, min_sma, max_sma):
             
         returns = df_strategy['Strategy_Return']
             
-        # Standard deviation check ensures calculation stability
         std_dev_daily_return = returns.std()
         
         if std_dev_daily_return > 0:
@@ -210,12 +243,13 @@ def calculate_sharpe_ratios_scan(df_raw, min_sma, max_sma):
     print(f"--- SMA Scan Complete. Found {len(results_df)} valid windows. ---")
     return results_df
 
-# --- Analysis Visualization (Heatmap Replacement) ---
+# --- Analysis Visualization (Shared) ---
 
 def create_analysis_visualization(results_df):
     """
     Generates a figure with two plots: Sharpe Ratio vs. SMA and Final Equity vs. SMA.
     """
+    # ... (Visualization function remains the same, MAX_SMA_SCAN = 400) ...
     fig, axes = plt.subplots(2, 1, figsize=(10, 8), sharex=True)
     
     # --- Top Plot: Sharpe Ratio ---
@@ -266,25 +300,21 @@ def create_analysis_visualization(results_df):
     img_base64 = base64.b64encode(buf.read()).decode('utf-8')
     return img_base64
 
-# --- Plotting Main Strategy (SMA 120) ---
+# --- Plotting Ternary Strategy ---
 
-def create_plot(df, strategy_sma):
-    """Generates the main SMA 120 strategy plot (Close Price + Equity Curve)
-       and highlights days where price is between 120/365 SMA OR within 3% of 365 SMA."""
+def create_plot(df):
+    """Generates the main strategy plot (Close Price + Equity Curve)."""
     
     df_plot = df.copy() 
-    sma_120_col = f'SMA_{strategy_sma}'
-    sma_365_col = 'SMA_365'
-
+    
     fig, axes = plt.subplots(2, 1, figsize=(10, 4), sharex=True, 
                              gridspec_kw={'height_ratios': [3, 2]})
     
-    # --- Price and SMA (Top Panel) ---
+    # --- Price and SMAs (Top Panel) ---
     ax1 = axes[0]
     
-    # 1. Background Coloring: Strategy Position (+1 or -1) - Continuous Trading
-    pos_series = df_plot['Position'] 
-    
+    # 1. Background Coloring: Strategy Position (+/- 1.0, 0.667, 0.333, or 0)
+    pos_series = df_plot['Held_Position'] 
     change_indices = pos_series.index[pos_series.diff() != 0]
     segment_starts = pd.Index([pos_series.index[0]]).append(change_indices)
     segment_ends = change_indices.append(pd.Index([pos_series.index[-1]]))
@@ -295,48 +325,36 @@ def create_plot(df, strategy_sma):
         color = None
         alpha = 0.08
         
-        if current_pos == POSITION_SIZE:
+        if current_pos > 0:
             color = 'green'
-        elif current_pos == -POSITION_SIZE:
-            color = 'red'
+            # Increase alpha slightly for stronger positions
+            if current_pos == 1.0: alpha = 0.15 
+            elif current_pos == 0.6666666666666666: alpha = 0.1
             
+        elif current_pos < 0:
+            color = 'red'
+            if current_pos == -1.0: alpha = 0.15 
+            elif current_pos == -0.6666666666666666: alpha = 0.1
+        
+        # Note: Position 0.0 is light grey (default background alpha)
+        
         if color:
             end_adjusted = end + pd.Timedelta(days=1)
             ax1.axvspan(start, end_adjusted, facecolor=color, alpha=alpha, zorder=0)
-
-    # 2. Highlight Ambiguous Days (Red Overlay)
     
-    # Condition A: Price is strictly between SMA 120 and SMA 365
-    condition_A = (
-        (df_plot['Close'] > df_plot[sma_120_col]) & (df_plot['Close'] < df_plot[sma_365_col]) |
-        (df_plot['Close'] < df_plot[sma_120_col]) & (df_plot['Close'] > df_plot[sma_365_col])
-    )
-    
-    # Condition B: Price within 3% band of SMA 365
-    condition_B = np.abs((df_plot['Close'] - df_plot[sma_365_col]) / df_plot[sma_365_col]) <= BAND_PERCENTAGE
-    
-    # Combined Condition (A OR B)
-    combined_days = df_plot[condition_A | condition_B].index
-    
-    # Draw a distinct red marker on these specific days
-    for day in combined_days:
-        # Use a strong red background for emphasis
-        ax1.axvspan(day, day + pd.Timedelta(days=1), facecolor='#DC143C', alpha=0.3, zorder=1) 
-    
-    # 3. Price and SMAs 
+    # 2. Price and SMAs 
     ax1.plot(df_plot.index, df_plot['Close'], label='Price (Close)', color='#1f77b4', linewidth=1.5, alpha=0.9, zorder=2)
-    ax1.plot(df_plot.index, df_plot[sma_120_col], 
-             label=f'SMA {strategy_sma}', 
-             color='#FF6347', linestyle='-', linewidth=2.5, zorder=2) 
-    ax1.plot(df_plot.index, df_plot[sma_365_col], 
-             label=f'SMA 365', 
-             color='#FFA07A', linestyle='--', linewidth=1.5, zorder=2) 
+    
+    # Plotting the three SMAs
+    ax1.plot(df_plot.index, df_plot['SMA_40'], label='SMA 40', color='#00CC00', linestyle=':', linewidth=1.5, alpha=0.7, zorder=2) 
+    ax1.plot(df_plot.index, df_plot['SMA_120'], label='SMA 120', color='#FF6347', linestyle='-', linewidth=2.5, zorder=2) 
+    ax1.plot(df_plot.index, df_plot['SMA_400'], label='SMA 400', color='#FFA07A', linestyle='--', linewidth=1.5, alpha=0.7, zorder=2) 
     
     ax1.set_ylabel('Price (Log Scale)', fontsize=10)
     ax1.grid(True, linestyle='--', alpha=0.6)
     ax1.legend(loc='upper left', fontsize=8)
     ax1.set_yscale('log')
-    ax1.set_title(f'SMA {strategy_sma} Crossover Strategy (Red Highlight: Ambiguity Period)', fontsize=12)
+    ax1.set_title(f'Ternary SMA Position Sizing (40/120/400 Consensus)', fontsize=12)
 
     # --- Equity Plot (Bottom Panel) ---
     ax2 = axes[1]
@@ -346,7 +364,7 @@ def create_plot(df, strategy_sma):
     plotted_returns = df_plot['Strategy_Return']
     sharpe_plotted = (plotted_returns.mean() / plotted_returns.std()) * np.sqrt(ANNUAL_TRADING_DAYS)
     
-    ax2.plot(df_plot.index, df_plot['Equity'], label=f'Strategy Equity (Sharpe: {sharpe_plotted:.2f})', color='blue', linewidth=3)
+    ax2.plot(df_plot.index, df_plot['Equity'], label=f'Strategy Equity (Sharpe: {sharpe_plotted:.3f})', color='blue', linewidth=3)
     ax2.plot(df_plot['Buy_Hold_Equity'], label='Buy & Hold Benchmark', color='gray', linestyle='--', alpha=0.7)
     
     ax2.set_xlabel('Date', fontsize=10)
@@ -385,8 +403,8 @@ def setup_analysis():
         if len(df_raw_sliced) < MAX_SMA_SCAN + 10:
              raise ValueError(f"70% data slice is too short ({len(df_raw_sliced)} days). Max SMA {MAX_SMA_SCAN} requires more data.")
         
-        # 3. Calculate necessary indicators on the sliced data (120 and 365)
-        df_ind = calculate_indicators(df_raw_sliced, SMA_WINDOWS_PLOT)
+        # 3. Calculate necessary indicators (40, 120, 400 for strategy logic)
+        df_ind = calculate_indicators(df_raw_sliced, [])
         
     except Exception as e:
         GLOBAL_ERROR = f"Fatal Data/Indicator Error: {e}\n\nTraceback:\n{traceback.format_exc()}"
@@ -423,52 +441,47 @@ def setup_analysis():
         print(f"--- FATAL ERROR DURING SHARPE SCAN ---\n{GLOBAL_ERROR}", file=sys.stderr)
         return
 
-    # --- Part 3: Main Strategy Backtest (SMA 120) - Continuous Trading ---
+    # --- Part 3: Ternary Strategy Backtest (40, 120, 400 Consensus) ---
     try:
-        MAIN_SMA_WINDOW = 120
-        COMPARE_SMA_WINDOW = 365
         
-        # 1. Get SMA 120 Results (main strategy - continuous trading)
-        # This function handles the base long/short signal and calculates the returns/equity
-        df_final = get_strategy_returns(df_ind, MAIN_SMA_WINDOW) 
+        # 1. Get Ternary Position Results
+        df_final = calculate_ternary_position(df_ind)
         
-        # 2. Get SMA 365 Returns for comparison table
-        df_365 = get_strategy_returns(df_ind, COMPARE_SMA_WINDOW)
-        
-        # 3. Merge SMA 365 returns and SMA 365 column for visualization/table
-        # The base SMA 120 results ('Position', 'Strategy_Return', 'Equity') are used directly.
-        
-        # Add SMA 365 data to df_final (aligned using MAX_SMA_SCAN index offset)
-        df_final['Strategy_Return_365'] = df_365['Strategy_Return']
-        df_final[f'SMA_{COMPARE_SMA_WINDOW}'] = df_ind[f'SMA_{COMPARE_SMA_WINDOW}'].iloc[MAX_SMA_SCAN:].copy()
-        
-        # 4. Calculate final Sharpe Ratio for the SMA 120 strategy
+        # 2. Calculate final Sharpe Ratio for the Ternary strategy
         returns = df_final['Strategy_Return']
         if returns.std() > 0:
             GLOBAL_SHARPE = (returns.mean() / returns.std()) * np.sqrt(ANNUAL_TRADING_DAYS)
         else:
             GLOBAL_SHARPE = 0.0
 
-        # 5. Determine current status
-        current_position = df_final['Position'].iloc[-1]
-        GLOBAL_STATUS = "LONG" if current_position == POSITION_SIZE else "SHORT"
-
-        # 6. Create Plot (Uses simplified plotting logic)
-        GLOBAL_IMG_BASE64, GLOBAL_TOTAL_RETURN = create_plot(df_final, MAIN_SMA_WINDOW)
+        # 3. Determine current status
+        current_position = df_final['Held_Position'].iloc[-1]
         
-        # 7. Populate Global Results
-        # Create summary table (simplified)
-        summary_df = df_final[['Close', f'SMA_{MAIN_SMA_WINDOW}', f'SMA_{COMPARE_SMA_WINDOW}', 'Position', 'Equity', 'Strategy_Return', 'Strategy_Return_365']].tail(10)
-        summary_df = summary_df.rename(columns={f'SMA_{MAIN_SMA_WINDOW}': 'SMA 120', f'SMA_{COMPARE_SMA_WINDOW}': 'SMA 365', 'Position': 'Pos Final', 'Strategy_Return': 'Ret Final', 'Strategy_Return_365': 'Ret 365'})
+        if current_position == 1.0: GLOBAL_STATUS = "LONG (Full: +1.00)"
+        elif current_position == 0.6666666666666666: GLOBAL_STATUS = "LONG (Partial: +0.67)"
+        elif current_position == 0.3333333333333333: GLOBAL_STATUS = "LONG (Minimal: +0.33)"
+        elif current_position == 0.0: GLOBAL_STATUS = "FLAT (0.00)"
+        elif current_position == -0.3333333333333333: GLOBAL_STATUS = "SHORT (Minimal: -0.33)"
+        elif current_position == -0.6666666666666666: GLOBAL_STATUS = "SHORT (Partial: -0.67)"
+        elif current_position == -1.0: GLOBAL_STATUS = "SHORT (Full: -1.00)"
+        else: GLOBAL_STATUS = "Error"
+
+        # 4. Create Plot
+        GLOBAL_IMG_BASE64, GLOBAL_TOTAL_RETURN = create_plot(df_final)
+        
+        # 5. Populate Global Results
+        # Create summary table
+        summary_df = df_final[['Close', 'SMA_40', 'SMA_120', 'SMA_400', 'Held_Position', 'Equity', 'Strategy_Return']].tail(10)
+        summary_df = summary_df.rename(columns={'Held_Position': 'Pos Held', 'Strategy_Return': 'Ret Final'})
         
         GLOBAL_SUMMARY_TABLE = summary_df.to_html(classes='table-auto w-full text-sm text-left', 
                                                   float_format=lambda x: f'{x:,.4f}') 
         
-        print(f"--- Strategy Sharpe Ratio: {GLOBAL_SHARPE:.3f} ---")
+        print(f"--- Ternary Strategy Sharpe Ratio: {GLOBAL_SHARPE:.3f} ---")
         print("--- ANALYSIS COMPLETE ---")
 
     except Exception as e:
-        GLOBAL_ERROR = f"Fatal Main Backtest Error (SMA 120): {e}\n\nTraceback:\n{traceback.format_exc()}"
+        GLOBAL_ERROR = f"Fatal Main Backtest Error: {e}\n\nTraceback:\n{traceback.format_exc()}"
         print(f"--- FATAL ERROR DURING MAIN BACKTEST ---\n{GLOBAL_ERROR}", file=sys.stderr)
         return
 
@@ -498,7 +511,7 @@ def analysis_dashboard():
     <head>
         <meta charset="UTF-8">
         <meta name="viewport" content="width=device-width, initial-scale=1.0">
-        <title>SMA Strategy Optimization</title>
+        <title>SMA Ternary Strategy</title>
         <script src="https://cdn.tailwindcss.com"></script>
         <style>
             .table-auto th, .table-auto td {{
@@ -523,7 +536,7 @@ def analysis_dashboard():
     <body class="bg-gray-100 p-4 sm:p-8 font-sans">
         <div class="max-w-7xl mx-auto bg-white p-6 sm:p-10 rounded-xl shadow-2xl">
             <h1 class="text-4xl font-extrabold text-blue-700 mb-6 border-b-4 border-blue-200 pb-2">
-                SMA Crossover Strategy Optimization Dashboard
+                Ternary SMA Position Sizing Dashboard
                 <span class="data-source-tag bg-blue-200 text-blue-800">{GLOBAL_DATA_SOURCE}</span>
             </h1>
 
@@ -533,11 +546,11 @@ def analysis_dashboard():
                     <p class="text-2xl font-bold text-blue-800">{SYMBOL} ({TIMEFRAME})</p>
                 </div>
                 <div class="bg-yellow-50 p-4 rounded-lg shadow-md">
-                    <p class="text-lg font-medium text-yellow-600">SMA 120 Sharpe Ratio</p>
+                    <p class="text-lg font-medium text-yellow-600">Strategy Sharpe Ratio</p>
                     <p class="text-2xl font-bold text-yellow-800">{GLOBAL_SHARPE:.3f}</p>
                 </div>
                 <div class="bg-green-50 p-4 rounded-lg shadow-md">
-                    <p class="text-lg font-medium text-green-600">SMA 120 Strategy Return</p>
+                    <p class="text-lg font-medium text-green-600">Total Strategy Return</p>
                     <p class="text-2xl font-bold text-green-800">{GLOBAL_TOTAL_RETURN:.2f}%</p>
                 </div>
                 <div class="bg-red-50 p-4 rounded-lg shadow-md">
@@ -549,7 +562,7 @@ def analysis_dashboard():
             <div class="grid lg:grid-cols-2 gap-8 mb-8">
                 
                 <div class="order-1">
-                    <h2 class="text-2xl font-semibold text-gray-700 mb-4">Current Strategy (SMA 120 vs 365)</h2>
+                    <h2 class="text-2xl font-semibold text-gray-700 mb-4">Ternary Position Strategy (40, 120, 400 SMA)</h2>
                     <div class="bg-gray-50 p-2 rounded-lg shadow-inner overflow-hidden">
                         <img src="data:image/png;base64,{GLOBAL_IMG_BASE64}" alt="Trading Strategy Backtest Plot" class="w-full h-auto rounded-lg"/>
                     </div>
@@ -563,13 +576,13 @@ def analysis_dashboard():
                 </div>
             </div>
             
-            <h2 class="text-2xl font-semibold text-gray-700 mt-8 mb-4">Recent Strategy Performance & Comparison</h2>
+            <h2 class="text-2xl font-semibold text-gray-700 mt-8 mb-4">Recent Ternary Strategy Data</h2>
             <div class="overflow-x-auto rounded-lg shadow-md border border-gray-200">
                 {GLOBAL_SUMMARY_TABLE}
             </div>
             
             <p class="mt-8 text-sm text-gray-600 border-t pt-4">
-                **Strategy:** Simple SMA 120 Crossover (continuous long/short). **The red background highlights where the price is between SMA 120/365 OR within a 3% band of SMA 365.**
+                **Strategy Logic:** Position size is determined by the consensus score of three SMAs (40, 120, 400). Each SMA contributes +1 if Price > SMA or -1 if Price $\le$ SMA. The final position is the sum divided by 3 (e.g., three bullish signals = +1.0).
             </p>
         </div>
     </body>
