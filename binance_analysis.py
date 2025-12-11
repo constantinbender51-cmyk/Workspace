@@ -13,7 +13,9 @@ START_DATE = '2018-01-01'
 TIME_FRAME = '1d'
 
 SMA_LONG_TERM = 400
-SMA_SHORT_TERM = 120
+SMA_MID_TERM = 120
+SMA_FAST = 40 # New SMA for pullback logic
+PROXIMITY_THRESHOLD = 0.02 # 2%
 
 # --- 2. DATA FETCHING (Using CCXT for Binance) ---
 
@@ -77,51 +79,74 @@ def get_data(symbol, since_date_str='2018-01-01'):
 
 def run_backtest(df):
     """
-    Calculates SMAs, implements the trading strategy with strict regime rules,
-    and computes metrics.
+    Calculates SMAs, implements the complex trading strategy with strict regime rules 
+    using lagged (yesterday's) data for today's signal, and computes metrics.
     """
     print("Running backtest and calculating SMAs...")
     
     # Calculate Simple Moving Averages
     df[f'SMA_{SMA_LONG_TERM}'] = df['close'].rolling(window=SMA_LONG_TERM).mean()
-    df[f'SMA_{SMA_SHORT_TERM}'] = df['close'].rolling(window=SMA_SHORT_TERM).mean()
+    df[f'SMA_{SMA_MID_TERM}'] = df['close'].rolling(window=SMA_MID_TERM).mean()
+    df[f'SMA_{SMA_FAST}'] = df['close'].rolling(window=SMA_FAST).mean()
 
     # Drop initial NaN values created by rolling windows (first 400 days)
     df = df.dropna()
 
+    # --- Prepare Lagged Data (Yesterday's Data) ---
+    # We explicitly shift the data used for signal generation by one day.
+    close_lag = df['close'].shift(1)
+    sma_long_lag = df[f'SMA_{SMA_LONG_TERM}'].shift(1)
+    sma_mid_lag = df[f'SMA_{SMA_MID_TERM}'].shift(1)
+    sma_fast_lag = df[f'SMA_{SMA_FAST}'].shift(1)
+    
     # --- 3. CREATE DATASETS (Regimes for REPORTING and LOGIC) ---
     
-    # Bullish Regime: Price > 400 SMA
+    # Bullish Regime for Reporting: Price > 400 SMA
     df_bull = df[df['close'] > df[f'SMA_{SMA_LONG_TERM}']].copy()
     
-    # Bearish Regime: Price < 400 SMA
+    # Bearish Regime for Reporting: Price < 400 SMA
     df_bear = df[df['close'] < df[f'SMA_{SMA_LONG_TERM}']].copy()
 
-    # --- 4. IMPLEMENT STRATEGY LOGIC (Regime-filtered 120-Day SMA) ---
+    # --- 4. IMPLEMENT STRATEGY LOGIC (Regime-filtered and Pullback-controlled) ---
 
     # Initialize Signal column
     df['Signal'] = 0.0
+    
+    # --- Define Conditions based on YESTERDAY's data ---
+    
+    # REGIME CONDITION: Is it a Bullish Regime? (Price > 400 SMA)
+    BULL_REGIME = (close_lag > sma_long_lag)
+    
+    # PRIMARY LONG CONDITION: Price > 120 SMA
+    LONG_SIGNAL = (close_lag > sma_mid_lag)
+    
+    # PULLBACK CONDITION (The exception): 40 SMA is above price
+    PULLBACK_DETECTED = (sma_fast_lag > close_lag)
+    
+    # PROXIMITY CONDITION (for the exception): Price is within 2% of 120 SMA
+    PRICE_NEAR_120SMA = (np.abs(close_lag - sma_mid_lag) / sma_mid_lag <= PROXIMITY_THRESHOLD)
 
-    # 1. Bullish Regime: Only allow LONG trades
-    # Rule: If Price > 400 SMA AND Price > 120 SMA -> LONG (1.0)
-    df.loc[(df['close'] > df[f'SMA_{SMA_LONG_TERM}']) & 
-           (df['close'] > df[f'SMA_{SMA_SHORT_TERM}']), 'Signal'] = 1.0
+    # --- Apply Logic to Signal ---
 
-    # 2. Bearish Regime: Only allow SHORT trades
+    # 1. Bullish Regime Logic
+    # Case A: Standard Bull (No pullback or price is above 40 SMA) -> LONG if Price > 120 SMA
+    df.loc[BULL_REGIME & (~PULLBACK_DETECTED) & LONG_SIGNAL, 'Signal'] = 1.0
+    
+    # Case B: Pullback Detected (Price < 40 SMA) -> LONG only if Price is NEAR 120 SMA AND Price > 120 SMA
+    df.loc[BULL_REGIME & PULLBACK_DETECTED & PRICE_NEAR_120SMA & LONG_SIGNAL, 'Signal'] = 1.0
+    
+    # 2. Bearish Regime Logic (Unchanged)
     # Rule: If Price < 400 SMA AND Price < 120 SMA -> SHORT (-1.0)
-    df.loc[(df['close'] < df[f'SMA_{SMA_LONG_TERM}']) & 
-           (df['close'] < df[f'SMA_{SMA_SHORT_TERM}']), 'Signal'] = -1.0
-           
-    # Note: When in a regime but the short-term signal is against the trade
-    # (e.g., Price > 400 SMA but Price < 120 SMA), the signal remains 0.0 (flat).
+    df.loc[(close_lag < sma_long_lag) & 
+           (close_lag < sma_mid_lag), 'Signal'] = -1.0
 
     # Calculate Daily Returns
     df['Daily_Return'] = df['close'].pct_change()
 
-    # Calculate Strategy Returns (Shift signals to act on the next day's return)
-    df['Strategy_Return'] = df['Signal'].shift(1) * df['Daily_Return']
+    # Calculate Strategy Returns: Signal is already lagged, apply directly to today's return.
+    df['Strategy_Return'] = df['Signal'] * df['Daily_Return']
 
-    # Drop the first row introduced by pct_change and shift
+    # Drop the first few rows (caused by SMAs, pct_change, and signal shifts)
     df = df.dropna()
 
     # Calculate Cumulative Returns
@@ -129,35 +154,26 @@ def run_backtest(df):
     df['Cumulative_BuyHold_Return'] = (1 + df['Daily_Return']).cumprod()
 
 
-    # --- 5. METRICS CALCULATION ---
+    # --- 5. METRICS CALCULATION (Unchanged) ---
     
-    # Total Number of Trading Days
     total_days = len(df)
-    
-    # Annualized Returns (Using 365 days for crypto)
     annualized_returns = (df['Cumulative_Strategy_Return'].iloc[-1] ** (365 / total_days)) - 1
-    
-    # Sharpe Ratio (Using risk-free rate of 0)
     daily_volatility = df['Strategy_Return'].std()
     sharpe_ratio = (df['Strategy_Return'].mean() / daily_volatility) * np.sqrt(365)
-    
-    # Max Drawdown
     cumulative_max = df['Cumulative_Strategy_Return'].cummax()
     drawdown = cumulative_max - df['Cumulative_Strategy_Return']
     max_drawdown = drawdown.max()
     
-    # Trades and Win Rate
     df['Position'] = df['Signal'].replace(0, method='ffill').fillna(0)
     
     trades = []
     trade_open = None
     
-    # Identify trades by position change
     for index, row in df.iterrows():
         current_pos = row['Position']
         prev_pos = df['Position'].shift(1).loc[index]
 
-        # Entry condition (position changes from 0 to 1 or -1)
+        # Entry condition
         if current_pos != 0 and prev_pos == 0:
             if trade_open is not None:
                  trades.append({
@@ -169,7 +185,7 @@ def run_backtest(df):
                 })
             trade_open = {'entry_date': index, 'entry_price': row['close'], 'position': current_pos}
 
-        # Exit condition (position changes from 1/-1 to 0 or switches direction)
+        # Exit condition 
         elif current_pos == 0 and prev_pos != 0 and trade_open is not None:
              pnl = (row['close'] / trade_open['entry_price'] - 1) * trade_open['position']
              trades.append({
@@ -194,8 +210,6 @@ def run_backtest(df):
     total_trades = len(trades)
     winning_trades = sum(1 for t in trades if t['win'])
     win_rate = winning_trades / total_trades if total_trades > 0 else 0
-    
-    # Net Profit/Loss (Final Strategy Return - 1)
     net_pnl = df['Cumulative_Strategy_Return'].iloc[-1] - 1
     
     metrics = {
@@ -212,10 +226,8 @@ def run_backtest(df):
         "Win Rate": f"{win_rate * 100:.2f}%",
     }
     
-    # Prepare trade list for output
     trade_list_output = [f"{t['exit_date'].strftime('%Y-%m-%d')}: {t['position']} trade ended. PnL: {t['pnl'] * 100:.2f}%" for t in trades]
     
-    # Prepare the two segregated datasets (for listing)
     bullish_days = len(df_bull)
     bearish_days = len(df_bear)
 
@@ -238,7 +250,8 @@ def generate_plot(df):
     ax1 = axes[0]
     ax1.plot(df.index, df['close'], label='Close Price', color='#4A90E2', linewidth=1)
     ax1.plot(df.index, df[f'SMA_{SMA_LONG_TERM}'], label=f'{SMA_LONG_TERM}-Day SMA', color='#F5A623', linestyle='--')
-    ax1.plot(df.index, df[f'SMA_{SMA_SHORT_TERM}'], label=f'{SMA_SHORT_TERM}-Day SMA', color='#7ED321')
+    ax1.plot(df.index, df[f'SMA_{SMA_MID_TERM}'], label=f'{SMA_MID_TERM}-Day SMA', color='#7ED321')
+    ax1.plot(df.index, df[f'SMA_{SMA_FAST}'], label=f'{SMA_FAST}-Day SMA', color='#FF00FF', linestyle=':') # Plot the new SMA
     
     # Highlight trade entry points
     ax1.scatter(df.index[df['Signal'] == 1], df['close'][df['Signal'] == 1], marker='^', color='green', label='Long Entry', alpha=1, s=50)
@@ -357,10 +370,12 @@ HTML_TEMPLATE = """
             </div>
         </div>
         <div class="strategy-description">
-            Strategy Logic (Strictly Regime-Filtered):<br>
-            - **Bullish Regime (Price > 400 SMA):** Only **Long** trades allowed (if Price > 120 SMA). No Shorting.<br>
-            - **Bearish Regime (Price < 400 SMA):** Only **Short** trades allowed (if Price < 120 SMA). No Longing.<br>
-            - **Flat:** All other conditions (e.g., Price > 400 SMA but Price < 120 SMA) result in no position.
+            Strategy Logic (Strictly Regime-Filtered, Lagged Data, Pullback Control):<br>
+            - **Signal Determination (Today):** Based on Price and SMAs from **Yesterday**.<br>
+            - **Bearish Regime (Price < 400 SMA):** Only **Short** trades allowed (if Price < 120 SMA).<br>
+            - **Bullish Regime (Price > 400 SMA):** - **Standard:** Long if Price > 120 SMA AND Price > 40 SMA.
+                - **Pullback:** Long only if Price > 120 SMA AND Price is within 2% of the 120 SMA (when Price < 40 SMA is detected).
+            - **Flat:** All other conditions result in no position.
         </div>
     </div>
 </body>
