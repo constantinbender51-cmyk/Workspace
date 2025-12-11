@@ -23,8 +23,8 @@ MAX_SMA_SCAN = 120 # Maximum SMA for the scan and the global analysis start poin
 SCAN_DELAY = 5.0 # Seconds delay after every 50 SMA calculations to respect API limits
 
 # --- Grid Search Range ---
-# Range increased from 0.01 to 2.0 (stop set to 2.01 to include 2.00)
-K_FACTOR_RANGE = np.arange(0.01, 2.01, 0.01)
+# Range expanded to 0.01 to 5.00
+K_FACTOR_RANGE = np.arange(0.01, 5.01, 0.01)
 
 # --- Global Variables to store results (populated once at startup) ---
 GLOBAL_DATA_SOURCE = "Binance (CCXT)"
@@ -177,13 +177,14 @@ def calculate_dynamic_position(df_ind_raw, k_factor):
     df['DC_Width'] = df['DC_Upper'] - df['DC_Lower']
     df['Relative_Width'] = df['DC_Width'] / df['Close']
     
-    # 2. Calculate Base Position Size (1 - (Relative_Width ^ k_factor)), clipped
+    # 2. Calculate Base Position Size (1 - (Relative_Width ^ k_factor)), clipped at lower bound 0
     # Ensures Close > 0 and Relative_Width > 0 for np.power calculation stability
     valid_conditions = (df['Close'] > 0) & (df['Relative_Width'] > 0)
 
     df['Size_Decider'] = np.where(
         valid_conditions,
-        (1 - np.power(df['Relative_Width'], k_factor)).clip(lower=0, upper=POSITION_SIZE_MAX),
+        # Removed redundant upper=POSITION_SIZE_MAX clip. Clip lower=0 remains for safety.
+        (1 - np.power(df['Relative_Width'], k_factor)).clip(lower=0),
         0.0 
     )
     
@@ -220,7 +221,7 @@ def calculate_dynamic_position(df_ind_raw, k_factor):
 
 def run_k_grid_search(df_ind_raw):
     """Runs a grid search for the optimal K_FACTOR based on Sharpe Ratio."""
-    print("\n--- Starting K-Factor Grid Search (0.01 to 2.00) ---")
+    print(f"\n--- Starting K-Factor Grid Search (0.01 to {K_FACTOR_RANGE[-1]:.2f}) ---")
     results = []
     
     for k in K_FACTOR_RANGE:
