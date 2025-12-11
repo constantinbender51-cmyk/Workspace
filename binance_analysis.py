@@ -77,7 +77,7 @@ def get_data(symbol, since_date_str='2018-01-01'):
 
 def run_backtest(df):
     """
-    Calculates SMAs, implements the trading strategy (based purely on 120-day SMA),
+    Calculates SMAs, implements the trading strategy with strict regime rules,
     and computes metrics.
     """
     print("Running backtest and calculating SMAs...")
@@ -89,7 +89,7 @@ def run_backtest(df):
     # Drop initial NaN values created by rolling windows (first 400 days)
     df = df.dropna()
 
-    # --- 3. CREATE DATASETS (Regimes for REPORTING only) ---
+    # --- 3. CREATE DATASETS (Regimes for REPORTING and LOGIC) ---
     
     # Bullish Regime: Price > 400 SMA
     df_bull = df[df['close'] > df[f'SMA_{SMA_LONG_TERM}']].copy()
@@ -97,16 +97,23 @@ def run_backtest(df):
     # Bearish Regime: Price < 400 SMA
     df_bear = df[df['close'] < df[f'SMA_{SMA_LONG_TERM}']].copy()
 
-    # --- 4. IMPLEMENT STRATEGY LOGIC (Purely 120-Day SMA based) ---
+    # --- 4. IMPLEMENT STRATEGY LOGIC (Regime-filtered 120-Day SMA) ---
 
     # Initialize Signal column
     df['Signal'] = 0.0
 
-    # Long Logic: Trades long if Price is above 120 SMA
-    df.loc[df['close'] > df[f'SMA_{SMA_SHORT_TERM}'], 'Signal'] = 1.0
+    # 1. Bullish Regime: Only allow LONG trades
+    # Rule: If Price > 400 SMA AND Price > 120 SMA -> LONG (1.0)
+    df.loc[(df['close'] > df[f'SMA_{SMA_LONG_TERM}']) & 
+           (df['close'] > df[f'SMA_{SMA_SHORT_TERM}']), 'Signal'] = 1.0
 
-    # Short Logic: Trades short if Price is below 120 SMA
-    df.loc[df['close'] < df[f'SMA_{SMA_SHORT_TERM}'], 'Signal'] = -1.0
+    # 2. Bearish Regime: Only allow SHORT trades
+    # Rule: If Price < 400 SMA AND Price < 120 SMA -> SHORT (-1.0)
+    df.loc[(df['close'] < df[f'SMA_{SMA_LONG_TERM}']) & 
+           (df['close'] < df[f'SMA_{SMA_SHORT_TERM}']), 'Signal'] = -1.0
+           
+    # Note: When in a regime but the short-term signal is against the trade
+    # (e.g., Price > 400 SMA but Price < 120 SMA), the signal remains 0.0 (flat).
 
     # Calculate Daily Returns
     df['Daily_Return'] = df['close'].pct_change()
@@ -140,7 +147,6 @@ def run_backtest(df):
     max_drawdown = drawdown.max()
     
     # Trades and Win Rate
-    # A trade is when the position changes from 0 or switches direction
     df['Position'] = df['Signal'].replace(0, method='ffill').fillna(0)
     
     trades = []
@@ -298,7 +304,7 @@ HTML_TEMPLATE = """
 </head>
 <body>
     <div class="container">
-        <h1>{{ symbol }} 400/120 SMA Crossover Strategy Backtest</h1>
+        <h1>{{ symbol }} 400/120 SMA Regime Filtered Strategy Backtest</h1>
         <div class="datasource">Data Source: Binance via CCXT | Timeframe: {{ timeframe }}</div>
         
         <!-- Plotting Area -->
@@ -351,9 +357,10 @@ HTML_TEMPLATE = """
             </div>
         </div>
         <div class="strategy-description">
-            Strategy Logic (Updated):<br>
-            - **Trade Signal:** Long when Price > 120 SMA, Short when Price < 120 SMA.<br>
-            - **Regime Separation:** 400 SMA is used only for reporting/analysis of Bullish (Price > 400 SMA) vs. Bearish (Price < 400 SMA) market periods.
+            Strategy Logic (Strictly Regime-Filtered):<br>
+            - **Bullish Regime (Price > 400 SMA):** Only **Long** trades allowed (if Price > 120 SMA). No Shorting.<br>
+            - **Bearish Regime (Price < 400 SMA):** Only **Short** trades allowed (if Price < 120 SMA). No Longing.<br>
+            - **Flat:** All other conditions (e.g., Price > 400 SMA but Price < 120 SMA) result in no position.
         </div>
     </div>
 </body>
@@ -393,7 +400,6 @@ def dashboard():
     df_results, metrics, trade_list_full, regime_metrics = run_backtest(df)
     
     # FIX: Pre-slice the trade list in Python before passing to Jinja2
-    # This resolves the TemplateSyntaxError caused by complex filter usage.
     trade_list = trade_list_full[:50] 
 
     # Generate plot
@@ -416,5 +422,4 @@ if __name__ == '__main__':
     print(f"Web server starting on http://127.0.0.1:8080/")
     
     # Required libraries: pip install pandas numpy matplotlib flask ccxt
-    # Set debug=False and use_reloader=False for cleaner execution
     app.run(host='0.0.0.0', port=8080, debug=False, use_reloader=False)
