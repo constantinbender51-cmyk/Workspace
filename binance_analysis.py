@@ -18,7 +18,7 @@ DC_WINDOW = 20  # Donchian Channel Period
 POSITION_SIZE = 1  # Unit of asset traded (+1 for Long, -1 for Short)
 PORT = 8080
 ANNUAL_TRADING_DAYS = 252 # Used for annualizing Sharpe Ratio
-MAX_SMA_SCAN = 1000 # Increased maximum SMA for the scan
+MAX_SMA_SCAN = 1000 # Maximum SMA for the scan and the global analysis start point
 
 # --- Global Variables to store results (populated once at startup) ---
 GLOBAL_DATA_SOURCE = "Binance (CCXT)"
@@ -76,8 +76,9 @@ def fetch_binance_data(symbol, timeframe, start_date):
             raise 
             
     # Check minimum data needed for the longest SMA scan (MAX_SMA_SCAN)
-    if len(all_ohlcv) < MAX_SMA_SCAN: 
-        raise ValueError(f"Not enough data fetched. Required >{MAX_SMA_SCAN}, received {len(all_ohlcv)}.")
+    # Plus a few extra days for safe calculation/slicing
+    if len(all_ohlcv) < MAX_SMA_SCAN + 10: 
+        raise ValueError(f"Not enough data fetched. Required >{MAX_SMA_SCAN + 10}, received {len(all_ohlcv)}.")
         
     df = pd.DataFrame(all_ohlcv, columns=['timestamp', 'Open', 'High', 'Low', 'Close', 'Volume'])
     df['Date'] = pd.to_datetime(df['timestamp'], unit='ms')
@@ -109,6 +110,7 @@ def calculate_indicators(df, windows_to_calculate):
 def get_strategy_returns(df_raw, sma_window):
     """
     Calculates returns for a Long/Short strategy based on a single given SMA window.
+    Enforces a global start time for equity/Sharpe calculation (MAX_SMA_SCAN day).
     """
     df = df_raw.copy()
     sma_col = f'SMA_{sma_window}'
@@ -132,36 +134,42 @@ def get_strategy_returns(df_raw, sma_window):
     # Strategy Return = Daily Asset Return * Held Position
     df.loc[:, 'Strategy_Return'] = daily_returns_clean * df['Position']
     
-    # 4. Cleanup and Normalization
-    df_clean = df.dropna(subset=['Position', sma_col])
-    if df_clean.empty:
+    # 4. Enforce Global Start for Tradable Period (Index MAX_SMA_SCAN)
+    
+    # The first MAX_SMA_SCAN rows are needed for the longest SMA calculation. 
+    # Returns/Equity must start on the first day the SMA 1000 decision is fully informed (Day 1001).
+    tradable_start_index = MAX_SMA_SCAN 
+    
+    if len(df) <= tradable_start_index:
         return pd.DataFrame() 
+        
+    # Slice the DataFrame to the tradable period (Day 1001 onwards)
+    df_tradable = df.iloc[tradable_start_index:].copy()
     
-    normalization_index = df_clean.index[0]
+    # 5. Calculate Cumulative Equity (starting fresh from 1.0)
     
-    # Calculate Strategy Equity
-    strategy_returns_tradable = df_clean['Strategy_Return'].loc[normalization_index:]
-    df_clean.loc[:, 'Equity'] = (1 + strategy_returns_tradable).cumprod().reindex(df_clean.index, fill_value=1.0)
+    # Strategy Equity: Calculated using geometric return.
+    strategy_returns_tradable = df_tradable['Strategy_Return']
+    df_tradable.loc[:, 'Equity'] = (1 + strategy_returns_tradable).cumprod()
     
-    # Calculate Buy & Hold Benchmark 
-    start_price_bh = df_clean['Close'].loc[normalization_index]
-    bh_equity_series = (df_clean['Close'] / start_price_bh).reindex(df_clean.index, fill_value=1.0)
-    df_clean.loc[:, 'Buy_Hold_Equity'] = bh_equity_series
+    # Buy & Hold Benchmark: Calculated using the price ratio from the global start price.
+    start_price_bh = df_tradable['Close'].iloc[0]
+    df_tradable.loc[:, 'Buy_Hold_Equity'] = df_tradable['Close'] / start_price_bh
 
-    return df_clean
+    return df_tradable
 
 # --- Comprehensive SMA Scan and Sharpe Ratio Calculation ---
 
 def calculate_sharpe_ratios_scan(df_raw, min_sma, max_sma):
     """
     Iterates through SMA windows and calculates the Annualized Sharpe Ratio and Final Equity for each.
-    Returns a DataFrame with ['SMA_Window', 'Sharpe_Ratio', 'Final_Equity'].
     """
     results = []
     
     print(f"\n--- Starting SMA Scan (Sharpe Ratio Calculation from SMA {min_sma} to {max_sma}) ---")
     
     for sma_w in range(min_sma, max_sma + 1):
+        # Pass the full 50% data slice. The strategy function handles the global start time.
         df_strategy = get_strategy_returns(df_raw, sma_w)
         
         if df_strategy.empty:
@@ -254,10 +262,8 @@ def create_analysis_visualization(results_df):
 def create_plot(df, strategy_sma):
     """Generates the main SMA 120 strategy plot (Close Price + Equity Curve)."""
     
-    # Use data after the longest required indicator (SMA 400 is the limit)
-    # Note: Using 400 here is illustrative; in the 50% data slice, this could be less than 400 days
-    # The clean data starts correctly after the longest SMA is calculated.
-    df_plot = df.iloc[SMA_WINDOWS_PLOT[0]:].copy() 
+    # Note: df here is already the globally tradable subset
+    df_plot = df.copy() 
     strategy_sma_col = f'SMA_{strategy_sma}'
 
     fig, axes = plt.subplots(2, 1, figsize=(10, 4), sharex=True, 
@@ -281,8 +287,14 @@ def create_plot(df, strategy_sma):
         end_adjusted = end + pd.Timedelta(days=1)
         ax1.axvspan(start, end_adjusted, facecolor=color, alpha=alpha, zorder=0)
 
-    # 2. Price and SMA 120
+    # 2. Price and SMA 120 (SMA 120 must be calculated on the original pre-sliced df_raw)
+    # Since df_plot is the sliced version, we must rely on the calculated SMA values.
+    # The strategy returns function already ensures SMA 120 is available and clean.
     ax1.plot(df_plot.index, df_plot['Close'], label='Price (Close)', color='#1f77b4', linewidth=1.5, alpha=0.9, zorder=1)
+    
+    # We must merge the SMA 120 column back into df_plot from df_ind if it's not already there.
+    # The setup_analysis logic ensures df_ind has SMA 120, and get_strategy_returns ensures the full SMA is calculated.
+    # We will assume df_plot (which is the output of get_strategy_returns) contains the SMA 120 column.
     ax1.plot(df_plot.index, df_plot[strategy_sma_col], 
              label=f'SMA {strategy_sma}', 
              color='#FF6347', linestyle='-', linewidth=2.5, zorder=2) 
@@ -329,13 +341,18 @@ def setup_analysis():
     try:
         df_raw = fetch_binance_data(SYMBOL, TIMEFRAME, START_DATE)
         
-        # NEW LOGIC: Slice to the first 50% of data
+        # SLICING LOGIC: We need enough data for MAX_SMA_SCAN + 10 days for indicators, 
+        # and then we slice to the first 50% of the fetched data *before* running the scan.
         split_idx = len(df_raw) // 2
-        df_raw = df_raw.iloc[:split_idx]
-        print(f"--- DATA SLICED: Running analysis on first {len(df_raw)} candles (50% of total) ---")
+        df_raw_sliced = df_raw.iloc[:split_idx]
+        print(f"--- DATA SLICED: Running analysis on first {len(df_raw_sliced)} candles (50% of total) ---")
         
-        # Calculate only SMA 120 and D-Channels for the main plot
-        df_ind = calculate_indicators(df_raw, SMA_WINDOWS_PLOT)
+        # Check if the 50% slice is still long enough for the MAX_SMA_SCAN
+        if len(df_raw_sliced) < MAX_SMA_SCAN + 10:
+             raise ValueError(f"50% data slice is too short ({len(df_raw_sliced)} days). Max SMA {MAX_SMA_SCAN} requires more data.")
+        
+        # Calculate SMA 120 and D-Channels on the sliced data
+        df_ind = calculate_indicators(df_raw_sliced, SMA_WINDOWS_PLOT)
         
     except Exception as e:
         GLOBAL_ERROR = f"Fatal Data/Indicator Error: {e}\n\nTraceback:\n{traceback.format_exc()}"
@@ -344,7 +361,8 @@ def setup_analysis():
 
     # --- Part 2: Comprehensive Sharpe Ratio Scan (SMA 1 to MAX_SMA_SCAN) ---
     try:
-        results_df = calculate_sharpe_ratios_scan(df_raw, min_sma=1, max_sma=MAX_SMA_SCAN)
+        # Pass the 50% slice for the scan
+        results_df = calculate_sharpe_ratios_scan(df_raw_sliced, min_sma=1, max_sma=MAX_SMA_SCAN)
         
         # Generate the visualization
         GLOBAL_ANALYSIS_IMG = create_analysis_visualization(results_df.sort_values(by='SMA_Window', ascending=True))
@@ -374,6 +392,7 @@ def setup_analysis():
     # --- Part 3: Main Strategy Backtest (SMA 120) ---
     try:
         MAIN_SMA_WINDOW = 120
+        # df_final is the cleaned, tradable portion of the sliced data
         df_final = get_strategy_returns(df_ind, MAIN_SMA_WINDOW)
         
         # 4. Determine current status
@@ -491,7 +510,7 @@ def analysis_dashboard():
             </div>
             
             <p class="mt-8 text-sm text-gray-600 border-t pt-4">
-                **Strategy:** Long if Close > SMA, Short if Close $\le$ SMA. The optimization chart shows how Sharpe Ratio and final compounded equity change across all moving average periods.
+                **Strategy:** Long if Close > SMA, Short if Close $\le$ SMA. The optimization chart shows how Sharpe Ratio and final compounded equity change across all moving average periods. **All SMA backtests start on the same day (after 1000 days of data warmup).**
             </p>
         </div>
     </body>
