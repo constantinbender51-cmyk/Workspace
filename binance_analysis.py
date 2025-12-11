@@ -145,15 +145,16 @@ def run_backtest(df):
         -1                                           # Value if False (Short position held on Day T)
     )
     
-    # --- 2.7 Calculate SMA Proximity Metric (Using corrected formula) ---
-    # User's formula: P = 1 / (X% * 1/0.01) where X% is the decimal distance (e.g., 0.01 for 1%).
+    # --- 2.7 Calculate SMA Proximity Metric ---
+    # Scaler is 1 / 0.02 = 50.0
+    PROXIMITY_SCALER = 50.0 
     
     # Calculate X% (Absolute decimal distance)
-    df['SMA_Distance_Decimal'] = np.abs((df['Close'] - df[f'SMA_{SMA_PERIOD}']) / df[f'SMA_{SMA_PERIOD}'])
+    df['SMA_Distance_Decimal'] = np.abs((df['Close'] - df[f'SMA_{SMA_PERIOD}']) / df[f'SMA_{SNA_PERIOD}'])
     
-    # Calculate Proximity base: 1 / (X% * 100)
-    # The term (X% * 100) must be protected against zero
-    denominator = df['SMA_Distance_Decimal'] * 100.0
+    # Calculate Proximity base: 1 / (X% * Scaler)
+    # The term (X% * Scaler) must be protected against zero
+    denominator = df['SMA_Distance_Decimal'] * PROXIMITY_SCALER
     
     # Calculate Proximity base (1.0 / Denominator)
     # Use np.where to handle the zero-distance case, setting it to a value > 1.0 (e.g., 100.0)
@@ -258,7 +259,7 @@ def plot_results(df):
     df['SMA_Proximity'].plot(ax=ax3, label='SMA Proximity (Capped at 1.0)', color='#F59E0B', linewidth=1)
     
     # Style and Labels for ax3
-    ax3.set_title('SMA Proximity Metric (1.0 when price is 1% or less from SMA)', fontsize=14, color='white')
+    ax3.set_title('SMA Proximity Metric (1.0 when price is 2% or less from SMA)', fontsize=14, color='white')
     ax3.set_xlabel('Date', fontsize=12, color='white')
     ax3.set_ylabel('Proximity Score', fontsize=12, color='white')
     ax3.set_ylim(0, 1.1) # Set limit for capped indicator
@@ -312,7 +313,7 @@ def serve_results():
                     <div class="container mx-auto p-4 bg-gray-800 shadow-xl rounded-xl">
                         <h1 class="text-3xl font-bold mb-4 text-green-400">Backtesting Results: {SYMBOL} SMA-120</h1>
                         <p class="text-gray-300 mb-6">
-                            The backtest now displays three plots: Price/SMA, Log Equity Curve, and the Capped SMA Proximity (Max 1.0). The proximity calculation uses the corrected formula based on a decimal distance (X%).
+                            The backtest now displays three plots: Price/SMA, Log Equity Curve, and the Capped SMA Proximity (Max 1.0). The proximity calculation uses a scaler of 50.0 (1/0.02), which sets the proximity to 1.0 when the price is 2% away from the SMA.
                         </p>
                         <div class="plot-container">
                             <img src="{RESULTS_DIR}/{PLOT_FILE}" alt="Strategy Cumulative Returns Plot" class="w-full h-auto rounded-lg shadow-2xl">
