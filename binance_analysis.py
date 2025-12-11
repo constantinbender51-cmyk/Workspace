@@ -18,6 +18,7 @@ DC_WINDOW = 20  # Donchian Channel Period
 POSITION_SIZE = 1  # Unit of asset traded (+1 for Long, -1 for Short)
 PORT = 8080
 ANNUAL_TRADING_DAYS = 252 # Used for annualizing Sharpe Ratio
+MAX_SMA_SCAN = 800 # Increased maximum SMA for the scan
 
 # --- Global Variables to store results (populated once at startup) ---
 GLOBAL_DATA_SOURCE = "Binance (CCXT)"
@@ -74,8 +75,9 @@ def fetch_binance_data(symbol, timeframe, start_date):
             print(f"An error occurred during CCXT fetching: {e}")
             raise 
             
-    if len(all_ohlcv) < 400: 
-        raise ValueError(f"Not enough data fetched. Required >400, received {len(all_ohlcv)}.")
+    # Check minimum data needed for the longest SMA scan (MAX_SMA_SCAN)
+    if len(all_ohlcv) < MAX_SMA_SCAN: 
+        raise ValueError(f"Not enough data fetched. Required >{MAX_SMA_SCAN}, received {len(all_ohlcv)}.")
         
     df = pd.DataFrame(all_ohlcv, columns=['timestamp', 'Open', 'High', 'Low', 'Close', 'Volume'])
     df['Date'] = pd.to_datetime(df['timestamp'], unit='ms')
@@ -213,8 +215,9 @@ def create_analysis_visualization(results_df):
     ax1.axhline(best_sharpe, color='red', linestyle='--', alpha=0.4, linewidth=1)
 
     ax1.set_ylabel('Annualized Sharpe Ratio', fontsize=10)
-    ax1.set_title('SMA Crossover Strategy Performance (SMA 1 to 400 - 50% Data Sample)', fontsize=14)
+    ax1.set_title(f'SMA Crossover Strategy Performance (SMA 1 to {MAX_SMA_SCAN} - 50% Data Sample)', fontsize=14)
     ax1.grid(True, linestyle=':', alpha=0.6)
+    ax1.set_xlim(1, MAX_SMA_SCAN)
     
     # --- Bottom Plot: Final Equity ---
     ax2 = axes[1]
@@ -232,6 +235,7 @@ def create_analysis_visualization(results_df):
     ax2.set_xlabel('SMA Window (Days)', fontsize=10)
     ax2.set_ylabel('Final Equity Multiplier (x)', fontsize=10)
     ax2.grid(True, linestyle=':', alpha=0.6)
+    ax2.set_xlim(1, MAX_SMA_SCAN)
     
     plt.tight_layout()
     
@@ -251,10 +255,12 @@ def create_plot(df, strategy_sma):
     """Generates the main SMA 120 strategy plot (Close Price + Equity Curve)."""
     
     # Use data after the longest required indicator (SMA 400 is the limit)
-    df_plot = df.iloc[400:].copy() 
+    # Note: Using 400 here is illustrative; in the 50% data slice, this could be less than 400 days
+    # The clean data starts correctly after the longest SMA is calculated.
+    df_plot = df.iloc[SMA_WINDOWS_PLOT[0]:].copy() 
     strategy_sma_col = f'SMA_{strategy_sma}'
 
-    fig, axes = plt.subplots(2, 1, figsize=(10, 4), sharex=True, # Reduced height for better dashboard fit
+    fig, axes = plt.subplots(2, 1, figsize=(10, 4), sharex=True, 
                              gridspec_kw={'height_ratios': [3, 2]})
     
     # --- Price and SMA (Top Panel) ---
@@ -336,9 +342,9 @@ def setup_analysis():
         print(f"--- FATAL ERROR DURING DATA SETUP ---\n{GLOBAL_ERROR}", file=sys.stderr)
         return
 
-    # --- Part 2: Comprehensive Sharpe Ratio Scan (SMA 1 to 400) ---
+    # --- Part 2: Comprehensive Sharpe Ratio Scan (SMA 1 to MAX_SMA_SCAN) ---
     try:
-        results_df = calculate_sharpe_ratios_scan(df_raw, min_sma=1, max_sma=400)
+        results_df = calculate_sharpe_ratios_scan(df_raw, min_sma=1, max_sma=MAX_SMA_SCAN)
         
         # Generate the visualization
         GLOBAL_ANALYSIS_IMG = create_analysis_visualization(results_df.sort_values(by='SMA_Window', ascending=True))
@@ -472,7 +478,7 @@ def analysis_dashboard():
                 </div>
 
                 <div class="order-2">
-                    <h2 class="text-2xl font-semibold text-gray-700 mb-4">SMA Optimization Scan (1 to 400)</h2>
+                    <h2 class="text-2xl font-semibold text-gray-700 mb-4">SMA Optimization Scan (1 to {MAX_SMA_SCAN} on 50% Data)</h2>
                     <div class="bg-gray-50 p-2 rounded-lg shadow-inner overflow-hidden">
                         <img src="data:image/png;base64,{GLOBAL_ANALYSIS_IMG}" alt="SMA Sharpe Ratio and Equity Analysis Plot" class="w-full h-auto rounded-lg"/>
                     </div>
