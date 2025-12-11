@@ -18,8 +18,8 @@ SERVER_PORT = 8080
 RESULTS_DIR = 'results'
 ANNUALIZATION_FACTOR = 365 # Used for annualizing Sharpe Ratio for daily data
 
-# --- Static Parameter ---
-STATIC_CENTER_DISTANCE = 0.040 # Set center distance to 2.0%
+# --- Dynamic Parameter ---
+MOMENTUM_PERIOD = 60 # Lookback period for calculating the dynamic center distance (60 days)
 
 # --- 1. Data Fetching Utilities ---
 
@@ -113,25 +113,33 @@ def generate_metrics(cumulative_returns, daily_returns, strategy_name):
         'Cumulative Returns': cumulative_returns
     }
 
-# --- 3. Backtesting Logic (Static Sizing) ---
+# --- 3. Backtesting Logic (Dynamic Momentum Center) ---
 
-def run_backtest_static_sizing(df):
+def run_backtest_dynamic_sizing(df):
     """
-    Applies the 120 SMA trading strategy with dynamic position sizing using the static center.
+    Applies the 120 SMA trading strategy with dynamic position sizing using 60-day momentum as center.
     """
-    print(f"-> Running static 120 SMA backtest with {STATIC_CENTER_DISTANCE*100:.1f}% center on {len(df)} candles...")
+    print(f"-> Running dynamic 120 SMA backtest with {MOMENTUM_PERIOD}-day momentum center on {len(df)} candles...")
     
-    # Calculate 120 SMA
+    # 1. Calculate 120 SMA
     df[f'SMA_{SMA_PERIOD_120}'] = df['Close'].rolling(window=SMA_PERIOD_120).mean()
     
-    # Calculate daily returns (log returns)
+    # 2. Calculate daily returns (log returns)
     df['Daily_Return'] = np.log(df['Close'] / df['Close'].shift(1))
 
-    # --- Prepare Lagged Data (Look-ahead Bias Prevention) ---
+    # --- Look-ahead Prevention for Trading Direction (120 SMA) ---
     df['Yesterday_Close'] = df['Close'].shift(1)
     df['Yesterday_SMA_120'] = df[f'SMA_{SMA_PERIOD_120}'].shift(1)
+
+    # --- Calculate Dynamic Center (Momentum) ---
+    # Momentum = (Price / Price[60 days ago]) - 1
+    df['Momentum_60d'] = (df['Close'] / df['Close'].shift(MOMENTUM_PERIOD)) - 1
     
-    # Drop NaNs from SMAs and shifting
+    # Lag and take absolute value for center distance on day T (based on close of T-1)
+    # np.abs is used as the center distance must be positive
+    df['Center_Distance'] = np.abs(df['Momentum_60d'].shift(1))
+
+    # Drop NaNs after all lagging/rolling calculations
     df = df.dropna()
     
     # ----------------------------------------------------
@@ -143,7 +151,9 @@ def run_backtest_static_sizing(df):
 
     # 2. Calculate Multiplier (M) using the provided formula:
     # M = 1 / ( (1 / (D * Scaler)) + (D * Scaler) - 1 )
-    distance_scaler = 1.0 / STATIC_CENTER_DISTANCE
+    
+    # Scaler = 1 / Center_Distance (Momentum)
+    distance_scaler = 1.0 / df['Center_Distance'] 
     scaled_distance = df['Distance'] * distance_scaler
     
     epsilon = 1e-6 
@@ -181,7 +191,7 @@ def run_backtest_static_sizing(df):
     
     # Strategy
     metrics.append(generate_metrics(
-        df['Cumulative_Strategy_Return'], df['Strategy_Return'], f'Dynamic Strategy (120 SMA, {STATIC_CENTER_DISTANCE*100:.1f}% Center)'
+        df['Cumulative_Strategy_Return'], df['Strategy_Return'], f'Dynamic Strategy (120 SMA, {MOMENTUM_PERIOD}d Momentum Center)'
     ))
     
     # Print comparison table
@@ -191,7 +201,7 @@ def run_backtest_static_sizing(df):
     ])
     
     print("\n" + "=" * 60)
-    print("BACKTEST METRICS COMPARISON (Static 2.0% Center)")
+    print("BACKTEST METRICS COMPARISON (Dynamic Momentum Center)")
     print("=" * 60)
     print(comparison_df.to_string(index=False))
     print("=" * 60)
@@ -299,11 +309,11 @@ def serve_results(metrics):
                 </head>
                 <body class="p-8">
                     <div class="container mx-auto p-4 bg-gray-800 shadow-xl rounded-xl">
-                        <h1 class="text-3xl font-bold mb-4 text-green-400">Backtest Results: {SYMBOL} Dynamic Sizing ({STATIC_CENTER_DISTANCE*100:.1f}% Center)</h1>
+                        <h1 class="text-3xl font-bold mb-4 text-green-400">Backtest Results: {SYMBOL} Dynamic Momentum Sizing</h1>
                         
                         <div class="mb-8">
                             <h2 class="text-xl font-semibold mb-3 text-gray-200">Strategy Metrics Comparison</h2>
-                            <p class="text-gray-400 mb-4">The dynamic sizing strategy uses a static 2.0% distance center for position sizing.</p>
+                            <p class="text-gray-400 mb-4">The dynamic sizing center is the absolute value of the 60-day price return (momentum).</p>
                             <div class="relative overflow-x-auto shadow-md sm:rounded-lg">
                                 <table class="w-full text-sm text-left text-gray-400">
                                     <thead class="text-xs uppercase bg-gray-700 text-gray-400">
@@ -363,7 +373,7 @@ if __name__ == '__main__':
         print("Error: Could not retrieve data. Exiting.")
     else:
         # 2. Run backtest and get comparison metrics
-        results_df, comparison_metrics = run_backtest_static_sizing(df_data)
+        results_df, comparison_metrics = run_backtest_dynamic_sizing(df_data)
         
         # 3. Plot results
         plot_results(results_df, comparison_metrics)
