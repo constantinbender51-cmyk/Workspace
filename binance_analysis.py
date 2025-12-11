@@ -1,488 +1,293 @@
 import pandas as pd
 import numpy as np
 import matplotlib.pyplot as plt
-import ccxt
-from io import BytesIO
+import io
 import base64
-from flask import Flask, render_template_string
 import time
+from flask import Flask, render_template_string
+import ccxt # CCXT is now mandatory
 
-# --- 1. CONFIGURATION ---
-SYMBOL = 'BTC/USDT'  # Binance standard symbol
+# --- Configuration Constants ---
+SYMBOL = 'BTC/USDT'
+TIMEFRAME = '1d' # Daily candles
 START_DATE = '2018-01-01'
-TIME_FRAME = '1d'
+SMA_WINDOWS = [50, 200, 400]
+DC_WINDOW = 20  # Donchian Channel Period
+POSITION_SIZE = 1  # Unit of asset traded
+PORT = 8080
 
-SMA_LONG_TERM = 400
-SMA_MID_TERM = 120 # Used only for plotting historical context
-SMA_FAST = 40 
-PROXIMITY_THRESHOLD = 0.02 # 2% Entry zone
+# --- Data Fetching (CCXT with Pagination) ---
 
-# --- 2. DATA FETCHING (Using CCXT for Binance) ---
-
-def get_data(symbol, since_date_str='2018-01-01'):
+def fetch_binance_data(symbol, timeframe, start_date):
     """
-    Fetches historical OHLCV data from Binance using CCXT, handling pagination.
+    Fetches historical OHLCV data from Binance using CCXT with pagination.
+    This function is now the ONLY method for data retrieval.
     """
-    try:
-        exchange = ccxt.binance({
-            'enableRateLimit': True,
-        })
-        
-        since_ms = exchange.parse8601(since_date_str + 'T00:00:00Z')
-        all_ohlcv = []
-        limit = 1000
-        
-        print(f"Fetching data for {symbol} from Binance starting {since_date_str}...")
-        
-        while True:
-            ohlcv = exchange.fetch_ohlcv(symbol, TIME_FRAME, since=since_ms, limit=limit)
+    exchange = ccxt.binance({
+        'enableRateLimit': True, # Automatically respect API rate limits
+    })
+
+    since_timestamp = exchange.parse8601(start_date + 'T00:00:00Z')
+    all_ohlcv = []
+    limit = 1000
+    
+    print(f"--- FETCHING DATA: {symbol} ({timeframe}) from {start_date} via Binance/CCXT ---")
+
+    while True:
+        try:
+            # Fetch batch of OHLCV data
+            ohlcv_batch = exchange.fetch_ohlcv(
+                symbol, 
+                timeframe, 
+                since=since_timestamp, 
+                limit=limit
+            )
             
-            if not ohlcv:
-                print("No more data available.")
-                break
-            
-            all_ohlcv.extend(ohlcv)
-            
-            last_timestamp = ohlcv[-1][0]
-            since_ms = last_timestamp + exchange.parse_timeframe(TIME_FRAME) * 1000 
-            
-            print(f"Fetched {len(ohlcv)} candles. Latest date: {exchange.iso8601(last_timestamp)}")
-            if len(ohlcv) < limit:
+            if not ohlcv_batch:
+                print("End of data reached.")
                 break
                 
-            time.sleep(exchange.rateLimit / 1000)
-
-        # Convert to DataFrame
-        df = pd.DataFrame(all_ohlcv, columns=['timestamp', 'open', 'high', 'low', 'close', 'volume'])
-        df['date'] = pd.to_datetime(df['timestamp'], unit='ms')
-        df.set_index('date', inplace=True)
-        df = df.drop(columns=['timestamp'])
-        df.index.name = 'Date'
-        df = df.sort_index(ascending=True)
+            all_ohlcv.extend(ohlcv_batch)
+            
+            # Use the timestamp of the last candle fetched to set 'since' for the next request.
+            # We add 1 millisecond to prevent fetching the last candle of the previous batch.
+            since_timestamp = ohlcv_batch[-1][0] + 1 
+            
+            print(f"Fetched {len(all_ohlcv)} candles up to {exchange.iso8601(ohlcv_batch[-1][0])}")
+            
+            # If the number of candles returned is less than the limit, we've caught up to the present.
+            if len(ohlcv_batch) < limit:
+                break
+                
+            # Sleep to ensure we don't violate rate limits
+            time.sleep(exchange.rateLimit / 1000) 
+            
+        except Exception as e:
+            print(f"An error occurred during CCXT fetching: {e}")
+            raise # Re-raise to be caught by the main handler
+            
+    if not all_ohlcv:
+        raise ValueError("Could not fetch any data from Binance. Check connection or symbol.")
         
-        print(f"Data fetching complete. Total {len(df)} candles retrieved.")
-        return df
+    df = pd.DataFrame(all_ohlcv, columns=['timestamp', 'Open', 'High', 'Low', 'Close', 'Volume'])
+    df['Date'] = pd.to_datetime(df['timestamp'], unit='ms')
+    df.set_index('Date', inplace=True)
+    df = df[['Open', 'High', 'Low', 'Close', 'Volume']].astype(float)
+    df = df.sort_index()
     
-    except ImportError:
-        print("ERROR: CCXT library not found. Please run: pip install ccxt")
-        return None
-    except Exception as e:
-        print(f"ERROR: Failed to fetch data from Binance: {e}")
-        return None
+    print(f"Total candles fetched: {len(df)}")
+    return df
 
+# --- Indicator Calculation ---
+
+def calculate_indicators(df):
+    """Calculates SMAs and Donchian Channels."""
+    for window in SMA_WINDOWS:
+        df[f'SMA_{window}'] = df['Close'].rolling(window=window).mean()
+
+    df['DC_Upper'] = df['High'].rolling(window=DC_WINDOW).max()
+    df['DC_Lower'] = df['Low'].rolling(window=DC_WINDOW).min()
+    df['DC_Mid'] = (df['DC_Upper'] + df['DC_Lower']) / 2
+    
+    return df
+
+# --- Backtesting and Equity Calculation ---
 
 def run_backtest(df):
     """
-    Calculates SMAs and implements the Retracement Confirmation Strategy using lagged data.
+    Implements a simple SMA 200 crossover strategy (Long/Flat) and calculates equity.
+    Rule: Long (Position=1) when Close > SMA 200, Flat (Position=0) otherwise.
     """
-    print("Running backtest and calculating SMAs...")
+    df['Position'] = np.where(df['Close'] > df['SMA_200'], POSITION_SIZE, 0)
+    df['Daily_Return'] = df['Close'].pct_change()
+    df['Strategy_Return'] = df['Daily_Return'] * df['Position'].shift(1).fillna(0)
+    df['Equity'] = (1 + df['Strategy_Return']).cumprod()
+    df['Buy_Hold_Equity'] = (1 + df['Daily_Return']).cumprod()
     
-    # Calculate Simple Moving Averages
-    df[f'SMA_{SMA_LONG_TERM}'] = df['close'].rolling(window=SMA_LONG_TERM).mean()
-    df[f'SMA_{SMA_MID_TERM}'] = df['close'].rolling(window=SMA_MID_TERM).mean()
-    df[f'SMA_{SMA_FAST}'] = df['close'].rolling(window=SMA_FAST).mean()
-
-    # CRITICAL: Drop initial NaN values created by rolling windows (at least 400 days)
-    df = df.dropna()
-
-    # --- Prepare Lagged Data for Crosses and Conditions (T-1 and T-2) ---
+    # Normalize starting equity to 1 at the point the longest SMA (SMA 400) is available
+    normalization_index = df.first_valid_index()
     
-    # We create shifted columns directly on the DataFrame
-    df['close_l1'] = df['close'].shift(1)
-    df[f'SMA_{SMA_LONG_TERM}_l1'] = df[f'SMA_{SMA_LONG_TERM}'].shift(1)
-    df[f'SMA_{SMA_FAST}_l1'] = df[f'SMA_{SMA_FAST}'].shift(1)
+    df['Equity'] = df['Equity'] / df['Equity'].loc[normalization_index]
+    df['Buy_Hold_Equity'] = df['Buy_Hold_Equity'] / df['Buy_Hold_Equity'].loc[normalization_index]
+
+    return df.dropna()
+
+# --- Plotting ---
+
+def create_plot(df):
+    """Generates the main analysis plot using matplotlib, encoded as base64."""
     
-    df['close_l2'] = df['close'].shift(2)
-    df[f'SMA_{SMA_LONG_TERM}_l2'] = df[f'SMA_{SMA_LONG_TERM}'].shift(2)
-    df[f'SMA_{SMA_FAST}_l2'] = df[f'SMA_{SMA_FAST}'].shift(2)
+    # Use data after the longest indicator (SMA 400) has stabilized
+    df_plot = df.iloc[400:] 
 
-    # Drop the rows created by the shifting (T-1, T-2). This makes the first row the first valid signal.
-    df = df.dropna()
-
-    # --- 3. CREATE DATASETS (Regimes for Reporting) ---
-    df_bull = df[df['close'] > df[f'SMA_{SMA_LONG_TERM}']].copy()
-    df_bear = df[df['close'] < df[f'SMA_{SMA_LONG_TERM}']].copy()
-
-    # --- 4. IMPLEMENT STRATEGY LOGIC (Retracement Confirmation Strategy) ---
+    fig, axes = plt.subplots(2, 1, figsize=(14, 10), sharex=True, 
+                             gridspec_kw={'height_ratios': [3, 1]})
     
-    # --- Entry Conditions (Crossing INTO the +/- 2% zone, T-2 to T-1) ---
-    
-    # LONG ENTRY: Price crosses *INTO* the zone (from ABOVE +2% to within +2% and 0%)
-    BULL_CONFIRM_L2 = df[f'SMA_{SMA_LONG_TERM}_l2'] * (1 + PROXIMITY_THRESHOLD)
-    BULL_CONFIRM_L1 = df[f'SMA_{SMA_LONG_TERM}_l1'] * (1 + PROXIMITY_THRESHOLD)
-    
-    LONG_ENTRY = (
-        (df['close_l2'] > BULL_CONFIRM_L2) &          # T-2 was OUTSIDE (above +2%)
-        (df['close_l1'] <= BULL_CONFIRM_L1) &         # T-1 is NOW INSIDE (below or at +2%)
-        (df['close_l1'] > df[f'SMA_{SMA_LONG_TERM}_l1'])  # AND T-1 is still above 400 SMA
-    ).astype(int)
-    
-    # SHORT ENTRY: Price crosses *INTO* the zone (from BELOW -2% to within -2% and 0%)
-    BEAR_CONFIRM_L2 = df[f'SMA_{SMA_LONG_TERM}_l2'] * (1 - PROXIMITY_THRESHOLD)
-    BEAR_CONFIRM_L1 = df[f'SMA_{SMA_LONG_TERM}_l1'] * (1 - PROXIMITY_THRESHOLD)
-    
-    SHORT_ENTRY = (
-        (df['close_l2'] < BEAR_CONFIRM_L2) &          # T-2 was OUTSIDE (below -2%)
-        (df['close_l1'] >= BEAR_CONFIRM_L1) &         # T-1 is NOW INSIDE (above or at -2%)
-        (df['close_l1'] < df[f'SMA_{SMA_LONG_TERM}_l1'])  # AND T-1 is still below 400 SMA
-    ).astype(int)
-    
-    # --- Exit Conditions (40 SMA Cross, T-2 to T-1) ---
-
-    # LONG EXIT: Price crosses 40 SMA from ABOVE
-    EXIT_LONG = ((df['close_l2'] >= df[f'SMA_{SMA_FAST}_l2']) & (df['close_l1'] < df[f'SMA_{SMA_FAST}_l1'])).astype(int)
-    
-    # SHORT EXIT: Price crosses 40 SMA from BELOW
-    EXIT_SHORT = ((df['close_l2'] <= df[f'SMA_{SMA_FAST}_l2']) & (df['close_l1'] > df[f'SMA_{SMA_FAST}_l1'])).astype(int)
-
-    # --- Calculate Persistent Position (State Machine) ---
-    position = 0
-    df['Position_Raw'] = 0.0 
-    
-    for i in range(len(df)):
-        # Extract signal values safely using iloc
-        entry_long = LONG_ENTRY.iloc[i]
-        entry_short = SHORT_ENTRY.iloc[i]
-        exit_long = EXIT_LONG.iloc[i]
-        exit_short = EXIT_SHORT.iloc[i]
-        
-        # State: Flat (0)
-        if position == 0:
-            if entry_long:
-                position = 1
-            elif entry_short:
-                position = -1
-        
-        # State: Long (1)
-        elif position == 1:
-            if exit_long:
-                position = 0
-            elif entry_short: 
-                 position = -1 
-                 
-        # State: Short (-1)
-        elif position == -1:
-            if exit_short:
-                position = 0
-            elif entry_long:
-                 position = 1 
-
-        df.iloc[i, df.columns.get_loc('Position_Raw')] = position
-
-    # 5. Generate Signal and Returns
-    
-    # Signal: T-1 Position_Raw determines T's trade
-    df['Signal'] = df['Position_Raw'].shift(1) 
-    df = df.dropna() # Drop the first row due to the final shift (Signal is NaN)
-    
-    # Calculate Daily Returns
-    df['Daily_Return'] = df['close'].pct_change()
-
-    # Calculate Strategy Returns: Signal is T-1 Position_Raw, applied to T's return.
-    df['Strategy_Return'] = df['Signal'] * df['Daily_Return']
-
-    # Final dropna after returns calculation
-    df = df.dropna()
-
-    # Calculate Cumulative Returns
-    df['Cumulative_Strategy_Return'] = (1 + df['Strategy_Return']).cumprod()
-    df['Cumulative_BuyHold_Return'] = (1 + df['Daily_Return']).cumprod()
-
-
-    # --- 6. METRICS CALCULATION (Refined Trade Tracking Loop) ---
-    
-    total_days = len(df)
-    annualized_returns = (df['Cumulative_Strategy_Return'].iloc[-1] ** (365 / total_days)) - 1
-    daily_volatility = df['Strategy_Return'].std()
-    sharpe_ratio = (df['Strategy_Return'].mean() / daily_volatility) * np.sqrt(365)
-    cumulative_max = df['Cumulative_Strategy_Return'].cummax()
-    drawdown = cumulative_max - df['Cumulative_Strategy_Return']
-    max_drawdown = drawdown.max()
-    
-    df['Position'] = df['Signal'].replace(0, method='ffill').fillna(0) 
-    
-    trades = []
-    trade_open = None
-    
-    # Use ILOC for safe index tracking
-    for i in range(len(df)):
-        index = df.index[i]
-        row = df.iloc[i] # Current day's row
-        
-        current_signal = row['Signal']
-        # The previous signal is the signal from the prior row (i-1)
-        prev_signal = df['Signal'].iloc[i-1] if i > 0 else 0.0
-
-        # 1. Entry (Signal goes from 0 to 1 or -1)
-        if current_signal != 0 and prev_signal == 0:
-            # Standard entry: Trade opens today based on yesterday's signal
-            if trade_open is None:
-                trade_open = {'entry_date': index, 'entry_price': row['open'], 'position': current_signal}
-        
-        # 2. Exit (Signal goes to 0) or Flip (Signal changes direction)
-        elif current_signal != prev_signal and prev_signal != 0:
-            
-            # --- Close Old Trade ---
-            # **CRITICAL FIX**: Check if a trade is actually open before accessing it.
-            if trade_open is not None: 
-                # PnL calculated based on today's opening price vs. entry price
-                pnl = (row['open'] / trade_open['entry_price'] - 1) * trade_open['position']
-                trades.append({
-                    'entry_date': trade_open['entry_date'],
-                    'exit_date': index,
-                    'position': ('Long' if trade_open['position'] == 1 else 'Short') + (' (Flip)' if current_signal != 0 else ''),
-                    'pnl': pnl,
-                    'win': pnl > 0
-                })
-            
-            # --- Open New Trade (if it was a flip) ---
-            if current_signal != 0:
-                trade_open = {'entry_date': index, 'entry_price': row['open'], 'position': current_signal}
-            else:
-                trade_open = None
-        
-        # 3. Handle Start In Position (Edge Case: First day is already 1 or -1)
-        elif i == 0 and current_signal != 0 and trade_open is None:
-             trade_open = {'entry_date': index, 'entry_price': row['open'], 'position': current_signal}
-
-
-    # Close any remaining open trade at the last price
-    if trade_open is not None:
-         trades.append({
-            'entry_date': trade_open['entry_date'],
-            'exit_date': df.index.max(),
-            'position': 'Long (End of Data)' if trade_open['position'] == 1 else 'Short (End of Data)',
-            'pnl': (df['close'].iloc[-1] / trade_open['entry_price'] - 1) * trade_open['position'],
-            'win': (df['close'].iloc[-1] / trade_open['entry_price'] - 1) * trade_open['position'] > 0
-        })
-
-    total_trades = len(trades)
-    winning_trades = sum(1 for t in trades if t['win'])
-    win_rate = winning_trades / total_trades if total_trades > 0 else 0
-    net_pnl = df['Cumulative_Strategy_Return'].iloc[-1] - 1
-    
-    metrics = {
-        "Total Days Tested": total_days,
-        "Start Date (Data Validity)": df.index.min().strftime('%Y-%m-%d'),
-        "End Date": df.index.max().strftime('%Y-%m-%d'),
-        "Final Strategy PnL": f"{net_pnl * 100:.2f}%",
-        "Final Buy & Hold PnL": f"{(df['Cumulative_BuyHold_Return'].iloc[-1] - 1) * 100:.2f}%",
-        "Annualized Return": f"{annualized_returns * 100:.2f}%",
-        "Sharpe Ratio": f"{sharpe_ratio:.2f}",
-        "Max Drawdown": f"{max_drawdown * 100:.2f}%",
-        "Total Trades": total_trades,
-        "Winning Trades": winning_trades,
-        "Win Rate": f"{win_rate * 100:.2f}%",
-    }
-    
-    trade_list_output = [f"{t['exit_date'].strftime('%Y-%m-%d')}: {t['position']} trade ended. PnL: {t['pnl'] * 100:.2f}%" for t in trades]
-    
-    bullish_days = len(df_bull)
-    bearish_days = len(df_bear)
-
-    regime_metrics = {
-        "Bullish Regime Days (Price > 400 SMA)": bullish_days,
-        "Bearish Regime Days (Price < 400 SMA)": bearish_days
-    }
-
-    return df, metrics, trade_list_output, regime_metrics
-
-
-def generate_plot(df):
-    """
-    Generates a plot of the price, SMAs, and strategy equity curve.
-    Returns the plot as a base64 encoded image string.
-    """
-    fig, axes = plt.subplots(2, 1, figsize=(14, 10), sharex=True, gridspec_kw={'height_ratios': [3, 1]})
-    
-    # --- Price and SMA Plot ---
+    # --- Price and Indicator Plot (Top Panel) ---
     ax1 = axes[0]
-    ax1.plot(df.index, df['close'], label='Close Price', color='#4A90E2', linewidth=1)
-    ax1.plot(df.index, df[f'SMA_{SMA_LONG_TERM}'], label=f'{SMA_LONG_TERM}-Day SMA (Center)', color='#F5A623', linestyle='--')
-    ax1.plot(df.index, df[f'SMA_{SMA_MID_TERM}'], label=f'{SMA_MID_TERM}-Day SMA', color='#7ED321', alpha=0.5)
-    ax1.plot(df.index, df[f'SMA_{SMA_FAST}'], label=f'{SMA_FAST}-Day SMA (Exit Trigger)', color='#FF00FF', linestyle=':')
+    ax1.plot(df_plot.index, df_plot['Close'], label='Price', color='#1f77b4', linewidth=1.5, alpha=0.9)
+    ax1.plot(df_plot.index, df_plot['SMA_50'], label='SMA 50', color='green', linestyle='--', alpha=0.7)
+    ax1.plot(df_plot.index, df_plot['SMA_200'], label='SMA 200', color='red', linestyle='-', linewidth=2)
+    ax1.plot(df_plot.index, df_plot['SMA_400'], label='SMA 400', color='orange', linestyle=':', alpha=0.7)
     
-    # Highlight trade entry points
-    ax1.scatter(df.index[df['Signal'] == 1], df['close'][df['Signal'] == 1], marker='^', color='green', label='Long Entry', alpha=1, s=50)
-    ax1.scatter(df.index[df['Signal'] == -1], df['close'][df['Signal'] == -1], marker='v', color='red', label='Short Entry', alpha=1, s=50)
+    # Donchian Channels
+    ax1.plot(df_plot.index, df_plot['DC_Upper'], label=f'DC {DC_WINDOW} Upper', color='c', linestyle='-.', alpha=0.5)
+    ax1.plot(df_plot.index, df_plot['DC_Lower'], label=f'DC {DC_WINDOW} Lower', color='c', linestyle='-.', alpha=0.5)
+    ax1.fill_between(df_plot.index, df_plot['DC_Lower'], df_plot['DC_Upper'], color='cyan', alpha=0.05)
+    
+    # Highlighting Trades (Change in Position)
+    entry_dates = df_plot[(df_plot['Position'].diff() > 0)].index
+    exit_dates = df_plot[(df_plot['Position'].diff() < 0)].index
+    
+    ax1.scatter(entry_dates, df_plot.loc[entry_dates, 'Close'], marker='^', color='lime', s=100, label='Long Entry', zorder=5)
+    ax1.scatter(exit_dates, df_plot.loc[exit_dates, 'Close'], marker='v', color='fuchsia', s=100, label='Exit', zorder=5)
 
-    ax1.set_title(f'{SYMBOL} Price and Strategy Signals ({TIME_FRAME})', fontsize=16)
-    ax1.set_ylabel('Price (USDT)', fontsize=12)
-    ax1.grid(True, linestyle=':', alpha=0.6)
-    ax1.legend()
-    
-    # --- Equity Curve Plot ---
+    ax1.set_title(f'{SYMBOL} Price, Indicators, and Trading Signals (Binance/CCXT)', fontsize=16)
+    ax1.set_ylabel('Price (USD)', fontsize=12)
+    ax1.grid(True, linestyle='--', alpha=0.6)
+    ax1.legend(loc='upper left', fontsize=8)
+    ax1.set_yscale('log')
+
+    # --- Equity Plot (Bottom Panel) ---
     ax2 = axes[1]
-    ax2.plot(df.index, df['Cumulative_Strategy_Return'], label='Strategy Equity', color='#50E3C2', linewidth=2)
-    ax2.plot(df.index, df['Cumulative_BuyHold_Return'], label='Buy & Hold', color='#FF6347', linestyle='--', linewidth=1)
     
-    ax2.set_title('Strategy vs. Buy & Hold Cumulative Returns', fontsize=14)
-    ax2.set_ylabel('Cumulative Return', fontsize=12)
+    final_strategy_return = (df_plot['Equity'].iloc[-1] - 1) * 100
+    final_bh_return = (df_plot['Buy_Hold_Equity'].iloc[-1] - 1) * 100
+    
+    ax2.plot(df_plot.index, df_plot['Equity'], label='SMA 200 Strategy Equity', color='blue', linewidth=2)
+    ax2.plot(df_plot.index, df_plot['Buy_Hold_Equity'], label='Buy & Hold Benchmark', color='gray', linestyle='--', alpha=0.7)
+    
+    ax2.set_title(f'Strategy Equity Curve (Final Return: {final_strategy_return:.2f}%) vs B&H ({final_bh_return:.2f}%)', fontsize=14)
     ax2.set_xlabel('Date', fontsize=12)
-    ax2.grid(True, linestyle=':', alpha=0.6)
-    ax2.legend()
+    ax2.set_ylabel('Cumulative Return (Normalized)', fontsize=12)
+    ax2.grid(True, linestyle='--', alpha=0.6)
+    ax2.legend(loc='upper left', fontsize=10)
     
     plt.tight_layout()
     
-    # Save plot to an in-memory buffer
-    buf = BytesIO()
+    # Save plot to buffer
+    buf = io.BytesIO()
     plt.savefig(buf, format='png')
+    buf.seek(0)
     plt.close(fig)
-    data = base64.b64encode(buf.getbuffer()).decode("ascii")
-    return data
+    
+    # Encode plot for HTML embedding
+    img_base64 = base64.b64encode(buf.read()).decode('utf-8')
+    return img_base64, final_strategy_return
 
-# --- 6. FLASK WEB SERVER SETUP ---
+# --- Flask Web Server ---
 
 app = Flask(__name__)
 
-# HTML template for the web page
-HTML_TEMPLATE = """
-<!doctype html>
-<html lang="en">
-<head>
-    <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Binance Backtest: {{ symbol }}</title>
-    <style>
-        body { font-family: 'Inter', sans-serif; background-color: #1e1e1e; color: #fff; margin: 0; padding: 20px; }
-        .container { max-width: 1200px; margin: 0 auto; background-color: #2c2c2c; padding: 20px; border-radius: 12px; box-shadow: 0 4px 15px rgba(0, 0, 0, 0.5); }
-        h1 { color: #50E3C2; text-align: center; margin-bottom: 20px; }
-        .datasource { text-align: center; color: #F5A623; margin-bottom: 30px; font-size: 1.1em; }
-        .grid { display: grid; grid-template-columns: 1fr 1fr; gap: 20px; margin-top: 20px; }
-        .card { background-color: #383838; padding: 15px; border-radius: 8px; box-shadow: 0 2px 5px rgba(0, 0, 0, 0.3); }
-        .metrics-list, .regime-list { list-style: none; padding: 0; }
-        .metrics-list li, .regime-list li { padding: 8px 0; border-bottom: 1px solid #4a4a4a; display: flex; justify-content: space-between; }
-        .metrics-list li:last-child, .regime-list li:last-child { border-bottom: none; }
-        .value { font-weight: bold; color: #50E3C2; }
-        img { max-width: 100%; height: auto; border-radius: 8px; margin-top: 20px; background-color: #fff; padding: 10px;}
-        .trade-log { max-height: 400px; overflow-y: scroll; background-color: #1e1e1e; padding: 10px; border-radius: 8px; margin-top: 10px; font-size: 0.9em; }
-        .trade-log p { margin: 4px 0; border-bottom: 1px dotted #4a4a4a; padding-bottom: 4px; }
-        .trade-log p:last-child { border-bottom: none; }
-        .positive { color: #7ED321; }
-        .negative { color: #D0021B; }
-        .plot-container { grid-column: 1 / -1; }
-        .strategy-description { text-align: center; margin-top: 20px; font-size: 0.9em; color: #888; border-top: 1px solid #4a4a4a; padding-top: 15px; }
-    </style>
-</head>
-<body>
-    <div class="container">
-        <h1>{{ symbol }} 400/40 SMA Retracement Confirmation Strategy Backtest</h1>
-        <div class="datasource">Data Source: Binance via CCXT | Timeframe: {{ timeframe }}</div>
-        
-        <!-- Plotting Area -->
-        <div class="plot-container">
-            <img src="data:image/png;base64,{{ plot_data }}" alt="Strategy Performance Plot">
-        </div>
-
-        <div class="grid">
-            <!-- Metrics Card -->
-            <div class="card">
-                <h2>Performance Metrics</h2>
-                <ul class="metrics-list">
-                    {% for key, value in metrics.items() %}
-                    <li>
-                        <span>{{ key }}:</span>
-                        <span class="value">{{ value }}</span>
-                    </li>
-                    {% endfor %}
-                </ul>
-            </div>
-            
-            <!-- Regimes & Trade Log Card -->
-            <div class="card">
-                <h2>Regime Analysis</h2>
-                <ul class="regime-list">
-                    {% for key, value in regime_metrics.items() %}
-                    <li>
-                        <span>{{ key }}:</span>
-                        <span class="value">{{ value }}</span>
-                    </li>
-                    {% endfor %}
-                </ul>
-
-                <h2>Trade List (Last 50)</h2>
-                <div class="trade-log">
-                    {% if trade_list %}
-                        {% for trade in trade_list %}
-                            {% set color_class = 'value' %}
-                            {% if 'PnL: -' in trade %}
-                                {% set color_class = 'negative' %}
-                            {% elif 'PnL: 0.00%' not in trade %}
-                                {% set color_class = 'positive' %}
-                            {% endif %}
-                            <p class="{{ color_class }}">{{ trade }}</p>
-                        {% endfor %}
-                    {% else %}
-                        <p>No completed trades found in the backtest period.</p>
-                    {% endif %}
-                </div>
-            </div>
-        </div>
-        <div class="strategy-description">
-            Strategy Logic (400/40 SMA Retracement Confirmation):<br>
-            - **Signal Determination (Today):** Based on Price and SMAs from **Yesterday (T-1)**.<br>
-            - **Long Entry:** Price crosses **INTO** the $400 SMA to $400 SMA + 2\%$ zone, coming from **ABOVE** the $+2\%$ threshold.<br>
-            - **Short Entry:** Price crosses **INTO** the $400 SMA - 2\%$ to $400 SMA$ zone, coming from **BELOW** the $-2\%$ threshold.<br>
-            - **Exit Long:** Price crosses the 40 SMA **from above**.<br>
-            - **Exit Short:** Price crosses the 40 SMA **from below**.<br>
-            - **Hold:** Stay in the position until the corresponding Exit condition is met.
-        </div>
-    </div>
-</body>
-</html>
-"""
-
 @app.route('/')
-def dashboard():
-    """
-    Main route to run the backtest, generate the plot, and display the dashboard.
-    """
-    df = get_data(SYMBOL, START_DATE)
+def analysis_dashboard():
+    """Main route to run analysis and serve the plot."""
+    data_source = "Binance (CCXT)"
     
-    if df is None or df.empty:
-        error_msg = f"""
-        <div style="background-color: #2c2c2c; color: #fff; padding: 40px; text-align: center; border-radius: 12px; margin: 50px auto; max-width: 600px;">
-            <h1>Data Fetching Failed</h1>
-            <p style="color: #F5A623;">Could not fetch sufficient historical data for {SYMBOL} from Binance.</p>
-            <p style="font-size: 0.9em; margin-top: 20px;">Please ensure you have installed <code>ccxt</code> and check if the API is currently accessible. The script needs data starting from {START_DATE}.</p>
-        </div>
+    try:
+        # 1. Get Data
+        df_raw = fetch_binance_data(SYMBOL, TIMEFRAME, START_DATE)
+        
+        # 2. Calculate Indicators
+        df_ind = calculate_indicators(df_raw)
+        
+        # 3. Run Backtest
+        df_final = run_backtest(df_ind)
+        
+        # Determine current position status
+        current_position = df_final['Position'].iloc[-1]
+        status = "LONG" if current_position == POSITION_SIZE else "FLAT/SHORT"
+
+        # 4. Create Plot
+        img_base64, total_strategy_return = create_plot(df_final)
+        
+        # Determine the last 10 days of the data for a small table snapshot
+        summary_df = df_final[['Close', 'SMA_200', 'DC_Upper', 'DC_Lower', 'Position', 'Equity']].tail(10)
+        summary_table = summary_df.to_html(classes='table-auto w-full text-sm text-left', 
+                                           float_format=lambda x: f'{x:,.2f}')
+        
+        # HTML Template with Tailwind CSS for modern look and responsiveness
+        html_content = f"""
+        <!DOCTYPE html>
+        <html lang="en">
+        <head>
+            <meta charset="UTF-8">
+            <meta name="viewport" content="width=device-width, initial-scale=1.0">
+            <title>SMA 200 Trading Backtest</title>
+            <script src="https://cdn.tailwindcss.com"></script>
+            <style>
+                /* Custom styles for the generated table */
+                .table-auto th, .table-auto td {{
+                    padding: 8px 12px;
+                    border: 1px solid #e5e7eb;
+                    text-align: right;
+                }}
+                .table-auto th {{
+                    text-align: left;
+                    background-color: #f3f4f6;
+                    font-weight: 600;
+                }}
+                .data-source-tag {{
+                    font-size: 0.75rem;
+                    padding: 0.25rem 0.5rem;
+                    border-radius: 0.5rem;
+                    font-weight: bold;
+                    margin-left: 1rem;
+                }}
+            </style>
+        </head>
+        <body class="bg-gray-100 p-4 sm:p-8 font-sans">
+            <div class="max-w-7xl mx-auto bg-white p-6 sm:p-10 rounded-xl shadow-2xl">
+                <h1 class="text-4xl font-extrabold text-blue-700 mb-6 border-b-4 border-blue-200 pb-2">
+                    Crypto Trading Backtest Dashboard
+                    <span class="data-source-tag bg-blue-200 text-blue-800">{data_source}</span>
+                </h1>
+
+                <div class="grid md:grid-cols-3 gap-6 mb-8">
+                    <div class="bg-blue-50 p-4 rounded-lg shadow-md">
+                        <p class="text-lg font-medium text-blue-600">Symbol</p>
+                        <p class="text-2xl font-bold text-blue-800">{SYMBOL} ({TIMEFRAME})</p>
+                    </div>
+                    <div class="bg-green-50 p-4 rounded-lg shadow-md">
+                        <p class="text-lg font-medium text-green-600">Strategy Return</p>
+                        <p class="text-2xl font-bold text-green-800">{total_strategy_return:.2f}%</p>
+                    </div>
+                    <div class="bg-red-50 p-4 rounded-lg shadow-md">
+                        <p class="text-lg font-medium text-red-600">Current Position</p>
+                        <p class="text-2xl font-bold text-red-800">{status}</p>
+                    </div>
+                </div>
+
+                <h2 class="text-2xl font-semibold text-gray-700 mb-4">Price & Equity Plot (Since {START_DATE})</h2>
+                <div class="bg-gray-50 p-2 rounded-lg shadow-inner mb-8 overflow-hidden">
+                    <img src="data:image/png;base64,{img_base64}" alt="Trading Strategy Backtest Plot" class="w-full h-auto rounded-lg"/>
+                </div>
+
+                <h2 class="text-2xl font-semibold text-gray-700 mb-4">Last 10 Days Data Snapshot</h2>
+                <div class="overflow-x-auto rounded-lg shadow-md border border-gray-200">
+                    {summary_table}
+                </div>
+                
+                <p class="mt-8 text-sm text-gray-600 border-t pt-4">
+                    **Note:** This backtest uses a simple Close > SMA 200 rule for daily position sizing (long/flat). Transaction costs and slippage are not included.
+                </p>
+            </div>
+        </body>
+        </html>
         """
-        return render_template_string(error_msg), 500
+        return render_template_string(html_content)
 
-    if len(df) < SMA_LONG_TERM:
-        error_msg = f"""
-        <div style="background-color: #2c2c2c; color: #fff; padding: 40px; text-align: center; border-radius: 12px; margin: 50px auto; max-width: 600px;">
-            <h1>Insufficient Data Error</h1>
-            <p style="color: #F5A623;">Fetched only {len(df)} days of data. We need at least {SMA_LONG_TERM} days to calculate the 400-day SMA.</p>
-            <p style="font-size: 0.9em; margin-top: 20px;">The script cannot run the backtest until more data is available or the required SMA window is reduced.</p>
-        </div>
-        """
-        return render_template_string(error_msg), 500
-
-    # Run the backtest and get the full list of trades
-    df_results, metrics, trade_list_full, regime_metrics = run_backtest(df)
-    
-    # Pre-slice the trade list in Python before passing to Jinja2
-    trade_list = trade_list_full[:50] 
-
-    # Generate plot
-    plot_data = generate_plot(df_results)
-
-    # Render HTML
-    return render_template_string(
-        HTML_TEMPLATE,
-        symbol=SYMBOL,
-        timeframe=TIME_FRAME,
-        metrics=metrics,
-        regime_metrics=regime_metrics,
-        trade_list=trade_list,
-        plot_data=plot_data
-    )
+    except Exception as e:
+        # Generic error handling for failed CCXT import or data fetching issues
+        error_message = f"Analysis Failed. Please ensure the 'ccxt' library is installed (`pip install ccxt`), and check your network connection or API limits. Details: {e}"
+        print(f"FATAL ERROR: {error_message}")
+        return render_template_string(f"""
+            <div class="p-8 text-center bg-white rounded-xl shadow-lg m-auto max-w-lg">
+                <h1 class="text-3xl font-bold text-red-600 mb-4">Analysis Failed</h1>
+                <p class="text-gray-700">The script could not fetch data from Binance. This is usually due to the 'ccxt' library not being installed or a network/API issue.</p>
+                <p class="mt-6 p-4 bg-red-100 text-red-800 rounded-lg text-left overflow-x-auto"><strong>Error:</strong> {error_message}</p>
+            </div>
+        """)
 
 if __name__ == '__main__':
-    print(f"\n--- Strategy Backtester Starting ---")
-    print(f"Data Source: Binance ({SYMBOL})")
-    print(f"Web server starting on http://127.0.0.1:8080/")
-    
-    # Required libraries: pip install pandas numpy matplotlib flask ccxt
-    app.run(host='0.0.0.0', port=8080, debug=False, use_reloader=False)
+    app.run(host='0.0.0.0', port=PORT, debug=True, use_reloader=False)
