@@ -18,9 +18,8 @@ SERVER_PORT = 8080
 RESULTS_DIR = 'results'
 ANNUALIZATION_FACTOR = 365 # Used for annualizing Sharpe Ratio for daily data
 
-# --- Asymmetric Dynamic Center Parameters ---
-BULLISH_CENTER_DISTANCE = 0.040  # 4.0% center when Price > SMA 120
-BEARISH_CENTER_DISTANCE = 0.010 # 1.0% center when Price <= SMA 120
+# --- Dynamic Center Parameter ---
+AVERAGE_DISTANCE_PERIOD = 20 # Lookback period (days) for the rolling average distance
 
 # --- 1. Data Fetching Utilities ---
 
@@ -114,48 +113,47 @@ def generate_metrics(cumulative_returns, daily_returns, strategy_name):
         'Cumulative Returns': cumulative_returns
     }
 
-# --- 3. Backtesting Logic (Dynamic Asymmetric Sizing) ---
+# --- 3. Backtesting Logic (Dynamic Average Distance Center) ---
 
-def run_backtest_dynamic_asymmetric_sizing(df):
+def run_backtest_dynamic_distance_center(df):
     """
-    Applies the 120 SMA trading strategy with asymmetric center distances (1% or 4%).
+    Applies the 120 SMA trading strategy with dynamic center distance based on 20-day average distance.
     """
-    print(f"-> Running dynamic asymmetric backtest (Center: Bullish={BULLISH_CENTER_DISTANCE*100:.0f}%, Bearish={BEARISH_CENTER_DISTANCE*100:.0f}%) on {len(df)} candles...")
+    print(f"-> Running dynamic backtest (Center=20d Avg Distance) on {len(df)} candles...")
     
     # 1. Calculate 120 SMA & Daily Returns
     df[f'SMA_{SMA_PERIOD_120}'] = df['Close'].rolling(window=SMA_PERIOD_120).mean()
     df['Daily_Return'] = np.log(df['Close'] / df['Close'].shift(1))
 
-    # --- Look-ahead Prevention ---
+    # --- Calculation for Dynamic Center (Requires current data) ---
+    # Calculate the absolute daily distance from SMA 120 (decimal format)
+    df['Raw_Distance'] = np.abs((df['Close'] - df[f'SMA_{SMA_PERIOD_120}']) / df[f'SMA_{SMA_PERIOD_120}'])
+    
+    # Calculate the 20-day rolling average of the distance
+    df['Rolling_Avg_Distance'] = df['Raw_Distance'].rolling(window=AVERAGE_DISTANCE_PERIOD).mean()
+    
+    # --- Look-ahead Prevention for all components ---
     df['Yesterday_Close'] = df['Close'].shift(1)
     df['Yesterday_SMA_120'] = df[f'SMA_{SMA_PERIOD_120}'].shift(1)
     
+    # Lag the rolling average distance to be used as the center for today's trade
+    df['Center_Distance'] = df['Rolling_Avg_Distance'].shift(1)
+
     # Drop NaNs after all lagging/rolling calculations
     df = df.dropna()
     
     # ----------------------------------------------------
-    # Strategy: Dynamic Position Sizing with Asymmetric Center
+    # Strategy: Dynamic Position Sizing
     # ----------------------------------------------------
     
-    # 1. Determine the Center Distance and Position Direction based on SMA crossover (Lagged)
-    
-    # Bullish Trend: Yesterday_Close > Yesterday_SMA_120
+    # 1. Determine Position Direction based on SMA crossover (Lagged)
     df['Bullish'] = df['Yesterday_Close'] > df['Yesterday_SMA_120']
-    
-    # Choose Center Distance: 4% (Bullish) or 1% (Bearish)
-    df['Center_Distance'] = np.where(
-        df['Bullish'],
-        BULLISH_CENTER_DISTANCE,
-        BEARISH_CENTER_DISTANCE
-    )
-    
-    # Determine Direction: +1 (Long) or -1 (Short)
     df['Direction'] = np.where(df['Bullish'], 1, -1)
     
     # 2. Calculate Distance (D): Absolute decimal distance from the SMA (lagged)
     df['Distance'] = np.abs((df['Yesterday_Close'] - df['Yesterday_SMA_120']) / df['Yesterday_SMA_120'])
 
-    # 3. Calculate Multiplier (M) using the dynamically chosen Center
+    # 3. Calculate Multiplier (M) using the dynamically calculated Center
     # Scaler = 1 / Center_Distance 
     distance_scaler = 1.0 / np.maximum(df['Center_Distance'], 1e-10) # Protect against zero division
     
@@ -190,7 +188,7 @@ def run_backtest_dynamic_asymmetric_sizing(df):
     
     # Strategy
     metrics.append(generate_metrics(
-        df['Cumulative_Strategy_Return'], df['Strategy_Return'], f'Dynamic Asymmetric Strategy'
+        df['Cumulative_Strategy_Return'], df['Strategy_Return'], f'Dynamic Avg Dist Center ({AVERAGE_DISTANCE_PERIOD}d)'
     ))
     
     # Print comparison table
@@ -200,7 +198,7 @@ def run_backtest_dynamic_asymmetric_sizing(df):
     ])
     
     print("\n" + "=" * 60)
-    print("FINAL BACKTEST METRICS (Dynamic Asymmetric Sizing)")
+    print("FINAL BACKTEST METRICS (Dynamic Avg Distance Center)")
     print("=" * 60)
     print(comparison_df.to_string(index=False))
     print("=" * 60)
@@ -308,11 +306,11 @@ def serve_results(metrics):
                 </head>
                 <body class="p-8">
                     <div class="container mx-auto p-4 bg-gray-800 shadow-xl rounded-xl">
-                        <h1 class="text-3xl font-bold mb-4 text-green-400">Backtest Results: {SYMBOL} Dynamic Asymmetric Sizing</h1>
+                        <h1 class="text-3xl font-bold mb-4 text-green-400">Backtest Results: {SYMBOL} Dynamic Avg Distance Center</h1>
                         
                         <div class="mb-8">
                             <h2 class="text-xl font-semibold mb-3 text-gray-200">Strategy Metrics Comparison</h2>
-                            <p class="text-gray-400 mb-4">Dynamic Position Sizing with asymmetric center distances based on SMA 120 trend (Bullish: 4.0% Center, Bearish: 1.0% Center).</p>
+                            <p class="text-gray-400 mb-4">Dynamic Position Sizing with center distance based on the lagged 20-day average distance to the SMA 120.</p>
                             <div class="relative overflow-x-auto shadow-md sm:rounded-lg">
                                 <table class="w-full text-sm text-left text-gray-400">
                                     <thead class="text-xs uppercase bg-gray-700 text-gray-400">
@@ -372,7 +370,7 @@ if __name__ == '__main__':
         print("Error: Could not retrieve data. Exiting.")
     else:
         # 2. Run backtest and get comparison metrics
-        results_df, comparison_metrics = run_backtest_dynamic_asymmetric_sizing(df_data)
+        results_df, comparison_metrics = run_backtest_dynamic_distance_center(df_data)
         
         # 3. Plot results
         plot_results(results_df, comparison_metrics)
