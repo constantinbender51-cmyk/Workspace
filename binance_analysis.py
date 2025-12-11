@@ -69,7 +69,8 @@ def fetch_klines(symbol, interval, start_str):
     df['Open Time'] = pd.to_datetime(df['Open Time'], unit='ms')
     df['Close'] = pd.to_numeric(df['Close'])
     df = df.set_index('Open Time')
-    df = df[['Close']].astype(float)
+    # Keep Close and Open for plotting the candles
+    df = df[['Open', 'Close']].astype(float)
     
     return df.dropna()
 
@@ -179,7 +180,7 @@ def run_backtest(df):
 
 def plot_results(df, metrics):
     """
-    Generates and saves the plot of the strategy and benchmark equity curves.
+    Generates and saves the plot of the strategy, benchmark equity curves, and price/SMA.
     """
     print(f"-> Generating plot in '{RESULTS_DIR}/{PLOT_FILE}'...")
     
@@ -187,24 +188,45 @@ def plot_results(df, metrics):
     plot_path = os.path.join(RESULTS_DIR, PLOT_FILE)
 
     plt.style.use('dark_background')
-    fig, ax = plt.subplots(figsize=(14, 8))
+    
+    # Create a figure with two subplots: Price/SMA (top) and Equity Curve (bottom)
+    fig = plt.figure(figsize=(14, 10)) 
+    gs = fig.add_gridspec(2, 1, hspace=0.25, height_ratios=[1, 1])
+    
+    # --- Top Subplot (ax1): Price and SMA (Linear Scale) ---
+    ax1 = fig.add_subplot(gs[0])
+    
+    # Plotting the Close Price and SMA
+    df['Close'].plot(ax=ax1, label='Close Price', color='#9CA3AF', linewidth=1.5, alpha=0.9, zorder=3)
+    df[f'SMA_{SMA_PERIOD_120}'].plot(ax=ax1, label=f'SMA {SMA_PERIOD_120}', color='#3B82F6', linewidth=2, zorder=4)
+    
+    # Style and Labels for ax1
+    ax1.set_title(f'{SYMBOL} Price and SMA (Linear Scale)', fontsize=16, color='white')
+    ax1.set_xlabel('') 
+    ax1.set_ylabel('Price (USDT)', fontsize=12, color='white')
+    ax1.legend(loc='upper left', fontsize=10)
+    ax1.grid(True, linestyle=':', alpha=0.5, color='#374151', which='both')
+    
+    # --- Bottom Subplot (ax2): Equity Curve (Log Scale) ---
+    ax2 = fig.add_subplot(gs[1], sharex=ax1)
     
     # Plotting the equity curves
-    df['Cumulative_Buy_and_Hold'].plot(ax=ax, label=metrics[0]['Strategy'], color='#EF4444', linestyle='--', linewidth=1.5)
-    df['Cumulative_Strategy_Return'].plot(ax=ax, label=metrics[1]['Strategy'], color='#3B82F6', linewidth=2.5)
+    df['Cumulative_Buy_and_Hold'].plot(ax=ax2, label=metrics[0]['Strategy'], color='#EF4444', linestyle='--', linewidth=1.5)
+    df['Cumulative_Strategy_Return'].plot(ax=ax2, label=metrics[1]['Strategy'], color='#3B82F6', linewidth=2.5)
     
     # Set Y-axis to Logarithmic Scale
-    ax.set_yscale('log')
+    ax2.set_yscale('log')
     
-    # Style and Labels
-    ax.set_title(f'{SYMBOL} 120 SMA Crossover vs. Buy & Hold (Log Scale Since 2018)', fontsize=16, color='white')
-    ax.set_xlabel('Date', fontsize=12, color='white')
-    ax.set_ylabel('Cumulative Return (Log Scale - Multiplier)', fontsize=12, color='white')
-    ax.legend(loc='upper left', fontsize=10)
-    ax.grid(True, linestyle=':', alpha=0.5, color='#374151', which='both')
-    
-    # Ensure non-scientific notation on the log scale
-    ax.yaxis.set_major_formatter(ScalarFormatter())
+    # Style and Labels for ax2
+    ax2.set_title('Cumulative Return (Log Scale)', fontsize=14, color='white')
+    ax2.set_xlabel('Date', fontsize=12, color='white')
+    ax2.set_ylabel('Cumulative Return (Log Scale - Multiplier)', fontsize=12, color='white')
+    ax2.legend(loc='upper left', fontsize=10)
+    ax2.grid(True, linestyle=':', alpha=0.5, color='#374151', which='both')
+    ax2.yaxis.set_major_formatter(ScalarFormatter()) 
+
+    # Remove tick labels from the upper plot's x-axis for a cleaner look
+    plt.setp(ax1.get_xticklabels(), visible=False)
 
     # Save the plot
     plt.savefig(plot_path, bbox_inches='tight', dpi=150)
@@ -277,7 +299,7 @@ def serve_results(metrics):
                         </div>
 
                         <div class="plot-container">
-                            <h2 class="text-xl font-semibold mb-3 text-gray-200">Cumulative Returns (Log Scale)</h2>
+                            <h2 class="text-xl font-semibold mb-3 text-gray-200">Price Action & Cumulative Returns</h2>
                             <img src="{RESULTS_DIR}/{PLOT_FILE}" alt="Strategy Cumulative Returns Plot" class="w-full h-auto rounded-lg shadow-2xl">
                         </div>
                         <div class="mt-6 p-4 bg-gray-700 rounded-lg">
