@@ -5,21 +5,19 @@ import requests
 import time
 import datetime as dt
 import os
-from http.server import SimpleHTTPRequestHandler, HTTPServer
-from matplotlib.ticker import ScalarFormatter
 
 # --- Configuration ---
 SYMBOL = 'BTCUSDT'
 INTERVAL = '1d'
 START_DATE = '1 Jan, 2018'
 SMA_PERIOD_120 = 120 
-PLOT_FILE = 'strategy_results.png'
-SERVER_PORT = 8080 
-RESULTS_DIR = 'results'
+MOMENTUM_PERIOD = 60 # Lookback period for calculating the dynamic center distance (60 days)
 ANNUALIZATION_FACTOR = 365 # Used for annualizing Sharpe Ratio for daily data
 
-# --- Dynamic Parameter ---
-MOMENTUM_PERIOD = 60 # Lookback period for calculating the dynamic center distance (60 days)
+# --- Grid Search Parameters ---
+GRID_K_START = 0.00
+GRID_K_END = 4.00
+GRID_K_STEP = 0.01
 
 # --- 1. Data Fetching Utilities ---
 
@@ -80,7 +78,7 @@ def fetch_klines(symbol, interval, start_str):
 def calculate_sharpe_ratio(returns, annualization_factor=ANNUALIZATION_FACTOR, risk_free_rate=0):
     """Calculates the Annualized Sharpe Ratio."""
     if returns.empty or len(returns) <= 1:
-        return 0.0 
+        return -np.inf 
     excess_return = returns - risk_free_rate
     mean_excess_return = excess_return.mean()
     std_dev = excess_return.std()
@@ -91,277 +89,124 @@ def calculate_sharpe_ratio(returns, annualization_factor=ANNUALIZATION_FACTOR, r
     sharpe = (mean_excess_return * annualization_factor) / (std_dev * np.sqrt(annualization_factor))
     return sharpe
 
-def calculate_max_drawdown(cumulative_returns):
-    """Calculates the Maximum Drawdown (MDD) in percentage."""
+def calculate_total_return(cumulative_returns):
+    """Calculates the Total Return in percentage."""
     if cumulative_returns.empty:
         return 0.0
-    peak = cumulative_returns.cummax()
-    drawdown = (peak - cumulative_returns) / peak
-    return drawdown.max() * 100
+    return (cumulative_returns.iloc[-1] - 1) * 100
 
-def generate_metrics(cumulative_returns, daily_returns, strategy_name):
-    """Aggregates all metrics for a given strategy."""
-    total_return = (cumulative_returns.iloc[-1] - 1) * 100
-    sharpe = calculate_sharpe_ratio(daily_returns)
-    max_dd = calculate_max_drawdown(cumulative_returns)
-    
-    return {
-        'Strategy': strategy_name,
-        'Total Return (%)': f'{total_return:.2f}',
-        'Annualized Sharpe': f'{sharpe:.2f}',
-        'Max Drawdown (%)': f'{max_dd:.2f}',
-        'Cumulative Returns': cumulative_returns
-    }
+# --- 3. Backtesting Logic for Grid Search ---
 
-# --- 3. Backtesting Logic (Dynamic Momentum Center) ---
-
-def run_backtest_dynamic_sizing(df):
+def run_strategy_for_optimization(df_data, k_factor):
     """
-    Applies the 120 SMA trading strategy with dynamic position sizing using 60-day momentum as center.
+    Applies the dynamic sizing strategy for a specific k_factor and returns Sharpe Ratio/Total Return.
     """
-    print(f"-> Running dynamic 120 SMA backtest with {MOMENTUM_PERIOD}-day momentum center on {len(df)} candles...")
+    df = df_data.copy()
     
-    # 1. Calculate 120 SMA
+    # 1. Calculate 120 SMA & Daily Returns
     df[f'SMA_{SMA_PERIOD_120}'] = df['Close'].rolling(window=SMA_PERIOD_120).mean()
-    
-    # 2. Calculate daily returns (log returns)
     df['Daily_Return'] = np.log(df['Close'] / df['Close'].shift(1))
 
-    # --- Look-ahead Prevention for Trading Direction (120 SMA) ---
+    # --- Look-ahead Prevention ---
     df['Yesterday_Close'] = df['Close'].shift(1)
     df['Yesterday_SMA_120'] = df[f'SMA_{SMA_PERIOD_120}'].shift(1)
-
-    # --- Calculate Dynamic Center (Momentum) ---
-    # Momentum = (Price / Price[60 days ago]) - 1
+    
+    # Calculate 60-day momentum
     df['Momentum_60d'] = (df['Close'] / df['Close'].shift(MOMENTUM_PERIOD)) - 1
     
-    # Lag and take absolute value for center distance on day T (based on close of T-1)
-    # np.abs is used as the center distance must be positive
-    df['Center_Distance'] = np.abs(df['Momentum_60d'].shift(1))
+    # Dynamic Center = k * |Momentum_60d| (Lagged)
+    df['Center_Distance'] = k_factor * np.abs(df['Momentum_60d'].shift(1))
 
     # Drop NaNs after all lagging/rolling calculations
     df = df.dropna()
     
-    # ----------------------------------------------------
-    # Strategy: 120 SMA Crossover with Dynamic Position Sizing
-    # ----------------------------------------------------
+    if df.empty:
+        return -np.inf, 0.0
     
-    # 1. Calculate Distance (D): Absolute decimal distance from the SMA (lagged)
+    # 2. Calculate Distance (D): Absolute decimal distance from the SMA (lagged)
     df['Distance'] = np.abs((df['Yesterday_Close'] - df['Yesterday_SMA_120']) / df['Yesterday_SMA_120'])
 
-    # 2. Calculate Multiplier (M) using the provided formula:
-    # M = 1 / ( (1 / (D * Scaler)) + (D * Scaler) - 1 )
+    # 3. Calculate Multiplier (M)
+    # Scaler = 1 / Center_Distance 
+    distance_scaler = 1.0 / np.maximum(df['Center_Distance'], 1e-10) # Use max to prevent div by zero
     
-    # Scaler = 1 / Center_Distance (Momentum)
-    distance_scaler = 1.0 / df['Center_Distance'] 
     scaled_distance = df['Distance'] * distance_scaler
     
     epsilon = 1e-6 
+    # M = 1 / ( (1 / (D * Scaler)) + (D * Scaler) - 1 )
     denominator = (1.0 / np.maximum(scaled_distance, epsilon)) + scaled_distance - 1.0
     
-    # Calculate Multiplier
+    # Calculate Multiplier (Position Size Magnitude)
     df['Multiplier'] = np.where(denominator == 0, 0, 1.0 / denominator)
 
-    # 3. Determine Direction (Long/Short)
+    # 4. Determine Direction (Long/Short)
     df['Direction'] = np.where(
         df['Yesterday_Close'] > df['Yesterday_SMA_120'],
         1,
         -1
     )
 
-    # 4. Final Position Size = Direction * Multiplier
+    # 5. Final Position Size = Direction * Multiplier
     df['Position_Size'] = df['Direction'] * df['Multiplier']
     
-    # 5. Calculate Strategy Returns
+    # 6. Calculate Strategy Returns & Cumulative Returns
     df['Strategy_Return'] = df['Daily_Return'] * df['Position_Size']
     df['Cumulative_Strategy_Return'] = np.exp(df['Strategy_Return'].cumsum())
+    
+    # Calculate metrics
+    sharpe = calculate_sharpe_ratio(df['Strategy_Return'])
+    total_return = calculate_total_return(df['Cumulative_Strategy_Return'])
+    
+    return sharpe, total_return
 
-    # ----------------------------------------------------
-    # Benchmark: Buy & Hold (B&H)
-    # ----------------------------------------------------
-    df['Cumulative_Buy_and_Hold'] = np.exp(df['Daily_Return'].cumsum())
-
-    # --- Generate Metrics ---
-    metrics = []
-    
-    # B&H
-    metrics.append(generate_metrics(
-        df['Cumulative_Buy_and_Hold'], df['Daily_Return'], 'Buy & Hold (Benchmark)'
-    ))
-    
-    # Strategy
-    metrics.append(generate_metrics(
-        df['Cumulative_Strategy_Return'], df['Strategy_Return'], f'Dynamic Strategy (120 SMA, {MOMENTUM_PERIOD}d Momentum Center)'
-    ))
-    
-    # Print comparison table
-    comparison_df = pd.DataFrame([
-        {k: v for k, v in m.items() if k != 'Cumulative Returns'} 
-        for m in metrics
-    ])
-    
+def run_grid_search(df):
+    """
+    Performs a grid search over the first 50% of the data to find the optimal k factor.
+    """
     print("\n" + "=" * 60)
-    print("BACKTEST METRICS COMPARISON (Dynamic Momentum Center)")
+    print("STARTING GRID SEARCH OPTIMIZATION (IN-SAMPLE: FIRST 50% OF DATA)")
+    print("Target Metric: Annualized Sharpe Ratio")
+    print(f"Parameter Range (k): {GRID_K_START:.2f} to {GRID_K_END:.2f} in {GRID_K_STEP:.2f} steps")
     print("=" * 60)
-    print(comparison_df.to_string(index=False))
-    print("=" * 60)
     
-    return df, metrics
+    # 1. Slice data to first 50% (In-Sample period)
+    half_index = len(df) // 2
+    df_in_sample = df.iloc[:half_index].copy()
+    
+    # 2. Define grid search space (0.00 to 4.00 in 0.01 steps)
+    k_factors = [round(k, 2) for k in np.arange(GRID_K_START, GRID_K_END + GRID_K_STEP/2, GRID_K_STEP)]
 
-# --- 4. Plotting Results ---
-
-def plot_results(df, metrics):
-    """
-    Generates and saves the plot of the strategy, benchmark equity curves, and price/SMA.
-    """
-    print(f"-> Generating plot in '{RESULTS_DIR}/{PLOT_FILE}'...")
+    best_sharpe = -np.inf
+    optimal_k = 0.0
     
-    os.makedirs(RESULTS_DIR, exist_ok=True)
-    plot_path = os.path.join(RESULTS_DIR, PLOT_FILE)
-
-    plt.style.use('dark_background')
-    
-    # Create a figure with two subplots: Price/SMA (top) and Equity Curve (bottom)
-    fig = plt.figure(figsize=(14, 10)) 
-    gs = fig.add_gridspec(2, 1, hspace=0.25, height_ratios=[1, 1])
-    
-    # --- Top Subplot (ax1): Price and SMA (Linear Scale) ---
-    ax1 = fig.add_subplot(gs[0])
-    
-    # Plotting the Close Price and SMA
-    df['Close'].plot(ax=ax1, label='Close Price', color='#9CA3AF', linewidth=1.5, alpha=0.9, zorder=3)
-    df[f'SMA_{SMA_PERIOD_120}'].plot(ax=ax1, label=f'SMA {SMA_PERIOD_120}', color='#3B82F6', linewidth=2, zorder=4)
-    
-    # Style and Labels for ax1
-    ax1.set_title(f'{SYMBOL} Price and SMA (Linear Scale)', fontsize=16, color='white')
-    ax1.set_xlabel('') 
-    ax1.set_ylabel('Price (USDT)', fontsize=12, color='white')
-    ax1.legend(loc='upper left', fontsize=10)
-    ax1.grid(True, linestyle=':', alpha=0.5, color='#374151', which='both')
-    
-    # --- Bottom Subplot (ax2): Equity Curve (Log Scale) ---
-    ax2 = fig.add_subplot(gs[1], sharex=ax1)
-    
-    # Plotting the equity curves
-    df['Cumulative_Buy_and_Hold'].plot(ax=ax2, label=metrics[0]['Strategy'], color='#EF4444', linestyle='--', linewidth=1.5)
-    df['Cumulative_Strategy_Return'].plot(ax=ax2, label=metrics[1]['Strategy'], color='#3B82F6', linewidth=2.5)
-    
-    # Set Y-axis to Logarithmic Scale
-    ax2.set_yscale('log')
-    
-    # Style and Labels for ax2
-    ax2.set_title('Cumulative Return (Log Scale)', fontsize=14, color='white')
-    ax2.set_xlabel('Date', fontsize=12, color='white')
-    ax2.set_ylabel('Cumulative Return (Log Scale - Multiplier)', fontsize=12, color='white')
-    ax2.legend(loc='upper left', fontsize=10)
-    ax2.grid(True, linestyle=':', alpha=0.5, color='#374151', which='both')
-    ax2.yaxis.set_major_formatter(ScalarFormatter()) 
-
-    # Remove tick labels from the upper plot's x-axis for a cleaner look
-    plt.setp(ax1.get_xticklabels(), visible=False)
-
-    # Save the plot
-    plt.savefig(plot_path, bbox_inches='tight', dpi=150)
-    plt.close(fig)
-    print("-> Plot saved successfully.")
-
-# --- 5. Web Server ---
-
-def serve_results(metrics):
-    """
-    Starts a simple HTTP server to host the results page.
-    """
-    print(f"\n==========================================================")
-    print(f"🚀 Starting Web Server on http://localhost:{SERVER_PORT}/")
-    print(f"==========================================================")
-    
-    metric_rows = ""
-    for m in metrics:
-        metric_rows += f"""
-        <tr class="bg-gray-700 hover:bg-gray-600">
-            <td class="px-6 py-3 font-medium text-white">{m['Strategy']}</td>
-            <td class="px-6 py-3">{m['Total Return (%)']}%</td>
-            <td class="px-6 py-3">{m['Annualized Sharpe']}</td>
-            <td class="px-6 py-3">{m['Max Drawdown (%)']}%</td>
-        </tr>
-        """
-
-    class ResultsHandler(SimpleHTTPRequestHandler):
-        def do_GET(self):
-            if self.path == '/':
-                self.send_response(200)
-                self.send_header('Content-type', 'text/html')
-                self.end_headers()
-                
-                html_content = f"""
-                <!DOCTYPE html>
-                <html lang="en">
-                <head>
-                    <meta charset="UTF-8">
-                    <meta name="viewport" content="width=device-width, initial-scale=1.0">
-                    <title>Trading Strategy Results</title>
-                    <script src="https://cdn.tailwindcss.com"></script>
-                    <style>
-                        body {{ font-family: 'Inter', sans-serif; background-color: #1F2937; color: #F3F4F6; }}
-                        .container {{ max-width: 1024px; }}
-                        .plot-container {{ background-color: #374151; border-radius: 0.5rem; padding: 1rem; }}
-                    </style>
-                </head>
-                <body class="p-8">
-                    <div class="container mx-auto p-4 bg-gray-800 shadow-xl rounded-xl">
-                        <h1 class="text-3xl font-bold mb-4 text-green-400">Backtest Results: {SYMBOL} Dynamic Momentum Sizing</h1>
-                        
-                        <div class="mb-8">
-                            <h2 class="text-xl font-semibold mb-3 text-gray-200">Strategy Metrics Comparison</h2>
-                            <p class="text-gray-400 mb-4">The dynamic sizing center is the absolute value of the 60-day price return (momentum).</p>
-                            <div class="relative overflow-x-auto shadow-md sm:rounded-lg">
-                                <table class="w-full text-sm text-left text-gray-400">
-                                    <thead class="text-xs uppercase bg-gray-700 text-gray-400">
-                                        <tr>
-                                            <th scope="col" class="px-6 py-3">Strategy</th>
-                                            <th scope="col" class="px-6 py-3">Total Return</th>
-                                            <th scope="col" class="px-6 py-3">Sharpe Ratio</th>
-                                            <th scope="col" class="px-6 py-3">Max Drawdown</th>
-                                        </tr>
-                                    </thead>
-                                    <tbody>
-                                        {metric_rows}
-                                    </tbody>
-                                </table>
-                            </div>
-                        </div>
-
-                        <div class="plot-container">
-                            <h2 class="text-xl font-semibold mb-3 text-gray-200">Price Action & Cumulative Returns</h2>
-                            <img src="{RESULTS_DIR}/{PLOT_FILE}" alt="Strategy Cumulative Returns Plot" class="w-full h-auto rounded-lg shadow-2xl">
-                        </div>
-                        <div class="mt-6 p-4 bg-gray-700 rounded-lg">
-                            <p class="text-xl font-semibold">Server Running on Port {SERVER_PORT}</p>
-                            <p class="text-sm text-gray-400">Close the terminal window to stop the server.</p>
-                        </div>
-                    </div>
-                </body>
-                </html>
-                """
-                self.wfile.write(bytes(html_content, "utf8"))
-            
-            elif self.path.startswith('/' + RESULTS_DIR):
-                SimpleHTTPRequestHandler.do_GET(self)
-            
-            else:
-                self.send_response(404)
-                self.end_headers()
-                self.wfile.write(b'404 Not Found')
-
-        def translate_path(self, path):
-            return os.path.join(os.getcwd(), path.lstrip('/'))
-
-    
-    with HTTPServer(("", SERVER_PORT), ResultsHandler) as httpd:
+    # 3. Run search
+    for k_factor in k_factors:
         try:
-            httpd.serve_forever()
-        except KeyboardInterrupt:
-            print("\n-> Server stopped by user.")
+            sharpe, total_return = run_strategy_for_optimization(df_in_sample, k_factor)
+            
+            # Print intermediate results sparingly
+            # if k_factor % 0.5 == 0:
+            #     print(f"   k={k_factor:.2f} -> Sharpe: {sharpe:.4f}")
+            
+            if sharpe > best_sharpe:
+                best_sharpe = sharpe
+                optimal_k = k_factor
+        
+        except Exception as e:
+            print(f"Error for k={k_factor:.2f}: {e}")
+            continue
+
+    if best_sharpe == -np.inf:
+        print("\nOptimization failed: No valid Sharpe ratio could be calculated.")
+        return None
+        
+    print("\n" + "=" * 60)
+    print("OPTIMIZATION COMPLETE")
+    print(f"Optimal Factor k (Sharpe Max): {optimal_k:.2f}")
+    print(f"Max Annualized Sharpe Ratio (In-Sample): {best_sharpe:.4f}")
+    print("=" * 60)
+    
+    return optimal_k
 
 # --- Main Execution ---
 
@@ -372,11 +217,10 @@ if __name__ == '__main__':
     if df_data.empty:
         print("Error: Could not retrieve data. Exiting.")
     else:
-        # 2. Run backtest and get comparison metrics
-        results_df, comparison_metrics = run_backtest_dynamic_sizing(df_data)
+        # 2. Run grid search
+        optimal_k = run_grid_search(df_data)
         
-        # 3. Plot results
-        plot_results(results_df, comparison_metrics)
-
-        # 4. Start web server in the main thread
-        serve_results(comparison_metrics)
+        if optimal_k is not None:
+             print(f"\nOptimization successful. Optimal k factor found: {optimal_k:.2f}")
+        else:
+             print("\nOptimization failed to find a valid optimal k factor.")
