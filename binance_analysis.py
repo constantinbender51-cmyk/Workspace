@@ -19,7 +19,7 @@ RESULTS_DIR = 'results'
 ANNUALIZATION_FACTOR = 365 # Used for annualizing Sharpe Ratio for daily data
 
 # --- Fixed Optimal Parameter (Based on prior testing) ---
-OPTIMAL_AVERAGE_DISTANCE_PERIOD = 20 # Fixed as 20 days, based on your previous assessment
+OPTIMAL_AVERAGE_DISTANCE_PERIOD = 10 # Fixed as 20 days, based on your previous assessment
 
 # --- 1. Data Fetching Utilities ---
 
