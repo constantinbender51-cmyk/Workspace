@@ -100,31 +100,31 @@ def calculate_indicators(df):
 
 def run_backtest(df):
     """
-    FOR VERIFICATION: Forces a permanent Long position to ensure strategy equity 
-    matches Buy & Hold.
+    CUSTOM TEST: Short for the first 5 tradable days, then Long permanently.
     """
     
-    # 1. Position Decision and Held Position
-    # --- MODIFICATION: ALWAYS GO LONG (TEST MODE) ---
-    df['Next_Day_Position'] = POSITION_SIZE      # Always +1 (Long)
-    # --------------------------------------------------
-    
-    df['Held_Position'] = df['Next_Day_Position'].shift(1).fillna(0)
-    
-    # 2. Calculate Daily Strategy Returns
+    # Calculate returns and indicators first
     df['Daily_Return'] = df['Close'].pct_change()
     daily_returns_clean = df['Daily_Return'].fillna(0)
     
-    # Strategy Return = Daily Asset Return * Held Position (+1)
-    df['Strategy_Return'] = daily_returns_clean * df['Held_Position']
-    
-    # 3. Final Cleanup
+    # 1. Final Cleanup (drop NaNs from indicators like SMA_400)
     df_clean = df.dropna()
     if df_clean.empty:
         raise ValueError("DataFrame is empty after dropping NaN values from indicators.")
         
-    # The normalization index is the first row where all indicators are valid (i.e., SMA_400 is non-NaN)
+    # The normalization index is the first row where all indicators are valid
     normalization_index = df_clean.index[0]
+    
+    # 2. Force the position for the test on the clean data's index
+    df_clean.loc[:, 'Position'] = POSITION_SIZE # Default all tradable days to Long (+1)
+
+    # Force the first 5 days to be SHORT (-1). 
+    # This reflects the position HELD for the return period of those 5 days.
+    df_clean.loc[df_clean.index[:5], 'Position'] = -POSITION_SIZE
+    
+    # 3. Calculate Strategy Return
+    # Strategy Return = Daily Asset Return * Held Position (Position is +1 or -1 here)
+    df_clean.loc[:, 'Strategy_Return'] = df_clean['Daily_Return'] * df_clean['Position']
     
     # 4. Calculate Cumulative Equity
     
@@ -137,9 +137,6 @@ def run_backtest(df):
     start_price_bh = df_clean['Close'].loc[normalization_index]
     bh_equity_series = (df_clean['Close'] / start_price_bh).reindex(df_clean.index, fill_value=1.0)
     df_clean.loc[:, 'Buy_Hold_Equity'] = bh_equity_series
-
-    # Renaming Held_Position to Position for summary table display
-    df_clean.rename(columns={'Held_Position': 'Position'}, inplace=True) 
 
     return df_clean
 
@@ -157,12 +154,30 @@ def create_plot(df):
     # --- Price and Indicator Plot (Top Panel) ---
     ax1 = axes[0]
     
-    # 1. Background Coloring for Position (Always Green)
+    # 1. Background Coloring for Position (Green for Long, Red for Short)
     pos_series = df_plot['Position']
     
-    # Since position is always +1, we just draw one large green span
-    ax1.axvspan(df_plot.index[0], df_plot.index[-1] + pd.Timedelta(days=1), 
-                facecolor='green', alpha=0.08, zorder=0)
+    # Identify segments of continuous position
+    change_indices = pos_series.index[pos_series.diff() != 0]
+
+    segment_starts = pd.Index([pos_series.index[0]]).append(change_indices)
+    segment_ends = change_indices.append(pd.Index([pos_series.index[-1]]))
+    
+    # Plot spans for each segment
+    for start, end in zip(segment_starts, segment_ends):
+        current_pos = pos_series.loc[start]
+        
+        if current_pos == POSITION_SIZE:
+            color = 'green'
+            alpha = 0.08
+        elif current_pos == -POSITION_SIZE:
+            color = 'red'
+            alpha = 0.08
+        else:
+            continue
+            
+        end_adjusted = end + pd.Timedelta(days=1)
+        ax1.axvspan(start, end_adjusted, facecolor=color, alpha=alpha, zorder=0)
 
     # 2. Price and Indicators
     ax1.plot(df_plot.index, df_plot['Close'], label='Price', color='#1f77b4', linewidth=1.5, alpha=0.9, zorder=1)
@@ -175,7 +190,7 @@ def create_plot(df):
     ax1.plot(df_plot.index, df_plot['DC_Lower'], label=f'DC {DC_WINDOW} Lower', color='c', linestyle='-.', alpha=0.5, zorder=1)
     
     # 3. Final Touches
-    ax1.set_title(f'{SYMBOL} Price and Indicators (TEST: Permanent LONG)', fontsize=16)
+    ax1.set_title(f'{SYMBOL} Price and Indicators (TEST: 5-Day Short, then Long)', fontsize=16)
     ax1.set_ylabel('Price (USD)', fontsize=12)
     ax1.grid(True, linestyle='--', alpha=0.6)
     ax1.legend(loc='upper left', fontsize=8)
@@ -188,7 +203,7 @@ def create_plot(df):
     final_bh_return = (df_plot['Buy_Hold_Equity'].iloc[-1] - 1) * 100
     
     # The lines should overlap perfectly here
-    ax2.plot(df_plot.index, df_plot['Equity'], label='Strategy Equity (Always LONG)', color='blue', linewidth=3)
+    ax2.plot(df_plot.index, df_plot['Equity'], label='Strategy Equity (Custom Test)', color='blue', linewidth=3)
     ax2.plot(df_plot.index, df_plot['Buy_Hold_Equity'], label='Buy & Hold Benchmark', color='gray', linestyle='--', alpha=0.7)
     
     ax2.set_title(f'Strategy Equity Curve (Final Return: {final_strategy_return:.2f}%) vs B&H ({final_bh_return:.2f}%)', fontsize=14)
@@ -222,12 +237,13 @@ def setup_analysis():
         # 2. Calculate Indicators
         df_ind = calculate_indicators(df_raw)
         
-        # 3. Run Backtest (Always LONG test)
+        # 3. Run Backtest (Custom sequence test)
         df_final = run_backtest(df_ind)
         
         # 4. Determine current status
         current_position = df_final['Position'].iloc[-1]
-        GLOBAL_STATUS = "LONG (TEST MODE)"
+        # Status reflects the final state of this specific test
+        GLOBAL_STATUS = "LONG (Custom Test)" 
 
         # 5. Create Plot
         img_base64, total_strategy_return = create_plot(df_final)
@@ -248,16 +264,14 @@ def setup_analysis():
         start_price_bh = df_final.iloc[0]['Close']
         end_price_bh = df_final.iloc[-1]['Close']
         final_bh_equity = df_final['Buy_Hold_Equity'].iloc[-1]
-        final_strategy_equity = df_final['Equity'].iloc[-1]
         
-        print("\n--- VERIFICATION DETAILS: PERMANENT LONG TEST ---")
+        print("\n--- VERIFICATION DETAILS: CUSTOM SEQUENCE TEST ---")
         print(f"B&H Start Date (Tradable Period): {start_date_bh}")
         print(f"B&H End Date: {end_date_bh}")
         print(f"Price at Start: {start_price_bh:,.2f} USD")
         print(f"Price at End: {end_price_bh:,.2f} USD")
-        print(f"Strategy Final Equity: {final_strategy_equity:.6f}x")
-        print(f"B&H Final Equity (Price Ratio): {final_bh_equity:.6f}x")
-        print(f"MATCH CHECK (Strategy == B&H): {final_strategy_equity:.6f} == {final_bh_equity:.6f}")
+        print(f"B&H Final Equity (Price Ratio): {final_bh_equity:.2f}x ({(final_bh_equity - 1) * 100:.2f}%)")
+        print(f"Strategy Final Equity: {df_final['Equity'].iloc[-1]:.2f}x ({(total_strategy_return):.2f}%)")
         print("----------------------------------------------------------------------")
         print("--- ANALYSIS COMPLETE ---")
 
@@ -347,7 +361,7 @@ def analysis_dashboard():
             </div>
             
             <p class="mt-8 text-sm text-gray-600 border-t pt-4">
-                **Note:** This is currently running in a **Permanent LONG Test Mode** to verify compounding logic. Transaction costs and slippage are not included.
+                **Note:** This is currently running in a **Custom Sequence Test (5 days Short, then Long)** to verify compounding logic. Transaction costs and slippage are not included.
             </p>
         </div>
     </body>
