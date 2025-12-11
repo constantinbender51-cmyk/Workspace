@@ -135,11 +135,9 @@ def run_strategy_core(df_window, center_distance):
     df['Yesterday_SMA_120'] = df[f'SMA_{SMA_PERIOD_120}'].shift(1)
     
     # Drop rows that don't have enough history for SMAs/lagging
-    # Crucially, we keep only rows that have a full SMA and a lagged value
-    df_clean = df.dropna(subset=[f'SMA_{SMA_PERIOD_120}', 'Yesterday_Close', 'Yesterday_SMA_120']).copy()
+    df_clean = df.dropna(subset=[f'SMA_{SMA_PERIOD_120}', 'Yesterday_Close', 'Yesterday_SMA_120', 'Daily_Return']).copy()
 
     if df_clean.empty:
-        # Return empty Series if no valid data is left after cleaning
         return pd.Series([], dtype=np.float64)
     
     # 1. Calculate Distance (D): Absolute decimal distance from the SMA (lagged)
@@ -167,7 +165,7 @@ def run_strategy_core(df_window, center_distance):
     # 5. Calculate Strategy Returns
     df_clean['Strategy_Return'] = df_clean['Daily_Return'] * df_clean['Position_Size']
     
-    # Return all valid returns in the clean DataFrame (iloc[0] is the first return after warmup)
+    # Return all valid strategy returns in the clean DataFrame
     return df_clean['Strategy_Return']
 
 def run_grid_search(df_optimization_window):
@@ -200,65 +198,55 @@ def run_rolling_optimization_backtest(df_full):
     """
     print("-> Starting Rolling Optimization Backtest...")
 
-    # The minimum data needed is for the SMA warmup (120) + 1 day lag + 1 day of returns
-    # We must ensure the first optimization window (which grows) is at least OPTIMIZATION_STEP long
-    MIN_INITIAL_OPTIMIZATION_DAYS = SMA_PERIOD_120 + 2 # Minimal data to get 1 return
+    # Minimum data index where the first trade can be executed
+    # SMA_PERIOD_120 (for SMA) + 1 (for Yesterday_Close) = 121
+    MIN_DATA_TO_TRADE = SMA_PERIOD_120 + 1 
     
-    # We must wait until we have enough data for the first optimization window
-    initial_opt_end_index = MIN_INITIAL_OPTIMIZATION_DAYS + OPTIMIZATION_STEP
+    # We must start the first optimization window to be at least one OPTIMIZATION_STEP long
+    initial_opt_end_index = MIN_DATA_TO_TRADE + OPTIMIZATION_STEP 
 
     if len(df_full) < initial_opt_end_index:
-        raise ValueError(f"Not enough data for rolling optimization. Need at least {initial_opt_end_index} days.")
+        raise ValueError(f"Not enough data for rolling optimization. Need at least {initial_DATA_TO_TRADE} days.")
 
     end_index = len(df_full)
-
-    # List to store daily returns from all execution windows
     all_strategy_returns = []
     
-    # The loop begins after the initial optimization window is complete
-    current_rebalance_point = initial_opt_end_index 
+    # Start the first execution block after the initial optimization period
+    execution_start_index = MIN_DATA_TO_TRADE 
 
-    # --- Initial Optimization and First Execution ---
-    
-    # 1. Define initial Optimization Window (from start up to the rebalance point)
-    df_optimization_window = df_full.iloc[:current_rebalance_point]
-    
-    # 2. Run Optimization (Sharpe on historical data)
-    optimal_center = run_grid_search(df_optimization_window)
-    
-    print(f"   Initial Optimization up to {df_full.index[current_rebalance_point-1].strftime('%Y-%m-%d')} completed. Optimal Center: {optimal_center*100:.1f}%")
+    while execution_start_index < end_index:
+        
+        # 1. OPTIMIZATION WINDOW: All history up to the execution start index (In-Sample)
+        df_optimization_window = df_full.iloc[:execution_start_index]
+        
+        # 2. Run Optimization (Sharpe on historical data)
+        optimal_center = run_grid_search(df_optimization_window)
+        
+        # 3. EXECUTION WINDOW (The next OPTIMIZATION_STEP days - Out-of-Sample)
+        execution_end_index = min(execution_start_index + OPTIMIZATION_STEP, end_index)
+        
+        # Execution data must include the preceding day (execution_start_index - 1) for lagged calculation
+        df_execution_data = df_full.iloc[execution_start_index - 1 : execution_end_index]
+        
+        # 4. Run Strategy on Execution Window with Optimal Parameter
+        strategy_returns = run_strategy_core(df_execution_data, optimal_center)
+        
+        if not strategy_returns.empty:
+            all_strategy_returns.append(strategy_returns)
+            print(f"   Rebalance up to {df_full.index[execution_start_index-1].strftime('%Y-%m-%d')} | Optimal Center: {optimal_center*100:.1f}% | Executed trades: {len(strategy_returns)} days")
+        else:
+             print(f"   Rebalance up to {df_full.index[execution_start_index-1].strftime('%Y-%m-%d')} | WARNING: No valid returns generated for execution window. Skipping this period.")
 
-    # 3. Define the first Execution Window (The full period that we just optimized on)
-    execution_start = MIN_INITIAL_OPTIMIZATION_DAYS
-    execution_end = current_rebalance_point
-    
-    # --- 4. Loop through the data to execute the strategy in 90-day chunks ---
-    
-    while execution_start < end_index:
+        # 5. Advance to the next execution block
+        execution_start_index = execution_end_index
         
-        # --- Run Strategy on Execution Window with Optimal Parameter ---
-        df_execution_window = df_full.iloc[execution_start : min(execution_start + OPTIMIZATION_STEP, end_index) + 1]
-        
-        # strategy_returns returns daily returns for the current period
-        strategy_returns = run_strategy_core(df_execution_window, optimal_center)
-        
-        # Store the returns for stitching
-        all_strategy_returns.append(strategy_returns)
-        
-        # Advance Execution Window
-        execution_start += OPTIMIZATION_STEP
-
-        # --- Rebalance: Run Optimization on accumulated history for the NEXT period ---
-        if execution_start < end_index:
-            df_optimization_window = df_full.iloc[:execution_start]
-            optimal_center = run_grid_search(df_optimization_window)
-            print(f"   Rebalance Optimization up to {df_full.index[execution_start-1].strftime('%Y-%m-%d')} completed. Optimal Center: {optimal_center*100:.1f}%")
-
-        
-    # --- 5. Final Metric Calculation ---
+    # --- 6. Final Metric Calculation ---
     
     # Stitch all daily returns together
     df_returns_stitched = pd.concat(all_strategy_returns).rename('Strategy_Return')
+    
+    if df_returns_stitched.empty:
+         raise IndexError("No valid returns were generated throughout the backtest. Please check your data or constraints.")
     
     # Calculate strategy cumulative returns
     strategy_cumulative_returns = np.exp(df_returns_stitched.cumsum())
@@ -266,15 +254,15 @@ def run_rolling_optimization_backtest(df_full):
     # Recalculate B&H over the same final period for fair comparison
     start_date = df_returns_stitched.index[0]
     
+    # Use loc slicing to get the relevant period for B&H
     df_full_sliced = df_full.loc[start_date:].copy()
     
     df_full_sliced['Daily_Return'] = np.log(df_full_sliced['Close'] / df_full_sliced['Close'].shift(1))
     df_full_sliced['Cumulative_Buy_and_Hold'] = np.exp(df_full_sliced['Daily_Return'].cumsum())
     
-    # Combine final cumulative returns
+    # Combine final cumulative returns, ensuring matching indices
     df_final = pd.DataFrame({
         'Cumulative_Strategy_Return': strategy_cumulative_returns,
-        # Ensure indices match exactly for the final B&H series
         'Cumulative_Buy_and_Hold': df_full_sliced['Cumulative_Buy_and_Hold'].loc[df_returns_stitched.index]
     })
 
@@ -287,12 +275,12 @@ def run_rolling_optimization_backtest(df_full):
     
     # B&H
     metrics.append(generate_metrics(
-        df_final['Cumulative_Buy_and_Hold'], bh_daily_returns, 'Buy & Hold (Benchmark)'
+        df_final['Cumulative_Buy_and_Hold'].loc[bh_daily_returns.index], bh_daily_returns, 'Buy & Hold (Benchmark)'
     ))
     
     # Strategy
     metrics.append(generate_metrics(
-        df_final['Cumulative_Strategy_Return'], strategy_daily_returns, f'Rolling Dynamic Strategy (90-day re-opt)'
+        df_final['Cumulative_Strategy_Return'].loc[strategy_daily_returns.index], strategy_daily_returns, f'Rolling Dynamic Strategy (90-day re-opt)'
     ))
     
     # Print comparison table
@@ -478,6 +466,9 @@ if __name__ == '__main__':
         try:
             results_df_final, df_full, comparison_metrics = run_rolling_optimization_backtest(df_data)
         except ValueError as e:
+            print(f"Error during backtest: {e}")
+            exit()
+        except IndexError as e:
             print(f"Error during backtest: {e}")
             exit()
         
