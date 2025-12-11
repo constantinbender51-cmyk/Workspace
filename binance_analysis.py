@@ -13,8 +13,8 @@ from matplotlib.ticker import ScalarFormatter
 SYMBOL = 'BTCUSDT'
 INTERVAL = '1d'
 START_DATE = '1 Jan, 2018'
-SMA_PERIOD = 120 # Trading SMA
-SMA_PERIOD_40 = 40 # New SMA for plotting only
+SMA_PERIOD = 120 # Trading SMA (120)
+SMA_PERIOD_40 = 40 # Filtering SMA (40)
 PLOT_FILE = 'strategy_results.png'
 SERVER_PORT = 8080
 RESULTS_DIR = 'results'
@@ -129,23 +129,31 @@ def run_backtest(df):
     
     # Calculate the SMAs (including the new 40 SMA)
     df[f'SMA_{SMA_PERIOD}'] = df['Close'].rolling(window=SMA_PERIOD).mean()
-    df[f'SMA_{SMA_PERIOD_40}'] = df['Close'].rolling(window=SMA_PERIOD_40).mean() # New SMA calculation
+    df[f'SMA_{SMA_PERIOD_40}'] = df['Close'].rolling(window=SMA_PERIOD_40).mean()
     
     # 2.2 Calculate daily returns (log returns are often preferred for backtesting)
     df['Daily_Return'] = np.log(df['Close'] / df['Close'].shift(1))
 
     # --- Look-ahead Bias Prevention (Explicit shift) ---
-    # For a decision on day T (applied to returns of day T), we use Close(T-1) and SMA(T-1)
     df['Yesterday_Close'] = df['Close'].shift(1)
-    df['Yesterday_SMA'] = df[f'SMA_{SMA_PERIOD}'].shift(1)
+    df['Yesterday_SMA_120'] = df[f'SMA_{SMA_PERIOD}'].shift(1)
+    df['Yesterday_SMA_40'] = df[f'SMA_{SMA_PERIOD_40}'].shift(1) # Lagged 40 SMA
     
     # 2.3 Generate Trading Signals (Position for day T)
-    # Rule: Position on day T is based on (Close(T-1) vs SMA(T-1))
-    df['Position'] = np.where(
-        df['Yesterday_Close'] > df['Yesterday_SMA'],  # Condition: Close(T-1) > SMA(T-1)
-        1,                                           # Value if True (Long position held on Day T)
-        -1                                           # Value if False (Short position held on Day T)
-    )
+    # New Logic: Uses 120 SMA for direction, 40 SMA for confirmation/exception filtering.
+    
+    long_condition = (df['Yesterday_Close'] > df['Yesterday_SMA_120']) & \
+                     (df['Yesterday_Close'] >= df['Yesterday_SMA_40'])
+    
+    short_condition = (df['Yesterday_Close'] < df['Yesterday_SMA_120']) & \
+                      (df['Yesterday_Close'] <= df['Yesterday_SMA_40'])
+    
+    # Default position is flat (0)
+    df['Position'] = 0
+    # Apply Long
+    df.loc[long_condition, 'Position'] = 1
+    # Apply Short
+    df.loc[short_condition, 'Position'] = -1
     
     # --- 2.7 Calculate SMA Proximity Metric (120 SMA) ---
     # Scaler is 1 / 0.02 = 50.0
@@ -168,8 +176,8 @@ def run_backtest(df):
     # Apply the cap at 1.0
     df['SMA_Proximity'] = np.minimum(proximity_base, 1.0)
     
-    # Drop the temporary columns for cleanliness and keep the final SMA column and proximity
-    df = df.drop(columns=['Yesterday_Close', 'Yesterday_SMA', 'SMA_Distance_Decimal'])
+    # Drop the temporary columns for cleanliness
+    df = df.drop(columns=['Yesterday_Close', 'Yesterday_SMA_120', 'Yesterday_SMA_40', 'SMA_Distance_Decimal'])
     # --- End Look-ahead Prevention ---
     
     # The first SMA_PERIOD entries will have NaN SMA. We drop rows with any NaNs.
@@ -177,6 +185,7 @@ def run_backtest(df):
     
     # 2.4 Calculate Strategy Returns
     # Strategy Return = Daily_Return(T) * Position(T)
+    # Since Position can now be 0, the return will be 0 on flat days.
     df['Strategy_Return'] = df['Daily_Return'] * df['Position']
     
     # 2.5 Calculate Cumulative Returns (Equity Curve)
@@ -338,9 +347,11 @@ def serve_results():
                         <p class="text-gray-300 mb-6">
                             The plot now shows two SMAs: the 40-Day SMA (orange) and the 120-Day SMA (blue, used for trading).
                             <br>
-                            - Blue shading indicates **close** proximity (<= 2%) to the 120-Day SMA.
+                            The trading strategy has been updated to use the 40-Day SMA as a filter:
                             <br>
-                            - The bottom plot tracks the inverse proximity score for the 120 SMA.
+                            - **LONG:** Price > 120 SMA AND Price >= 40 SMA.
+                            <br>
+                            - **SHORT:** Price < 120 SMA AND Price <= 40 SMA.
                         </p>
                         <div class="plot-container">
                             <img src="{RESULTS_DIR}/{PLOT_FILE}" alt="Strategy Cumulative Returns Plot" class="w-full h-auto rounded-lg shadow-2xl">
