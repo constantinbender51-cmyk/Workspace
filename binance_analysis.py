@@ -17,7 +17,7 @@ SYMBOL = 'BTC/USDT'
 TIMEFRAME = '1d' 
 START_DATE = '2018-01-01 00:00:00'
 PORT = 8080
-WINDOW_SIZE = 20 # Rolling optimization window
+WINDOW_SIZE = 40 # Rolling optimization window
 FIXED_III_THRESHOLD = 0.5 # New fixed threshold
 
 def fetch_data():
@@ -68,7 +68,7 @@ def walk_forward_optimization(df):
     # 1. Calculate III and Leverage Multiplier ONCE (Leverage is constant for all SMA strategies)
     data['iii'] = calculate_efficiency_ratio(data, period=30)
     # Leverage: 0.5 if iii < 0.1, else 1.0 (Shifted 1 step later)
-    leverage_mult = np.where(data['iii'] < FIXED_III_THRESHOLD, 0.5, 1.0)
+    leverage_mult = np.where(data['iii'] < FIXED_III_THRESHOLD, 0.1, 1.0)
     
     # 2. Generate Parameter Range (SMA only)
     sma_periods = list(range(10, 410, 10)) # 40 periods
