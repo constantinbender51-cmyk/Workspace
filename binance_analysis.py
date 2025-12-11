@@ -18,7 +18,7 @@ DC_WINDOW = 20  # Donchian Channel Period
 POSITION_SIZE = 1  # Unit of asset traded (+1 for Long, -1 for Short)
 PORT = 8080
 ANNUAL_TRADING_DAYS = 252 # Used for annualizing Sharpe Ratio
-MAX_SMA_SCAN = 400 # Maximum SMA for the scan and the global analysis start point
+MAX_SMA_SCAN = 1000 # Maximum SMA for the scan and the global analysis start point
 
 # --- Global Variables to store results (populated once at startup) ---
 GLOBAL_DATA_SOURCE = "Binance (CCXT)"
@@ -93,8 +93,10 @@ def fetch_binance_data(symbol, timeframe, start_date):
 
 def calculate_indicators(df, windows_to_calculate):
     """Calculates specified SMAs and Donchian Channels."""
-    # Ensure all required SMAs for the plot are calculated
-    for window in windows_to_calculate:
+    # Ensure all required SMAs for the plot and comparison are calculated
+    required_smas = set(windows_to_calculate + [40, 120]) # Ensure 40 and 120 are calculated
+    
+    for window in required_smas:
         if f'SMA_{window}' not in df.columns:
             df[f'SMA_{window}'] = df['Close'].rolling(window=window).mean()
     
@@ -260,9 +262,10 @@ def create_analysis_visualization(results_df):
 # --- Plotting Main Strategy (SMA 120) ---
 
 def create_plot(df, strategy_sma):
-    """Generates the main SMA 120 strategy plot (Close Price + Equity Curve)."""
+    """Generates the main SMA 120 strategy plot (Close Price + Equity Curve)
+       and highlights intersection days (SMA 120 Loss & SMA 40 Profit)."""
     
-    # Note: df here is already the globally tradable subset
+    # Note: df here is already the globally tradable subset and contains Strategy_Return_40
     df_plot = df.copy() 
     strategy_sma_col = f'SMA_{strategy_sma}'
 
@@ -272,12 +275,13 @@ def create_plot(df, strategy_sma):
     # --- Price and SMA (Top Panel) ---
     ax1 = axes[0]
     
-    # 1. Background Coloring
+    # 1. Background Coloring (SMA 120 Position)
     pos_series = df_plot['Position']
     change_indices = pos_series.index[pos_series.diff() != 0]
     segment_starts = pd.Index([pos_series.index[0]]).append(change_indices)
     segment_ends = change_indices.append(pd.Index([pos_series.index[-1]]))
     
+    # Light green/red background for Long/Short positions of SMA 120
     for start, end in zip(segment_starts, segment_ends):
         current_pos = pos_series.loc[start]
         if current_pos == POSITION_SIZE: color = 'green'; alpha = 0.08
@@ -287,8 +291,20 @@ def create_plot(df, strategy_sma):
         end_adjusted = end + pd.Timedelta(days=1)
         ax1.axvspan(start, end_adjusted, facecolor=color, alpha=alpha, zorder=0)
 
-    # 2. Price and SMA 120 
-    ax1.plot(df_plot.index, df_plot['Close'], label='Price (Close)', color='#1f77b4', linewidth=1.5, alpha=0.9, zorder=1)
+    # 2. Highlight Intersection Days (SMA 120 LOSS AND SMA 40 PROFIT)
+    # The main strategy return is in 'Strategy_Return'
+    # The comparison return is in 'Strategy_Return_40'
+    
+    # Condition: SMA 120 strategy lost (< 0) AND SMA 40 strategy gained (> 0)
+    intersection_days = df_plot[(df_plot['Strategy_Return'] < 0) & (df_plot['Strategy_Return_40'] > 0)].index
+    
+    # Draw a distinct red marker on these specific days
+    for day in intersection_days:
+        # Use a solid, stronger red background for emphasis on intersection
+        ax1.axvspan(day, day + pd.Timedelta(days=1), facecolor='#DC143C', alpha=0.3, zorder=1) 
+    
+    # 3. Price and SMA 120 
+    ax1.plot(df_plot.index, df_plot['Close'], label='Price (Close)', color='#1f77b4', linewidth=1.5, alpha=0.9, zorder=2)
     ax1.plot(df_plot.index, df_plot[strategy_sma_col], 
              label=f'SMA {strategy_sma}', 
              color='#FF6347', linestyle='-', linewidth=2.5, zorder=2) 
@@ -297,6 +313,7 @@ def create_plot(df, strategy_sma):
     ax1.grid(True, linestyle='--', alpha=0.6)
     ax1.legend(loc='upper left', fontsize=8)
     ax1.set_yscale('log')
+    ax1.set_title(f'SMA {strategy_sma} Strategy (Red Highlight: Loss day for SMA 120, Profit day for SMA 40)', fontsize=12)
 
     # --- Equity Plot (Bottom Panel) ---
     ax2 = axes[1]
@@ -335,7 +352,7 @@ def setup_analysis():
     try:
         df_raw = fetch_binance_data(SYMBOL, TIMEFRAME, START_DATE)
         
-        # NEW LOGIC: Slice to the first 70% of data
+        # SLICING LOGIC: Slice to the first 70% of data
         split_idx = int(len(df_raw) * 0.70)
         df_raw_sliced = df_raw.iloc[:split_idx]
         print(f"--- DATA SLICED: Running analysis on first {len(df_raw_sliced)} candles (70% of total) ---")
@@ -344,7 +361,7 @@ def setup_analysis():
         if len(df_raw_sliced) < MAX_SMA_SCAN + 10:
              raise ValueError(f"70% data slice is too short ({len(df_raw_sliced)} days). Max SMA {MAX_SMA_SCAN} requires more data.")
         
-        # Calculate SMA 120 and D-Channels on the sliced data
+        # Calculate SMA 120 (main) and SMA 40 (comparison) on the sliced data
         df_ind = calculate_indicators(df_raw_sliced, SMA_WINDOWS_PLOT)
         
     except Exception as e:
@@ -382,12 +399,21 @@ def setup_analysis():
         print(f"--- FATAL ERROR DURING SHARPE SCAN ---\n{GLOBAL_ERROR}", file=sys.stderr)
         return
 
-    # --- Part 3: Main Strategy Backtest (SMA 120) ---
+    # --- Part 3: Main Strategy Backtest (SMA 120) and Comparison ---
     try:
         MAIN_SMA_WINDOW = 120
-        # df_final is the cleaned, tradable portion of the sliced data
+        COMPARE_SMA_WINDOW = 40
+        
+        # 1. Get SMA 120 Results (main strategy)
         df_final = get_strategy_returns(df_ind, MAIN_SMA_WINDOW)
         
+        # 2. Get SMA 40 Results (comparison strategy)
+        df_40 = get_strategy_returns(df_ind, COMPARE_SMA_WINDOW)
+        
+        # 3. Merge SMA 40 returns onto the main dataframe for plotting comparison
+        # Alignment is guaranteed since get_strategy_returns enforces the global start index (Day 1001)
+        df_final['Strategy_Return_40'] = df_40['Strategy_Return']
+
         # 4. Determine current status
         current_position = df_final['Position'].iloc[-1]
         GLOBAL_STATUS = "LONG" if current_position == POSITION_SIZE else "SHORT"
@@ -397,11 +423,11 @@ def setup_analysis():
         
         # 6. Populate Global Results
         # Create summary table (simplified)
-        summary_df = df_final[['Close', f'SMA_{MAIN_SMA_WINDOW}', 'Position', 'Equity']].tail(10)
-        summary_df = summary_df.rename(columns={f'SMA_{MAIN_SMA_WINDOW}': 'SMA 120'})
+        summary_df = df_final[['Close', f'SMA_{MAIN_SMA_WINDOW}', 'Position', 'Equity', 'Strategy_Return', 'Strategy_Return_40']].tail(10)
+        summary_df = summary_df.rename(columns={f'SMA_{MAIN_SMA_WINDOW}': 'SMA 120', 'Strategy_Return': 'Ret 120', 'Strategy_Return_40': 'Ret 40'})
         
         GLOBAL_SUMMARY_TABLE = summary_df.to_html(classes='table-auto w-full text-sm text-left', 
-                                                  float_format=lambda x: f'{x:,.2f}')
+                                                  float_format=lambda x: f'{x:,.4f}') # Increased precision for returns
         
         print("--- ANALYSIS COMPLETE ---")
 
@@ -497,7 +523,7 @@ def analysis_dashboard():
                 </div>
             </div>
             
-            <h2 class="text-2xl font-semibold text-gray-700 mt-8 mb-4">Recent SMA 120 Data</h2>
+            <h2 class="text-2xl font-semibold text-gray-700 mt-8 mb-4">Recent SMA 120 vs. SMA 40 Comparison</h2>
             <div class="overflow-x-auto rounded-lg shadow-md border border-gray-200">
                 {GLOBAL_SUMMARY_TABLE}
             </div>
