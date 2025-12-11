@@ -18,9 +18,9 @@ SERVER_PORT = 8080
 RESULTS_DIR = 'results'
 ANNUALIZATION_FACTOR = 365 # Used for annualizing Sharpe Ratio for daily data
 
-# --- Optimal Parameters (Found via 2D Grid Search) ---
-OPTIMAL_K = 0.07  # Scaling factor for center distance
-MOMENTUM_PERIOD = 90 # Lookback period for momentum (M)
+# --- Asymmetric Dynamic Center Parameters ---
+BULLISH_CENTER_DISTANCE = 0.040  # 4.0% center when Price > SMA 120
+BEARISH_CENTER_DISTANCE = 0.010 # 1.0% center when Price <= SMA 120
 
 # --- 1. Data Fetching Utilities ---
 
@@ -114,13 +114,13 @@ def generate_metrics(cumulative_returns, daily_returns, strategy_name):
         'Cumulative Returns': cumulative_returns
     }
 
-# --- 3. Backtesting Logic (Final Run) ---
+# --- 3. Backtesting Logic (Dynamic Asymmetric Sizing) ---
 
-def run_backtest_final(df):
+def run_backtest_dynamic_asymmetric_sizing(df):
     """
-    Applies the 120 SMA trading strategy with k=0.07 and M=90 momentum center.
+    Applies the 120 SMA trading strategy with asymmetric center distances (1% or 4%).
     """
-    print(f"-> Running final backtest (k={OPTIMAL_K}, M={MOMENTUM_PERIOD}) on {len(df)} candles...")
+    print(f"-> Running dynamic asymmetric backtest (Center: Bullish={BULLISH_CENTER_DISTANCE*100:.0f}%, Bearish={BEARISH_CENTER_DISTANCE*100:.0f}%) on {len(df)} candles...")
     
     # 1. Calculate 120 SMA & Daily Returns
     df[f'SMA_{SMA_PERIOD_120}'] = df['Close'].rolling(window=SMA_PERIOD_120).mean()
@@ -130,41 +130,43 @@ def run_backtest_final(df):
     df['Yesterday_Close'] = df['Close'].shift(1)
     df['Yesterday_SMA_120'] = df[f'SMA_{SMA_PERIOD_120}'].shift(1)
     
-    # Calculate M-day momentum
-    df['Momentum_M'] = (df['Close'] / df['Close'].shift(MOMENTUM_PERIOD)) - 1
-    
-    # Dynamic Center = k * |Momentum_M| (Lagged)
-    df['Center_Distance'] = OPTIMAL_K * np.abs(df['Momentum_M'].shift(1))
-
     # Drop NaNs after all lagging/rolling calculations
     df = df.dropna()
     
     # ----------------------------------------------------
-    # Strategy: Dynamic Position Sizing Implementation
+    # Strategy: Dynamic Position Sizing with Asymmetric Center
     # ----------------------------------------------------
     
-    # 1. Calculate Distance (D): Absolute decimal distance from the SMA (lagged)
+    # 1. Determine the Center Distance and Position Direction based on SMA crossover (Lagged)
+    
+    # Bullish Trend: Yesterday_Close > Yesterday_SMA_120
+    df['Bullish'] = df['Yesterday_Close'] > df['Yesterday_SMA_120']
+    
+    # Choose Center Distance: 4% (Bullish) or 1% (Bearish)
+    df['Center_Distance'] = np.where(
+        df['Bullish'],
+        BULLISH_CENTER_DISTANCE,
+        BEARISH_CENTER_DISTANCE
+    )
+    
+    # Determine Direction: +1 (Long) or -1 (Short)
+    df['Direction'] = np.where(df['Bullish'], 1, -1)
+    
+    # 2. Calculate Distance (D): Absolute decimal distance from the SMA (lagged)
     df['Distance'] = np.abs((df['Yesterday_Close'] - df['Yesterday_SMA_120']) / df['Yesterday_SMA_120'])
 
-    # 2. Calculate Multiplier (M)
+    # 3. Calculate Multiplier (M) using the dynamically chosen Center
     # Scaler = 1 / Center_Distance 
-    distance_scaler = 1.0 / np.maximum(df['Center_Distance'], 1e-10) # Use max to prevent div by zero
+    distance_scaler = 1.0 / np.maximum(df['Center_Distance'], 1e-10) # Protect against zero division
     
     scaled_distance = df['Distance'] * distance_scaler
     
     epsilon = 1e-6 
-    # Multiplier_Magnitude = 1 / ( (1 / (D * Scaler)) + (D * Scaler) - 1 )
+    # M_magnitude = 1 / ( (1 / (D * Scaler)) + (D * Scaler) - 1 )
     denominator = (1.0 / np.maximum(scaled_distance, epsilon)) + scaled_distance - 1.0
     
     # Calculate Multiplier (Position Size Magnitude)
     df['Multiplier'] = np.where(denominator == 0, 0, 1.0 / denominator)
-
-    # 3. Determine Direction (Long/Short) based on 120 SMA crossover
-    df['Direction'] = np.where(
-        df['Yesterday_Close'] > df['Yesterday_SMA_120'],
-        1,
-        -1
-    )
 
     # 4. Final Position Size = Direction * Multiplier
     df['Position_Size'] = df['Direction'] * df['Multiplier']
@@ -188,7 +190,7 @@ def run_backtest_final(df):
     
     # Strategy
     metrics.append(generate_metrics(
-        df['Cumulative_Strategy_Return'], df['Strategy_Return'], f'Dynamic Strategy (k={OPTIMAL_K:.2f}, M={MOMENTUM_PERIOD}d)'
+        df['Cumulative_Strategy_Return'], df['Strategy_Return'], f'Dynamic Asymmetric Strategy'
     ))
     
     # Print comparison table
@@ -198,7 +200,7 @@ def run_backtest_final(df):
     ])
     
     print("\n" + "=" * 60)
-    print(f"FINAL BACKTEST METRICS (k={OPTIMAL_K:.2f}, M={MOMENTUM_PERIOD}d)")
+    print("FINAL BACKTEST METRICS (Dynamic Asymmetric Sizing)")
     print("=" * 60)
     print(comparison_df.to_string(index=False))
     print("=" * 60)
@@ -306,11 +308,11 @@ def serve_results(metrics):
                 </head>
                 <body class="p-8">
                     <div class="container mx-auto p-4 bg-gray-800 shadow-xl rounded-xl">
-                        <h1 class="text-3xl font-bold mb-4 text-green-400">Backtest Results: {SYMBOL} Dynamic Sizing (k=0.07, M=90d)</h1>
+                        <h1 class="text-3xl font-bold mb-4 text-green-400">Backtest Results: {SYMBOL} Dynamic Asymmetric Sizing</h1>
                         
                         <div class="mb-8">
                             <h2 class="text-xl font-semibold mb-3 text-gray-200">Strategy Metrics Comparison</h2>
-                            <p class="text-gray-400 mb-4">Final backtest run using optimized parameters: k=0.07 (scaling factor) and M=90 days (momentum lookback).</p>
+                            <p class="text-gray-400 mb-4">Dynamic Position Sizing with asymmetric center distances based on SMA 120 trend (Bullish: 4.0% Center, Bearish: 1.0% Center).</p>
                             <div class="relative overflow-x-auto shadow-md sm:rounded-lg">
                                 <table class="w-full text-sm text-left text-gray-400">
                                     <thead class="text-xs uppercase bg-gray-700 text-gray-400">
@@ -370,7 +372,7 @@ if __name__ == '__main__':
         print("Error: Could not retrieve data. Exiting.")
     else:
         # 2. Run backtest and get comparison metrics
-        results_df, comparison_metrics = run_backtest_final(df_data)
+        results_df, comparison_metrics = run_backtest_dynamic_asymmetric_sizing(df_data)
         
         # 3. Plot results
         plot_results(results_df, comparison_metrics)
