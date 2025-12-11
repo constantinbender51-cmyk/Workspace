@@ -21,7 +21,7 @@ ANNUALIZATION_FACTOR = 365 # Used for annualizing Sharpe Ratio for daily data
 # --- Strategy Parameters ---
 STATIC_CENTER_DISTANCE = 0.010 # Fixed 1.0% center distance for the dynamic sizing multiplier
 LEVERAGE_FACTOR = 5.0        # APPLYING 5x LEVERAGE
-STOP_LOSS_PERCENT = 0.05     # 5% Stop Loss based on previous day's close
+STOP_LOSS_PERCENT = 0.04     # 5% Stop Loss based on previous day's close
 
 # --- 1. Data Fetching Utilities ---
 
