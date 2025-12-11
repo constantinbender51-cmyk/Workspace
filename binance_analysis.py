@@ -328,7 +328,7 @@ HTML_TEMPLATE = """
                 <h2>Trade List (Last 50)</h2>
                 <div class="trade-log">
                     {% if trade_list %}
-                        {% for trade in trade_list|slice:":50" %}
+                        {% for trade in trade_list %}
                             {% set color_class = 'value' %}
                             {% if 'PnL: -' in trade %}
                                 {% set color_class = 'negative' %}
@@ -388,13 +388,16 @@ def dashboard():
     plot_data = generate_plot(df_results)
 
     # Render HTML
+    # Slice trade_list for display, as Jinja2's `slice` filter is for chunking, not list slicing.
+    display_trade_list = trade_list[:50]
+
     return render_template_string(
         HTML_TEMPLATE,
         symbol=SYMBOL,
         timeframe=TIME_FRAME,
         metrics=metrics,
         regime_metrics=regime_metrics,
-        trade_list=trade_list,
+        trade_list=display_trade_list,
         plot_data=plot_data
     )
 
