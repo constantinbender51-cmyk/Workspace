@@ -20,7 +20,7 @@ PORT = 8080
 
 # Optimization Parameters
 TRAIN_WINDOW = 400   # Lookback window for finding best params
-RETRAIN_DAYS = 60    # How often we re-optimize (and hold params)
+RETRAIN_DAYS = 400   # How often we re-optimize (and hold params) - UPDATED TO 400
 FIXED_III_THRESHOLD = 0.1 # Fixed leverage threshold
 
 def fetch_data():
@@ -61,11 +61,7 @@ def calculate_efficiency_ratio(df, period=30):
 
 def walk_forward_optimization(df):
     """
-    Performs Walk-Forward Optimization with Periodic Retraining.
-    1. Pre-calculates returns for all 40 SMA strategies.
-    2. Steps through time in 60-day chunks.
-    3. Looks back 400 days to pick best SMA.
-    4. Applies best SMA to next 60 days.
+    Performs Walk-Forward Optimization with Periodic Retraining (400 days).
     """
     print(f"Preparing Strategy Matrix (40 SMAs, Fixed Threshold {FIXED_III_THRESHOLD})...")
     data = df.copy()
@@ -118,7 +114,7 @@ def walk_forward_optimization(df):
         sharpes = train_slice.mean() / (train_slice.std() + 1e-9)
         best_sma = sharpes.idxmax()
         
-        # C. Define Test Set (Next 60 days from t)
+        # C. Define Test Set (Next 400 days from t)
         test_start = t
         test_end = min(t + RETRAIN_DAYS, len(data))
         
@@ -150,7 +146,7 @@ def generate_plot(df):
     ax3 = fig.add_subplot(gs[2], sharex=ax1)
     
     # --- PLOT 1: Equity Curves ---
-    ax1.plot(plot_df.index, plot_df['equity'], label='WFO Strategy (Retrain 60d)', color='lime', linewidth=2)
+    ax1.plot(plot_df.index, plot_df['equity'], label='WFO Strategy (Retrain 400d)', color='lime', linewidth=2)
     ax1.plot(plot_df.index, plot_df['buy_hold_equity'], label='Buy & Hold', color='gray', alpha=0.5, linestyle='--')
     
     ax1.set_title(f'Walk-Forward Optimization (Train: {TRAIN_WINDOW}d, Hold: {RETRAIN_DAYS}d)', fontsize=14)
@@ -160,11 +156,10 @@ def generate_plot(df):
     ax1.set_yscale('log')
 
     # --- PLOT 2: Best SMA Evolution (Step Function) ---
-    # Plot the raw steps
     ax2.step(plot_df.index, plot_df['best_sma'], where='post', color='cyan', linewidth=2, label='Active SMA')
     ax2.scatter(plot_df.index, plot_df['best_sma'], color='cyan', s=10, alpha=0.5)
     
-    ax2.set_title('Dynamic SMA Selection (Re-optimized every 60 days)', fontsize=12)
+    ax2.set_title('Dynamic SMA Selection (Re-optimized every 400 days)', fontsize=12)
     ax2.set_ylabel('Selected SMA Period')
     ax2.legend(loc='upper right')
     ax2.grid(True, alpha=0.3)
