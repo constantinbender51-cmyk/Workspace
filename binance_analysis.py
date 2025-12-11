@@ -13,7 +13,7 @@ import traceback
 SYMBOL = 'BTC/USDT'
 TIMEFRAME = '1d' # Daily candles
 START_DATE = '2018-01-01'
-SMA_WINDOWS = [50, 200, 400]
+SMA_WINDOWS = [50, 120, 200, 400] # Now including SMA 120
 DC_WINDOW = 20  # Donchian Channel Period
 POSITION_SIZE = 1  # Unit of asset traded (+1 for Long, -1 for Short)
 PORT = 8080
@@ -71,8 +71,8 @@ def fetch_binance_data(symbol, timeframe, start_date):
             print(f"An error occurred during CCXT fetching: {e}")
             raise 
             
-    if len(all_ohlcv) < 400: # Need at least 400 for the SMA 400
-        raise ValueError(f"Not enough data fetched. Required >400, received {len(all_ohlcv)}.")
+    if len(all_ohlcv) < max(SMA_WINDOWS): # Use the largest window for minimum data check
+        raise ValueError(f"Not enough data fetched. Required >{max(SMA_WINDOWS)}, received {len(all_ohlcv)}.")
         
     df = pd.DataFrame(all_ohlcv, columns=['timestamp', 'Open', 'High', 'Low', 'Close', 'Volume'])
     df['Date'] = pd.to_datetime(df['timestamp'], unit='ms')
@@ -100,7 +100,8 @@ def calculate_indicators(df):
 
 def run_backtest(df):
     """
-    CUSTOM TEST: Short for the first 5 tradable days, then Long permanently.
+    SMA 120 Crossover Strategy: Long (+1) if Close > SMA 120, Short (-1) if Close <= SMA 120.
+    Position for day t is decided by Close vs. SMA 120 on day t-1.
     """
     
     # Calculate returns and indicators first
@@ -115,12 +116,13 @@ def run_backtest(df):
     # The normalization index is the first row where all indicators are valid
     normalization_index = df_clean.index[0]
     
-    # 2. Force the position for the test on the clean data's index
-    df_clean.loc[:, 'Position'] = POSITION_SIZE # Default all tradable days to Long (+1)
-
-    # Force the first 5 days to be SHORT (-1). 
-    # This reflects the position HELD for the return period of those 5 days.
-    df_clean.loc[df_clean.index[:5], 'Position'] = -POSITION_SIZE
+    # 2. Strategy Logic: Long (+1) if Close > SMA 120, Short (-1) if Close <= SMA 120
+    df_clean.loc[:, 'Next_Day_Position'] = np.where(df_clean['Close'] > df_clean['SMA_120'], 
+                                                    POSITION_SIZE,      # +1 for Long
+                                                    -POSITION_SIZE)     # -1 for Short
+    
+    # The position HELD for the day t return is based on the decision from day t-1.
+    df_clean.loc[:, 'Position'] = df_clean['Next_Day_Position'].shift(1).fillna(0)
     
     # 3. Calculate Strategy Return
     # Strategy Return = Daily Asset Return * Held Position (Position is +1 or -1 here)
@@ -182,7 +184,8 @@ def create_plot(df):
     # 2. Price and Indicators
     ax1.plot(df_plot.index, df_plot['Close'], label='Price', color='#1f77b4', linewidth=1.5, alpha=0.9, zorder=1)
     ax1.plot(df_plot.index, df_plot['SMA_50'], label='SMA 50', color='green', linestyle='--', alpha=0.7, zorder=1)
-    ax1.plot(df_plot.index, df_plot['SMA_200'], label='SMA 200', color='red', linestyle='-', linewidth=2, zorder=1)
+    ax1.plot(df_plot.index, df_plot['SMA_120'], label='SMA 120 (Strategy)', color='blue', linestyle='-', linewidth=2, zorder=1) # Highlight SMA 120
+    ax1.plot(df_plot.index, df_plot['SMA_200'], label='SMA 200', color='red', linestyle='-', alpha=0.7, zorder=1)
     ax1.plot(df_plot.index, df_plot['SMA_400'], label='SMA 400', color='orange', linestyle=':', alpha=0.7, zorder=1)
     
     # Donchian Channels
@@ -190,7 +193,7 @@ def create_plot(df):
     ax1.plot(df_plot.index, df_plot['DC_Lower'], label=f'DC {DC_WINDOW} Lower', color='c', linestyle='-.', alpha=0.5, zorder=1)
     
     # 3. Final Touches
-    ax1.set_title(f'{SYMBOL} Price and Indicators (TEST: 5-Day Short, then Long)', fontsize=16)
+    ax1.set_title(f'{SYMBOL} Price and Indicators (Strategy: SMA 120 Crossover)', fontsize=16)
     ax1.set_ylabel('Price (USD)', fontsize=12)
     ax1.grid(True, linestyle='--', alpha=0.6)
     ax1.legend(loc='upper left', fontsize=8)
@@ -202,8 +205,7 @@ def create_plot(df):
     final_strategy_return = (df_plot['Equity'].iloc[-1] - 1) * 100
     final_bh_return = (df_plot['Buy_Hold_Equity'].iloc[-1] - 1) * 100
     
-    # The lines should overlap perfectly here
-    ax2.plot(df_plot.index, df_plot['Equity'], label='Strategy Equity (Custom Test)', color='blue', linewidth=3)
+    ax2.plot(df_plot.index, df_plot['Equity'], label='SMA 120 Strategy Equity', color='blue', linewidth=3)
     ax2.plot(df_plot.index, df_plot['Buy_Hold_Equity'], label='Buy & Hold Benchmark', color='gray', linestyle='--', alpha=0.7)
     
     ax2.set_title(f'Strategy Equity Curve (Final Return: {final_strategy_return:.2f}%) vs B&H ({final_bh_return:.2f}%)', fontsize=14)
@@ -237,13 +239,12 @@ def setup_analysis():
         # 2. Calculate Indicators
         df_ind = calculate_indicators(df_raw)
         
-        # 3. Run Backtest (Custom sequence test)
+        # 3. Run Backtest (SMA 120 dynamic strategy)
         df_final = run_backtest(df_ind)
         
         # 4. Determine current status
         current_position = df_final['Position'].iloc[-1]
-        # Status reflects the final state of this specific test
-        GLOBAL_STATUS = "LONG (Custom Test)" 
+        GLOBAL_STATUS = "LONG" if current_position == POSITION_SIZE else "SHORT"
 
         # 5. Create Plot
         img_base64, total_strategy_return = create_plot(df_final)
@@ -253,7 +254,7 @@ def setup_analysis():
         GLOBAL_TOTAL_RETURN = total_strategy_return
         
         # Create summary table
-        summary_df = df_final[['Close', 'SMA_200', 'DC_Upper', 'DC_Lower', 'Position', 'Equity']].tail(10)
+        summary_df = df_final[['Close', 'SMA_120', 'DC_Upper', 'DC_Lower', 'Position', 'Equity']].tail(10)
         GLOBAL_SUMMARY_TABLE = summary_df.to_html(classes='table-auto w-full text-sm text-left', 
                                                   float_format=lambda x: f'{x:,.2f}')
         
@@ -265,7 +266,7 @@ def setup_analysis():
         end_price_bh = df_final.iloc[-1]['Close']
         final_bh_equity = df_final['Buy_Hold_Equity'].iloc[-1]
         
-        print("\n--- VERIFICATION DETAILS: CUSTOM SEQUENCE TEST ---")
+        print("\n--- VERIFICATION DETAILS: SMA 120 STRATEGY ---")
         print(f"B&H Start Date (Tradable Period): {start_date_bh}")
         print(f"B&H End Date: {end_date_bh}")
         print(f"Price at Start: {start_price_bh:,.2f} USD")
@@ -305,7 +306,7 @@ def analysis_dashboard():
     <head>
         <meta charset="UTF-8">
         <meta name="viewport" content="width=device-width, initial-scale=1.0">
-        <title>SMA 200 Trading Backtest</title>
+        <title>SMA 120 Trading Backtest</title>
         <script src="https://cdn.tailwindcss.com"></script>
         <style>
             /* Custom styles for the generated table */
@@ -361,7 +362,7 @@ def analysis_dashboard():
             </div>
             
             <p class="mt-8 text-sm text-gray-600 border-t pt-4">
-                **Note:** This is currently running in a **Custom Sequence Test (5 days Short, then Long)** to verify compounding logic. Transaction costs and slippage are not included.
+                **Note:** This backtest uses a Long/Short strategy based on Close vs. SMA 120, executed daily (Close-to-Close). Transaction costs and slippage are not included.
             </p>
         </div>
     </body>
