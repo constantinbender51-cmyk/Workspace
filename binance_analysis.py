@@ -259,5 +259,16 @@ if __name__ == '__main__':
         print(f"Buy & Hold (close-to-close) Return: {bh_return * 100:.2f}%")
         print(f"Final Portfolio Value: ${INITIAL_CAPITAL * (1 + total_return):,.2f}")
 
+        # Calculate Sharpe ratio
+        daily_returns = results_df['Daily_PnL'] / results_df['Portfolio_Value'].shift(1)
+        daily_returns.iloc[0] = results_df['Daily_PnL'].iloc[0] / INITIAL_CAPITAL
+        avg_daily_return = daily_returns.mean()
+        std_daily_return = daily_returns.std()
+        if std_daily_return > 0:
+            sharpe_ratio = (avg_daily_return / std_daily_return) * np.sqrt(252)  # Annualized with 252 trading days
+        else:
+            sharpe_ratio = 0.0
+        print(f"Sharpe Ratio (annualized, risk-free=0): {sharpe_ratio:.4f}")
+
         results_df.to_csv('conviction_backtest_results_no_lookahead.csv')
         print("\nSaved daily results to 'conviction_backtest_results_no_lookahead.csv'")
