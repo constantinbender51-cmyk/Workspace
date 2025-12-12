@@ -17,6 +17,7 @@ SINCE_STR = '2018-01-01 00:00:00'
 HORIZON = 380  # Decay window (days) - OPTIMAL VALUE
 INITIAL_CAPITAL = 10000.0
 LEVERAGE = 5.0  # Multiplier applied to conviction exposure
+CONVICTION_THRESHOLD = 0.5  # 50% Conviction required to trade
 
 # --- Winning Signals ---
 WINNING_SIGNALS = [
@@ -175,10 +176,15 @@ def run_conviction_backtest(df_data, df_signals):
         # Calculate Normalized Conviction (-1 to 1)
         raw_conviction = daily_sum / MAX_CONVICTION
         
+        # --- CONVICTION FILTER ---
+        # If absolute conviction is less than 50% (0.5), we force cash (0 exposure)
+        if abs(raw_conviction) < CONVICTION_THRESHOLD:
+            raw_conviction = 0.0
+        
         # Apply LEVERAGE
         exposure = raw_conviction * LEVERAGE
         
-        # Clip to max leverage in case of floating point anomalies, though math guarantees bounds
+        # Clip to max leverage
         exposure = np.clip(exposure, -LEVERAGE, LEVERAGE)
 
         if t > 0:
@@ -189,10 +195,9 @@ def run_conviction_backtest(df_data, df_signals):
                 portfolio[t] = portfolio[t-1] + pnl_amt
                 daily_pnl[t] = pnl_amt
                 
-                # Check for Bankruptcy / Liquidation
                 if portfolio[t] <= 0:
                     portfolio[t] = 0
-                    daily_pnl[t] = -portfolio[t-1] # Loss is whatever was left
+                    daily_pnl[t] = -portfolio[t-1]
                     is_bankrupt = True
             else:
                 portfolio[t] = 0
@@ -211,7 +216,6 @@ def run_conviction_backtest(df_data, df_signals):
     results['Strategy_Daily_Return'] = results['Portfolio_Value'].pct_change().fillna(0)
     
     rolling_max = results['Portfolio_Value'].cummax()
-    # Avoid division by zero if rolling_max is 0 (bankruptcy)
     results['Drawdown'] = np.where(rolling_max > 0, (results['Portfolio_Value'] - rolling_max) / rolling_max, -1.0)
 
     signal_names = [f"{s[0]}_{s[1]}" for s in WINNING_SIGNALS]
@@ -248,15 +252,11 @@ def create_equity_plot(results_df, long_signal_dates, short_signal_dates, horizo
     
     # --- Plot 2: Equity Curve (Log Scale) ---
     ax2.plot(results_df.index, results_df['Portfolio_Value'], 'b-', linewidth=1.5, label=f'Strategy Equity ({LEVERAGE}x Lev)')
-    
     bh_curve = results_df['close'] / results_df['close'].iloc[0] * INITIAL_CAPITAL
     ax2.plot(results_df.index, bh_curve, 'g--', alpha=0.8, linewidth=1, label='Buy & Hold (1x)')
     
-    # Handle Log Scale with potential 0 values (Bankruptcy)
-    # Symlog allows plotting 0 or negative values on a log-like scale, or we mask 0s.
-    # Standard log scale crashes on 0.
     if (results_df['Portfolio_Value'] <= 0).any():
-        ax2.set_yscale('symlog', linthresh=1.0) # Graceful handling of bankruptcy
+        ax2.set_yscale('symlog', linthresh=1.0) 
     else:
         ax2.set_yscale('log')
         
@@ -307,11 +307,10 @@ def start_web_server(results_df, long_signal_dates, short_signal_dates, signal_n
             m_start_val = group['Portfolio_Value'].iloc[0]
             m_end_val = group['Portfolio_Value'].iloc[-1]
             
-            # Safe calculation for 0 start value
             if m_start_val > 0:
                 m_ret_total = (m_end_val / m_start_val) - 1.0
             else:
-                m_ret_total = 0.0 # Already dead
+                m_ret_total = 0.0
             
             if m_daily_rets.std() > 0:
                 m_sharpe = (m_daily_rets.mean() / m_daily_rets.std()) * np.sqrt(365)
@@ -345,9 +344,6 @@ def start_web_server(results_df, long_signal_dates, short_signal_dates, signal_n
         for date, row in first_month_df.iterrows():
             date_str = date.strftime('%Y-%m-%d')
             exposure = row['Exposure']
-            
-            # Show Raw Conviction if desired, or Leveraged Exposure.
-            # Showing actual leveraged exposure here.
             
             if exposure > 0: exp_style = "color: #C0392B; font-weight: bold;"
             elif exposure < 0: exp_style = "color: #2980B9; font-weight: bold;"
@@ -429,6 +425,7 @@ def start_web_server(results_df, long_signal_dates, short_signal_dates, signal_n
                 </p>
                 <p>
                     <strong>Overall Sharpe Ratio:</strong> <span style="font-size: 1.2em; font-weight: bold;">{overall_sharpe:.2f}</span>
+                    <span style="font-size: 0.8em; color: #7f8c8d;">(Filter: < 50% Conviction = Cash)</span>
                 </p>
             </div>
             
@@ -469,7 +466,7 @@ def start_web_server(results_df, long_signal_dates, short_signal_dates, signal_n
         return send_file(buf, mimetype='image/png')
     
     print("\n" + "=" * 60)
-    print(f"Server running on http://localhost:8080 (Fixed Horizon: {HORIZON}, Leverage: {LEVERAGE}x)")
+    print(f"Server running on http://localhost:8080 (Fixed Horizon: {HORIZON}, Leverage: {LEVERAGE}x, Filter: 50%)")
     print("Press Ctrl+C to stop.")
     print("=" * 60)
     
