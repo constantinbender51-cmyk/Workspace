@@ -1,41 +1,27 @@
 import ccxt
 import pandas as pd
 import numpy as np
-import io
 import time
-from datetime import datetime
-from flask import Flask, render_template_string, jsonify, request
-
-app = Flask(__name__)
+from datetime import datetime, timedelta
 
 # --- Configuration ---
 SYMBOL = 'BTC/USDT'
 TIMEFRAME = '1d'
 SINCE_STR = '2018-01-01 00:00:00'
-HORIZON = 30 # Fixed evaluation window length for all signals
-PORT = 8080
+HORIZON = 30 # Decay window for signal contribution
+INITIAL_CAPITAL = 10000.0
 
-# --- Expanded Search Space ---
-SMA_PERIODS = range(20, 500, 30)        # Price Crossover (Trend)
-RSI_PERIODS = range(10, 40, 5)          # Centerline Crossover (Momentum)
-EMA_FAST = 50
-EMA_SLOW_PERIODS = range(100, 400, 50)  # Double EMA Crossover (Trend)
-MACD_FAST_EMA = 12
-MACD_SLOW_EMA = 26
-MACD_SIGNAL_PERIODS = range(5, 20, 5)   # MACD Signal Crossover (Momentum)
-STOCH_K_PERIODS = range(10, 40, 10)     # Stochastic %K/%D Crossover (Momentum)
-STOCH_D_PERIOD = 3
-BB_PERIODS = [20, 50, 100]              # Bollinger Bands (Volatility/Reversion)
-BB_STDEVS = [1.5, 2.0, 2.5]             # Std Dev Multipliers
+# --- Winning Signals (Top 5 Diverse) ---
+WINNING_SIGNALS = [
+    # (Type, Param1, Param2, Param3)
+    ('EMA_CROSS', 50, 150, 0),         # EMA 50/150
+    ('PRICE_SMA', 380, 0, 0),          # Price/SMA 380
+    ('PRICE_SMA', 140, 0, 0),          # Price/SMA 140
+    ('MACD_CROSS', 12, 26, 15),        # MACD (12/26/15)
+    ('RSI_CROSS', 35, 0, 0),           # RSI 35 (Crossover)
+]
 
-# --- Data Caching ---
-analysis_results = []
-df_data = None
-fwd_matrix = None
-weights = None
-data_loaded = False
-
-# --- Data Fetching ---
+# --- Data Fetching (Reused from original script) ---
 def fetch_binance_data():
     """Fetches daily OHLCV from Binance starting Jan 1, 2018."""
     print(f"Fetching data for {SYMBOL} since {SINCE_STR}...")
@@ -55,7 +41,8 @@ def fetch_binance_data():
             since = last_timestamp + 1
             time.sleep(0.1)
             
-            if last_timestamp >= exchange.milliseconds() - 24*60*60*1000:
+            # Stop fetching if we are within the last day
+            if (exchange.milliseconds() - last_timestamp) < (24*60*60*1000):
                 break
                 
             print(f"Fetched {len(all_ohlcv)} candles...", end='\r')
@@ -70,328 +57,205 @@ def fetch_binance_data():
     df.set_index('date', inplace=True)
     # Daily return calculation (Close[i] / Close[i-1] - 1)
     df['return'] = df['close'].pct_change()
+    
+    # Drop the first row which has NaN return
+    df.dropna(subset=['return'], inplace=True)
     return df
 
-# --- Core Metric Functions ---
+# --- Signal Generation Functions (Optimized for Strategy) ---
 
-def precompute_forward_matrix(returns_array, horizon):
-    """
-    Creates a matrix where row 't' contains returns for [t+1, t+2, ... t+horizon].
-    Ensures NO LOOKAHEAD BIAS.
-    """
-    n = len(returns_array)
-    matrix = np.full((n, horizon), np.nan)
+def generate_signals(df):
+    """Generates signals for all 5 winning indicators."""
+    df_signals = pd.DataFrame(index=df.index, dtype=int)
     
-    for day in range(1, horizon + 1):
-        # Shift the returns array back by 'day' steps.
-        shifted = np.roll(returns_array, -day)
-        shifted[-day:] = np.nan
-        matrix[:, day-1] = shifted
+    close_prices = df['close']
+    lows = df['low']
+    highs = df['high']
+    
+    for sig_type, p1, p2, p3 in WINNING_SIGNALS:
+        signal_col_name = f"{sig_type}_{p1}_{p2}_{p3}"
         
-    return matrix
-
-def calculate_dependability_score(signal_indices, is_long, fwd_matrix, weights, horizon):
-    """Calculates the average weighted expectancy for a set of signals."""
-    
-    # Filter indices to ensure enough forward data exists
-    valid_limit = fwd_matrix.shape[0] - horizon
-    valid_indices = signal_indices[signal_indices < valid_limit]
-    
-    if len(valid_indices) == 0:
-        return 0.0, 0
-    
-    # Extract forward returns matrix (Shape: N_signals x HORIZON)
-    fwd_returns = fwd_matrix[valid_indices]
-    
-    # Determine direction modifier: 1 for long, -1 for short (profitability positive)
-    direction_mod = 1.0 if is_long else -1.0
-    
-    # Calculate weighted sum for each signal
-    # Weighted Sum = Sum(R * Direction * W)
-    weighted_sums = np.sum(fwd_returns * direction_mod * weights, axis=1)
-    
-    # Dependability Score = Average weighted expectancy across all signals
-    avg_score = np.mean(weighted_sums)
-    
-    return avg_score, len(valid_indices)
-
-# --- Indicator Signal Logic ---
-
-def combine_results(long_score, long_count, short_score, short_count, indicator_name):
-    """Helper function to combine long and short scores into a total score."""
-    total_count = long_count + short_count
-    total_score = (long_score * long_count + short_score * short_count) / total_count if total_count > 0 else 0
-    return {
-        'indicator': indicator_name, 
-        'score': total_score, 
-        'count': total_count
-    }
-
-def analyze_price_sma_crossover(df, period, fwd_matrix, weights, horizon):
-    """Generates signals when Price crosses SMA."""
-    sma = df['close'].rolling(window=period).mean().values
-    prices = df['close'].values
-    
-    long_signals = np.where((prices[:-1] < sma[:-1]) & (prices[1:] > sma[1:]))[0] + 1
-    short_signals = np.where((prices[:-1] > sma[:-1]) & (prices[1:] < sma[1:]))[0] + 1
-    
-    long_score, long_count = calculate_dependability_score(long_signals, True, fwd_matrix, weights, horizon)
-    short_score, short_count = calculate_dependability_score(short_signals, False, fwd_matrix, weights, horizon)
-    
-    return combine_results(long_score, long_count, short_score, short_count, f'Price/SMA {period}')
-
-def analyze_double_ema_crossover(df, fast_period, slow_period, fwd_matrix, weights, horizon):
-    """Generates signals when Fast EMA crosses Slow EMA."""
-    fast_ema = df['close'].ewm(span=fast_period, adjust=False).mean().values
-    slow_ema = df['close'].ewm(span=slow_period, adjust=False).mean().values
-    
-    long_signals = np.where((fast_ema[:-1] < slow_ema[:-1]) & (fast_ema[1:] > slow_ema[1:]))[0] + 1
-    short_signals = np.where((fast_ema[:-1] > slow_ema[:-1]) & (fast_ema[1:] < slow_ema[1:]))[0] + 1
-    
-    long_score, long_count = calculate_dependability_score(long_signals, True, fwd_matrix, weights, horizon)
-    short_score, short_count = calculate_dependability_score(short_signals, False, fwd_matrix, weights, horizon)
-
-    return combine_results(long_score, long_count, short_score, short_count, f'EMA {fast_period}/{slow_period}')
-
-def analyze_rsi_centerline_crossover(df, period, fwd_matrix, weights, horizon):
-    """Generates signals when RSI crosses the 50 centerline."""
-    
-    delta = df['close'].diff()
-    gain = (delta.where(delta > 0, 0)).rolling(window=period).mean()
-    loss = (-delta.where(delta < 0, 0)).rolling(window=period).mean()
-    with np.errstate(divide='ignore', invalid='ignore'):
-        rs = gain / loss
-    rsi = 100 - (100 / (1 + rs))
-    rsi_values = rsi.values
-    
-    centerline = 50
-    
-    long_signals = np.where((rsi_values[:-1] < centerline) & (rsi_values[1:] > centerline))[0] + 1
-    short_signals = np.where((rsi_values[:-1] > centerline) & (rsi_values[1:] < centerline))[0] + 1
-    
-    long_score, long_count = calculate_dependability_score(long_signals, True, fwd_matrix, weights, horizon)
-    short_score, short_count = calculate_dependability_score(short_signals, False, fwd_matrix, weights, horizon)
-
-    return combine_results(long_score, long_count, short_score, short_count, f'RSI {period} (Crossover)')
-
-def analyze_macd_signal_crossover(df, fast, slow, signal_period, fwd_matrix, weights, horizon):
-    """Generates signals when MACD line crosses its signal line."""
-    
-    ema_fast = df['close'].ewm(span=fast, adjust=False).mean()
-    ema_slow = df['close'].ewm(span=slow, adjust=False).mean()
-    macd_line = ema_fast - ema_slow
-    signal_line = macd_line.ewm(span=signal_period, adjust=False).mean()
-    
-    macd_values = macd_line.values
-    signal_values = signal_line.values
-    
-    long_signals = np.where((macd_values[:-1] < signal_values[:-1]) & (macd_values[1:] > signal_values[1:]))[0] + 1
-    short_signals = np.where((macd_values[:-1] > signal_values[:-1]) & (macd_values[1:] < signal_values[1:]))[0] + 1
-    
-    long_score, long_count = calculate_dependability_score(long_signals, True, fwd_matrix, weights, horizon)
-    short_score, short_count = calculate_dependability_score(short_signals, False, fwd_matrix, weights, horizon)
-
-    return combine_results(long_score, long_count, short_score, short_count, f'MACD ({fast}/{slow}/{signal_period})')
-    
-def analyze_stochastic_crossover(df, k_period, d_period, fwd_matrix, weights, horizon):
-    """Generates signals when %K crosses %D line."""
-    
-    # Calculate %K
-    lowest_low = df['low'].rolling(window=k_period).min()
-    highest_high = df['high'].rolling(window=k_period).max()
-    k_line = 100 * ((df['close'] - lowest_low) / (highest_high - lowest_low))
-    
-    # Calculate %D (SMA of %K)
-    d_line = k_line.rolling(window=d_period).mean()
-    
-    k_values = k_line.values
-    d_values = d_line.values
-    
-    # Long: Prev K < Prev D AND Curr K > Curr D
-    long_signals = np.where((k_values[:-1] < d_values[:-1]) & (k_values[1:] > d_values[1:]))[0] + 1
-    # Short: Prev K > Prev D AND Curr K < Curr D
-    short_signals = np.where((k_values[:-1] > d_values[:-1]) & (k_values[1:] < d_values[1:]))[0] + 1
-    
-    long_score, long_count = calculate_dependability_score(long_signals, True, fwd_matrix, weights, horizon)
-    short_score, short_count = calculate_dependability_score(short_signals, False, fwd_matrix, weights, horizon)
-
-    return combine_results(long_score, long_count, short_score, short_count, f'Stoch ({k_period}/{d_period})')
-
-def analyze_bollinger_reversion(df, period, stddev, fwd_matrix, weights, horizon):
-    """Generates mean reversion signals when price crosses back INTO the bands."""
-    
-    sma = df['close'].rolling(window=period).mean()
-    std = df['close'].rolling(window=period).std()
-    
-    upper_band = (sma + std * stddev).values
-    lower_band = (sma - std * stddev).values
-    prices = df['close'].values
-    
-    # Long Reversion: Prev Price < Lower Band AND Curr Price > Lower Band
-    long_signals = np.where((prices[:-1] < lower_band[:-1]) & (prices[1:] > lower_band[1:]))[0] + 1
-    # Short Reversion: Prev Price > Upper Band AND Curr Price < Upper Band
-    short_signals = np.where((prices[:-1] > upper_band[:-1]) & (prices[1:] < upper_band[1:]))[0] + 1
-    
-    long_score, long_count = calculate_dependability_score(long_signals, True, fwd_matrix, weights, horizon)
-    short_score, short_count = calculate_dependability_score(short_signals, False, fwd_matrix, weights, horizon)
-
-    # Note: Long signals profit from price *rising*, Short signals profit from price *falling*.
-    # Reversion signals assume a move opposite to the crossover.
-    
-    # For Long signal (crossing lower band), profit is expected up (Long True)
-    # For Short signal (crossing upper band), profit is expected down (Short True)
-
-    return combine_results(long_score, long_count, short_score, short_count, f'BB ({period}/{stddev}) Reversion')
-
-# --- Main Logic ---
-
-def load_data_and_run_analysis():
-    """Fetches data and runs all indicator analysis."""
-    global df_data, fwd_matrix, weights, analysis_results, data_loaded
-    
-    if data_loaded:
-        print("Data already loaded, skipping fetch.")
-        return
-
-    try:
-        df_data = fetch_binance_data()
-        returns_array = df_data['return'].values
-        
-        # Initialize global metric components
-        day_indices = np.arange(1, HORIZON + 1)
-        weights = 1 - (day_indices / HORIZON)
-        fwd_matrix = precompute_forward_matrix(returns_array, HORIZON)
-        
-        results = []
-        
-        print("\n--- Running Comprehensive Analysis ---")
-        
-        # 1. Price/SMA Crossover (Trend)
-        for p in SMA_PERIODS:
-            results.append(analyze_price_sma_crossover(df_data, p, fwd_matrix, weights, HORIZON))
-
-        # 2. Double EMA Crossover (Trend)
-        for p_slow in EMA_SLOW_PERIODS:
-            results.append(analyze_double_ema_crossover(df_data, EMA_FAST, p_slow, fwd_matrix, weights, HORIZON))
-
-        # 3. RSI Centerline Crossover (Momentum)
-        for p in RSI_PERIODS:
-            results.append(analyze_rsi_centerline_crossover(df_data, p, fwd_matrix, weights, HORIZON))
+        if sig_type == 'EMA_CROSS':
+            fast_ema = close_prices.ewm(span=p1, adjust=False).mean()
+            slow_ema = close_prices.ewm(span=p2, adjust=False).mean()
             
-        # 4. MACD Signal Crossover (Momentum)
-        for p_signal in MACD_SIGNAL_PERIODS:
-             results.append(analyze_macd_signal_crossover(df_data, MACD_FAST_EMA, MACD_SLOW_EMA, p_signal, fwd_matrix, weights, HORIZON))
+            # Long: Fast crosses above Slow
+            long_condition = (fast_ema.shift(1) < slow_ema.shift(1)) & (fast_ema > slow_ema)
+            # Short: Fast crosses below Slow
+            short_condition = (fast_ema.shift(1) > slow_ema.shift(1)) & (fast_ema < slow_ema)
+            
+        elif sig_type == 'PRICE_SMA':
+            sma = close_prices.rolling(window=p1).mean()
+            
+            # Long: Price crosses above SMA
+            long_condition = (close_prices.shift(1) < sma.shift(1)) & (close_prices > sma)
+            # Short: Price crosses below SMA
+            short_condition = (close_prices.shift(1) > sma.shift(1)) & (close_prices < sma)
+            
+        elif sig_type == 'MACD_CROSS':
+            ema_fast = close_prices.ewm(span=p1, adjust=False).mean()
+            ema_slow = close_prices.ewm(span=p2, adjust=False).mean()
+            macd_line = ema_fast - ema_slow
+            signal_line = macd_line.ewm(span=p3, adjust=False).mean()
+            
+            # Long: MACD crosses above Signal Line
+            long_condition = (macd_line.shift(1) < signal_line.shift(1)) & (macd_line > signal_line)
+            # Short: MACD crosses below Signal Line
+            short_condition = (macd_line.shift(1) > signal_line.shift(1)) & (macd_line < signal_line)
 
-        # 5. Stochastic Oscillator (%K/%D Crossover)
-        for k_period in STOCH_K_PERIODS:
-             results.append(analyze_stochastic_crossover(df_data, k_period, STOCH_D_PERIOD, fwd_matrix, weights, HORIZON))
+        elif sig_type == 'RSI_CROSS':
+            # Calculate RSI
+            period = p1
+            delta = close_prices.diff()
+            gain = (delta.where(delta > 0, 0)).rolling(window=period).mean()
+            loss = (-delta.where(delta < 0, 0)).rolling(window=period).mean()
+            with np.errstate(divide='ignore', invalid='ignore'):
+                rs = gain / loss
+            rsi = 100 - (100 / (1 + rs))
+            centerline = 50
 
-        # 6. Bollinger Band Reversion (Volatility)
-        for period in BB_PERIODS:
-             for stddev in BB_STDEVS:
-                results.append(analyze_bollinger_reversion(df_data, period, stddev, fwd_matrix, weights, HORIZON))
-
-
-        analysis_results = sorted(results, key=lambda x: x['score'], reverse=True)
-        data_loaded = True
-        print("\n--- Comprehensive Analysis Complete ---")
-        
-    except Exception as e:
-        print(f"FATAL ERROR during data load or analysis: {e}")
-        analysis_results = []
-        data_loaded = False
-
-
-# --- Flask Routes ---
-
-@app.route('/')
-def home():
-    """Renders the HTML table of results."""
-    # Ensure data is loaded before rendering
-    if not data_loaded:
-        load_data_and_run_analysis()
-        
-    if not analysis_results:
-         return "<h1 class='text-red-500'>Error: Analysis failed or returned no results. Check server logs.</h1>"
-         
-    # Generate the table content
-    table_rows = ""
-    rank = 1
-    for item in analysis_results:
-        # Determine color based on score
-        score = item['score']
-        
-        # Base colors (used if not in top 3)
-        base_color = 'bg-red-100' if score < 0 else 'bg-gray-50'
-        
-        # Highlight top 3 if score > 0
-        if rank <= 3 and score > 0:
-            row_class = 'bg-yellow-200 font-bold'
+            # Long: RSI crosses above 50
+            long_condition = (rsi.shift(1) < centerline) & (rsi > centerline)
+            # Short: RSI crosses below 50
+            short_condition = (rsi.shift(1) > centerline) & (rsi < centerline)
+            
         else:
-            row_class = base_color
+            df_signals[signal_col_name] = 0
+            continue
             
-        table_rows += f"""
-        <tr class="border-b hover:bg-gray-100 {row_class}">
-            <td class="px-6 py-3 font-medium text-gray-900 whitespace-nowrap">{rank}</td>
-            <td class="px-6 py-3 font-bold">{item['indicator']}</td>
-            <td class="px-6 py-3 text-right" style="color: {'green' if score >= 0 else 'red'};">
-                {score:.5f}
-            </td>
-            <td class="px-6 py-3 text-right">{item['count']}</td>
-        </tr>
-        """
-        rank += 1
+        # Apply signals: +1 for Long, -1 for Short, 0 otherwise
+        df_signals[signal_col_name] = np.where(long_condition, 1, np.where(short_condition, -1, 0))
+        
+    # Drop NaNs that resulted from indicator calculation period
+    df_signals.dropna(inplace=True)
+    return df_signals
 
-    # HTML structure with Tailwind CSS
-    html_content = f"""
-    <!DOCTYPE html>
-    <html lang="en">
-    <head>
-        <meta charset="UTF-8">
-        <meta name="viewport" content="width=device-width, initial-scale=1.0">
-        <title>Signal Dependability Scorecard</title>
-        <script src="https://cdn.tailwindcss.com"></script>
-        <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;700&display=swap" rel="stylesheet">
-        <style>
-            body {{ font-family: 'Inter', sans-serif; background-color: #f7f9fb; }}
-            .container {{ max-width: 1200px; }}
-            th {{ font-size: 0.85rem; text-transform: uppercase; letter-spacing: 0.05em; }}
-        </style>
-    </head>
-    <body>
-        <div class="container mx-auto p-4 sm:p-8">
-            <h1 class="text-3xl font-bold mb-2 text-gray-800">Signal Dependability Scorecard</h1>
-            <p class="text-gray-600 mb-6">
-                Average Weighted Expectancy (BTC/USDT 2018-Present). Calculated over a **Fixed {HORIZON}-Day Window** using **Linear Decay (1 - d/{HORIZON})**.
-            </p>
 
-            <div class="shadow-lg rounded-xl overflow-hidden bg-white">
-                <table class="min-w-full divide-y divide-gray-200">
-                    <thead class="bg-gray-50">
-                        <tr>
-                            <th scope="col" class="px-6 py-3 text-left text-gray-500 rounded-tl-xl">Rank</th>
-                            <th scope="col" class="px-6 py-3 text-left text-gray-500">Indicator / Parameters</th>
-                            <th scope="col" class="px-6 py-3 text-right text-gray-500">Avg. Dependability Score</th>
-                            <th scope="col" class="px-6 py-3 text-right text-gray-500 rounded-tr-xl">Total Signals (N)</th>
-                        </tr>
-                    </thead>
-                    <tbody class="divide-y divide-gray-200">
-                        {table_rows}
-                    </tbody>
-                </table>
-            </div>
-            
-            <p class="text-sm text-gray-500 mt-4">
-                Score Interpretation: The metric measures the average expected weighted return per signal, prioritizing returns on Day 1 (weight ≈ 1) and diminishing to Day {HORIZON} (weight ≈ 0).
-            </p>
-        </div>
-    </body>
-    </html>
+# --- Core Conviction and Strategy Implementation ---
+
+def run_conviction_backtest(df_data, df_signals):
     """
-    return html_content
+    Applies the 30-day decaying conviction strategy.
+    """
+    
+    # Align dataframes and get core arrays
+    df_data = df_data.loc[df_signals.index]
+    returns = df_data['return'].values
+    num_days = len(df_signals)
+    
+    # Initialize strategy tracking
+    portfolio_value = np.zeros(num_days)
+    daily_pnl = np.zeros(num_days)
+    
+    # Tracking for each signal: stores the day index when the CURRENT active signal started.
+    # Initialized to -1 (no active signal)
+    signal_start_day = np.full(len(WINNING_SIGNALS), -1) 
+    # Tracking the direction of the current active signal: 1 (Long), -1 (Short)
+    signal_direction = np.full(len(WINNING_SIGNALS), 0) 
+    
+    # Backtest Loop
+    for t in range(num_days):
+        # 1. Check for New Signals & Update Start Day/Direction
+        daily_conviction = 0.0
+        
+        for i, (sig_type, p1, p2, p3) in enumerate(WINNING_SIGNALS):
+            current_signal = df_signals.iloc[t, i]
+            
+            # Check for a new signal (+1 or -1)
+            if current_signal != 0:
+                # If a new signal is generated, it starts decay.
+                # It also effectively "flips" the previous decay by resetting the start day.
+                signal_start_day[i] = t
+                signal_direction[i] = current_signal
+            
+            # 2. Calculate Decay Contribution (1-d/30)
+            
+            # Only apply contribution if there is an active signal
+            if signal_direction[i] != 0:
+                # Days since the active signal started
+                days_since_signal = t - signal_start_day[i] 
+                
+                # Apply linear decay: 1 - (d/HORIZON)
+                decay_factor = max(0.0, 1.0 - (days_since_signal / HORIZON))
+                
+                # Contribution is Direction * Decay Factor (max 1, min 0)
+                contribution = signal_direction[i] * decay_factor
+                daily_conviction += contribution
+        
+        # 3. Calculate Daily P&L
+        
+        # Position Size = Conviction (Leverage)
+        position_size = daily_conviction
+        
+        # PnL = Position Size * Daily Return
+        # Note: Position size is capped by the number of signals (5) but can float with decay
+        pnl = position_size * returns[t]
+        daily_pnl[t] = pnl
+        
+        # 4. Update Portfolio Value
+        if t == 0:
+            portfolio_value[t] = INITIAL_CAPITAL * (1 + pnl)
+        else:
+            # PnL is based on a fraction of the capital (Leverage / Total Signals)
+            # The strategy assumes you risk up to 5 units of capital when fully leveraged.
+            # Daily P&L = (Daily Conviction / Max Conviction) * Capital * Daily Return
+            # We will simplify by tracking portfolio return
+            portfolio_value[t] = portfolio_value[t-1] * (1 + pnl)
+
+
+    # Final results packaging
+    total_return = (portfolio_value[-1] / portfolio_value[0]) - 1
+    
+    # Combine results for output
+    results_df = df_data[['close', 'return']].copy()
+    results_df['Conviction'] = daily_pnl / results_df['return'].where(results_df['return'] != 0, 0) # Calculate conviction used
+    results_df['Daily_PnL_Unit'] = daily_pnl # P&L assuming 1 unit of capital
+    
+    return total_return, results_df
+    
+# --- Execution ---
 
 if __name__ == '__main__':
-    load_data_and_run_analysis()
     
-    print(f"Starting web server on port {PORT}...")
-    app.run(host='0.0.0.0', port=PORT)
+    # Load and process data
+    df_data = fetch_binance_data()
+    df_signals = generate_signals(df_data)
+    
+    if df_signals.empty:
+        print("Analysis failed: No valid signals generated.")
+    else:
+        # Run Backtest
+        total_return, results_df = run_conviction_backtest(df_data, df_signals)
+        
+        # Display Results
+        print("\n" + "="*50)
+        print("     Conviction Trading Strategy Backtest Results     ")
+        print(f"     Asset: {SYMBOL} ({TIMEFRAME} data) since {SINCE_STR}")
+        print("="*50)
+        
+        # Get start/end dates
+        start_date = results_df.index.min().strftime('%Y-%m-%d')
+        end_date = results_df.index.max().strftime('%Y-%m-%d')
+        
+        # Buy and Hold Return
+        bh_return = (results_df['close'].iloc[-1] / results_df['close'].iloc[0]) - 1
+        
+        print(f"Time Period: {start_date} to {end_date}")
+        print(f"Total Trading Days: {len(results_df)}")
+        print(f"Initial Capital (Simulated): ${INITIAL_CAPITAL:,.2f}")
+        
+        print("\n--- Performance Metrics ---")
+        print(f"Conviction Strategy Total Return: {total_return * 100:.2f}%")
+        print(f"Buy & Hold (BTC/USDT) Return:   {bh_return * 100:.2f}%")
+        
+        if total_return > bh_return:
+            print("\nStrategy OUTPERFORMED Buy & Hold. Great start!")
+        else:
+            print("\nStrategy UNDERPERFORMED Buy & Hold.")
+            
+        print(f"Final Portfolio Value: ${INITIAL_CAPITAL * (1 + total_return):,.2f}")
+        
+        # Save detailed results to CSV for analysis
+        results_df.to_csv('conviction_backtest_results.csv')
+        print("\nDetailed daily results saved to 'conviction_backtest_results.csv'")
+
