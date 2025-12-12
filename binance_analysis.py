@@ -1,728 +1,250 @@
+import requests
 import pandas as pd
 import numpy as np
-import matplotlib.pyplot as plt
-import io
-import base64
+import plotly.graph_objects as go
+from plotly.subplots import make_subplots
+import http.server
+import socketserver
+import webbrowser
 import time
-from flask import Flask, render_template_string
-import ccxt 
-import sys
-import traceback
+from datetime import datetime, timedelta, timezone
 
-# --- Configuration Constants ---
-SYMBOL = 'BTC/USDT'
-TIMEFRAME = '1d' # Daily candles
-START_DATE = '2018-01-01'
-SMA_WINDOWS_PLOT = [120] 
-DC_WINDOW = 20  # Donchian Channel Period (N)
-SL_FEE = 0.0005 # 0.05% fee applied on Stop Loss hit
-POSITION_SIZE_MAX = 1.0  # Maximum position size limit
+# --- Configuration ---
 PORT = 8080
-ANNUAL_TRADING_DAYS = 252 # Used for annualizing Sharpe Ratio
-MAX_SMA_SCAN = 120 # Maximum SMA for the scan and the global analysis start point
-SCAN_DELAY = 5.0 # Seconds delay after every 50 SMA calculations to respect API limits
+DAYS_BACK = 720
+TIMEFRAME = '1h'  # 1-hour candles for Binance
+SYMBOL_BINANCE = 'BTCUSDT'
+SYMBOL_KRAKEN = 'PF_XBTUSD'
+FUNDING_THRESHOLD = 0.5  # As requested
 
-# --- Grid Search Ranges ---
-# K: 0.0001 to 0.0100 in 0.0001 steps (101 runs)
-K_FACTOR_RANGE = np.arange(0.0001, 0.0101, 0.0001)
-# S (Stop Loss %): Fixed at 2% (0.02)
-S_FACTOR_RANGE = np.array([0.02])
+# --- Data Fetching Functions ---
 
-# --- Global Variables to store results (populated once at startup) ---
-GLOBAL_DATA_SOURCE = "Binance (CCXT)"
-GLOBAL_IMG_BASE64 = ""      # Image for Strategy Plot (using Optimal K & S)
-GLOBAL_ANALYSIS_IMG = ""    # Image for Sharpe/Equity Scan (for SMA window 1-120)
-GLOBAL_K_S_ANALYSIS_IMG = "" # Image for K & S 2D Heatmap/1D Plot Search
-GLOBAL_SUMMARY_TABLE = ""
-GLOBAL_TOTAL_RETURN = 0.0
-GLOBAL_SHARPE = 0.0         # Annualized Sharpe Ratio for the Optimal K & S strategy
-GLOBAL_STATUS = "PENDING"
-GLOBAL_ERROR = None
-GLOBAL_OPTIMAL_K = 0.0      # Optimal K found in the search
-GLOBAL_OPTIMAL_S = 0.0      # Optimal S found in the search
-GLOBAL_TOP_10_MD = ""       # Markdown for the top 10 results
-
-# --- Data Fetching (CCXT with Pagination) ---
-
-def fetch_binance_data(symbol, timeframe, start_date):
-    """
-    *** CALLED ONLY ONCE ***
-    Fetches historical OHLCV data from Binance using CCXT with pagination.
-    """
-    exchange = ccxt.binance({
-        'enableRateLimit': True, # Automatically respect API rate limits
-    })
-
-    since_timestamp = exchange.parse8601(start_date + 'T00:00:00Z')
-    all_ohlcv = []
-    limit = 1000
+def fetch_binance_ohlcv(symbol, interval, days):
+    """Fetches OHLCV data from Binance API (public)."""
+    print(f"Fetching Binance data for {symbol}...")
+    base_url = "https://api.binance.com/api/v3/klines"
     
-    print(f"--- STARTING API DATA FETCH: {symbol} ({timeframe}) from {start_date} via Binance/CCXT ---")
-
-    while True:
+    end_time = int(datetime.now(timezone.utc).timestamp() * 1000)
+    start_time = int((datetime.now(timezone.utc) - timedelta(days=days)).timestamp() * 1000)
+    
+    all_data = []
+    current_start = start_time
+    
+    while current_start < end_time:
+        params = {
+            'symbol': symbol,
+            'interval': interval,
+            'startTime': current_start,
+            'limit': 1000
+        }
         try:
-            ohlcv_batch = exchange.fetch_ohlcv(
-                symbol, 
-                timeframe, 
-                since=since_timestamp, 
-                limit=limit
-            )
+            r = requests.get(base_url, params=params)
+            r.raise_for_status()
+            data = r.json()
             
-            if not ohlcv_batch:
-                print("End of data reached.")
+            if not data:
                 break
                 
-            all_ohlcv.extend(ohlcv_batch)
+            all_data.extend(data)
+            # Update start time to the last timestamp fetched + 1ms
+            current_start = data[-1][0] + 1
             
-            # Use the timestamp of the last candle fetched to set 'since' for the next request.
-            since_timestamp = ohlcv_batch[-1][0] + 1 
-            
-            print(f"Fetched total {len(all_ohlcv)} candles up to {exchange.iso8601(ohlcv_batch[-1][0])}")
-            
-            if len(ohlcv_batch) < limit:
-                break
-                
-            time.sleep(exchange.rateLimit / 1000) 
+            # Rate limit respect
+            time.sleep(0.1)
             
         except Exception as e:
-            print(f"An error occurred during CCXT fetching: {e}")
-            raise 
+            print(f"Error fetching Binance data: {e}")
+            break
+
+    df = pd.DataFrame(all_data, columns=['timestamp', 'open', 'high', 'low', 'close', 'volume', 'close_time', 'q_vol', 'trades', 'tb_base', 'tb_quote', 'ignore'])
+    df['timestamp'] = pd.to_datetime(df['timestamp'], unit='ms')
+    df.set_index('timestamp', inplace=True)
+    df = df[['open', 'high', 'low', 'close', 'volume']].astype(float)
+    print(f"Binance data fetched: {len(df)} rows.")
+    return df
+
+def fetch_kraken_funding(symbol, days):
+    """Fetches historical funding rates from Kraken Futures API."""
+    print(f"Fetching Kraken funding rates for {symbol}...")
+    base_url = "https://futures.kraken.com/derivatives/api/v3/historical-funding-rates"
+    
+    # Kraken usually works with ISO strings or ms timestamps depending on the specific v3 endpoint docs. 
+    # v3 historical-funding-rates takes a 'before' param (timestamp in ms).
+    
+    all_rates = []
+    # Start from now, working backwards
+    # Note: If the API doesn't support easy pagination backwards, we might need a different approach.
+    # Standard pattern: query 'before' current time, get list, take oldest, query 'before' oldest.
+    
+    # Using a simplified forward iteration or single grab approach is risky for 720 days.
+    # We will iterate backwards.
+    
+    current_pointer = int(datetime.now(timezone.utc).timestamp() * 1000)
+    min_time = int((datetime.now(timezone.utc) - timedelta(days=days)).timestamp() * 1000)
+    
+    while current_pointer > min_time:
+        params = {
+            'symbol': symbol,
+            'before': current_pointer
+        }
+        
+        try:
+            r = requests.get(base_url, params=params)
+            r.raise_for_status()
+            data = r.json()
             
-    # Check minimum data needed for the longest indicator (SMA 120)
-    if len(all_ohlcv) < MAX_SMA_SCAN + 10: 
-        raise ValueError(f"Not enough data fetched. Required >{MAX_SMA_SCAN + 10}, received {len(all_ohlcv)}.")
-        
-    df = pd.DataFrame(all_ohlcv, columns=['timestamp', 'Open', 'High', 'Low', 'Close', 'Volume'])
-    df['Date'] = pd.to_datetime(df['timestamp'], unit='ms')
-    df.set_index('Date', inplace=True)
-    df = df[['Open', 'High', 'Low', 'Close', 'Volume']].astype(float)
-    df = df.sort_index()
+            rates = data.get('rates', [])
+            if not rates:
+                break
+                
+            all_rates.extend(rates)
+            
+            # Timestamps in Kraken v3 are usually ISO or ms. Let's check the first item.
+            # Response format: {"rates": [{"timestamp": "2023-...", "fundingRate": 0.0001, ...}]}
+            # We need to parse the oldest timestamp to update current_pointer
+            
+            oldest_ts_str = rates[-1]['timestamp']
+            # Parse ISO to ms timestamp
+            dt_obj = datetime.fromisoformat(oldest_ts_str.replace('Z', '+00:00'))
+            oldest_ts = int(dt_obj.timestamp() * 1000)
+            
+            if oldest_ts >= current_pointer:
+                # Avoid infinite loop if timestamps aren't moving
+                current_pointer -= 86400000 # Force move back 1 day
+            else:
+                current_pointer = oldest_ts
+            
+            if current_pointer <= min_time:
+                break
+                
+            time.sleep(0.1)
+            
+        except Exception as e:
+            print(f"Error fetching Kraken data: {e}")
+            break
+            
+    df = pd.DataFrame(all_rates)
+    # Filter columns and parse
+    if not df.empty:
+        df['timestamp'] = pd.to_datetime(df['timestamp'])
+        df.set_index('timestamp', inplace=True)
+        df['fundingRate'] = df['fundingRate'].astype(float)
+        # Sort index to be chronological
+        df.sort_index(inplace=True)
+        # Filter for the last 720 days only (since we fetched backwards, we might have extra or gaps)
+        cutoff = datetime.now(timezone.utc) - timedelta(days=days)
+        df = df[df.index >= cutoff]
     
-    print(f"--- SUCCESS: Total candles fetched: {len(df)} ---")
+    print(f"Kraken funding rates fetched: {len(df)} rows.")
     return df
 
-# --- Indicator Calculation ---
+# --- Processing & Strategy ---
 
-def calculate_indicators(df, windows_to_calculate):
-    """Calculates specified SMAs and Donchian Channels."""
+def process_data(df_price, df_funding):
+    # Resample funding to match price index (1H)
+    # Funding rates typically occur every 4h or 8h. We forward fill the rate to the hours in between.
+    df = df_price.join(df_funding['fundingRate'], how='left')
+    df['fundingRate'] = df['fundingRate'].ffill().fillna(0)
     
-    all_smas = set(windows_to_calculate + [120])
+    # 1. Calculate SMA 400
+    df['sma_400'] = df['close'].rolling(window=400).mean()
     
-    for window in all_smas:
-        if f'SMA_{window}' not in df.columns:
-            df[f'SMA_{window}'] = df['Close'].rolling(window=window).mean()
+    # 2. Strategy Logic
+    # Start with flat (0)
+    df['position'] = 0
     
-    # Calculate Donchian Channel
-    df['DC_Upper'] = df['High'].rolling(window=DC_WINDOW).max()
-    df['DC_Lower'] = df['Low'].rolling(window=DC_WINDOW).min()
+    # Long if Price > SMA 400
+    df.loc[df['close'] > df['sma_400'], 'position'] = 1
+    
+    # Short if Price < SMA 400
+    df.loc[df['close'] < df['sma_400'], 'position'] = -1
+    
+    # Flat if Funding Rate > Threshold (Overwrites previous signals)
+    df.loc[df['fundingRate'] > FUNDING_THRESHOLD, 'position'] = 0
+    
+    # 3. Calculate Equity
+    # Shift position by 1 to simulate executing on the next open/close after signal
+    df['strategy_ret'] = df['position'].shift(1) * df['close'].pct_change()
+    df['equity'] = (1 + df['strategy_ret'].fillna(0)).cumprod()
+    
+    # Buy & Hold for comparison
+    df['bnh_ret'] = df['close'].pct_change()
+    df['bnh_equity'] = (1 + df['bnh_ret'].fillna(0)).cumprod()
     
     return df
 
-# --- Backtesting and Strategy Return Calculation (Reusable for Scan) ---
+# --- Plotting ---
 
-def get_strategy_returns_scan(df_raw, sma_window):
-    """
-    Calculates returns for a simple Long/Short strategy based on a single given SMA window.
-    Used ONLY for the initial Sharpe Scan (1 to 120).
-    """
-    df = df_raw.copy()
-    sma_col = f'SMA_{sma_window}'
-    
-    # 1. Calculate the specific SMA needed for this run
-    if sma_col not in df.columns:
-        df[sma_col] = df['Close'].rolling(window=sma_window).mean()
-    
-    # 2. Strategy Logic: Long (+1) if Close > SMA, Short (-1) if Close <= SMA
-    df.loc[:, 'Next_Day_Position'] = np.where(df['Close'] > df[sma_col], 
-                                              POSITION_SIZE_MAX,      # +1 for Long
-                                              -POSITION_SIZE_MAX)     # -1 for Short
-    
-    # Position HELD for the day t return is based on the decision from day t-1.
-    df.loc[:, 'Position'] = df['Next_Day_Position'].shift(1).fillna(0)
-    
-    # 3. Calculate Strategy Return
-    df['Daily_Return'] = df['Close'].pct_change()
-    daily_returns_clean = df['Daily_Return'].fillna(0)
-    
-    # Strategy Return = Daily Asset Return * Held Position
-    df.loc[:, 'Strategy_Return'] = daily_returns_clean * df['Position']
-    
-    # 4. Enforce Global Start for Tradable Period (Index MAX_SMA_SCAN)
-    tradable_start_index = MAX_SMA_SCAN 
-    
-    if len(df) <= tradable_start_index:
-        return pd.DataFrame() 
-        
-    df_tradable = df.iloc[tradable_start_index:].copy()
-    
-    # 5. Calculate Cumulative Equity (starting fresh from 1.0)
-    strategy_returns_tradable = df_tradable['Strategy_Return']
-    df_tradable.loc[:, 'Equity'] = (1 + strategy_returns_tradable).cumprod()
-    
-    # Buy & Hold Benchmark: Calculated using the price ratio from the global start price.
-    start_price_bh = df_tradable['Close'].iloc[0]
-    df_tradable.loc[:, 'Buy_Hold_Equity'] = df_tradable['Close'] / start_price_bh
+def create_dashboard(df):
+    fig = make_subplots(
+        rows=3, cols=1, 
+        shared_xaxes=True, 
+        vertical_spacing=0.05,
+        row_heights=[0.5, 0.25, 0.25],
+        subplot_titles=("Price & SMA 400", "Equity Curve", "Funding Rate")
+    )
 
-    return df_tradable
+    # Row 1: Price
+    fig.add_trace(go.Scatter(x=df.index, y=df['close'], name='BTC Price', line=dict(color='gray', width=1)), row=1, col=1)
+    fig.add_trace(go.Scatter(x=df.index, y=df['sma_400'], name='SMA 400', line=dict(color='orange', width=2)), row=1, col=1)
 
-# --- Dynamic Position Size Strategy (Core Logic adapted for K_FACTOR and S_FACTOR) ---
+    # Row 2: Equity
+    fig.add_trace(go.Scatter(x=df.index, y=df['equity'], name='Strategy Equity', line=dict(color='green', width=2)), row=2, col=1)
+    fig.add_trace(go.Scatter(x=df.index, y=df['bnh_equity'], name='Buy & Hold', line=dict(color='blue', width=1, dash='dot')), row=2, col=1)
 
-def calculate_dynamic_position(df_ind_raw, k_factor, s_factor):
-    """
-    Calculates position size based on volatility (DC width relative to price),
-    and sets the direction based on SMA 120, incorporating FIXED s_factor% Stop Loss logic.
+    # Row 3: Funding
+    # Color red if above threshold
+    colors = ['red' if val > FUNDING_THRESHOLD else 'purple' for val in df['fundingRate']]
+    fig.add_trace(go.Bar(x=df.index, y=df['fundingRate'], name='Funding Rate', marker_color=colors), row=3, col=1)
     
-    New Position Size Formula (rewards high volatility): Size = (Relative Volatility)^k
-    """
-    df = df_ind_raw.copy()
-    
-    # 1. Calculate Relative Volatility for Position Sizing
-    df['DC_Width'] = df['DC_Upper'] - df['DC_Lower']
-    df['Relative_Width'] = df['DC_Width'] / df['Close']
-    
-    # 2. Calculate Base Position Size (Relative_Width ^ k_factor), clipped between 0 and 1
-    valid_conditions = (df['Close'] > 0) & (df['Relative_Width'] > 0)
+    # Add Threshold line
+    fig.add_hline(y=FUNDING_THRESHOLD, line_dash="dash", line_color="red", row=3, col=1, annotation_text="Threshold")
 
-    df['Size_Decider'] = np.where(
-        valid_conditions,
-        # REVERSED LOGIC: Maximize size when Relative_Width (volatility) is high
-        (np.power(df['Relative_Width'], k_factor)).clip(lower=0, upper=POSITION_SIZE_MAX),
-        0.0 
+    fig.update_layout(
+        title=f"Strategy Analysis ({DAYS_BACK} Days): SMA 400 Filter + Funding Cutoff",
+        height=900,
+        template="plotly_dark",
+        hovermode="x unified"
     )
     
-    # 3. Determine Direction Signal (+1 or -1) from SMA 120
-    sma_col = 'SMA_120'
-    df['Direction_Decider'] = np.where(df['Close'] > df[sma_col], 1, -1)
-    
-    # 4. Final Held Position = Direction Decided Yesterday * Size Decided Yesterday
-    df['Held_Position'] = (df['Direction_Decider'] * df['Size_Decider']).shift(1).fillna(0)
-    
-    # Calculate Previous Close for SL calculation (used for current day's trade)
-    df['Previous_Close'] = df['Close'].shift(1)
-    
-    # Calculate daily asset return
-    df['Daily_Return'] = df['Close'].pct_change().fillna(0)
-    
-    # --- Stop Loss Logic (SL FIXED at s_factor% from Previous Close + 0.05% fee) ---
-    
-    # s_factor is the trigger percentage
-    TOTAL_LOSS_RATE = s_factor + SL_FEE # Stop Loss % + Fee
+    return fig
 
-    # A. Long SL Hit Check: Low < SL Price (Prev Close * (1 - s_factor))
-    SL_Price_Long = df['Previous_Close'] * (1 - s_factor)
-    is_long_sl_hit = (df['Held_Position'] > 0) & (df['Low'] < SL_Price_Long)
+# --- Main Execution ---
 
-    # B. Short SL Hit Check: High > SL Price (Prev Close * (1 + s_factor))
-    SL_Price_Short = df['Previous_Close'] * (1 + s_factor)
-    is_short_sl_hit = (df['Held_Position'] < 0) & (df['High'] > SL_Price_Short)
+if __name__ == "__main__":
+    # 1. Fetch
+    df_ohlcv = fetch_binance_ohlcv(SYMBOL_BINANCE, TIMEFRAME, DAYS_BACK)
+    df_funding = fetch_kraken_funding(SYMBOL_KRAKEN, DAYS_BACK)
+    
+    if df_ohlcv.empty:
+        print("No OHLCV data found. Exiting.")
+        exit()
 
-    df['SL_Hit'] = is_long_sl_hit | is_short_sl_hit
+    # 2. Process
+    df_final = process_data(df_ohlcv, df_funding)
+    
+    # 3. Plot
+    fig = create_dashboard(df_final)
+    filename = "strategy_dashboard.html"
+    fig.write_html(filename)
+    print(f"Dashboard saved to {filename}")
 
-    # C. Calculate Strategy Return:
-    # Default return: Daily asset return * Held Position
-    df['Strategy_Return'] = df['Daily_Return'] * df['Held_Position']
+    # 4. Serve
+    class Handler(http.server.SimpleHTTPRequestHandler):
+        def do_GET(self):
+            if self.path == '/':
+                self.path = f'/{filename}'
+            return http.server.SimpleHTTPRequestHandler.do_GET(self)
 
-    # If SL is hit, the return is capped at the maximum allowed loss (Total Loss Rate)
-    # Loss = -TOTAL_LOSS_RATE * |Held Position|
+    print(f"Starting server at http://localhost:{PORT}")
+    print("Press Ctrl+C to stop.")
     
-    # Apply SL for long positions
-    loss_long_capped = -TOTAL_LOSS_RATE * df['Held_Position']
-    df.loc[is_long_sl_hit, 'Strategy_Return'] = loss_long_capped
+    # Open browser automatically
+    webbrowser.open(f"http://localhost:{PORT}")
     
-    # Apply SL for short positions
-    loss_short_capped = -TOTAL_LOSS_RATE * np.abs(df['Held_Position'])
-    df.loc[is_short_sl_hit, 'Strategy_Return'] = loss_short_capped
-    
-    # --- End Stop Loss Logic ---
-    
-    # 5. Enforce Global Start for Tradable Period (Index MAX_SMA_SCAN)
-    tradable_start_index = MAX_SMA_SCAN 
-    
-    if len(df) <= tradable_start_index:
-        return pd.DataFrame() 
-        
-    df_tradable = df.iloc[tradable_start_index:].copy()
-
-    # 6. Calculate Cumulative Equity
-    df_tradable.loc[:, 'Equity'] = (1 + df_tradable['Strategy_Return']).cumprod()
-    
-    # Buy & Hold Benchmark
-    start_price_bh = df_tradable['Close'].iloc[0]
-    df_tradable.loc[:, 'Buy_Hold_Equity'] = df_tradable['Close'] / start_price_bh
-    
-    return df_tradable[['Close', sma_col, 'DC_Upper', 'DC_Lower', 'Held_Position', 'SL_Hit', 'Strategy_Return', 'Equity', 'Buy_Hold_Equity']]
-
-# --- 2D K & S Grid Search Function (now adapting for fixed S) ---
-
-def run_k_s_grid_search(df_ind_raw):
-    """Runs a 1D grid search for the optimal K factor based on Sharpe Ratio with fixed S."""
-    k_range_start = K_FACTOR_RANGE[0]
-    k_range_end = K_FACTOR_RANGE[-1]
-    s_range_start_pct = S_FACTOR_RANGE[0]*100
-    
-    print(f"\n--- Starting 1D K-Factor Grid Search (K: {k_range_start:.4f} to {k_range_end:.4f}) with Fixed S = {s_range_start_pct:.2f}% ---")
-        
-    
-    # Use lists to ensure exact floating point values from arange are used for indexing later
-    K_VALUES = [round(k, 4) for k in K_FACTOR_RANGE]
-    S_VALUES = [round(s, 3) for s in S_FACTOR_RANGE]
-    
-    sharpe_matrix = np.zeros((len(K_VALUES), len(S_VALUES)))
-    max_sharpe = -np.inf
-    optimal_k = 0.0
-    optimal_s = S_VALUES[0] # Only one S value
-    
-    total_runs = len(K_VALUES) * len(S_VALUES)
-    run_count = 0
-    
-    for i, k in enumerate(K_VALUES):
-        for j, s in enumerate(S_VALUES):
-            
-            df_strategy = calculate_dynamic_position(df_ind_raw, k, s)
-            
-            if df_strategy.empty:
-                sharpe_matrix[i, j] = 0.0
-                continue
-                
-            returns = df_strategy['Strategy_Return']
-            std_dev_daily_return = returns.std()
-            
-            if std_dev_daily_return > 0:
-                avg_daily_return = returns.mean()
-                sharpe_ratio = (avg_daily_return / std_dev_daily_return) * np.sqrt(ANNUAL_TRADING_DAYS)
-            else:
-                sharpe_ratio = 0.0 
-            
-            sharpe_matrix[i, j] = sharpe_ratio
-
-            if sharpe_ratio > max_sharpe:
-                max_sharpe = sharpe_ratio
-                optimal_k = k
-                optimal_s = s
-            
-            run_count += 1
-            if run_count % 20 == 0:
-                 print(f"Processed {run_count}/{total_runs} combinations. Current best Sharpe: {max_sharpe:.4f} (K={optimal_k:.4f}, S={optimal_s*100:.2f}%)")
-
-
-    print(f"--- K & S Search Complete. Optimal K: {optimal_k:.4f}, Optimal S: {optimal_s*100:.2f}% ---")
-    
-    
-    # --- Generate Plot (1D Line Plot for Fixed S) ---
-    fig, ax = plt.subplots(1, 1, figsize=(10, 4))
-    sharpe_values = sharpe_matrix[:, 0]
-    
-    ax.plot(K_VALUES, sharpe_values, color='#5a3d90', linewidth=2)
-    
-    ax.scatter(optimal_k, max_sharpe, color='red', s=50, zorder=5)
-    ax.text(optimal_k, max_sharpe * 1.01, 
-            f'Optimal K: {optimal_k:.4f}', fontsize=9, color='red', ha='center')
-
-    ax.set_xlabel('K-Factor (Volatility Exponent)', fontsize=10)
-    ax.set_ylabel('Annualized Sharpe Ratio', fontsize=10)
-    ax.set_title(f'Sharpe Ratio vs. K-Factor (Fixed S = {S_VALUES[0]*100:.2f}%)', fontsize=12)
-    ax.grid(True, linestyle=':', alpha=0.6)
-        
-    plt.tight_layout()
-    buf = io.BytesIO()
-    plt.savefig(buf, format='png')
-    buf.seek(0)
-    plt.close(fig)
-    img_base64 = base64.b64encode(buf.read()).decode('utf-8')
-    
-    return optimal_k, optimal_s, img_base64
-
-# --- Comprehensive SMA Scan and Sharpe Ratio Calculation ---
-
-def calculate_sharpe_ratios_scan(df_raw, min_sma, max_sma):
-    """
-    Calculates Sharpe Ratio for different SMA window sizes (simple long/short strategy).
-    """
-    results = []
-    
-    print(f"\n--- Starting SMA Scan (SMA {min_sma} to {max_sma}) ---")
-    
-    for sma_w in range(min_sma, max_sma + 1):
-        df_strategy = get_strategy_returns_scan(df_raw, sma_w)
-        
-        if df_strategy.empty:
-            continue
-            
-        returns = df_strategy['Strategy_Return']
-        std_dev_daily_return = returns.std()
-        
-        if std_dev_daily_return > 0:
-            avg_daily_return = returns.mean()
-            sharpe_ratio = (avg_daily_return / std_dev_daily_return) * np.sqrt(ANNUAL_TRADING_DAYS)
-        else:
-            sharpe_ratio = 0.0 
-            
-        final_equity = df_strategy['Equity'].iloc[-1]
-            
-        results.append({
-            'SMA_Window': sma_w,
-            'Sharpe_Ratio': sharpe_ratio,
-            'Final_Equity': final_equity
-        })
-        
-        if sma_w % 50 == 0:
-            print(f"Processed SMA {sma_w}...")
-            time.sleep(SCAN_DELAY)
-
-    results_df = pd.DataFrame(results)
-    print(f"--- SMA Scan Complete. Found {len(results_df)} valid windows. ---")
-    return results_df
-
-# --- Analysis Visualization (Shared) ---
-
-def create_analysis_visualization(results_df):
-    """
-    Generates a figure with two plots: Sharpe Ratio vs. SMA and Final Equity vs. SMA.
-    """
-    fig, axes = plt.subplots(2, 1, figsize=(10, 8), sharex=True)
-    
-    # --- Top Plot: Sharpe Ratio ---
-    ax1 = axes[0]
-    ax1.plot(results_df['SMA_Window'], results_df['Sharpe_Ratio'], 
-             color='#1f77b4', linewidth=1.5, alpha=0.8)
-    
-    # Highlight the peak Sharpe Ratio
-    best_sharpe_row = results_df.sort_values(by='Sharpe_Ratio', ascending=False).iloc[0]
-    best_sma = best_sharpe_row['SMA_Window']
-    best_sharpe = best_sharpe_row['Sharpe_Ratio']
-    
-    ax1.scatter(best_sma, best_sharpe, color='red', s=50, zorder=5)
-    ax1.axhline(best_sharpe, color='red', linestyle='--', alpha=0.4, linewidth=1)
-
-    ax1.set_ylabel('Annualized Sharpe Ratio', fontsize=10)
-    ax1.set_title(f'SMA Crossover Strategy Performance (SMA 1 to {MAX_SMA_SCAN} - 70% Data Sample)', fontsize=14)
-    ax1.grid(True, linestyle=':', alpha=0.6)
-    ax1.set_xlim(1, MAX_SMA_SCAN)
-    
-    # --- Bottom Plot: Final Equity ---
-    ax2 = axes[1]
-    ax2.plot(results_df['SMA_Window'], results_df['Final_Equity'], 
-             color='#2ca02c', linewidth=1.5, alpha=0.8)
-    
-    # Highlight the peak Final Equity
-    best_equity_row = results_df.sort_values(by='Final_Equity', ascending=False).iloc[0]
-    best_equity_sma = best_equity_row['SMA_Window']
-    best_equity = best_equity_row['Final_Equity']
-    
-    ax2.scatter(best_equity_sma, best_equity, color='red', s=50, zorder=5)
-    ax2.axhline(best_equity, color='red', linestyle='--', alpha=0.4, linewidth=1)
-    
-    ax2.set_xlabel('SMA Window (Days)', fontsize=10)
-    ax2.set_ylabel('Final Equity Multiplier (x)', fontsize=10)
-    ax2.grid(True, linestyle=':', alpha=0.6)
-    ax2.set_xlim(1, MAX_SMA_SCAN)
-    
-    plt.tight_layout()
-    
-    # Save plot to buffer
-    buf = io.BytesIO()
-    plt.savefig(buf, format='png')
-    buf.seek(0)
-    plt.close(fig)
-    
-    # Encode plot for HTML embedding
-    img_base64 = base64.b64encode(buf.read()).decode('utf-8')
-    return img_base64
-
-# --- Plotting Dynamic Position Strategy ---
-
-def create_plot(df, sma_window, k_factor, s_factor):
-    """Generates the main strategy plot (Close Price + Equity Curve) for the dynamic position size strategy."""
-    
-    df_plot = df.copy() 
-    sma_col = f'SMA_{sma_window}'
-    
-    fig, axes = plt.subplots(2, 1, figsize=(10, 4), sharex=True, 
-                             gridspec_kw={'height_ratios': [3, 2]})
-    
-    # --- Price and SMA (Top Panel) ---
-    ax1 = axes[0]
-    
-    # 1. Background Coloring: Strategy Position (+/- size)
-    pos_series = df_plot['Held_Position'] 
-    change_indices = pos_series.index[pos_series.diff() != 0]
-    segment_starts = pd.Index([pos_series.index[0]]).append(change_indices)
-    segment_ends = change_indices.append(pd.Index([pos_series.index[-1]]))
-    
-    # Color intensity corresponds to position size magnitude
-    for start, end in zip(segment_starts, segment_ends):
-        current_pos = pos_series.loc[start]
-        
-        color = None
-        alpha = np.abs(current_pos) * 0.15 # Max alpha 0.15
-        
-        if current_pos > 0:
-            color = 'green'
-        elif current_pos < 0:
-            color = 'red'
-        
-        if color and alpha > 0.01: # Don't plot near-zero positions
-            end_adjusted = end + pd.Timedelta(days=1)
-            ax1.axvspan(start, end_adjusted, facecolor=color, alpha=alpha, zorder=0)
-            
-    # 2. Highlight Stop Loss days with a black marker
-    sl_days = df_plot[df_plot['SL_Hit']].index
-    for day in sl_days:
-        ax1.axvspan(day, day + pd.Timedelta(days=1), facecolor='black', alpha=0.4, zorder=1)
-
-    # 3. Price and SMAs/DC
-    ax1.plot(df_plot.index, df_plot['Close'], label='Price (Close)', color='#1f77b4', linewidth=1.5, alpha=0.9, zorder=2)
-    
-    # Plotting the main SMA 120 and DC for context
-    ax1.plot(df_plot.index, df_plot[sma_col], 
-             label=f'SMA {sma_window}', 
-             color='#FF6347', linestyle='-', linewidth=2.5, zorder=2) 
-    ax1.plot(df_plot.index, df_plot['DC_Upper'], label='DC Upper (20)', color='#9400D3', linestyle=':', linewidth=1.0, alpha=0.5, zorder=2)
-    ax1.plot(df_plot.index, df_plot['DC_Lower'], label='DC Lower (20)', color='#9400D3', linestyle=':', linewidth=1.0, alpha=0.5, zorder=2)
-    
-    ax1.set_ylabel('Price (Log Scale)', fontsize=10)
-    ax1.grid(True, linestyle='--', alpha=0.6)
-    ax1.legend(loc='upper left', fontsize=8)
-    ax1.set_yscale('log')
-    ax1.set_title(f'SMA {sma_window} Signal w/ Volatility Max Sizing (K={k_factor:.4f}) - SL: {s_factor*100:.2f}% + {SL_FEE*100:.2f}% Fee', fontsize=12)
-
-    # --- Equity Plot (Bottom Panel) ---
-    ax2 = axes[1]
-    
-    final_strategy_return = (df_plot['Equity'].iloc[-1] - 1) * 100
-    
-    plotted_returns = df_plot['Strategy_Return']
-    sharpe_plotted = (plotted_returns.mean() / plotted_returns.std()) * np.sqrt(ANNUAL_TRADING_DAYS)
-    
-    ax2.plot(df_plot.index, df_plot['Equity'], label=f'Strategy Equity (Sharpe: {sharpe_plotted:.3f})', color='blue', linewidth=3)
-    ax2.plot(df_plot['Buy_Hold_Equity'], label='Buy & Hold Benchmark', color='gray', linestyle='--', alpha=0.7)
-    
-    ax2.set_xlabel('Date', fontsize=10)
-    ax2.set_ylabel('Cumulative Return', fontsize=10)
-    ax2.grid(True, linestyle='--', alpha=0.6)
-    ax2.legend(loc='upper left', fontsize=9)
-    
-    plt.tight_layout()
-    
-    # Save plot to buffer
-    buf = io.BytesIO()
-    plt.savefig(buf, format='png')
-    buf.seek(0)
-    plt.close(fig)
-    
-    img_base64 = base64.b64encode(buf.read()).decode('utf-8')
-    return img_base64, final_strategy_return
-
-# --- Setup Function (Runs once at startup) ---
-
-def setup_analysis():
-    """Runs the full backtest analysis, SMA scan, K-factor search, and populates global variables."""
-    global GLOBAL_IMG_BASE64, GLOBAL_ANALYSIS_IMG, GLOBAL_K_S_ANALYSIS_IMG, GLOBAL_SUMMARY_TABLE, GLOBAL_TOTAL_RETURN, GLOBAL_STATUS, GLOBAL_ERROR, GLOBAL_TOP_10_MD, GLOBAL_SHARPE, GLOBAL_OPTIMAL_K, GLOBAL_OPTIMAL_S
-    
-    MAIN_SMA_WINDOW = 120 
-
-    # --- Part 1: Data Fetching and Indicator Calculation ---
-    try:
-        df_raw = fetch_binance_data(SYMBOL, TIMEFRAME, START_DATE)
-        split_idx = int(len(df_raw) * 0.70)
-        df_raw_sliced = df_raw.iloc[:split_idx]
-        print(f"--- DATA SLICED: Running analysis on first {len(df_raw_sliced)} candles (70% of total) ---")
-        
-        if len(df_raw_sliced) < MAX_SMA_SCAN + 10:
-             raise ValueError(f"70% data slice is too short ({len(df_raw_sliced)} days). Max SMA {MAX_SMA_SCAN} requires more data.")
-        
-        df_ind = calculate_indicators(df_raw_sliced, [])
-        
-    except Exception as e:
-        GLOBAL_ERROR = f"Fatal Data/Indicator Error: {e}\n\nTraceback:\n{traceback.format_exc()}"
-        print(f"--- FATAL ERROR DURING DATA SETUP ---\n{GLOBAL_ERROR}", file=sys.stderr)
-        return
-
-    # --- Part 2: Comprehensive SMA Scan (SMA 1 to MAX_SMA_SCAN) ---
-    try:
-        results_df_sma = calculate_sharpe_ratios_scan(df_raw_sliced, min_sma=1, max_sma=MAX_SMA_SCAN)
-        GLOBAL_ANALYSIS_IMG = create_analysis_visualization(results_df_sma.sort_values(by='SMA_Window', ascending=True))
-        
-        top_10_df = results_df_sma.sort_values(by='Sharpe_Ratio', ascending=False).head(10).copy()
-        top_10_df['Sharpe_Ratio'] = top_10_df['Sharpe_Ratio'].apply(lambda x: f'{x:.3f}')
-        top_10_df['Final_Equity'] = top_10_df['Final_Equity'].apply(lambda x: f'{x:.2f}x')
-        top_10_df = top_10_df.rename(columns={'SMA_Window': 'SMA Window', 'Sharpe_Ratio': 'Sharpe Ratio', 'Final_Equity': 'Final Equity (x)'})
-        GLOBAL_TOP_10_MD = f"""
-## Top 10 SMA Crossover Strategies (Sharpe Ratio)
-{top_10_df.to_markdown(index=False)}
-"""
-        print(GLOBAL_TOP_10_MD)
-
-
-    except Exception as e:
-        GLOBAL_ERROR = f"Fatal Sharpe Scan Error: {e}\n\nTraceback:\n{traceback.format_exc()}"
-        print(f"--- FATAL ERROR DURING SHARPE SCAN ---\n{GLOBAL_ERROR}", file=sys.stderr)
-        return
-        
-    # --- Part 3: K & S Grid Search ---
-    try:
-        GLOBAL_OPTIMAL_K, GLOBAL_OPTIMAL_S, GLOBAL_K_S_ANALYSIS_IMG = run_k_s_grid_search(df_ind)
-        
-    except Exception as e:
-        GLOBAL_ERROR = f"Fatal K & S Grid Search Error: {e}\n\nTraceback:\n{traceback.format_exc()}"
-        print(f"--- FATAL ERROR DURING K & S SEARCH ---\n{GLOBAL_ERROR}", file=sys.stderr)
-        # Fallback values
-        GLOBAL_OPTIMAL_K = 0.001
-        GLOBAL_OPTIMAL_S = 0.02
-        return
-
-    # --- Part 4: Run Main Strategy with Optimal K & S ---
-    try:
-        print(f"--- Running main strategy with Optimal K: {GLOBAL_OPTIMAL_K:.4f} and Optimal S: {GLOBAL_OPTIMAL_S*100:.2f}% ---")
-        
-        df_final = calculate_dynamic_position(df_ind, GLOBAL_OPTIMAL_K, GLOBAL_OPTIMAL_S)
-        
-        returns = df_final['Strategy_Return']
-        if returns.std() > 0:
-            GLOBAL_SHARPE = (returns.mean() / returns.std()) * np.sqrt(ANNUAL_TRADING_DAYS)
-        else:
-            GLOBAL_SHARPE = 0.0
-
-        current_position = df_final['Held_Position'].iloc[-1]
-        
-        if current_position > 0:
-            GLOBAL_STATUS = f"LONG ({current_position:.4f})"
-        elif current_position < 0:
-            GLOBAL_STATUS = f"SHORT ({current_position:.4f})"
-        else:
-             GLOBAL_STATUS = "FLAT (0.0000)"
-             
-        GLOBAL_IMG_BASE64, GLOBAL_TOTAL_RETURN = create_plot(df_final, MAIN_SMA_WINDOW, GLOBAL_OPTIMAL_K, GLOBAL_OPTIMAL_S)
-        
-        # Add SL_Hit column to the summary table
-        summary_df = df_final[['Close', f'SMA_{MAIN_SMA_WINDOW}', 'DC_Upper', 'DC_Lower', 'Held_Position', 'SL_Hit', 'Equity', 'Strategy_Return']].tail(10)
-        summary_df['SL_Hit'] = summary_df['SL_Hit'].astype(int) # Convert boolean to 1/0 for cleaner display
-        summary_df = summary_df.rename(columns={'Held_Position': 'Pos Held', 'Strategy_Return': 'Ret Final', f'SMA_{MAIN_SMA_WINDOW}': 'SMA 120', 'SL_Hit': 'SL Hit'})
-        
-        GLOBAL_SUMMARY_TABLE = summary_df.to_html(classes='table-auto w-full text-sm text-left', 
-                                                  float_format=lambda x: f'{x:,.4f}') 
-        
-        print(f"--- Strategy Sharpe Ratio (K={GLOBAL_OPTIMAL_K}, S={GLOBAL_OPTIMAL_S}): {GLOBAL_SHARPE:.3f} ---")
-        print("--- ANALYSIS COMPLETE ---")
-
-    except Exception as e:
-        GLOBAL_ERROR = f"Fatal Main Strategy Run Error: {e}\n\nTraceback:\n{traceback.format_exc()}"
-        print(f"--- FATAL ERROR DURING MAIN STRATEGY RUN ---\n{GLOBAL_ERROR}", file=sys.stderr)
-        return
-
-
-# --- Flask Web Server ---
-from flask import Flask, render_template_string
-
-app = Flask(__name__)
-
-@app.route('/')
-def analysis_dashboard():
-    """Renders the dashboard using pre-calculated global variables."""
-    
-    if GLOBAL_ERROR:
-        return render_template_string(f"""
-            <div class="p-8 text-center bg-white rounded-xl shadow-lg m-auto max-w-lg">
-                <h1 class="text-3xl font-bold text-red-600 mb-4">Analysis Failed at Startup</h1>
-                <p class="text-gray-700">The backtest and plotting could not be completed when the server started. This is usually due to a network error, Binance API limit, or missing data.</p>
-                <p class="mt-6 p-4 bg-red-100 text-red-800 rounded-lg text-left overflow-x-auto text-sm whitespace-pre-wrap"><strong>Details:</strong> {GLOBAL_ERROR}</p>
-            </div>
-        """)
-        
-    # Define the mathematical expression for the HTML display separately.
-    # Updated formula reflecting the goal to maximize size with volatility
-    position_sizing_formula = r"$\left( \frac{\text{DC Upper} - \text{DC Lower}}{\text{Close}} \right)^{k}$"
-    total_sl_loss = GLOBAL_OPTIMAL_S + SL_FEE
-        
-    # HTML Template with Tailwind CSS for modern look and responsiveness
-    html_content = f"""
-    <!DOCTYPE html>
-    <html lang="en">
-    <head>
-        <meta charset="UTF-8">
-        <meta name="viewport" content="width=device-width, initial-scale=1.0">
-        <title>SMA 120 Dynamic Position</title>
-        <script src="https://cdn.tailwindcss.com"></script>
-        <style>
-            .table-auto th, .table-auto td {{
-                padding: 8px 12px;
-                border: 1px solid #e5e7eb;
-                text-align: right;
-            }}
-            .table-auto th {{
-                text-align: left;
-                background-color: #f3f4f6;
-                font-weight: 600;
-            }}
-            .data-source-tag {{
-                font-size: 0.75rem;
-                padding: 0.25rem 0.5rem;
-                border-radius: 0.5rem;
-                font-weight: bold;
-                margin-left: 1rem;
-            }}
-        </style>
-    </head>
-    <body class="bg-gray-100 p-4 sm:p-8 font-sans">
-        <div class="max-w-7xl mx-auto bg-white p-6 sm:p-10 rounded-xl shadow-2xl">
-            <h1 class="text-4xl font-extrabold text-blue-700 mb-6 border-b-4 border-blue-200 pb-2">
-                Dynamic Volatility Sizing Dashboard (Volatility Maximized)
-                <span class="data-source-tag bg-blue-200 text-blue-800">{GLOBAL_DATA_SOURCE}</span>
-            </h1>
-
-            <div class="grid md:grid-cols-4 gap-6 mb-8">
-                <div class="bg-blue-50 p-4 rounded-lg shadow-md">
-                    <p class="text-lg font-medium text-blue-600">Symbol</p>
-                    <p class="text-2xl font-bold text-blue-800">{SYMBOL} ({TIMEFRAME})</p>
-                </div>
-                <div class="bg-yellow-50 p-4 rounded-lg shadow-md">
-                    <p class="text-lg font-medium text-yellow-600">Optimal K-Factor (Volatility Exponent)</p>
-                    <p class="text-2xl font-bold text-yellow-800">{GLOBAL_OPTIMAL_K:.4f}</p>
-                </div>
-                <div class="bg-green-50 p-4 rounded-lg shadow-md">
-                    <p class="text-lg font-medium text-green-600">Optimal Stop Loss (S + Fee)</p>
-                    <p class="text-2xl font-bold text-green-800">{total_sl_loss*100:.2f}%</p>
-                </div>
-                <div class="bg-red-50 p-4 rounded-lg shadow-md">
-                    <p class="text-lg font-medium text-red-600">Current Position</p>
-                    <p class="text-2xl font-bold text-red-800">{GLOBAL_STATUS}</p>
-                </div>
-            </div>
-            
-            <div class="grid lg:grid-cols-2 gap-8 mb-8">
-                
-                <div class="order-1">
-                    <h2 class="text-2xl font-semibold text-gray-700 mb-4">Optimized Strategy Backtest</h2>
-                    <div class="bg-gray-50 p-2 rounded-lg shadow-inner overflow-hidden">
-                        <img src="data:image/png;base64,{GLOBAL_IMG_BASE64}" alt="Trading Strategy Backtest Plot" class="w-full h-auto rounded-lg"/>
-                    </div>
-                </div>
-
-                <div class="order-2">
-                    <h2 class="text-2xl font-semibold text-gray-700 mb-4">K-Factor Optimization Plot (Fixed S = {GLOBAL_OPTIMAL_S*100:.2f}%)</h2>
-                    <div class="bg-gray-50 p-2 rounded-lg shadow-inner overflow-hidden">
-                        <img src="data:image/png;base64,{GLOBAL_K_S_ANALYSIS_IMG}" alt="K and S Optimization Heatmap Plot" class="w-full h-auto rounded-lg"/>
-                    </div>
-                </div>
-            </div>
-            
-            <h2 class="text-2xl font-semibold text-gray-700 mt-8 mb-4">Recent Dynamic Strategy Data (SL Hit = 1 means Stop Loss Hit)</h2>
-            <div class="overflow-x-auto rounded-lg shadow-md border border-gray-200">
-                {GLOBAL_SUMMARY_TABLE}
-            </div>
-            
-            <p class="mt-8 text-sm text-gray-600 border-t pt-4">
-                **Strategy Logic:** Direction is determined by SMA 120 crossover. **Position size is calculated to maximize exposure during high volatility (instability)** (K={GLOBAL_OPTIMAL_K:.4f}) using the formula: {position_sizing_formula}. Stop Loss (SL) is set at {GLOBAL_OPTIMAL_S*100:.2f}% deviation, incurring a total loss of {total_sl_loss*100:.2f}% (SL + {SL_FEE*100:.2f}% fee) when triggered.
-            </p>
-        </div>
-    </body>
-    </html>
-    """
-    return render_template_string(html_content)
-
-if __name__ == '__main__':
-    # 1. Run the entire data analysis and calculation process once at startup
-    setup_analysis()
-    
-    # 2. Start the Flask server to serve the pre-calculated results
-    app.run(host='0.0.0.0', port=PORT, debug=True, use_reloader=False)
+    with socketserver.TCPServer(("", PORT), Handler) as httpd:
+        try:
+            httpd.serve_forever()
+        except KeyboardInterrupt:
+            print("\nServer stopped.")
+            httpd.server_close()
