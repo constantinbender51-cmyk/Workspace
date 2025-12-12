@@ -117,7 +117,6 @@ def generate_signals(df):
         df_signals[col] = np.where(long_cond, 1, np.where(short_cond, -1, 0))
 
     # --- Shift signals forward ---
-    # Signal at Close(t) applies to exposure for period t to t+1
     df_signals = df_signals.shift(1)
     df_signals.fillna(0, inplace=True)
     df_signals = df_signals.astype(int)
@@ -151,6 +150,7 @@ def run_conviction_backtest(df_data, df_signals):
         for i in range(len(WINNING_SIGNALS)):
             current_sig = signals.iloc[t, i]
 
+            # Signal Recharging Logic
             if current_sig != 0:
                 signal_start_day[i] = t
                 signal_direction[i] = current_sig
@@ -191,45 +191,51 @@ def run_conviction_backtest(df_data, df_signals):
 
 
 def create_equity_plot(results_df):
-    fig, (ax1, ax2) = plt.subplots(2, 1, figsize=(12, 10))
+    fig, (ax1, ax2) = plt.subplots(2, 1, figsize=(12, 10), sharex=True)
     
-    # Colors
-    long_color = 'red'
-    short_color = 'blue'
-    alpha = 0.15
-
     exposure = results_df['Exposure']
-
+    
+    # Calculate days where position starts or flips direction
+    # We check if the sign changes compared to the previous day
+    # np.sign(x) gives 1 for positive, -1 for negative, 0 for zero
+    position_change = np.sign(exposure).diff().fillna(0).abs() > 0
+    
+    # Exclude the first day unless exposure is non-zero
+    if exposure.iloc[0] == 0:
+        position_change.iloc[0] = False
+    
+    entry_dates = results_df.index[position_change]
+    
     # --- Plot 1: Price Chart ---
     ax1.plot(results_df.index, results_df['close'], 'k-', linewidth=1.5, label='BTC Price')
     ax1.set_title('BTC/USDT Price', fontsize=12, fontweight='bold')
     ax1.set_ylabel('Price', fontsize=10)
     ax1.grid(True, alpha=0.3)
     ax1.legend(loc='upper left')
-    
-    # Background for Price - Logic ensures no overlap
-    ax1.fill_between(results_df.index, 0, 1, where=exposure > 0, 
-                     color=long_color, alpha=alpha, transform=ax1.get_xaxis_transform(), interpolate=True)
-    ax1.fill_between(results_df.index, 0, 1, where=exposure < 0, 
-                     color=short_color, alpha=alpha, transform=ax1.get_xaxis_transform(), interpolate=True)
 
     # --- Plot 2: Equity Curve ---
     ax2.plot(results_df.index, results_df['Portfolio_Value'], 'k-', linewidth=1.5, label='Strategy Equity')
     
+    # Add Buy & Hold for comparison
     bh_curve = results_df['close'] / results_df['close'].iloc[0] * INITIAL_CAPITAL
     ax2.plot(results_df.index, bh_curve, 'g--', alpha=0.6, label='Buy & Hold')
     
     ax2.set_title('Strategy vs Buy & Hold', fontsize=12, fontweight='bold')
     ax2.set_ylabel('Value (USDT)', fontsize=10)
+    ax2.set_xlabel('Date', fontsize=10)
     ax2.grid(True, alpha=0.3)
     ax2.legend(loc='upper left')
     
-    # Background for Equity
-    ax2.fill_between(results_df.index, 0, 1, where=exposure > 0, 
-                     color=long_color, alpha=alpha, transform=ax2.get_xaxis_transform(), interpolate=True)
-    ax2.fill_between(results_df.index, 0, 1, where=exposure < 0, 
-                     color=short_color, alpha=alpha, transform=ax2.get_xaxis_transform(), interpolate=True)
-    
+    # --- Add Vertical Lines for Entries/Flips ---
+    for date in entry_dates:
+        # Determine color based on the exposure *after* the change
+        current_exposure = exposure.loc[date]
+        line_color = 'red' if current_exposure > 0 else 'blue'
+        
+        # Add the vertical line to both plots
+        ax1.axvline(x=date, color=line_color, linestyle='--', linewidth=1, alpha=0.7)
+        ax2.axvline(x=date, color=line_color, linestyle='--', linewidth=1, alpha=0.7)
+
     plt.tight_layout()
     
     buf = io.BytesIO()
@@ -248,7 +254,6 @@ def start_web_server(results_df):
         
         # Build Table Rows (Reverse Chronological)
         table_rows = ""
-        # Convert index to string for safe iterating
         df_rev = results_df.sort_index(ascending=False)
         
         for date, row in df_rev.iterrows():
@@ -259,13 +264,13 @@ def start_web_server(results_df):
             # Formatting Exposure and Color
             if exposure_val > 0:
                 exp_str = f"LONG {exposure_val*100:.1f}%"
-                row_color = "color: red; font-weight: bold;"
+                row_color = "color: #C0392B; font-weight: bold;" # Darker Red
             elif exposure_val < 0:
                 exp_str = f"SHORT {abs(exposure_val*100):.1f}%"
-                row_color = "color: blue; font-weight: bold;"
+                row_color = "color: #2980B9; font-weight: bold;" # Darker Blue
             else:
                 exp_str = "NEUTRAL 0%"
-                row_color = "color: gray;"
+                row_color = "color: #7f8c8d;" # Gray
             
             pnl = f"${row['Daily_PnL']:,.2f}"
             equity = f"${row['Portfolio_Value']:,.2f}"
@@ -290,10 +295,10 @@ def start_web_server(results_df):
                 .stats {{ margin: 20px auto; padding: 20px; background: #f9f9f9; max-width: 800px; border-radius: 8px; box-shadow: 0 2px 4px rgba(0,0,0,0.1); }}
                 img {{ max-width: 95%; height: auto; border: 1px solid #ccc; margin-bottom: 30px; }}
                 h2 {{ margin-top: 40px; }}
-                .table-container {{ margin: 0 auto; max-width: 900px; max-height: 500px; overflow-y: auto; border: 1px solid #ddd; }}
+                .table-container {{ margin: 0 auto; max-width: 900px; max-height: 500px; overflow-y: auto; border: 1px solid #ddd; border-radius: 4px; }}
                 table {{ width: 100%; border-collapse: collapse; }}
-                th {{ background: #eee; position: sticky; top: 0; padding: 10px; border-bottom: 2px solid #ccc; }}
-                td {{ padding: 8px; border-bottom: 1px solid #eee; }}
+                th {{ background: #eee; position: sticky; top: 0; padding: 12px; border-bottom: 2px solid #ccc; }}
+                td {{ padding: 10px; border-bottom: 1px solid #eee; }}
                 tr:hover {{ background-color: #f5f5f5; }}
             </style>
         </head>
@@ -302,7 +307,7 @@ def start_web_server(results_df):
             
             <div class="stats">
                 <p><strong>Initial Capital:</strong> ${INITIAL_CAPITAL:,.2f} | <strong>Final Value:</strong> ${final_val:,.2f}</p>
-                <p><strong>Total Return:</strong> <span style="font-size: 1.2em; color: {'green' if total_ret > 0 else 'red'};">{total_ret:.2f}%</span></p>
+                <p><strong>Total Return:</strong> <span style="font-size: 1.2em; color: {'green' if total_ret > 0 else '#C0392B'};">{total_ret:.2f}%</span></p>
             </div>
             
             <img src="/plot" />
