@@ -288,28 +288,28 @@ def start_web_server(results_df):
     
     @app.route('/')
     def index():
-        return '''
+        html_template = '''
         <!DOCTYPE html>
         <html>
         <head>
             <title>Conviction Backtest Results</title>
             <style>
-                body {font-family: Arial, sans-serif; margin: 40px; }
-                h1 {color: #333; }
-                .container {max-width: 1200px; margin: 0 auto; }
-                .info {background: #f5f5f5; padding: 20px; border-radius: 5px; margin-bottom: 20px; }
-                .plot-container {text-align: center; margin-top: 20px; }
-                img {max-width: 100%; height: auto; border: 1px solid #ddd; border-radius: 5px; }
+                body {{ font-family: Arial, sans-serif; margin: 40px; }}
+                h1 {{ color: #333; }}
+                .container {{ max-width: 1200px; margin: 0 auto; }}
+                .info {{ background: #f5f5f5; padding: 20px; border-radius: 5px; margin-bottom: 20px; }}
+                .plot-container {{ text-align: center; margin-top: 20px; }}
+                img {{ max-width: 100%; height: auto; border: 1px solid #ddd; border-radius: 5px; }}
             </style>
         </head>
         <body>
             <div class="container">
                 <h1>Conviction Strategy Backtest Results</h1>
                 <div class="info">
-                    <p><strong>Period:</strong> {} to {}</p>
-                    <p><strong>Initial Capital:</strong> ${:,.2f}</p>
-                    <p><strong>Final Portfolio Value:</strong> ${:,.2f}</p>
-                    <p><strong>Total Return:</strong> {:.2f}%</p>
+                    <p><strong>Period:</strong> {start_date} to {end_date}</p>
+                    <p><strong>Initial Capital:</strong> ${initial_capital:,.2f}</p>
+                    <p><strong>Final Portfolio Value:</strong> ${final_value:,.2f}</p>
+                    <p><strong>Total Return:</strong> {total_return:.2f}%</p>
                     <p><strong>Server running on port 8080</strong></p>
                 </div>
                 <div class="plot-container">
@@ -320,12 +320,13 @@ def start_web_server(results_df):
             </div>
         </body>
         </html>
-        '''.format(
-            results_df.index.min().strftime('%Y-%m-%d'),
-            results_df.index.max().strftime('%Y-%m-%d'),
-            INITIAL_CAPITAL,
-            results_df['Portfolio_Value'].iloc[-1],
-            ((results_df['Portfolio_Value'].iloc[-1] / INITIAL_CAPITAL) - 1) * 100
+        '''
+        return html_template.format(
+            start_date=results_df.index.min().strftime('%Y-%m-%d'),
+            end_date=results_df.index.max().strftime('%Y-%m-%d'),
+            initial_capital=INITIAL_CAPITAL,
+            final_value=results_df['Portfolio_Value'].iloc[-1],
+            total_return=((results_df['Portfolio_Value'].iloc[-1] / INITIAL_CAPITAL) - 1) * 100
         )
     
     @app.route('/plot')
