@@ -18,8 +18,7 @@ SINCE_STR = '2018-01-01 00:00:00'
 HORIZON = 380  # Decay window (days) - OPTIMAL VALUE
 INITIAL_CAPITAL = 10000.0
 LEVERAGE = 5.0  # Multiplier applied to conviction exposure
-THRESHOLD_1 = 0.50
-THRESHOLD_2 = 0.20
+# Conviction Threshold is effectively 0.0 (disabled)
 
 # --- Winning Signals ---
 WINNING_SIGNALS = [
@@ -128,9 +127,9 @@ def generate_signals(df):
 
 
 # --- Backtest implementation ---
-def run_conviction_backtest(df_data, df_signals, threshold):
+def run_conviction_backtest(df_data, df_signals):
     """
-    Runs the backtest with a specific Conviction Threshold.
+    Runs the backtest with NO Conviction Threshold applied.
     """
     horizon = HORIZON
     
@@ -181,9 +180,8 @@ def run_conviction_backtest(df_data, df_signals, threshold):
         # Calculate Normalized Conviction (-1 to 1)
         raw_conviction = daily_sum / MAX_CONVICTION
         
-        # --- CONVICTION FILTER ---
-        if abs(raw_conviction) < threshold:
-            raw_conviction = 0.0
+        # --- CONVICTION FILTER DISABLED ---
+        # Threshold logic is skipped; raw conviction is used directly.
         
         # Apply LEVERAGE
         exposure = raw_conviction * LEVERAGE
@@ -238,23 +236,6 @@ def run_conviction_backtest(df_data, df_signals, threshold):
     
     return total_return, sharpe, results, signal_names
 
-def run_comparison_backtests(df_data, df_signals):
-    # Run for Threshold 0.50 (Tighter Filter)
-    ret_50, sharpe_50, res_50, sig_names = run_conviction_backtest(df_data, df_signals, threshold=THRESHOLD_1)
-    
-    # Run for Threshold 0.20 (Looser Filter)
-    ret_20, sharpe_20, res_20, _ = run_conviction_backtest(df_data, df_signals, threshold=THRESHOLD_2)
-    
-    return {
-        'main_result': res_50,
-        'main_sharpe': sharpe_50,
-        'main_ret': ret_50,
-        'sig_names': sig_names,
-        'comp_result_050': res_50['Portfolio_Value'],
-        'comp_result_020': res_20['Portfolio_Value'],
-        'comp_sharpe_020': sharpe_20,
-    }
-
 def calculate_net_daily_signal_event(df_signals_raw, results_df):
     aligned_signals = df_signals_raw.loc[results_df.index.min():results_df.index.max()]
     net_signal_sum = aligned_signals.sum(axis=1)
@@ -263,7 +244,7 @@ def calculate_net_daily_signal_event(df_signals_raw, results_df):
     return long_signal_dates, short_signal_dates
 
 
-def create_equity_plot(results_df, long_signal_dates, short_signal_dates, horizon, threshold):
+def create_equity_plot(results_df, long_signal_dates, short_signal_dates, horizon):
     # Use explicitly created Figure for thread safety in Flask
     fig = Figure(figsize=(12, 14))
     
@@ -275,7 +256,7 @@ def create_equity_plot(results_df, long_signal_dates, short_signal_dates, horizo
     # --- Plot 1: Price Chart (Log Scale) ---
     ax1.plot(results_df.index, results_df['close'], 'k-', linewidth=1, label='BTC Price')
     ax1.set_yscale('log')
-    ax1.set_title(f'BTC/USDT Price (Log Scale) - Filter: {threshold:.2f}', fontsize=12, fontweight='bold')
+    ax1.set_title(f'BTC/USDT Price (Log Scale)', fontsize=12, fontweight='bold')
     ax1.set_ylabel('Price ($)', fontsize=10)
     ax1.grid(True, which="both", ls="-", alpha=0.2)
     ax1.legend(loc='upper left')
@@ -287,7 +268,7 @@ def create_equity_plot(results_df, long_signal_dates, short_signal_dates, horizo
     ax1.scatter(short_signal_dates, short_prices, marker='v', color='red', s=50, label='Short Signal', zorder=5)
     
     # --- Plot 2: Equity Curve (Log Scale) ---
-    ax2.plot(results_df.index, results_df['Portfolio_Value'], 'b-', linewidth=1.5, label=f'Strategy Equity ({LEVERAGE}x Lev, Filter {threshold:.2f})')
+    ax2.plot(results_df.index, results_df['Portfolio_Value'], 'b-', linewidth=1.5, label=f'Strategy Equity ({LEVERAGE}x Lev)')
     
     # Calculate B&H curve
     bh_curve = results_df['close'] / results_df['close'].iloc[0] * INITIAL_CAPITAL
@@ -298,7 +279,7 @@ def create_equity_plot(results_df, long_signal_dates, short_signal_dates, horizo
     else:
         ax2.set_yscale('log')
         
-    ax2.set_title(f'Strategy Equity (Main Result) - {LEVERAGE}x Leverage', fontsize=12, fontweight='bold')
+    ax2.set_title(f'Strategy Equity - {LEVERAGE}x Leverage', fontsize=12, fontweight='bold')
     ax2.set_ylabel('Value ($)', fontsize=10)
     ax2.grid(True, which="both", ls="-", alpha=0.2)
     ax2.legend(loc='upper left')
@@ -317,63 +298,32 @@ def create_equity_plot(results_df, long_signal_dates, short_signal_dates, horizo
     buf.seek(0)
     return buf
 
-def create_comparison_plot(comp_result_050, comp_result_020, comp_sharpe_020, main_result_close):
-    # Use explicitly created Figure
-    fig = Figure(figsize=(10, 6))
-    ax1 = fig.add_subplot(1, 1, 1)
-    
-    ax1.plot(comp_result_050.index, comp_result_050, 'b-', linewidth=2, label=f'Threshold 0.50 (Main)')
-    ax1.plot(comp_result_020.index, comp_result_020, 'r--', linewidth=1.5, alpha=0.7, label=f'Threshold 0.20 (Sharpe {comp_sharpe_020:.2f})')
-    
-    # Calculate B&H curve
-    bh_curve = main_result_close / main_result_close.iloc[0] * INITIAL_CAPITAL
-    ax1.plot(bh_curve.index, bh_curve.values, 'g-', linewidth=1, alpha=0.8, label='Buy & Hold (1x)')
-
-    if (comp_result_050.min() <= 0) or (comp_result_020.min() <= 0):
-        ax1.set_yscale('symlog', linthresh=1.0) 
-    else:
-        ax1.set_yscale('log')
-
-    ax1.set_title(f'Equity Comparison: Threshold 0.50 vs 0.20 ({LEVERAGE}x Leverage)', fontsize=12, fontweight='bold')
-    ax1.set_ylabel('Portfolio Value ($) - Log Scale', fontsize=10)
-    ax1.set_xlabel('Date', fontsize=10)
-    ax1.grid(True, which="both", ls="-", alpha=0.2)
-    ax1.legend(loc='upper left')
-
-    fig.tight_layout()
-    buf = io.BytesIO()
-    fig.savefig(buf, format='png', dpi=100)
-    buf.seek(0)
-    return buf
-
-def start_web_server(backtest_data, comp_sharpe_020, df_signals_raw):
+def start_web_server(results_df, df_signals_raw, main_sharpe):
     app = Flask(__name__)
     
-    results_df = backtest_data['main_result']
-    sig_names = backtest_data['sig_names']
+    sig_names = [f"{s[0]}_{s[1]}" for s in WINNING_SIGNALS] # Recalc sig names
     long_signal_dates, short_signal_dates = calculate_net_daily_signal_event(df_signals_raw, results_df)
     
     # Stats logic...
-    best_threshold = THRESHOLD_1
     final_val = results_df['Portfolio_Value'].iloc[-1]
     total_ret = ((final_val / INITIAL_CAPITAL) - 1) * 100
-    strat_daily_rets = results_df['Strategy_Daily_Return']
-    overall_sharpe = (strat_daily_rets.mean() / strat_daily_rets.std()) * np.sqrt(365) if strat_daily_rets.std() > 0 else 0.0
+    overall_sharpe = main_sharpe
     is_bust = (final_val <= 0)
 
-    # ... [HTML building code remains same as before, omitted for brevity but included in full file output] ...
-    
-    # --- Reconstructing the HTML string for completeness in file output ---
+    # --- Monthly Stats ---
     monthly_rows = ""
     monthly_groups = results_df.groupby(pd.Grouper(freq='M'))
     monthly_stats = []
     for name, group in monthly_groups:
         if len(group) < 5: continue
+        
         m_daily_rets = group['Strategy_Daily_Return']
         m_start_val = group['Portfolio_Value'].iloc[0]
         m_end_val = group['Portfolio_Value'].iloc[-1]
+        
         m_ret_total = (m_end_val / m_start_val) - 1.0 if m_start_val > 0 else 0.0
         m_sharpe = (m_daily_rets.mean() / m_daily_rets.std()) * np.sqrt(365) if m_daily_rets.std() > 0 else 0.0
+            
         monthly_stats.append({'Date': name.strftime('%Y-%m'), 'Return': m_ret_total, 'Sharpe': m_sharpe})
         
     for stats in reversed(monthly_stats):
@@ -428,24 +378,28 @@ def start_web_server(backtest_data, comp_sharpe_020, df_signals_raw):
                 th {{ background: #eee; position: sticky; top: 0; padding: 10px; border-bottom: 1px solid #ccc; }}
                 td {{ padding: 8px; border-bottom: 1px solid #eee; }}
                 tr:hover {{ background-color: #f5f5f5; }}
-                .comparison-section {{ margin-top: 40px; }}
             </style>
         </head>
         <body>
             <h1>Conviction Strategy Results</h1>
             {bust_warning}
             <div class="stats">
-                <p><strong>Horizon:</strong> {HORIZON} days | <strong>Leverage:</strong> {LEVERAGE}x | <strong>Filter:</strong> {best_threshold:.2f}</p>
-                <p><strong>Final:</strong> ${final_val:,.2f} | <strong>Return:</strong> <span style="color: {'green' if total_ret > 0 else 'red'};">{total_ret:.2f}%</span></p>
-                <p><strong>Sharpe:</strong> <span style="font-size: 1.2em; font-weight: bold;">{overall_sharpe:.2f}</span></p>
+                <p>
+                    <strong>Horizon Set:</strong> {HORIZON} days |
+                    <strong>Leverage:</strong> {LEVERAGE}x |
+                    <strong>Filter:</strong> Disabled
+                </p>
+                <p>
+                    <strong>Final Value:</strong> ${final_val:,.2f} | 
+                    <strong>Return:</strong> <span style="color: {'green' if total_ret > 0 else 'red'};">{total_ret:.2f}%</span>
+                </p>
+                <p>
+                    <strong>Overall Sharpe Ratio:</strong> <span style="font-size: 1.2em; font-weight: bold;">{overall_sharpe:.2f}</span>
+                    <span style="font-size: 0.8em; color: #7f8c8d;">(No external risk rules active)</span>
+                </p>
             </div>
             
-            <div class="comparison-section">
-                <h2>Comparison (0.50 vs 0.20)</h2>
-                <img src="/comparison_plot?v={timestamp}" />
-            </div>
-
-            <h2>Detailed Performance (Filter: {best_threshold:.2f})</h2>
+            <h2>Detailed Performance</h2>
             <img src="/plot?v={timestamp}" />
 
             <h2>Monthly Performance</h2>
@@ -465,21 +419,15 @@ def start_web_server(backtest_data, comp_sharpe_020, df_signals_raw):
     @app.route('/plot')
     def plot():
         try:
-            buf = create_equity_plot(results_df, long_signal_dates, short_signal_dates, HORIZON, THRESHOLD_1)
+            buf = create_equity_plot(results_df, long_signal_dates, short_signal_dates, HORIZON)
             return send_file(buf, mimetype='image/png')
         except Exception as e:
+            # Added error logging for debugging plot issues
+            print(f"Error creating plot: {e}")
             return f"Error creating plot: {e}", 500
 
-    @app.route('/comparison_plot')
-    def comparison_plot():
-        try:
-            buf = create_comparison_plot(backtest_data['comp_result_050'], backtest_data['comp_result_020'], comp_sharpe_020, results_df['close'])
-            return send_file(buf, mimetype='image/png')
-        except Exception as e:
-            return f"Error creating comparison plot: {e}", 500
-    
     print("\n" + "=" * 60)
-    print(f"Server running on http://localhost:8080")
+    print(f"Server running on http://localhost:8080 (Filter Disabled, Leverage: {LEVERAGE}x)")
     print("Press Ctrl+C to stop.")
     print("=" * 60)
     
@@ -497,16 +445,12 @@ if __name__ == '__main__':
         if df_signals.empty or len(df_signals) < 10:
              print("Not enough signals generated.")
         else:
-            # 1. Run comparison backtests
-            backtest_data = run_comparison_backtests(df_data, df_signals)
+            # Run Final Backtest
+            ret, main_sharpe, res, sig_names = run_conviction_backtest(df_data, df_signals)
             
-            # 2. Extract data for server startup
-            res = backtest_data['main_result']
-            ret = backtest_data['main_ret']
+            print(f"\n--- Strategy Results ---")
+            print(f"Return: {ret*100:.2f}%")
+            print(f"Sharpe: {main_sharpe:.2f}")
+            print("========================")
             
-            print(f"\n--- Strategy Comparison Complete ---")
-            print(f"Filter 0.50 (Main): Sharpe {backtest_data['main_sharpe']:.2f} | Return {ret*100:.2f}%")
-            print(f"Filter 0.20 (Comp): Sharpe {backtest_data['comp_sharpe_020']:.2f}")
-            print("====================================")
-            
-            start_web_server(backtest_data, backtest_data['comp_sharpe_020'], df_signals_raw)
+            start_web_server(res, df_signals_raw, main_sharpe)
