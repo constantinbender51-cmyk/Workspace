@@ -8,12 +8,12 @@ import matplotlib.pyplot as plt
 from flask import Flask, send_file
 import io
 import threading
+import base64
 
 # --- Configuration ---
 SYMBOL = 'BTC/USDT'
 TIMEFRAME = '1d'
 SINCE_STR = '2018-01-01 00:00:00'
-HORIZON = 40  # Decay window (days)
 INITIAL_CAPITAL = 10000.0
 
 # --- Winning Signals ---
@@ -128,7 +128,10 @@ def generate_signals(df):
 
 
 # --- Backtest implementation ---
-def run_conviction_backtest(df_data, df_signals):
+def run_conviction_backtest(df_data, df_signals, horizon):
+    """
+    Runs the backtest with a specific horizon decay parameter.
+    """
     common_idx = df_data.index.intersection(df_signals.index)
     df = df_data.loc[common_idx].copy()
     signals = df_signals.loc[common_idx]
@@ -165,7 +168,8 @@ def run_conviction_backtest(df_data, df_signals):
                 if d < 0: 
                     decay = 0.0
                 else:
-                    decay = max(0.0, 1.0 - (d / HORIZON))
+                    # Use the passed horizon parameter
+                    decay = max(0.0, 1.0 - (d / horizon))
                 
                 contribution = signal_direction[i] * decay
                 daily_contributions[t, i] = contribution
@@ -203,6 +207,34 @@ def run_conviction_backtest(df_data, df_signals):
     total_return = (portfolio[-1] / portfolio[0]) - 1.0
     return total_return, results, signal_names
 
+def run_grid_search(df_data, df_signals):
+    print("\nRunning Grid Search for Optimal Horizon (10-400 days)...")
+    results = []
+    
+    # Test range from 10 to 400 in steps of 10
+    search_space = range(10, 401, 10)
+    
+    for h in search_space:
+        ret, res, _ = run_conviction_backtest(df_data, df_signals, horizon=h)
+        
+        # Calculate Sharpe
+        daily_rets = res['Strategy_Daily_Return']
+        if daily_rets.std() > 0:
+            sharpe = (daily_rets.mean() / daily_rets.std()) * np.sqrt(365)
+        else:
+            sharpe = 0.0
+            
+        results.append({
+            'Horizon': h,
+            'Return': ret,
+            'Sharpe': sharpe
+        })
+        print(f"Horizon {h}: Sharpe {sharpe:.2f} | Return {ret*100:.1f}%", end='\r')
+        
+    print("\nGrid Search Complete.")
+    df_grid = pd.DataFrame(results)
+    return df_grid
+
 def calculate_net_daily_signal_event(df_signals_raw, results_df):
     aligned_signals = df_signals_raw.loc[results_df.index.min():results_df.index.max()]
     net_signal_sum = aligned_signals.sum(axis=1)
@@ -211,12 +243,12 @@ def calculate_net_daily_signal_event(df_signals_raw, results_df):
     return long_signal_dates, short_signal_dates
 
 
-def create_equity_plot(results_df, long_signal_dates, short_signal_dates):
+def create_equity_plot(results_df, long_signal_dates, short_signal_dates, horizon):
     fig, (ax1, ax2) = plt.subplots(2, 1, figsize=(12, 10), sharex=True)
     
     # --- Plot 1: Price Chart ---
     ax1.plot(results_df.index, results_df['close'], 'k-', linewidth=1.5, label='BTC Price')
-    ax1.set_title('BTC/USDT Price', fontsize=12, fontweight='bold')
+    ax1.set_title(f'BTC/USDT Price (Horizon: {horizon})', fontsize=12, fontweight='bold')
     ax1.set_ylabel('Price', fontsize=10)
     ax1.grid(True, alpha=0.3)
     ax1.legend(loc='upper left')
@@ -247,7 +279,32 @@ def create_equity_plot(results_df, long_signal_dates, short_signal_dates):
     buf.seek(0)
     return buf
 
-def start_web_server(results_df, long_signal_dates, short_signal_dates, signal_names):
+def create_grid_plot(df_grid):
+    fig, ax1 = plt.subplots(figsize=(10, 6))
+    
+    color = 'tab:blue'
+    ax1.set_xlabel('Horizon (Days)')
+    ax1.set_ylabel('Sharpe Ratio', color=color, fontweight='bold')
+    ax1.plot(df_grid['Horizon'], df_grid['Sharpe'], color=color, linewidth=2, marker='o', markersize=4)
+    ax1.tick_params(axis='y', labelcolor=color)
+    ax1.grid(True, alpha=0.3)
+    
+    ax2 = ax1.twinx()  # instantiate a second axes that shares the same x-axis
+    color = 'tab:gray'
+    ax2.set_ylabel('Total Return', color=color, fontweight='bold')  # we already handled the x-label with ax1
+    ax2.plot(df_grid['Horizon'], df_grid['Return'], color=color, linestyle='--', linewidth=1.5, alpha=0.5)
+    ax2.tick_params(axis='y', labelcolor=color)
+
+    plt.title("Grid Search: Horizon vs Performance")
+    fig.tight_layout()
+    
+    buf = io.BytesIO()
+    plt.savefig(buf, format='png', dpi=100)
+    plt.close(fig)
+    buf.seek(0)
+    return buf
+
+def start_web_server(results_df, long_signal_dates, short_signal_dates, signal_names, df_grid, best_horizon):
     app = Flask(__name__)
     
     @app.route('/')
@@ -255,41 +312,40 @@ def start_web_server(results_df, long_signal_dates, short_signal_dates, signal_n
         final_val = results_df['Portfolio_Value'].iloc[-1]
         total_ret = ((final_val / INITIAL_CAPITAL) - 1) * 100
         
-        # --- Calculate Overall Sharpe ---
-        # Crypto markets trade 365 days a year
         strat_daily_rets = results_df['Strategy_Daily_Return']
-        avg_ret = strat_daily_rets.mean()
-        std_ret = strat_daily_rets.std()
-        
-        if std_ret > 0:
-            overall_sharpe = (avg_ret / std_ret) * np.sqrt(365)
+        if strat_daily_rets.std() > 0:
+            overall_sharpe = (strat_daily_rets.mean() / strat_daily_rets.std()) * np.sqrt(365)
         else:
             overall_sharpe = 0.0
 
+        # --- Grid Search Table (Top 5) ---
+        top_5 = df_grid.sort_values(by='Sharpe', ascending=False).head(5)
+        grid_rows = ""
+        for _, row in top_5.iterrows():
+            is_best = int(row['Horizon']) == best_horizon
+            style = "background-color: #d4edda;" if is_best else ""
+            grid_rows += f"""
+            <tr style="{style}">
+                <td>{int(row['Horizon'])}</td>
+                <td>{row['Sharpe']:.2f}</td>
+                <td>{row['Return']*100:.1f}%</td>
+            </tr>
+            """
+
         # --- Calculate Monthly Sharpe & Returns ---
         monthly_rows = ""
-        # Group by month using the index
         monthly_groups = results_df.groupby(pd.Grouper(freq='M'))
-        
-        # We collect stats in a list to reverse them later
         monthly_stats = []
-        
         for name, group in monthly_groups:
-            if len(group) < 5: continue  # Skip extremely partial months (e.g., start of data)
+            if len(group) < 5: continue
             
             m_daily_rets = group['Strategy_Daily_Return']
-            m_avg = m_daily_rets.mean()
-            m_std = m_daily_rets.std()
-            
-            # Month Total Return (Start of Month Equity to End of Month Equity)
-            # Safe calculation using the Portfolio Value
             m_start_val = group['Portfolio_Value'].iloc[0]
             m_end_val = group['Portfolio_Value'].iloc[-1]
             m_ret_total = (m_end_val / m_start_val) - 1.0
             
-            # Annualized Sharpe for this specific month's behavior
-            if m_std > 0:
-                m_sharpe = (m_avg / m_std) * np.sqrt(365)
+            if m_daily_rets.std() > 0:
+                m_sharpe = (m_daily_rets.mean() / m_daily_rets.std()) * np.sqrt(365)
             else:
                 m_sharpe = 0.0
                 
@@ -299,15 +355,11 @@ def start_web_server(results_df, long_signal_dates, short_signal_dates, signal_n
                 'Sharpe': m_sharpe
             })
             
-        # Reverse to show newest first
         for stats in reversed(monthly_stats):
             ret_val = stats['Return']
             sharpe_val = stats['Sharpe']
-            
-            # Color coding
             ret_color = "green" if ret_val > 0 else "red"
             sharpe_color = "green" if sharpe_val > 1 else ("orange" if sharpe_val > 0 else "red")
-            
             monthly_rows += f"""
             <tr>
                 <td>{stats['Date']}</td>
@@ -316,7 +368,7 @@ def start_web_server(results_df, long_signal_dates, short_signal_dates, signal_n
             </tr>
             """
 
-        # --- Generate Attribution Table (First 30 Days) ---
+        # --- Attribution Table (First 30 Days) ---
         first_month_df = results_df.iloc[:30]
         attribution_headers = "".join([f"<th>{name}</th>" for name in signal_names])
         attribution_rows = ""
@@ -325,41 +377,26 @@ def start_web_server(results_df, long_signal_dates, short_signal_dates, signal_n
             date_str = date.strftime('%Y-%m-%d')
             exposure = row['Exposure']
             
-            if exposure > 0:
-                 exp_style = "color: #C0392B; font-weight: bold;"
-            elif exposure < 0:
-                 exp_style = "color: #2980B9; font-weight: bold;"
-            else:
-                 exp_style = "color: #7f8c8d;"
+            if exposure > 0: exp_style = "color: #C0392B; font-weight: bold;"
+            elif exposure < 0: exp_style = "color: #2980B9; font-weight: bold;"
+            else: exp_style = "color: #7f8c8d;"
                  
             sig_cells = ""
             for name in signal_names:
                 val = row[f"Contrib_{name}"]
-                if val > 0:
-                    color = "background-color: #ffe6e6; color: #C0392B;" 
-                elif val < 0:
-                    color = "background-color: #e6f2ff; color: #2980B9;" 
-                else:
-                    color = "color: #ccc;"
-                
+                if val > 0: color = "background-color: #ffe6e6; color: #C0392B;" 
+                elif val < 0: color = "background-color: #e6f2ff; color: #2980B9;" 
+                else: color = "color: #ccc;"
                 sig_cells += f"<td style='{color}'>{val:.2f}</td>"
             
-            attribution_rows += f"""
-            <tr>
-                <td>{date_str}</td>
-                <td style="{exp_style}">{exposure:.2f}</td>
-                {sig_cells}
-            </tr>
-            """
+            attribution_rows += f"<tr><td>{date_str}</td><td style='{exp_style}'>{exposure:.2f}</td>{sig_cells}</tr>"
 
-        # --- Generate Main Log Table ---
+        # --- Daily Log Table ---
         table_rows = ""
         df_rev = results_df.sort_index(ascending=False)
         for date, row in df_rev.iterrows():
             date_str = date.strftime('%Y-%m-%d')
-            close = f"${row['close']:,.2f}"
             exposure_val = row['Exposure']
-            
             if exposure_val > 0:
                 exp_str = f"LONG {exposure_val*100:.1f}%"
                 row_color = "color: #C0392B; font-weight: bold;"
@@ -370,16 +407,13 @@ def start_web_server(results_df, long_signal_dates, short_signal_dates, signal_n
                 exp_str = "NEUTRAL 0%"
                 row_color = "color: #7f8c8d;"
             
-            pnl = f"${row['Daily_PnL']:,.2f}"
-            equity = f"${row['Portfolio_Value']:,.2f}"
-            
             table_rows += f"""
             <tr>
                 <td>{date_str}</td>
-                <td>{close}</td>
+                <td>${row['close']:,.2f}</td>
                 <td style="{row_color}">{exp_str}</td>
-                <td>{pnl}</td>
-                <td>{equity}</td>
+                <td>${row['Daily_PnL']:,.2f}</td>
+                <td>${row['Portfolio_Value']:,.2f}</td>
             </tr>
             """
 
@@ -387,18 +421,18 @@ def start_web_server(results_df, long_signal_dates, short_signal_dates, signal_n
         <!DOCTYPE html>
         <html>
         <head>
-            <title>Conviction Backtest</title>
+            <title>Conviction Strategy Results</title>
             <style>
                 body {{ font-family: sans-serif; margin: 40px; text-align: center; color: #333; }}
                 .stats {{ margin: 20px auto; padding: 20px; background: #f9f9f9; max-width: 900px; border-radius: 8px; box-shadow: 0 2px 4px rgba(0,0,0,0.1); }}
-                img {{ max-width: 95%; height: auto; border: 1px solid #ccc; margin-bottom: 30px; }}
-                h2 {{ margin-top: 40px; }}
+                img {{ max-width: 95%; height: auto; border: 1px solid #ccc; margin-bottom: 20px; }}
+                h2 {{ margin-top: 40px; border-bottom: 2px solid #eee; display: inline-block; padding-bottom: 5px; }}
                 .table-container {{ margin: 0 auto; max-width: 1000px; max-height: 400px; overflow-y: auto; border: 1px solid #ddd; border-radius: 4px; }}
                 table {{ width: 100%; border-collapse: collapse; font-size: 0.9em; }}
                 th {{ background: #eee; position: sticky; top: 0; padding: 10px; border-bottom: 2px solid #ccc; }}
                 td {{ padding: 8px; border-bottom: 1px solid #eee; }}
                 tr:hover {{ background-color: #f5f5f5; }}
-                .attrib-table th {{ background: #e0e0e0; }}
+                .grid-section {{ display: flex; justify-content: center; gap: 20px; flex-wrap: wrap; margin-bottom: 40px; }}
             </style>
         </head>
         <body>
@@ -406,65 +440,56 @@ def start_web_server(results_df, long_signal_dates, short_signal_dates, signal_n
             
             <div class="stats">
                 <p>
+                    <strong>Selected Horizon:</strong> {best_horizon} days |
                     <strong>Initial Capital:</strong> ${INITIAL_CAPITAL:,.2f} | 
                     <strong>Final Value:</strong> ${final_val:,.2f} | 
                     <strong>Return:</strong> <span style="color: {'green' if total_ret > 0 else 'red'};">{total_ret:.2f}%</span>
                 </p>
                 <p>
-                    <strong>Overall Sharpe Ratio:</strong> <span style="font-size: 1.2em; font-weight: bold;">{overall_sharpe:.2f}</span> (Annualized 365 days)
+                    <strong>Overall Sharpe Ratio:</strong> <span style="font-size: 1.2em; font-weight: bold;">{overall_sharpe:.2f}</span>
                 </p>
-                <p style="font-size: 0.9em;">Vertical Lines: <span style="color: red;">RED = Net Long Signal</span> | <span style="color: blue;">BLUE = Net Short Signal</span></p>
             </div>
             
+            <h2>Grid Search Analysis</h2>
+            <div class="grid-section">
+                <div>
+                    <img src="/grid_plot" style="max-width: 600px;" />
+                </div>
+                <div class="table-container" style="max-width: 300px; height: auto;">
+                    <h3>Top 5 Settings</h3>
+                    <table>
+                        <thead>
+                            <tr><th>Horizon</th><th>Sharpe</th><th>Return</th></tr>
+                        </thead>
+                        <tbody>{grid_rows}</tbody>
+                    </table>
+                </div>
+            </div>
+
+            <h2>Performance (Horizon: {best_horizon})</h2>
             <img src="/plot" />
 
-            <h2>Monthly Performance & Sharpe</h2>
+            <h2>Monthly Performance</h2>
             <div class="table-container" style="max-width: 600px;">
                 <table>
-                    <thead>
-                        <tr>
-                            <th>Month</th>
-                            <th>Total Return</th>
-                            <th>Sharpe Ratio</th>
-                        </tr>
-                    </thead>
-                    <tbody>
-                        {monthly_rows}
-                    </tbody>
+                    <thead><tr><th>Month</th><th>Total Return</th><th>Sharpe Ratio</th></tr></thead>
+                    <tbody>{monthly_rows}</tbody>
                 </table>
             </div>
 
-            <h2>First Month Detailed Attribution (Decay Analysis)</h2>
+            <h2>Attribution (First 30 Days)</h2>
             <div class="table-container">
                 <table class="attrib-table">
-                    <thead>
-                        <tr>
-                            <th>Date</th>
-                            <th>Total Exp</th>
-                            {attribution_headers}
-                        </tr>
-                    </thead>
-                    <tbody>
-                        {attribution_rows}
-                    </tbody>
+                    <thead><tr><th>Date</th><th>Total Exp</th>{attribution_headers}</tr></thead>
+                    <tbody>{attribution_rows}</tbody>
                 </table>
             </div>
             
             <h2>Daily Position Log</h2>
             <div class="table-container">
                 <table>
-                    <thead>
-                        <tr>
-                            <th>Date</th>
-                            <th>Close Price</th>
-                            <th>Position / Conviction</th>
-                            <th>Daily PnL</th>
-                            <th>Total Equity</th>
-                        </tr>
-                    </thead>
-                    <tbody>
-                        {table_rows}
-                    </tbody>
+                    <thead><tr><th>Date</th><th>Close</th><th>Position</th><th>PnL</th><th>Equity</th></tr></thead>
+                    <tbody>{table_rows}</tbody>
                 </table>
             </div>
         </body>
@@ -474,11 +499,16 @@ def start_web_server(results_df, long_signal_dates, short_signal_dates, signal_n
     
     @app.route('/plot')
     def plot():
-        buf = create_equity_plot(results_df, long_signal_dates, short_signal_dates)
+        buf = create_equity_plot(results_df, long_signal_dates, short_signal_dates, best_horizon)
+        return send_file(buf, mimetype='image/png')
+    
+    @app.route('/grid_plot')
+    def grid_plot():
+        buf = create_grid_plot(df_grid)
         return send_file(buf, mimetype='image/png')
     
     print("\n" + "=" * 60)
-    print("Server running on http://localhost:8080")
+    print(f"Server running on http://localhost:8080 (Showing Best Horizon: {best_horizon})")
     print("Press Ctrl+C to stop.")
     print("=" * 60)
     
@@ -496,11 +526,20 @@ if __name__ == '__main__':
         if df_signals.empty or len(df_signals) < 10:
              print("Not enough signals generated.")
         else:
-            ret, res, sig_names = run_conviction_backtest(df_data, df_signals)
+            # 1. Run Grid Search
+            df_grid = run_grid_search(df_data, df_signals)
+            
+            # 2. Find Best Horizon (Max Sharpe)
+            best_row = df_grid.loc[df_grid['Sharpe'].idxmax()]
+            best_h = int(best_row['Horizon'])
+            print(f"\nOPTIMAL FOUND: Horizon {best_h} days (Sharpe: {best_row['Sharpe']:.2f})")
+            
+            # 3. Run Final Backtest with Best Horizon
+            ret, res, sig_names = run_conviction_backtest(df_data, df_signals, horizon=best_h)
             
             long_dates, short_dates = calculate_net_daily_signal_event(df_signals_raw, res)
             
-            print(f"\nFinal Portfolio: ${res['Portfolio_Value'].iloc[-1]:,.2f}")
+            print(f"Final Portfolio: ${res['Portfolio_Value'].iloc[-1]:,.2f}")
             print(f"Strategy Return: {ret*100:.2f}%")
             
-            start_web_server(res, long_dates, short_dates, sig_names)
+            start_web_server(res, long_dates, short_dates, sig_names, df_grid, best_h)
