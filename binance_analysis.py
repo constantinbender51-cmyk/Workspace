@@ -31,14 +31,8 @@ WINNING_SIGNALS = [
 
 MAX_CONVICTION = len(WINNING_SIGNALS)
 
-# --- Global Data Storage for Plots (Retrieved once at start) ---
-# Store the initial market data frame globally after fetching.
-# This avoids re-fetching or recalculating the B&H curve inside plot functions.
-global_df_data = pd.DataFrame() 
-
 # --- Data Fetching ---
 def fetch_binance_data():
-    global global_df_data
     print(f"Fetching data for {SYMBOL} since {SINCE_STR}...")
     exchange = ccxt.binance()
     exchange.enableRateLimit = True 
@@ -74,7 +68,6 @@ def fetch_binance_data():
     df['return'] = df['close'].pct_change()
     
     df.dropna(subset=['return'], inplace=True)
-    global_df_data = df.copy() # Store globally
     return df
 
 
@@ -272,6 +265,7 @@ def calculate_net_daily_signal_event(df_signals_raw, results_df):
 
 
 def create_equity_plot(results_df, long_signal_dates, short_signal_dates, horizon, threshold):
+    plt.close('all') # Clear previous figures
     # Plot for the main result (Threshold 0.50)
     fig, (ax1, ax2, ax3) = plt.subplots(3, 1, figsize=(12, 14), sharex=True, gridspec_kw={'height_ratios': [2, 2, 1]})
     
@@ -292,11 +286,9 @@ def create_equity_plot(results_df, long_signal_dates, short_signal_dates, horizo
     # --- Plot 2: Equity Curve (Log Scale) ---
     ax2.plot(results_df.index, results_df['Portfolio_Value'], 'b-', linewidth=1.5, label=f'Strategy Equity ({LEVERAGE}x Lev, Filter {threshold:.2f})')
     
-    # Calculate B&H curve based on the globally stored data, restricted to the backtest index
-    market_df = global_df_data.loc[results_df.index.min():results_df.index.max()]
-    bh_market_returns = market_df['return'].fillna(0) + 1
-    bh_equity = INITIAL_CAPITAL * bh_market_returns.cumprod()
-    ax2.plot(bh_equity.index, bh_equity.values, 'g--', alpha=0.8, linewidth=1, label='Buy & Hold (1x)')
+    # Calculate B&H curve DIRECTLY from the passed results dataframe to ensure alignment and data availability
+    bh_curve = results_df['close'] / results_df['close'].iloc[0] * INITIAL_CAPITAL
+    ax2.plot(results_df.index, bh_curve, 'g--', alpha=0.8, linewidth=1, label='Buy & Hold (1x)')
     
     if (results_df['Portfolio_Value'] <= 0).any():
         ax2.set_yscale('symlog', linthresh=1.0) 
@@ -323,19 +315,18 @@ def create_equity_plot(results_df, long_signal_dates, short_signal_dates, horizo
     buf.seek(0)
     return buf
 
-def create_comparison_plot(comp_result_050, comp_result_020, comp_sharpe_020):
+def create_comparison_plot(comp_result_050, comp_result_020, comp_sharpe_020, main_result_close):
+    plt.close('all') # Clear previous figures
     fig, ax1 = plt.subplots(figsize=(10, 6))
     
     ax1.plot(comp_result_050.index, comp_result_050, 'b-', linewidth=2, label=f'Threshold 0.50 (Main)')
     ax1.plot(comp_result_020.index, comp_result_020, 'r--', linewidth=1.5, alpha=0.7, label=f'Threshold 0.20 (Sharpe {comp_sharpe_020:.2f})')
     
-    # Calculate B&H curve separately using the global market data
-    market_df = global_df_data.loc[comp_result_050.index.min():comp_result_050.index.max()]
-    bh_market_returns = market_df['return'].fillna(0) + 1
-    bh_equity = INITIAL_CAPITAL * bh_market_returns.cumprod()
+    # Calculate B&H curve using the close prices passed from the main result
+    # We use the close prices from the 0.50 result (which spans the same range)
+    bh_curve = main_result_close / main_result_close.iloc[0] * INITIAL_CAPITAL
     
-    ax1.plot(bh_equity.index, bh_equity.values, 'g-', linewidth=1, alpha=0.8, label='Buy & Hold (1x)')
-
+    ax1.plot(bh_curve.index, bh_curve.values, 'g-', linewidth=1, alpha=0.8, label='Buy & Hold (1x)')
 
     if (comp_result_050.min() <= 0) or (comp_result_020.min() <= 0):
         ax1.set_yscale('symlog', linthresh=1.0) 
@@ -360,7 +351,6 @@ def start_web_server(backtest_data, comp_sharpe_020, df_signals_raw):
     
     results_df = backtest_data['main_result']
     sig_names = backtest_data['sig_names']
-    # Calculation needed here to define long/short dates for the main plot route
     long_signal_dates, short_signal_dates = calculate_net_daily_signal_event(df_signals_raw, results_df)
     
     # Main stats for THRESHOLD 0.50
@@ -469,10 +459,8 @@ def start_web_server(backtest_data, comp_sharpe_020, df_signals_raw):
     if is_bust:
         bust_warning = "<h2 style='color: red; background: #fee; padding: 10px; border: 1px solid red;'>⚠️ STRATEGY BANKRUPT (LIQUIDATED) ⚠️</h2>"
 
-    # --- Route Definitions ---
     @app.route('/')
     def index():
-        # HTML template uses variables defined above
         html_template = f'''
         <!DOCTYPE html>
         <html>
@@ -555,7 +543,8 @@ def start_web_server(backtest_data, comp_sharpe_020, df_signals_raw):
 
     @app.route('/comparison_plot')
     def comparison_plot():
-        buf = create_comparison_plot(backtest_data['comp_result_050'], backtest_data['comp_result_020'], comp_sharpe_020)
+        # Pass the close prices from the main result to calculate B&H
+        buf = create_comparison_plot(backtest_data['comp_result_050'], backtest_data['comp_result_020'], comp_sharpe_020, results_df['close'])
         return send_file(buf, mimetype='image/png')
     
     print("\n" + "=" * 60)
