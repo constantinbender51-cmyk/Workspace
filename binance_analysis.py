@@ -1,250 +1,210 @@
-import requests
+import ccxt
 import pandas as pd
 import numpy as np
-import plotly.graph_objects as go
-from plotly.subplots import make_subplots
-import http.server
-import socketserver
-import webbrowser
+import matplotlib
+matplotlib.use('Agg') # Required for server environments without display
+import matplotlib.pyplot as plt
+from flask import Flask, send_file
+import io
 import time
-from datetime import datetime, timedelta, timezone
+from datetime import datetime
+
+app = Flask(__name__)
 
 # --- Configuration ---
+SYMBOL = 'BTC/USDT'
+TIMEFRAME = '1d'
+SINCE_STR = '2018-01-01 00:00:00'
+SMA_START = 10
+SMA_END = 400
+HORIZON = 30
 PORT = 8080
-DAYS_BACK = 720
-TIMEFRAME = '1h'  # 1-hour candles for Binance
-SYMBOL_BINANCE = 'BTCUSDT'
-SYMBOL_KRAKEN = 'PF_XBTUSD'
-FUNDING_THRESHOLD = 0.5  # As requested
 
-# --- Data Fetching Functions ---
-
-def fetch_binance_ohlcv(symbol, interval, days):
-    """Fetches OHLCV data from Binance API (public)."""
-    print(f"Fetching Binance data for {symbol}...")
-    base_url = "https://api.binance.com/api/v3/klines"
+def fetch_binance_data():
+    """Fetches daily OHLCV from Binance starting Jan 1, 2018."""
+    print(f"Fetching data for {SYMBOL} since {SINCE_STR}...")
+    exchange = ccxt.binance()
+    since = exchange.parse8601(SINCE_STR)
     
-    end_time = int(datetime.now(timezone.utc).timestamp() * 1000)
-    start_time = int((datetime.now(timezone.utc) - timedelta(days=days)).timestamp() * 1000)
-    
-    all_data = []
-    current_start = start_time
-    
-    while current_start < end_time:
-        params = {
-            'symbol': symbol,
-            'interval': interval,
-            'startTime': current_start,
-            'limit': 1000
-        }
+    all_ohlcv = []
+    while True:
         try:
-            r = requests.get(base_url, params=params)
-            r.raise_for_status()
-            data = r.json()
-            
-            if not data:
+            ohlcv = exchange.fetch_ohlcv(SYMBOL, TIMEFRAME, since=since, limit=1000)
+            if not ohlcv:
                 break
-                
-            all_data.extend(data)
-            # Update start time to the last timestamp fetched + 1ms
-            current_start = data[-1][0] + 1
             
-            # Rate limit respect
+            all_ohlcv.extend(ohlcv)
+            # Update 'since' to the last timestamp + 1ms to avoid duplicates
+            last_timestamp = ohlcv[-1][0]
+            since = last_timestamp + 1
+            
+            # Rate limit handling (Binance is usually generous, but safety first)
             time.sleep(0.1)
             
+            # If we reached current time (approx), stop
+            if last_timestamp >= exchange.milliseconds() - 24*60*60*1000:
+                break
+                
+            print(f"Fetched {len(all_ohlcv)} candles...", end='\r')
         except Exception as e:
-            print(f"Error fetching Binance data: {e}")
+            print(f"\nError fetching data: {e}")
             break
-
-    df = pd.DataFrame(all_data, columns=['timestamp', 'open', 'high', 'low', 'close', 'volume', 'close_time', 'q_vol', 'trades', 'tb_base', 'tb_quote', 'ignore'])
-    df['timestamp'] = pd.to_datetime(df['timestamp'], unit='ms')
-    df.set_index('timestamp', inplace=True)
-    df = df[['open', 'high', 'low', 'close', 'volume']].astype(float)
-    print(f"Binance data fetched: {len(df)} rows.")
+            
+    print(f"\nTotal candles fetched: {len(all_ohlcv)}")
+    
+    df = pd.DataFrame(all_ohlcv, columns=['timestamp', 'open', 'high', 'low', 'close', 'volume'])
+    df['date'] = pd.to_datetime(df['timestamp'], unit='ms')
+    df.set_index('date', inplace=True)
+    
+    # Calculate daily returns
+    df['return'] = df['close'].pct_change()
     return df
 
-def fetch_kraken_funding(symbol, days):
-    """Fetches historical funding rates from Kraken Futures API."""
-    print(f"Fetching Kraken funding rates for {symbol}...")
-    base_url = "https://futures.kraken.com/derivatives/api/v3/historical-funding-rates"
+def precompute_forward_matrix(returns, horizon):
+    """
+    Creates a matrix where row 't' contains returns for [t+1, t+2, ... t+horizon].
+    This allows O(1) lookups during the SMA loop.
+    """
+    values = returns.values
+    n = len(values)
+    # Create a 2D matrix of shape (n, horizon) filled with NaN
+    matrix = np.full((n, horizon), np.nan)
     
-    # Kraken usually works with ISO strings or ms timestamps depending on the specific v3 endpoint docs. 
-    # v3 historical-funding-rates takes a 'before' param (timestamp in ms).
-    
-    all_rates = []
-    # Start from now, working backwards
-    # Note: If the API doesn't support easy pagination backwards, we might need a different approach.
-    # Standard pattern: query 'before' current time, get list, take oldest, query 'before' oldest.
-    
-    # Using a simplified forward iteration or single grab approach is risky for 720 days.
-    # We will iterate backwards.
-    
-    current_pointer = int(datetime.now(timezone.utc).timestamp() * 1000)
-    min_time = int((datetime.now(timezone.utc) - timedelta(days=days)).timestamp() * 1000)
-    
-    while current_pointer > min_time:
-        params = {
-            'symbol': symbol,
-            'before': current_pointer
-        }
+    for day in range(1, horizon + 1):
+        # Shift returns back by 'day' steps
+        # If today is t, we want return at t+day in column (day-1)
+        shifted = np.roll(values, -day)
+        # Set the invalid end elements to NaN
+        shifted[-day:] = np.nan
+        matrix[:, day-1] = shifted
         
-        try:
-            r = requests.get(base_url, params=params)
-            r.raise_for_status()
-            data = r.json()
-            
-            rates = data.get('rates', [])
-            if not rates:
-                break
-                
-            all_rates.extend(rates)
-            
-            # Timestamps in Kraken v3 are usually ISO or ms. Let's check the first item.
-            # Response format: {"rates": [{"timestamp": "2023-...", "fundingRate": 0.0001, ...}]}
-            # We need to parse the oldest timestamp to update current_pointer
-            
-            oldest_ts_str = rates[-1]['timestamp']
-            # Parse ISO to ms timestamp
-            dt_obj = datetime.fromisoformat(oldest_ts_str.replace('Z', '+00:00'))
-            oldest_ts = int(dt_obj.timestamp() * 1000)
-            
-            if oldest_ts >= current_pointer:
-                # Avoid infinite loop if timestamps aren't moving
-                current_pointer -= 86400000 # Force move back 1 day
-            else:
-                current_pointer = oldest_ts
-            
-            if current_pointer <= min_time:
-                break
-                
-            time.sleep(0.1)
-            
-        except Exception as e:
-            print(f"Error fetching Kraken data: {e}")
-            break
-            
-    df = pd.DataFrame(all_rates)
-    # Filter columns and parse
-    if not df.empty:
-        df['timestamp'] = pd.to_datetime(df['timestamp'])
-        df.set_index('timestamp', inplace=True)
-        df['fundingRate'] = df['fundingRate'].astype(float)
-        # Sort index to be chronological
-        df.sort_index(inplace=True)
-        # Filter for the last 720 days only (since we fetched backwards, we might have extra or gaps)
-        cutoff = datetime.now(timezone.utc) - timedelta(days=days)
-        df = df[df.index >= cutoff]
-    
-    print(f"Kraken funding rates fetched: {len(df)} rows.")
-    return df
+    return matrix
 
-# --- Processing & Strategy ---
+def calculate_dependability_scores(df):
+    """Calculates the dependability score for SMA 10-400."""
+    prices = df['close'].values
+    returns = df['return']
+    
+    # 1. Precompute forward return matrix
+    print("Precomputing forward returns matrix...")
+    fwd_matrix = precompute_forward_matrix(returns, HORIZON)
+    
+    # 2. Precompute Weights: Linear Decay (1 - d/30)
+    # Days 1 to 30. Weight for day 1 = 29/30? No, 1 - 1/30 = 0.96. 
+    # Or should it be 1 - (d-1)/30 to start at 1.0? 
+    # User said "1-day/30". If day=30, weight=0. 
+    # Let's use weights that don't hit zero exactly at the end to keep the last day relevant?
+    # Actually, 1 - d/30 is fine.
+    days = np.arange(1, HORIZON + 1)
+    weights = 1 - (days / HORIZON) 
+    # Avoid zero weight if desired, but formula is formula.
+    # Note: If day=30, weight=0. That renders the 30th day useless. 
+    # Often "linear decay" implies triangular window. We'll stick to the user's "1 - day/30" literal.
+    
+    results = {'sma': [], 'score': [], 'num_signals': []}
+    
+    print("Calculating scores for SMAs 10-400...")
+    for period in range(SMA_START, SMA_END + 1):
+        # Calculate SMA
+        sma = df['close'].rolling(window=period).mean().values
+        
+        # Identify Crosses (Vectorized)
+        # prev_price < prev_sma AND curr_price > curr_sma (Long)
+        # prev_price > prev_sma AND curr_price < curr_sma (Short)
+        
+        prev_close = prices[:-1]
+        curr_close = prices[1:]
+        prev_sma = sma[:-1]
+        curr_sma = sma[1:]
+        
+        # Boolean arrays for crossovers
+        long_signals = (prev_close < prev_sma) & (curr_close > curr_sma)
+        short_signals = (prev_close > prev_sma) & (curr_close < curr_sma)
+        
+        # Indices in the original array (add 1 because of shifting)
+        long_indices = np.where(long_signals)[0] + 1
+        short_indices = np.where(short_signals)[0] + 1
+        
+        # Combine valid indices
+        # We need to filter indices that don't have enough future data (where fwd_matrix row contains NaN)
+        valid_limit = len(prices) - HORIZON
+        
+        long_indices = long_indices[long_indices < valid_limit]
+        short_indices = short_indices[short_indices < valid_limit]
+        
+        if len(long_indices) == 0 and len(short_indices) == 0:
+            results['sma'].append(period)
+            results['score'].append(0)
+            results['num_signals'].append(0)
+            continue
 
-def process_data(df_price, df_funding):
-    # Resample funding to match price index (1H)
-    # Funding rates typically occur every 4h or 8h. We forward fill the rate to the hours in between.
-    df = df_price.join(df_funding['fundingRate'], how='left')
-    df['fundingRate'] = df['fundingRate'].ffill().fillna(0)
-    
-    # 1. Calculate SMA 400
-    df['sma_400'] = df['close'].rolling(window=400).mean()
-    
-    # 2. Strategy Logic
-    # Start with flat (0)
-    df['position'] = 0
-    
-    # Long if Price > SMA 400
-    df.loc[df['close'] > df['sma_400'], 'position'] = 1
-    
-    # Short if Price < SMA 400
-    df.loc[df['close'] < df['sma_400'], 'position'] = -1
-    
-    # Flat if Funding Rate > Threshold (Overwrites previous signals)
-    df.loc[df['fundingRate'] > FUNDING_THRESHOLD, 'position'] = 0
-    
-    # 3. Calculate Equity
-    # Shift position by 1 to simulate executing on the next open/close after signal
-    df['strategy_ret'] = df['position'].shift(1) * df['close'].pct_change()
-    df['equity'] = (1 + df['strategy_ret'].fillna(0)).cumprod()
-    
-    # Buy & Hold for comparison
-    df['bnh_ret'] = df['close'].pct_change()
-    df['bnh_equity'] = (1 + df['bnh_ret'].fillna(0)).cumprod()
-    
-    return df
+        # Get forward returns for these days
+        # Shape: (num_signals, 30)
+        long_fwd = fwd_matrix[long_indices]
+        short_fwd = fwd_matrix[short_indices]
+        
+        # Calculate Weighted Sums
+        # Long Score: Sum(R * Weight)
+        long_scores = np.sum(long_fwd * weights, axis=1) if len(long_indices) > 0 else np.array([])
+        
+        # Short Score: Sum(R * -1 * Weight) -> Sum(-R * Weight)
+        short_scores = np.sum(short_fwd * -1 * weights, axis=1) if len(short_indices) > 0 else np.array([])
+        
+        # Total Dependability: Average of all signal scores
+        all_scores = np.concatenate([long_scores, short_scores])
+        avg_score = np.mean(all_scores)
+        
+        results['sma'].append(period)
+        results['score'].append(avg_score)
+        results['num_signals'].append(len(all_scores))
+        
+    return pd.DataFrame(results)
 
-# --- Plotting ---
+# --- Execution & Caching ---
+# We calculate once on startup
+print("Starting Data Fetch & Analysis...")
+df_data = fetch_binance_data()
+df_results = calculate_dependability_scores(df_data)
+print("Analysis Complete.")
 
-def create_dashboard(df):
-    fig = make_subplots(
-        rows=3, cols=1, 
-        shared_xaxes=True, 
-        vertical_spacing=0.05,
-        row_heights=[0.5, 0.25, 0.25],
-        subplot_titles=("Price & SMA 400", "Equity Curve", "Funding Rate")
-    )
-
-    # Row 1: Price
-    fig.add_trace(go.Scatter(x=df.index, y=df['close'], name='BTC Price', line=dict(color='gray', width=1)), row=1, col=1)
-    fig.add_trace(go.Scatter(x=df.index, y=df['sma_400'], name='SMA 400', line=dict(color='orange', width=2)), row=1, col=1)
-
-    # Row 2: Equity
-    fig.add_trace(go.Scatter(x=df.index, y=df['equity'], name='Strategy Equity', line=dict(color='green', width=2)), row=2, col=1)
-    fig.add_trace(go.Scatter(x=df.index, y=df['bnh_equity'], name='Buy & Hold', line=dict(color='blue', width=1, dash='dot')), row=2, col=1)
-
-    # Row 3: Funding
-    # Color red if above threshold
-    colors = ['red' if val > FUNDING_THRESHOLD else 'purple' for val in df['fundingRate']]
-    fig.add_trace(go.Bar(x=df.index, y=df['fundingRate'], name='Funding Rate', marker_color=colors), row=3, col=1)
+@app.route('/')
+def plot_png():
+    """Generates the plot and serves it."""
     
-    # Add Threshold line
-    fig.add_hline(y=FUNDING_THRESHOLD, line_dash="dash", line_color="red", row=3, col=1, annotation_text="Threshold")
-
-    fig.update_layout(
-        title=f"Strategy Analysis ({DAYS_BACK} Days): SMA 400 Filter + Funding Cutoff",
-        height=900,
-        template="plotly_dark",
-        hovermode="x unified"
-    )
+    # Setup the plot
+    fig, (ax1, ax2) = plt.subplots(2, 1, figsize=(12, 10), gridspec_kw={'height_ratios': [3, 1]})
     
-    return fig
-
-# --- Main Execution ---
-
-if __name__ == "__main__":
-    # 1. Fetch
-    df_ohlcv = fetch_binance_ohlcv(SYMBOL_BINANCE, TIMEFRAME, DAYS_BACK)
-    df_funding = fetch_kraken_funding(SYMBOL_KRAKEN, DAYS_BACK)
+    # Plot 1: Dependability Score
+    ax1.plot(df_results['sma'], df_results['score'], color='#2ecc71', linewidth=2)
+    ax1.set_title(f'Signal Dependability Score (BTC/USDT 2018-Present)\nMetric: Linear Decay (1 - day/30) over 30 days', fontsize=14)
+    ax1.set_ylabel('Dependability Score (Weighted Avg Return)', fontsize=12)
+    ax1.grid(True, alpha=0.3)
     
-    if df_ohlcv.empty:
-        print("No OHLCV data found. Exiting.")
-        exit()
+    # Highlight max score
+    max_idx = df_results['score'].idxmax()
+    best_sma = df_results.loc[max_idx, 'sma']
+    best_score = df_results.loc[max_idx, 'score']
+    ax1.annotate(f'Best SMA: {best_sma}\nScore: {best_score:.4f}', 
+                 xy=(best_sma, best_score), 
+                 xytext=(best_sma+20, best_score),
+                 arrowprops=dict(facecolor='black', shrink=0.05))
 
-    # 2. Process
-    df_final = process_data(df_ohlcv, df_funding)
+    # Plot 2: Number of Signals
+    ax2.bar(df_results['sma'], df_results['num_signals'], color='#3498db', alpha=0.6, width=1.0)
+    ax2.set_title('Frequency of Signals', fontsize=12)
+    ax2.set_xlabel('SMA Period', fontsize=12)
+    ax2.set_ylabel('Count', fontsize=12)
+    ax2.grid(True, alpha=0.3)
     
-    # 3. Plot
-    fig = create_dashboard(df_final)
-    filename = "strategy_dashboard.html"
-    fig.write_html(filename)
-    print(f"Dashboard saved to {filename}")
+    # Save to buffer
+    output = io.BytesIO()
+    plt.tight_layout()
+    fig.savefig(output, format='png')
+    plt.close(fig) # Clear memory
+    output.seek(0)
+    
+    return send_file(output, mimetype='image/png')
 
-    # 4. Serve
-    class Handler(http.server.SimpleHTTPRequestHandler):
-        def do_GET(self):
-            if self.path == '/':
-                self.path = f'/{filename}'
-            return http.server.SimpleHTTPRequestHandler.do_GET(self)
-
-    print(f"Starting server at http://localhost:{PORT}")
-    print("Press Ctrl+C to stop.")
-    
-    # Open browser automatically
-    webbrowser.open(f"http://localhost:{PORT}")
-    
-    with socketserver.TCPServer(("", PORT), Handler) as httpd:
-        try:
-            httpd.serve_forever()
-        except KeyboardInterrupt:
-            print("\nServer stopped.")
-            httpd.server_close()
+if __name__ == '__main__':
+    print(f"Starting server on port {PORT}...")
+    app.run(host='0.0.0.0', port=PORT)
