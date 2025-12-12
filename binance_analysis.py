@@ -361,4 +361,4 @@ if __name__ == '__main__':
     load_data_and_run_analysis()
     
     print(f"Starting web server on port {PORT}...")
-    app.run(host='0.0.0.0', port=PORT
+    app.run(host='0.0.0.0', port=PORT)
