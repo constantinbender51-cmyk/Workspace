@@ -1,4 +1,3 @@
-# conviction_backtest_corrected.py
 import ccxt
 import pandas as pd
 import numpy as np
@@ -32,7 +31,6 @@ MAX_CONVICTION = len(WINNING_SIGNALS)
 def fetch_binance_data():
     print(f"Fetching data for {SYMBOL} since {SINCE_STR}...")
     exchange = ccxt.binance()
-    # Handle API rate limits/timeouts more gracefully
     exchange.enableRateLimit = True 
     since = exchange.parse8601(SINCE_STR)
 
@@ -54,7 +52,7 @@ def fetch_binance_data():
             print(f"Fetched {len(all_ohlcv)} candles...", end='\r')
         except Exception as e:
             print(f"\nError fetching data: {e}")
-            time.sleep(5) # Wait before retrying on error
+            time.sleep(5)
             continue
 
     print(f"\nTotal candles fetched: {len(all_ohlcv)}")
@@ -63,13 +61,9 @@ def fetch_binance_data():
     df['date'] = pd.to_datetime(df['timestamp'], unit='ms')
     df.set_index('date', inplace=True)
 
-    # Calculate returns
-    # 1. Close-to-Close Return: Captures 24/7 moves (Best for swing/conviction strategies)
+    # Standard Close-to-Close Return (Standard for holding strategies)
     df['return'] = df['close'].pct_change()
     
-    # 2. Intraday Return: kept for reference only
-    df['intraday_return'] = df['close'] / df['open'] - 1.0
-
     df.dropna(subset=['return'], inplace=True)
     return df
 
@@ -162,7 +156,8 @@ def run_conviction_backtest(df_data, df_signals):
         for i in range(len(WINNING_SIGNALS)):
             current_sig = signals.iloc[t, i]
 
-            # LOGIC UPDATE: If a signal fires (even if same direction), reset the decay.
+            # --- CRITICAL FIX: RECHARGING LOGIC ---
+            # If a signal fires (even if same direction), reset the decay.
             # This "recharges" conviction if the market confirms the trend again.
             if current_sig != 0:
                 signal_start_day[i] = t
@@ -188,13 +183,11 @@ def run_conviction_backtest(df_data, df_signals):
         exposure = np.clip(exposure, -1.0, 1.0)
 
         # PnL Calculation
-        # PnL = Previous_Equity * Exposure * Daily_Return
         if t > 0:
             pnl_amt = portfolio[t-1] * exposure * daily_returns[t]
             portfolio[t] = portfolio[t-1] + pnl_amt
             daily_pnl[t] = pnl_amt
         else:
-            # First day usually has 0 return or we skip it, keeping flat
             portfolio[t] = INITIAL_CAPITAL
 
         conviction_raw[t] = daily_sum
