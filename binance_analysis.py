@@ -17,7 +17,7 @@ SINCE_STR = '2018-01-01 00:00:00'
 HORIZON = 380  # Decay window (days) - OPTIMAL VALUE
 INITIAL_CAPITAL = 10000.0
 LEVERAGE = 5.0  # Multiplier applied to conviction exposure
-CONVICTION_THRESHOLD = 0.5  # 50% Conviction required to trade
+# CONVICTION_THRESHOLD will be determined by Grid Search
 
 # --- Winning Signals ---
 WINNING_SIGNALS = [
@@ -126,7 +126,10 @@ def generate_signals(df):
 
 
 # --- Backtest implementation ---
-def run_conviction_backtest(df_data, df_signals):
+def run_conviction_backtest(df_data, df_signals, threshold=0.5):
+    """
+    Runs the backtest with a specific Conviction Threshold.
+    """
     horizon = HORIZON
     
     common_idx = df_data.index.intersection(df_signals.index)
@@ -177,8 +180,8 @@ def run_conviction_backtest(df_data, df_signals):
         raw_conviction = daily_sum / MAX_CONVICTION
         
         # --- CONVICTION FILTER ---
-        # If absolute conviction is less than 50% (0.5), we force cash (0 exposure)
-        if abs(raw_conviction) < CONVICTION_THRESHOLD:
+        # If absolute conviction is less than the threshold, force cash (0 exposure)
+        if abs(raw_conviction) < threshold:
             raw_conviction = 0.0
         
         # Apply LEVERAGE
@@ -216,6 +219,7 @@ def run_conviction_backtest(df_data, df_signals):
     results['Strategy_Daily_Return'] = results['Portfolio_Value'].pct_change().fillna(0)
     
     rolling_max = results['Portfolio_Value'].cummax()
+    # Handle division by zero for bankruptcy
     results['Drawdown'] = np.where(rolling_max > 0, (results['Portfolio_Value'] - rolling_max) / rolling_max, -1.0)
 
     signal_names = [f"{s[0]}_{s[1]}" for s in WINNING_SIGNALS]
@@ -225,6 +229,37 @@ def run_conviction_backtest(df_data, df_signals):
     total_return = (portfolio[-1] / portfolio[0]) - 1.0
     return total_return, results, signal_names
 
+def run_grid_search_threshold(df_data, df_signals):
+    print("\nRunning Grid Search for Optimal Conviction Threshold (0.00 - 1.00)...")
+    results = []
+    
+    # Range 0 to 1 in 0.01 steps (0, 0.01, 0.02 ... 1.0)
+    search_space = np.linspace(0, 1.0, 101)
+    
+    for thr in search_space:
+        ret, res, _ = run_conviction_backtest(df_data, df_signals, threshold=thr)
+        
+        daily_rets = res['Strategy_Daily_Return']
+        if daily_rets.std() > 0:
+            sharpe = (daily_rets.mean() / daily_rets.std()) * np.sqrt(365)
+        else:
+            sharpe = 0.0
+        
+        # Avoid huge negative returns skewing display (bankruptcy)
+        if res['Portfolio_Value'].iloc[-1] <= 0:
+            sharpe = -1.0 # Penalty for bankruptcy
+            
+        results.append({
+            'Threshold': thr,
+            'Return': ret,
+            'Sharpe': sharpe
+        })
+        # print(f"Threshold {thr:.2f}: Sharpe {sharpe:.2f} | Return {ret*100:.1f}%", end='\r')
+        
+    print("\nGrid Search Complete.")
+    df_grid = pd.DataFrame(results)
+    return df_grid
+
 def calculate_net_daily_signal_event(df_signals_raw, results_df):
     aligned_signals = df_signals_raw.loc[results_df.index.min():results_df.index.max()]
     net_signal_sum = aligned_signals.sum(axis=1)
@@ -232,8 +267,32 @@ def calculate_net_daily_signal_event(df_signals_raw, results_df):
     short_signal_dates = net_signal_sum[net_signal_sum < 0].index
     return long_signal_dates, short_signal_dates
 
+def create_threshold_plot(df_grid):
+    fig, ax1 = plt.subplots(figsize=(10, 6))
+    
+    color = 'tab:blue'
+    ax1.set_xlabel('Conviction Threshold (0.0 - 1.0)')
+    ax1.set_ylabel('Sharpe Ratio', color=color, fontweight='bold')
+    ax1.plot(df_grid['Threshold'], df_grid['Sharpe'], color=color, linewidth=2)
+    ax1.tick_params(axis='y', labelcolor=color)
+    ax1.grid(True, alpha=0.3)
+    
+    ax2 = ax1.twinx() 
+    color = 'tab:gray'
+    ax2.set_ylabel('Total Return', color=color, fontweight='bold')
+    ax2.plot(df_grid['Threshold'], df_grid['Return'], color=color, linestyle='--', linewidth=1.5, alpha=0.5)
+    ax2.tick_params(axis='y', labelcolor=color)
 
-def create_equity_plot(results_df, long_signal_dates, short_signal_dates, horizon):
+    plt.title(f"Grid Search: Conviction Threshold vs Performance ({LEVERAGE}x Lev)")
+    fig.tight_layout()
+    
+    buf = io.BytesIO()
+    plt.savefig(buf, format='png', dpi=100)
+    plt.close(fig)
+    buf.seek(0)
+    return buf
+
+def create_equity_plot(results_df, long_signal_dates, short_signal_dates, horizon, threshold):
     fig, (ax1, ax2, ax3) = plt.subplots(3, 1, figsize=(12, 14), sharex=True, gridspec_kw={'height_ratios': [2, 2, 1]})
     
     # --- Plot 1: Price Chart (Log Scale) ---
@@ -280,7 +339,7 @@ def create_equity_plot(results_df, long_signal_dates, short_signal_dates, horizo
     buf.seek(0)
     return buf
 
-def start_web_server(results_df, long_signal_dates, short_signal_dates, signal_names, best_horizon):
+def start_web_server(results_df, long_signal_dates, short_signal_dates, signal_names, best_threshold, df_grid):
     app = Flask(__name__)
     
     @app.route('/')
@@ -295,6 +354,21 @@ def start_web_server(results_df, long_signal_dates, short_signal_dates, signal_n
             overall_sharpe = 0.0
             
         is_bust = (final_val <= 0)
+
+        # --- Grid Search Table (Top 5) ---
+        top_5 = df_grid.sort_values(by='Sharpe', ascending=False).head(5)
+        grid_rows = ""
+        for _, row in top_5.iterrows():
+            # Check if this row is the chosen optimal one (float comparison tolerance)
+            is_best = abs(row['Threshold'] - best_threshold) < 0.001
+            style = "background-color: #d4edda;" if is_best else ""
+            grid_rows += f"""
+            <tr style="{style}">
+                <td>{row['Threshold']:.2f}</td>
+                <td>{row['Sharpe']:.2f}</td>
+                <td>{row['Return']*100:.1f}%</td>
+            </tr>
+            """
 
         # --- Monthly Stats ---
         monthly_rows = ""
@@ -406,6 +480,7 @@ def start_web_server(results_df, long_signal_dates, short_signal_dates, signal_n
                 th {{ background: #eee; position: sticky; top: 0; padding: 10px; border-bottom: 1px solid #ccc; }}
                 td {{ padding: 8px; border-bottom: 1px solid #eee; }}
                 tr:hover {{ background-color: #f5f5f5; }}
+                .grid-section {{ display: flex; justify-content: center; gap: 20px; flex-wrap: wrap; margin-bottom: 40px; }}
             </style>
         </head>
         <body>
@@ -415,9 +490,9 @@ def start_web_server(results_df, long_signal_dates, short_signal_dates, signal_n
             
             <div class="stats">
                 <p>
-                    <strong>Horizon Set:</strong> {best_horizon} days |
+                    <strong>Horizon Set:</strong> {HORIZON} days |
                     <strong>Leverage:</strong> {LEVERAGE}x |
-                    <strong>Initial Capital:</strong> ${INITIAL_CAPITAL:,.2f}
+                    <strong>Optimal Threshold:</strong> {best_threshold:.2f}
                 </p>
                 <p>
                     <strong>Final Value:</strong> ${final_val:,.2f} | 
@@ -425,10 +500,25 @@ def start_web_server(results_df, long_signal_dates, short_signal_dates, signal_n
                 </p>
                 <p>
                     <strong>Overall Sharpe Ratio:</strong> <span style="font-size: 1.2em; font-weight: bold;">{overall_sharpe:.2f}</span>
-                    <span style="font-size: 0.8em; color: #7f8c8d;">(Filter: < 50% Conviction = Cash)</span>
                 </p>
             </div>
             
+            <h2>Threshold Grid Search</h2>
+            <div class="grid-section">
+                <div>
+                    <img src="/threshold_plot" style="max-width: 600px;" />
+                </div>
+                <div class="table-container" style="max-width: 300px; height: auto;">
+                    <h3>Top 5 Thresholds</h3>
+                    <table>
+                        <thead>
+                            <tr><th>Threshold</th><th>Sharpe</th><th>Return</th></tr>
+                        </thead>
+                        <tbody>{grid_rows}</tbody>
+                    </table>
+                </div>
+            </div>
+
             <h2>Performance (Log Scale)</h2>
             <img src="/plot" />
 
@@ -462,11 +552,16 @@ def start_web_server(results_df, long_signal_dates, short_signal_dates, signal_n
     
     @app.route('/plot')
     def plot():
-        buf = create_equity_plot(results_df, long_signal_dates, short_signal_dates, HORIZON)
+        buf = create_equity_plot(results_df, long_signal_dates, short_signal_dates, HORIZON, best_threshold)
+        return send_file(buf, mimetype='image/png')
+    
+    @app.route('/threshold_plot')
+    def threshold_plot():
+        buf = create_threshold_plot(df_grid)
         return send_file(buf, mimetype='image/png')
     
     print("\n" + "=" * 60)
-    print(f"Server running on http://localhost:8080 (Fixed Horizon: {HORIZON}, Leverage: {LEVERAGE}x, Filter: 50%)")
+    print(f"Server running on http://localhost:8080 (Optimized Threshold: {best_threshold:.2f})")
     print("Press Ctrl+C to stop.")
     print("=" * 60)
     
@@ -484,12 +579,20 @@ if __name__ == '__main__':
         if df_signals.empty or len(df_signals) < 10:
              print("Not enough signals generated.")
         else:
-            # Run Final Backtest with fixed Horizon
-            ret, res, sig_names = run_conviction_backtest(df_data, df_signals)
+            # 1. Run Grid Search for Threshold
+            df_grid = run_grid_search_threshold(df_data, df_signals)
+            
+            # 2. Find Best Threshold (Max Sharpe)
+            best_row = df_grid.loc[df_grid['Sharpe'].idxmax()]
+            best_threshold = best_row['Threshold']
+            print(f"\nOPTIMAL FOUND: Threshold {best_threshold:.2f} (Sharpe: {best_row['Sharpe']:.2f})")
+            
+            # 3. Run Final Backtest
+            ret, res, sig_names = run_conviction_backtest(df_data, df_signals, threshold=best_threshold)
             
             long_dates, short_dates = calculate_net_daily_signal_event(df_signals_raw, res)
             
             print(f"\nFinal Portfolio: ${res['Portfolio_Value'].iloc[-1]:,.2f}")
             print(f"Strategy Return: {ret*100:.2f}%")
             
-            start_web_server(res, long_dates, short_dates, sig_names, HORIZON)
+            start_web_server(res, long_dates, short_dates, sig_names, best_threshold, df_grid)
