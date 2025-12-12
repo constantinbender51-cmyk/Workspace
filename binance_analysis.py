@@ -151,9 +151,9 @@ def run_conviction_backtest(df_data, df_signals):
 
     portfolio[0] = INITIAL_CAPITAL
 
-    # Stop Loss Constants
-    SL_THRESHOLD = 0.02
-    SL_PENALTY = 0.0205 # 2% + 0.05% slippage
+    # Stop Loss Constants (Updated to 4%)
+    SL_THRESHOLD = 0.04
+    SL_PENALTY = 0.0405 # 4% + 0.05% slippage
 
     for t in range(num_days):
         daily_sum = 0.0
@@ -194,13 +194,13 @@ def run_conviction_backtest(df_data, df_signals):
             
             # Check Stop Loss
             if exposure > 0:
-                # Long: If Low drops 2% below prev close
+                # Long: If Low drops 4% below prev close
                 if (current_low / prev_close) - 1.0 <= -SL_THRESHOLD:
                     effective_return = -SL_PENALTY
                     sl_triggered[t] = True
                     
             elif exposure < 0:
-                # Short: If High rises 2% above prev close
+                # Short: If High rises 4% above prev close
                 if (current_high / prev_close) - 1.0 >= SL_THRESHOLD:
                     effective_return = SL_PENALTY # Positive return means loss for Short
                     sl_triggered[t] = True
@@ -408,7 +408,7 @@ def start_web_server(results_df, long_signal_dates, short_signal_dates, signal_n
                 h2 {{ margin-top: 40px; border-bottom: 2px solid #eee; display: inline-block; padding-bottom: 5px; }}
                 .table-container {{ margin: 0 auto; max-width: 1000px; max-height: 400px; overflow-y: auto; border: 1px solid #ddd; border-radius: 4px; }}
                 table {{ width: 100%; border-collapse: collapse; font-size: 0.9em; }}
-                th {{ background: #eee; position: sticky; top: 0; padding: 10px; border-bottom: 2px solid #ccc; }}
+                th {{ background: #eee; position: sticky; top: 0; padding: 10px; border-bottom: 1px solid #ccc; }}
                 td {{ padding: 8px; border-bottom: 1px solid #eee; }}
                 tr:hover {{ background-color: #f5f5f5; }}
             </style>
@@ -426,6 +426,7 @@ def start_web_server(results_df, long_signal_dates, short_signal_dates, signal_n
                 <p>
                     <strong>Overall Sharpe Ratio:</strong> <span style="font-size: 1.2em; font-weight: bold;">{overall_sharpe:.2f}</span>
                     | <strong>Stop Loss Hits:</strong> <span style="color: red;">{sl_hits}</span>
+                    <span style="font-size: 0.8em; color: #7f8c8d;">(Threshold: 4.05% loss)</span>
                 </p>
             </div>
             
