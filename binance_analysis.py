@@ -134,15 +134,13 @@ def run_conviction_backtest(df_data, df_signals):
     num_days = len(df)
     daily_returns = df['return'].values 
     
-    # We need Close, Low, and High for Stop Loss logic
-    closes = df['close'].values
-    lows = df['low'].values
-    highs = df['high'].values
+    # Close, Low, and High are no longer needed for stop loss, but kept for completeness
     
     portfolio = np.zeros(num_days)
     daily_pnl = np.zeros(num_days)
     conviction_norm = np.zeros(num_days)
-    sl_triggered = np.zeros(num_days, dtype=bool) # Track days where SL hit
+    
+    # No stop loss tracking needed
     
     daily_contributions = np.zeros((num_days, len(WINNING_SIGNALS)))
 
@@ -150,10 +148,8 @@ def run_conviction_backtest(df_data, df_signals):
     signal_direction = np.zeros(MAX_CONVICTION, dtype=int)
 
     portfolio[0] = INITIAL_CAPITAL
-
-    # Stop Loss Constants (Updated to 4%)
-    SL_THRESHOLD = 0.08
-    SL_PENALTY = 0.0805 # 4% + 0.05% slippage
+    
+    # SL_THRESHOLD and SL_PENALTY variables removed
 
     for t in range(num_days):
         daily_sum = 0.0
@@ -184,27 +180,10 @@ def run_conviction_backtest(df_data, df_signals):
         exposure = np.clip(exposure, -1.0, 1.0)
 
         if t > 0:
-            # --- STOP LOSS LOGIC ---
-            prev_close = closes[t-1]
-            current_low = lows[t]
-            current_high = highs[t]
-            
-            # Default to actual market return
+            # --- NO STOP LOSS LOGIC APPLIED ---
+            # Effective return is always the actual market return
             effective_return = daily_returns[t]
             
-            # Check Stop Loss
-            if exposure > 0:
-                # Long: If Low drops 4% below prev close
-                if (current_low / prev_close) - 1.0 <= -SL_THRESHOLD:
-                    effective_return = -SL_PENALTY
-                    sl_triggered[t] = True
-                    
-            elif exposure < 0:
-                # Short: If High rises 4% above prev close
-                if (current_high / prev_close) - 1.0 >= SL_THRESHOLD:
-                    effective_return = SL_PENALTY # Positive return means loss for Short
-                    sl_triggered[t] = True
-
             # Calculate PnL with effective return
             pnl_amt = portfolio[t-1] * exposure * effective_return
             portfolio[t] = portfolio[t-1] + pnl_amt
@@ -218,7 +197,7 @@ def run_conviction_backtest(df_data, df_signals):
     results['Exposure'] = conviction_norm
     results['Daily_PnL'] = daily_pnl
     results['Portfolio_Value'] = portfolio
-    results['SL_Triggered'] = sl_triggered
+    # results['SL_Triggered'] column removed
     
     results['Strategy_Daily_Return'] = results['Portfolio_Value'].pct_change().fillna(0)
     
@@ -259,10 +238,7 @@ def create_equity_plot(results_df, long_signal_dates, short_signal_dates, horizo
     ax1.scatter(long_signal_dates, long_prices, marker='^', color='green', s=50, label='Long Signal', zorder=5)
     ax1.scatter(short_signal_dates, short_prices, marker='v', color='red', s=50, label='Short Signal', zorder=5)
     
-    # Mark Stop Loss Events
-    sl_dates = results_df[results_df['SL_Triggered']].index
-    sl_prices = results_df.loc[sl_dates, 'close']
-    ax1.scatter(sl_dates, sl_prices, marker='x', color='purple', s=40, label='Stop Loss Hit', zorder=6)
+    # Stop Loss Markers removed
 
     # --- Plot 2: Equity Curve (Log Scale) ---
     ax2.plot(results_df.index, results_df['Portfolio_Value'], 'b-', linewidth=1.5, label='Strategy Equity')
@@ -305,7 +281,7 @@ def start_web_server(results_df, long_signal_dates, short_signal_dates, signal_n
         else:
             overall_sharpe = 0.0
             
-        sl_hits = results_df['SL_Triggered'].sum()
+        # SL hits counter removed
 
         # --- Monthly Stats ---
         monthly_rows = ""
@@ -372,7 +348,6 @@ def start_web_server(results_df, long_signal_dates, short_signal_dates, signal_n
         for date, row in df_rev.iterrows():
             date_str = date.strftime('%Y-%m-%d')
             exposure_val = row['Exposure']
-            is_sl = row['SL_Triggered']
             
             if exposure_val > 0:
                 exp_str = f"LONG {exposure_val*100:.1f}%"
@@ -384,12 +359,12 @@ def start_web_server(results_df, long_signal_dates, short_signal_dates, signal_n
                 exp_str = "NEUTRAL 0%"
                 row_color = "color: #7f8c8d;"
             
-            sl_badge = "<span style='background: red; color: white; padding: 2px 6px; border-radius: 4px; font-size: 0.8em; margin-left: 5px;'>STOP HIT</span>" if is_sl else ""
+            # SL badge removed
             
             table_rows += f"""
             <tr>
                 <td>{date_str}</td>
-                <td>${row['close']:,.2f} {sl_badge}</td>
+                <td>${row['close']:,.2f}</td>
                 <td style="{row_color}">{exp_str}</td>
                 <td>${row['Daily_PnL']:,.2f}</td>
                 <td>${row['Portfolio_Value']:,.2f}</td>
@@ -425,8 +400,7 @@ def start_web_server(results_df, long_signal_dates, short_signal_dates, signal_n
                 </p>
                 <p>
                     <strong>Overall Sharpe Ratio:</strong> <span style="font-size: 1.2em; font-weight: bold;">{overall_sharpe:.2f}</span>
-                    | <strong>Stop Loss Hits:</strong> <span style="color: red;">{sl_hits}</span>
-                    <span style="font-size: 0.8em; color: #7f8c8d;">(Threshold: 4.05% loss)</span>
+                    <span style="font-size: 0.8em; color: #7f8c8d;">(Stop Loss Disabled)</span>
                 </p>
             </div>
             
