@@ -4,6 +4,7 @@ import numpy as np
 import matplotlib
 matplotlib.use('Agg') # Required for server environments without display
 import matplotlib.pyplot as plt
+import matplotlib.dates as mdates
 from flask import Flask, send_file
 import io
 import time
@@ -15,8 +16,7 @@ app = Flask(__name__)
 SYMBOL = 'BTC/USDT'
 TIMEFRAME = '1d'
 SINCE_STR = '2018-01-01 00:00:00'
-SMA_START = 10
-SMA_END = 400
+VALIDATION_SMA = 120  # The specific SMA to validate
 HORIZON = 30
 PORT = 8080
 
@@ -38,7 +38,7 @@ def fetch_binance_data():
             last_timestamp = ohlcv[-1][0]
             since = last_timestamp + 1
             
-            # Rate limit handling (Binance is usually generous, but safety first)
+            # Rate limit handling
             time.sleep(0.1)
             
             # If we reached current time (approx), stop
@@ -60,171 +60,131 @@ def fetch_binance_data():
     df['return'] = df['close'].pct_change()
     return df
 
-def precompute_forward_matrix(returns, horizon):
+def get_detailed_signals(df, period, horizon):
     """
-    Creates a matrix where row 't' contains returns for [t+1, t+2, ... t+horizon].
-    This allows O(1) lookups during the SMA loop.
+    Analyzes a SPECIFIC SMA period and returns details for every signal.
     """
-    values = returns.values
-    n = len(values)
-    # Create a 2D matrix of shape (n, horizon) filled with NaN
-    matrix = np.full((n, horizon), np.nan)
-    
-    for day in range(1, horizon + 1):
-        # Shift returns back by 'day' steps
-        # If today is t, we want return at t+day in column (day-1)
-        shifted = np.roll(values, -day)
-        # Set the invalid end elements to NaN
-        shifted[-day:] = np.nan
-        matrix[:, day-1] = shifted
-        
-    return matrix
-
-def calculate_dependability_scores(df):
-    """Calculates the dependability score for SMA 10-400."""
     prices = df['close'].values
-    returns = df['return']
+    returns = df['return'].values
+    dates = df.index
     
-    # 1. Precompute forward return matrix
-    print("Precomputing forward returns matrix...")
-    fwd_matrix = precompute_forward_matrix(returns, HORIZON)
+    # Calculate SMA
+    sma = df['close'].rolling(window=period).mean().values
     
-    # 2. Precompute Weights: Linear Decay (1 - d/30)
-    days = np.arange(1, HORIZON + 1)
-    weights = 1 - (days / HORIZON) 
+    # Weights: Linear Decay (1 - day/30)
+    # Day 1 weight = 0.966, Day 30 weight = 0
+    day_indices = np.arange(1, horizon + 1)
+    weights = 1 - (day_indices / horizon)
     
-    # Initialize results dictionary
-    results = {
-        'sma': [], 
-        'score_total': [], 
-        'score_long': [], 
-        'score_short': [], 
-        'num_signals': []
-    }
+    signal_details = []
     
-    print("Calculating scores for SMAs 10-400...")
-    for period in range(SMA_START, SMA_END + 1):
-        # Calculate SMA
-        sma = df['close'].rolling(window=period).mean().values
+    # Identify signals
+    # We iterate to allow easy extraction of the 30-day window per signal
+    # (Vectorization is faster for summary, but loop is better for detailed extraction)
+    
+    for i in range(period, len(prices) - horizon):
+        prev_price = prices[i-1]
+        curr_price = prices[i]
+        prev_sma = sma[i-1]
+        curr_sma = sma[i]
         
-        # Identify Crosses (Vectorized)
-        prev_close = prices[:-1]
-        curr_close = prices[1:]
-        prev_sma = sma[:-1]
-        curr_sma = sma[1:]
-        
-        # Boolean arrays for crossovers
-        long_signals = (prev_close < prev_sma) & (curr_close > curr_sma)
-        short_signals = (prev_close > prev_sma) & (curr_close < curr_sma)
-        
-        # Indices in the original array (add 1 because of shifting)
-        long_indices = np.where(long_signals)[0] + 1
-        short_indices = np.where(short_signals)[0] + 1
-        
-        # Filter indices near the end of data (not enough future days)
-        valid_limit = len(prices) - HORIZON
-        long_indices = long_indices[long_indices < valid_limit]
-        short_indices = short_indices[short_indices < valid_limit]
-        
-        # Initialize scores for this SMA
-        avg_long = np.nan
-        avg_short = np.nan
-        avg_total = np.nan
-        count = len(long_indices) + len(short_indices)
-
-        if count == 0:
-            results['sma'].append(period)
-            results['score_total'].append(0)
-            results['score_long'].append(0)
-            results['score_short'].append(0)
-            results['num_signals'].append(0)
-            continue
-
-        # --- Calculate Long Scores ---
-        if len(long_indices) > 0:
-            long_fwd = fwd_matrix[long_indices]
-            # Sum(R * Weight)
-            long_weighted_sums = np.sum(long_fwd * weights, axis=1)
-            # We want the average dependability per signal
-            avg_long = np.mean(long_weighted_sums)
+        signal_type = None
+        if prev_price < prev_sma and curr_price > curr_sma:
+            signal_type = 'LONG'
+        elif prev_price > prev_sma and curr_price < curr_sma:
+            signal_type = 'SHORT'
             
-        # --- Calculate Short Scores ---
-        if len(short_indices) > 0:
-            short_fwd = fwd_matrix[short_indices]
-            # Sum(-R * Weight) -> Profit from price drop
-            short_weighted_sums = np.sum(short_fwd * -1 * weights, axis=1)
-            avg_short = np.mean(short_weighted_sums)
+        if signal_type:
+            # Get the 30-day forward returns
+            # returns[i+1] is the return of the day AFTER the signal
+            fwd_returns = returns[i+1 : i+1+horizon]
             
-        # --- Calculate Total Score ---
-        # Combine all weighted sum values to get true weighted average
-        all_sums = []
-        if len(long_indices) > 0:
-            all_sums.extend(long_weighted_sums)
-        if len(short_indices) > 0:
-            all_sums.extend(short_weighted_sums)
+            if len(fwd_returns) < horizon:
+                continue
+                
+            # Calculate Score
+            if signal_type == 'LONG':
+                weighted_sum = np.sum(fwd_returns * weights)
+            else:
+                weighted_sum = np.sum(fwd_returns * -1 * weights)
+                
+            signal_details.append({
+                'date': dates[i],
+                'index': i,
+                'price': curr_price,
+                'type': signal_type,
+                'score': weighted_sum,
+                'window_end_date': dates[i+horizon]
+            })
             
-        if all_sums:
-            avg_total = np.mean(all_sums)
-        else:
-            avg_total = 0
+    return pd.DataFrame(signal_details), sma
 
-        # Fill NaNs with 0 for plotting if no signals of that type occurred
-        results['sma'].append(period)
-        results['score_total'].append(avg_total if not np.isnan(avg_total) else 0)
-        results['score_long'].append(avg_long if not np.isnan(avg_long) else 0)
-        results['score_short'].append(avg_short if not np.isnan(avg_short) else 0)
-        results['num_signals'].append(count)
-        
-    return pd.DataFrame(results)
-
-# --- Execution & Caching ---
-# We calculate once on startup
+# --- Execution ---
 print("Starting Data Fetch & Analysis...")
 df_data = fetch_binance_data()
-df_results = calculate_dependability_scores(df_data)
+df_signals, sma_values = get_detailed_signals(df_data, VALIDATION_SMA, HORIZON)
+df_data['SMA'] = sma_values
 print("Analysis Complete.")
 
 @app.route('/')
-def plot_png():
-    """Generates the plot and serves it."""
+def plot_validation():
+    """Generates the validation plot for SMA 120."""
     
+    if df_signals.empty:
+        return "No signals found to validate."
+
     # Setup the plot
-    fig, (ax1, ax2) = plt.subplots(2, 1, figsize=(12, 12), gridspec_kw={'height_ratios': [3, 1]})
+    fig, (ax1, ax2) = plt.subplots(2, 1, figsize=(14, 12), gridspec_kw={'height_ratios': [2, 1]}, sharex=True)
     
-    # Plot 1: Dependability Score (Long vs Short vs Total)
-    ax1.plot(df_results['sma'], df_results['score_total'], color='black', linewidth=2, alpha=0.8, label='Total')
-    ax1.plot(df_results['sma'], df_results['score_long'], color='#2ecc71', linewidth=1.5, linestyle='--', label='Long Only')
-    ax1.plot(df_results['sma'], df_results['score_short'], color='#e74c3c', linewidth=1.5, linestyle='--', label='Short Only')
+    # --- Plot 1: Price, SMA, and Signal Windows ---
+    # Use log scale for BTC to see 2018 and 2024 clearly
+    ax1.semilogy(df_data.index, df_data['close'], color='gray', alpha=0.5, linewidth=1, label='Price')
+    ax1.semilogy(df_data.index, df_data['SMA'], color='blue', linewidth=1.5, label=f'SMA {VALIDATION_SMA}')
     
-    ax1.set_title(f'Signal Dependability: Long vs Short (BTC/USDT 2018-Present)\nMetric: Linear Decay (1 - day/30)', fontsize=14)
-    ax1.set_ylabel('Dependability Score', fontsize=12)
+    # Highlight Signal Windows
+    for _, row in df_signals.iterrows():
+        color = 'green' if row['type'] == 'LONG' else 'red'
+        # Shade the 30-day window
+        ax1.axvspan(row['date'], row['window_end_date'], color=color, alpha=0.1)
+        # Mark the entry point
+        marker = '^' if row['type'] == 'LONG' else 'v'
+        ax1.scatter(row['date'], row['price'], color=color, marker=marker, s=100, zorder=5)
+
+    ax1.set_title(f'SMA {VALIDATION_SMA} Validation: Signal Windows ({HORIZON} Days)', fontsize=14)
+    ax1.set_ylabel('Price (Log Scale)', fontsize=12)
     ax1.legend(loc='upper left')
-    ax1.grid(True, alpha=0.3)
+    ax1.grid(True, which="both", ls="-", alpha=0.2)
     
-    # Add Zero Line
-    ax1.axhline(0, color='gray', linewidth=0.8, alpha=0.5)
+    # --- Plot 2: Individual Signal Scores ---
+    
+    # Separate Longs and Shorts for color coding
+    longs = df_signals[df_signals['type'] == 'LONG']
+    shorts = df_signals[df_signals['type'] == 'SHORT']
+    
+    ax2.bar(longs['date'], longs['score'], color='green', alpha=0.7, width=10, label='Long Score')
+    ax2.bar(shorts['date'], shorts['score'], color='red', alpha=0.7, width=10, label='Short Score')
+    
+    # Plot Average Score Line
+    avg_score = df_signals['score'].mean()
+    ax2.axhline(avg_score, color='black', linestyle='--', linewidth=2, label=f'Avg Score: {avg_score:.4f}')
+    
+    # Zero line
+    ax2.axhline(0, color='gray', linewidth=0.8)
 
-    # Highlight max Total score
-    max_idx = df_results['score_total'].idxmax()
-    best_sma = df_results.loc[max_idx, 'sma']
-    best_score = df_results.loc[max_idx, 'score_total']
-    ax1.annotate(f'Best Total: SMA {best_sma}\nScore: {best_score:.4f}', 
-                 xy=(best_sma, best_score), 
-                 xytext=(best_sma+20, best_score),
-                 arrowprops=dict(facecolor='black', shrink=0.05))
-
-    # Plot 2: Number of Signals
-    ax2.bar(df_results['sma'], df_results['num_signals'], color='#3498db', alpha=0.6, width=1.0)
-    ax2.set_title('Frequency of Signals', fontsize=12)
-    ax2.set_xlabel('SMA Period', fontsize=12)
-    ax2.set_ylabel('Count', fontsize=12)
+    ax2.set_title(f'Individual Dependability Scores per Signal (Linear Decay Weight)', fontsize=12)
+    ax2.set_ylabel('Score (Weighted Return)', fontsize=12)
+    ax2.legend()
     ax2.grid(True, alpha=0.3)
+    
+    # Format Date Axis
+    ax2.xaxis.set_major_formatter(mdates.DateFormatter('%Y-%m'))
+    plt.xticks(rotation=45)
     
     # Save to buffer
     output = io.BytesIO()
     plt.tight_layout()
     fig.savefig(output, format='png')
-    plt.close(fig) # Clear memory
+    plt.close(fig) 
     output.seek(0)
     
     return send_file(output, mimetype='image/png')
