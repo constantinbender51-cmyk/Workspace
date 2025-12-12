@@ -17,7 +17,8 @@ SINCE_STR = '2018-01-01 00:00:00'
 HORIZON = 380  # Decay window (days) - OPTIMAL VALUE
 INITIAL_CAPITAL = 10000.0
 LEVERAGE = 5.0  # Multiplier applied to conviction exposure
-# CONVICTION_THRESHOLD will be determined by Grid Search
+THRESHOLD_1 = 0.50
+THRESHOLD_2 = 0.20
 
 # --- Winning Signals ---
 WINNING_SIGNALS = [
@@ -126,7 +127,7 @@ def generate_signals(df):
 
 
 # --- Backtest implementation ---
-def run_conviction_backtest(df_data, df_signals, threshold=0.5):
+def run_conviction_backtest(df_data, df_signals, threshold):
     """
     Runs the backtest with a specific Conviction Threshold.
     """
@@ -219,7 +220,6 @@ def run_conviction_backtest(df_data, df_signals, threshold=0.5):
     results['Strategy_Daily_Return'] = results['Portfolio_Value'].pct_change().fillna(0)
     
     rolling_max = results['Portfolio_Value'].cummax()
-    # Handle division by zero for bankruptcy
     results['Drawdown'] = np.where(rolling_max > 0, (results['Portfolio_Value'] - rolling_max) / rolling_max, -1.0)
 
     signal_names = [f"{s[0]}_{s[1]}" for s in WINNING_SIGNALS]
@@ -227,38 +227,33 @@ def run_conviction_backtest(df_data, df_signals, threshold=0.5):
         results[f"Contrib_{name}"] = daily_contributions[:, i]
     
     total_return = (portfolio[-1] / portfolio[0]) - 1.0
-    return total_return, results, signal_names
+    
+    # Calculate Sharpe Ratio
+    daily_rets = results['Strategy_Daily_Return']
+    if daily_rets.std() > 0:
+        sharpe = (daily_rets.mean() / daily_rets.std()) * np.sqrt(365)
+    else:
+        sharpe = 0.0
+    
+    return total_return, sharpe, results, signal_names
 
-def run_grid_search_threshold(df_data, df_signals):
-    print("\nRunning Grid Search for Optimal Conviction Threshold (0.00 - 1.00)...")
-    results = []
+def run_comparison_backtests(df_data, df_signals):
+    # Run for Threshold 0.50 (Tighter Filter)
+    ret_50, sharpe_50, res_50, sig_names = run_conviction_backtest(df_data, df_signals, threshold=THRESHOLD_1)
     
-    # Range 0 to 1 in 0.01 steps (0, 0.01, 0.02 ... 1.0)
-    search_space = np.linspace(0, 1.0, 101)
+    # Run for Threshold 0.20 (Looser Filter)
+    ret_20, sharpe_20, res_20, _ = run_conviction_backtest(df_data, df_signals, threshold=THRESHOLD_2)
     
-    for thr in search_space:
-        ret, res, _ = run_conviction_backtest(df_data, df_signals, threshold=thr)
-        
-        daily_rets = res['Strategy_Daily_Return']
-        if daily_rets.std() > 0:
-            sharpe = (daily_rets.mean() / daily_rets.std()) * np.sqrt(365)
-        else:
-            sharpe = 0.0
-        
-        # Avoid huge negative returns skewing display (bankruptcy)
-        if res['Portfolio_Value'].iloc[-1] <= 0:
-            sharpe = -1.0 # Penalty for bankruptcy
-            
-        results.append({
-            'Threshold': thr,
-            'Return': ret,
-            'Sharpe': sharpe
-        })
-        # print(f"Threshold {thr:.2f}: Sharpe {sharpe:.2f} | Return {ret*100:.1f}%", end='\r')
-        
-    print("\nGrid Search Complete.")
-    df_grid = pd.DataFrame(results)
-    return df_grid
+    # We return the results for the Tighter Filter (0.50) as the "main" display result
+    return {
+        'main_result': res_50,
+        'main_sharpe': sharpe_50,
+        'main_ret': ret_50,
+        'sig_names': sig_names,
+        'comp_result_050': res_50['Portfolio_Value'],
+        'comp_result_020': res_20['Portfolio_Value'],
+        'comp_sharpe_020': sharpe_20,
+    }
 
 def calculate_net_daily_signal_event(df_signals_raw, results_df):
     aligned_signals = df_signals_raw.loc[results_df.index.min():results_df.index.max()]
@@ -267,38 +262,15 @@ def calculate_net_daily_signal_event(df_signals_raw, results_df):
     short_signal_dates = net_signal_sum[net_signal_sum < 0].index
     return long_signal_dates, short_signal_dates
 
-def create_threshold_plot(df_grid):
-    fig, ax1 = plt.subplots(figsize=(10, 6))
-    
-    color = 'tab:blue'
-    ax1.set_xlabel('Conviction Threshold (0.0 - 1.0)')
-    ax1.set_ylabel('Sharpe Ratio', color=color, fontweight='bold')
-    ax1.plot(df_grid['Threshold'], df_grid['Sharpe'], color=color, linewidth=2)
-    ax1.tick_params(axis='y', labelcolor=color)
-    ax1.grid(True, alpha=0.3)
-    
-    ax2 = ax1.twinx() 
-    color = 'tab:gray'
-    ax2.set_ylabel('Total Return', color=color, fontweight='bold')
-    ax2.plot(df_grid['Threshold'], df_grid['Return'], color=color, linestyle='--', linewidth=1.5, alpha=0.5)
-    ax2.tick_params(axis='y', labelcolor=color)
-
-    plt.title(f"Grid Search: Conviction Threshold vs Performance ({LEVERAGE}x Lev)")
-    fig.tight_layout()
-    
-    buf = io.BytesIO()
-    plt.savefig(buf, format='png', dpi=100)
-    plt.close(fig)
-    buf.seek(0)
-    return buf
 
 def create_equity_plot(results_df, long_signal_dates, short_signal_dates, horizon, threshold):
+    # Plot for the main result (Threshold 0.50)
     fig, (ax1, ax2, ax3) = plt.subplots(3, 1, figsize=(12, 14), sharex=True, gridspec_kw={'height_ratios': [2, 2, 1]})
     
     # --- Plot 1: Price Chart (Log Scale) ---
     ax1.plot(results_df.index, results_df['close'], 'k-', linewidth=1, label='BTC Price')
     ax1.set_yscale('log')
-    ax1.set_title(f'BTC/USDT Price (Log Scale) - Horizon: {horizon}', fontsize=12, fontweight='bold')
+    ax1.set_title(f'BTC/USDT Price (Log Scale) - Filter: {threshold:.2f}', fontsize=12, fontweight='bold')
     ax1.set_ylabel('Price ($)', fontsize=10)
     ax1.grid(True, which="both", ls="-", alpha=0.2)
     ax1.legend(loc='upper left')
@@ -310,7 +282,7 @@ def create_equity_plot(results_df, long_signal_dates, short_signal_dates, horizo
     ax1.scatter(short_signal_dates, short_prices, marker='v', color='red', s=50, label='Short Signal', zorder=5)
     
     # --- Plot 2: Equity Curve (Log Scale) ---
-    ax2.plot(results_df.index, results_df['Portfolio_Value'], 'b-', linewidth=1.5, label=f'Strategy Equity ({LEVERAGE}x Lev)')
+    ax2.plot(results_df.index, results_df['Portfolio_Value'], 'b-', linewidth=1.5, label=f'Strategy Equity ({LEVERAGE}x Lev, Filter {threshold:.2f})')
     bh_curve = results_df['close'] / results_df['close'].iloc[0] * INITIAL_CAPITAL
     ax2.plot(results_df.index, bh_curve, 'g--', alpha=0.8, linewidth=1, label='Buy & Hold (1x)')
     
@@ -319,7 +291,7 @@ def create_equity_plot(results_df, long_signal_dates, short_signal_dates, horizo
     else:
         ax2.set_yscale('log')
         
-    ax2.set_title(f'Strategy Equity vs Buy & Hold (Log Scale) - {LEVERAGE}x Leverage', fontsize=12, fontweight='bold')
+    ax2.set_title(f'Strategy Equity (Main Result) - {LEVERAGE}x Leverage', fontsize=12, fontweight='bold')
     ax2.set_ylabel('Value ($)', fontsize=10)
     ax2.grid(True, which="both", ls="-", alpha=0.2)
     ax2.legend(loc='upper left')
@@ -339,234 +311,247 @@ def create_equity_plot(results_df, long_signal_dates, short_signal_dates, horizo
     buf.seek(0)
     return buf
 
-def start_web_server(results_df, long_signal_dates, short_signal_dates, signal_names, best_threshold, df_grid):
+def create_comparison_plot(comp_result_050, comp_result_020, comp_sharpe_020):
+    fig, ax1 = plt.subplots(figsize=(10, 6))
+    
+    ax1.plot(comp_result_050.index, comp_result_050, 'b-', linewidth=2, label=f'Threshold 0.50 (Main)')
+    ax1.plot(comp_result_020.index, comp_result_020, 'r--', linewidth=1.5, alpha=0.7, label=f'Threshold 0.20 (Sharpe {comp_sharpe_020:.2f})')
+    
+    # Buy & Hold Curve
+    bh_curve = comp_result_050.index.to_series().apply(lambda x: INITIAL_CAPITAL).index
+    bh_price = comp_result_050.index.to_series().apply(lambda x: comp_result_050.loc[x] / (comp_result_050.iloc[-1] / INITIAL_CAPITAL))
+    
+    bh_curve = comp_result_050.index.to_series().apply(lambda x: INITIAL_CAPITAL)
+    # The simplest way is to calculate B&H using the market returns
+    market_returns = (comp_result_050.index.to_series().apply(lambda x: comp_result_050.index.get_loc(x)).index).to_series()
+    bh_returns = (comp_result_050.index.to_series().apply(lambda x: comp_result_050.index.get_loc(x)).index).to_series()
+    
+    # Calculate B&H curve separately using the original market data (close-to-close returns)
+    market_df = fetch_binance_data()
+    market_df = market_df.loc[comp_result_050.index.min():comp_result_050.index.max()]
+    
+    bh_market_returns = market_df['return'].fillna(0) + 1
+    bh_equity = INITIAL_CAPITAL * bh_market_returns.cumprod()
+    
+    ax1.plot(bh_equity.index, bh_equity.values, 'g-', linewidth=1, alpha=0.8, label='Buy & Hold (1x)')
+
+
+    if (comp_result_050.min() <= 0) or (comp_result_020.min() <= 0):
+        ax1.set_yscale('symlog', linthresh=1.0) 
+    else:
+        ax1.set_yscale('log')
+
+    ax1.set_title(f'Equity Comparison: Threshold 0.50 vs 0.20 ({LEVERAGE}x Leverage)', fontsize=12, fontweight='bold')
+    ax1.set_ylabel('Portfolio Value ($) - Log Scale', fontsize=10)
+    ax1.set_xlabel('Date', fontsize=10)
+    ax1.grid(True, which="both", ls="-", alpha=0.2)
+    ax1.legend(loc='upper left')
+
+    fig.tight_layout()
+    buf = io.BytesIO()
+    plt.savefig(buf, format='png', dpi=100)
+    plt.close(fig)
+    buf.seek(0)
+    return buf
+
+def start_web_server(backtest_data, comp_sharpe_020):
     app = Flask(__name__)
     
-    @app.route('/')
-    def index():
-        final_val = results_df['Portfolio_Value'].iloc[-1]
-        total_ret = ((final_val / INITIAL_CAPITAL) - 1) * 100
+    results_df = backtest_data['main_result']
+    sig_names = backtest_data['sig_names']
+    long_signal_dates, short_signal_dates = calculate_net_daily_signal_event(df_signals_raw, results_df)
+    
+    # Main stats for THRESHOLD 0.50
+    best_threshold = THRESHOLD_1
+    final_val = results_df['Portfolio_Value'].iloc[-1]
+    total_ret = ((final_val / INITIAL_CAPITAL) - 1) * 100
+    strat_daily_rets = results_df['Strategy_Daily_Return']
+    if strat_daily_rets.std() > 0:
+        overall_sharpe = (strat_daily_rets.mean() / strat_daily_rets.std()) * np.sqrt(365)
+    else:
+        overall_sharpe = 0.0
+    is_bust = (final_val <= 0)
+
+    # --- Monthly Stats ---
+    monthly_rows = ""
+    monthly_groups = results_df.groupby(pd.Grouper(freq='M'))
+    monthly_stats = []
+    for name, group in monthly_groups:
+        if len(group) < 5: continue
         
-        strat_daily_rets = results_df['Strategy_Daily_Return']
-        if strat_daily_rets.std() > 0:
-            overall_sharpe = (strat_daily_rets.mean() / strat_daily_rets.std()) * np.sqrt(365)
+        m_daily_rets = group['Strategy_Daily_Return']
+        m_start_val = group['Portfolio_Value'].iloc[0]
+        m_end_val = group['Portfolio_Value'].iloc[-1]
+        
+        if m_start_val > 0:
+            m_ret_total = (m_end_val / m_start_val) - 1.0
         else:
-            overall_sharpe = 0.0
-            
-        is_bust = (final_val <= 0)
-
-        # --- Grid Search Table (Top 5) ---
-        top_5 = df_grid.sort_values(by='Sharpe', ascending=False).head(5)
-        grid_rows = ""
-        for _, row in top_5.iterrows():
-            # Check if this row is the chosen optimal one (float comparison tolerance)
-            is_best = abs(row['Threshold'] - best_threshold) < 0.001
-            style = "background-color: #d4edda;" if is_best else ""
-            grid_rows += f"""
-            <tr style="{style}">
-                <td>{row['Threshold']:.2f}</td>
-                <td>{row['Sharpe']:.2f}</td>
-                <td>{row['Return']*100:.1f}%</td>
-            </tr>
-            """
-
-        # --- Monthly Stats ---
-        monthly_rows = ""
-        monthly_groups = results_df.groupby(pd.Grouper(freq='M'))
-        monthly_stats = []
-        for name, group in monthly_groups:
-            if len(group) < 5: continue
-            
-            m_daily_rets = group['Strategy_Daily_Return']
-            m_start_val = group['Portfolio_Value'].iloc[0]
-            m_end_val = group['Portfolio_Value'].iloc[-1]
-            
-            if m_start_val > 0:
-                m_ret_total = (m_end_val / m_start_val) - 1.0
-            else:
-                m_ret_total = 0.0
-            
-            if m_daily_rets.std() > 0:
-                m_sharpe = (m_daily_rets.mean() / m_daily_rets.std()) * np.sqrt(365)
-            else:
-                m_sharpe = 0.0
-                
-            monthly_stats.append({
-                'Date': name.strftime('%Y-%m'),
-                'Return': m_ret_total,
-                'Sharpe': m_sharpe
-            })
-            
-        for stats in reversed(monthly_stats):
-            ret_val = stats['Return']
-            sharpe_val = stats['Sharpe']
-            ret_color = "green" if ret_val > 0 else "red"
-            sharpe_color = "green" if sharpe_val > 1 else ("orange" if sharpe_val > 0 else "red")
-            monthly_rows += f"""
-            <tr>
-                <td>{stats['Date']}</td>
-                <td style="color: {ret_color}; font-weight: bold;">{ret_val*100:.2f}%</td>
-                <td style="color: {sharpe_color};">{sharpe_val:.2f}</td>
-            </tr>
-            """
-
-        # --- Attribution ---
-        first_month_df = results_df.iloc[:30]
-        attribution_headers = "".join([f"<th>{name}</th>" for name in signal_names])
-        attribution_rows = ""
+            m_ret_total = 0.0
         
-        for date, row in first_month_df.iterrows():
-            date_str = date.strftime('%Y-%m-%d')
-            exposure = row['Exposure']
+        if m_daily_rets.std() > 0:
+            m_sharpe = (m_daily_rets.mean() / m_daily_rets.std()) * np.sqrt(365)
+        else:
+            m_sharpe = 0.0
             
-            if exposure > 0: exp_style = "color: #C0392B; font-weight: bold;"
-            elif exposure < 0: exp_style = "color: #2980B9; font-weight: bold;"
-            else: exp_style = "color: #7f8c8d;"
-                 
-            sig_cells = ""
-            for name in signal_names:
-                val = row[f"Contrib_{name}"]
-                if val > 0: color = "background-color: #ffe6e6; color: #C0392B;" 
-                elif val < 0: color = "background-color: #e6f2ff; color: #2980B9;" 
-                else: color = "color: #ccc;"
-                sig_cells += f"<td style='{color}'>{val:.2f}</td>"
-            
-            attribution_rows += f"<tr><td>{date_str}</td><td style='{exp_style}'>{exposure:.2f}x</td>{sig_cells}</tr>"
-
-        # --- Daily Log ---
-        table_rows = ""
-        df_rev = results_df.sort_index(ascending=False)
+        monthly_stats.append({
+            'Date': name.strftime('%Y-%m'),
+            'Return': m_ret_total,
+            'Sharpe': m_sharpe
+        })
         
-        for date, row in df_rev.iterrows():
-            date_str = date.strftime('%Y-%m-%d')
-            exposure_val = row['Exposure']
-            
-            if exposure_val > 0:
-                exp_str = f"LONG {exposure_val:.2f}x"
-                row_color = "color: #C0392B; font-weight: bold;"
-            elif exposure_val < 0:
-                exp_str = f"SHORT {abs(exposure_val):.2f}x"
-                row_color = "color: #2980B9; font-weight: bold;"
-            else:
-                exp_str = f"NEUTRAL 0x"
-                row_color = "color: #7f8c8d;"
-            
-            table_rows += f"""
-            <tr>
-                <td>{date_str}</td>
-                <td>${row['close']:,.2f}</td>
-                <td style="{row_color}">{exp_str}</td>
-                <td>${row['Daily_PnL']:,.2f}</td>
-                <td>${row['Portfolio_Value']:,.2f}</td>
-            </tr>
-            """
-            
-        bust_warning = ""
-        if is_bust:
-            bust_warning = "<h2 style='color: red; background: #fee; padding: 10px; border: 1px solid red;'>⚠️ STRATEGY BANKRUPT (LIQUIDATED) ⚠️</h2>"
+    for stats in reversed(monthly_stats):
+        ret_val = stats['Return']
+        sharpe_val = stats['Sharpe']
+        ret_color = "green" if ret_val > 0 else "red"
+        sharpe_color = "green" if sharpe_val > 1 else ("orange" if sharpe_val > 0 else "red")
+        monthly_rows += f"""
+        <tr>
+            <td>{stats['Date']}</td>
+            <td style="color: {ret_color}; font-weight: bold;">{ret_val*100:.2f}%</td>
+            <td style="color: {sharpe_color};">{sharpe_val:.2f}</td>
+        </tr>
+        """
 
-        html_template = f'''
-        <!DOCTYPE html>
-        <html>
-        <head>
-            <title>Conviction Strategy Results</title>
-            <style>
-                body {{ font-family: sans-serif; margin: 40px; text-align: center; color: #333; }}
-                .stats {{ margin: 20px auto; padding: 20px; background: #f9f9f9; max-width: 900px; border-radius: 8px; box-shadow: 0 2px 4px rgba(0,0,0,0.1); }}
-                img {{ max-width: 95%; height: auto; border: 1px solid #ccc; margin-bottom: 20px; }}
-                h2 {{ margin-top: 40px; border-bottom: 2px solid #eee; display: inline-block; padding-bottom: 5px; }}
-                .table-container {{ margin: 0 auto; max-width: 1000px; max-height: 400px; overflow-y: auto; border: 1px solid #ddd; border-radius: 4px; }}
-                table {{ width: 100%; border-collapse: collapse; font-size: 0.9em; }}
-                th {{ background: #eee; position: sticky; top: 0; padding: 10px; border-bottom: 1px solid #ccc; }}
-                td {{ padding: 8px; border-bottom: 1px solid #eee; }}
-                tr:hover {{ background-color: #f5f5f5; }}
-                .grid-section {{ display: flex; justify-content: center; gap: 20px; flex-wrap: wrap; margin-bottom: 40px; }}
-            </style>
-        </head>
-        <body>
-            <h1>Conviction Strategy Results</h1>
-            
-            {bust_warning}
-            
-            <div class="stats">
-                <p>
-                    <strong>Horizon Set:</strong> {HORIZON} days |
-                    <strong>Leverage:</strong> {LEVERAGE}x |
-                    <strong>Optimal Threshold:</strong> {best_threshold:.2f}
-                </p>
-                <p>
-                    <strong>Final Value:</strong> ${final_val:,.2f} | 
-                    <strong>Return:</strong> <span style="color: {'green' if total_ret > 0 else 'red'};">{total_ret:.2f}%</span>
-                </p>
-                <p>
-                    <strong>Overall Sharpe Ratio:</strong> <span style="font-size: 1.2em; font-weight: bold;">{overall_sharpe:.2f}</span>
-                </p>
-            </div>
-            
-            <h2>Threshold Grid Search</h2>
-            <div class="grid-section">
-                <div>
-                    <img src="/threshold_plot" style="max-width: 600px;" />
-                </div>
-                <div class="table-container" style="max-width: 300px; height: auto;">
-                    <h3>Top 5 Thresholds</h3>
-                    <table>
-                        <thead>
-                            <tr><th>Threshold</th><th>Sharpe</th><th>Return</th></tr>
-                        </thead>
-                        <tbody>{grid_rows}</tbody>
-                    </table>
-                </div>
-            </div>
-
-            <h2>Performance (Log Scale)</h2>
-            <img src="/plot" />
-
-            <h2>Monthly Performance</h2>
-            <div class="table-container" style="max-width: 600px;">
-                <table>
-                    <thead><tr><th>Month</th><th>Total Return</th><th>Sharpe Ratio</th></tr></thead>
-                    <tbody>{monthly_rows}</tbody>
-                </table>
-            </div>
-
-            <h2>Attribution (First 30 Days)</h2>
-            <div class="table-container">
-                <table class="attrib-table">
-                    <thead><tr><th>Date</th><th>Exposure</th>{attribution_headers}</tr></thead>
-                    <tbody>{attribution_rows}</tbody>
-                </table>
-            </div>
-            
-            <h2>Daily Position Log</h2>
-            <div class="table-container">
-                <table>
-                    <thead><tr><th>Date</th><th>Close</th><th>Position</th><th>PnL</th><th>Equity</th></tr></thead>
-                    <tbody>{table_rows}</tbody>
-                </table>
-            </div>
-        </body>
-        </html>
-        '''
-        return html_template
+    # --- Attribution ---
+    first_month_df = results_df.iloc[:30]
+    attribution_headers = "".join([f"<th>{name}</th>" for name in sig_names])
+    attribution_rows = ""
     
-    @app.route('/plot')
-    def plot():
-        buf = create_equity_plot(results_df, long_signal_dates, short_signal_dates, HORIZON, best_threshold)
-        return send_file(buf, mimetype='image/png')
-    
-    @app.route('/threshold_plot')
-    def threshold_plot():
-        buf = create_threshold_plot(df_grid)
-        return send_file(buf, mimetype='image/png')
-    
-    print("\n" + "=" * 60)
-    print(f"Server running on http://localhost:8080 (Optimized Threshold: {best_threshold:.2f})")
-    print("Press Ctrl+C to stop.")
-    print("=" * 60)
-    
-    app.run(host='0.0.0.0', port=8080, debug=False)
+    for date, row in first_month_df.iterrows():
+        date_str = date.strftime('%Y-%m-%d')
+        exposure = row['Exposure']
+        
+        if exposure > 0: exp_style = "color: #C0392B; font-weight: bold;"
+        elif exposure < 0: exp_style = "color: #2980B9; font-weight: bold;"
+        else: exp_style = "color: #7f8c8d;"
+             
+        sig_cells = ""
+        for name in sig_names:
+            val = row[f"Contrib_{name}"]
+            if val > 0: color = "background-color: #ffe6e6; color: #C0392B;" 
+            elif val < 0: color = "background-color: #e6f2ff; color: #2980B9;" 
+            else: color = "color: #ccc;"
+            sig_cells += f"<td style='{color}'>{val:.2f}</td>"
+        
+        attribution_rows += f"<tr><td>{date_str}</td><td style='{exp_style}'>{exposure:.2f}x</td>{sig_cells}</tr>"
 
+    # --- Daily Log ---
+    table_rows = ""
+    df_rev = results_df.sort_index(ascending=False)
+    
+    for date, row in df_rev.iterrows():
+        date_str = date.strftime('%Y-%m-%d')
+        exposure_val = row['Exposure']
+        
+        if exposure_val > 0:
+            exp_str = f"LONG {exposure_val:.2f}x"
+            row_color = "color: #C0392B; font-weight: bold;"
+        elif exposure_val < 0:
+            exp_str = f"SHORT {abs(exposure_val):.2f}x"
+            row_color = "color: #2980B9; font-weight: bold;"
+        else:
+            exp_str = f"NEUTRAL 0x"
+            row_color = "color: #7f8c8d;"
+        
+        table_rows += f"""
+        <tr>
+            <td>{date_str}</td>
+            <td>${row['close']:,.2f}</td>
+            <td style="{row_color}">{exp_str}</td>
+            <td>${row['Daily_PnL']:,.2f}</td>
+            <td>${row['Portfolio_Value']:,.2f}</td>
+        </tr>
+        """
+        
+    bust_warning = ""
+    if is_bust:
+        bust_warning = "<h2 style='color: red; background: #fee; padding: 10px; border: 1px solid red;'>⚠️ STRATEGY BANKRUPT (LIQUIDATED) ⚠️</h2>"
+
+    html_template = f'''
+    <!DOCTYPE html>
+    <html>
+    <head>
+        <title>Conviction Strategy Results</title>
+        <style>
+            body {{ font-family: sans-serif; margin: 40px; text-align: center; color: #333; }}
+            .stats {{ margin: 20px auto; padding: 20px; background: #f9f9f9; max-width: 900px; border-radius: 8px; box-shadow: 0 2px 4px rgba(0,0,0,0.1); }}
+            img {{ max-width: 95%; height: auto; border: 1px solid #ccc; margin-bottom: 20px; }}
+            h2 {{ margin-top: 40px; border-bottom: 2px solid #eee; display: inline-block; padding-bottom: 5px; }}
+            .table-container {{ margin: 0 auto; max-width: 1000px; max-height: 400px; overflow-y: auto; border: 1px solid #ddd; border-radius: 4px; }}
+            table {{ width: 100%; border-collapse: collapse; font-size: 0.9em; }}
+            th {{ background: #eee; position: sticky; top: 0; padding: 10px; border-bottom: 1px solid #ccc; }}
+            td {{ padding: 8px; border-bottom: 1px solid #eee; }}
+            tr:hover {{ background-color: #f5f5f5; }}
+            .comparison-section {{ margin-top: 40px; }}
+        </style>
+    </head>
+    <body>
+        <h1>Conviction Strategy Results</h1>
+        
+        {bust_warning}
+        
+        <div class="stats">
+            <p>
+                <strong>Horizon Set:</strong> {HORIZON} days |
+                <strong>Leverage:</strong> {LEVERAGE}x |
+                <strong>Main Filter:</strong> {best_threshold:.2f} (50%)
+            </p>
+            <p>
+                <strong>Final Value:</strong> ${final_val:,.2f} | 
+                <strong>Return:</strong> <span style="color: {'green' if total_ret > 0 else 'red'};">{total_ret:.2f}%</span>
+            </p>
+            <p>
+                <strong>Overall Sharpe Ratio:</strong> <span style="font-size: 1.2em; font-weight: bold;">{overall_sharpe:.2f}</span>
+            </p>
+        </div>
+        
+        <h2>Strategy Performance Comparison</h2>
+        <div class="comparison-section">
+            <p>Comparing Threshold 0.50 (Tighter Filter) vs Threshold 0.20 (Looser Filter, Sharpe: {comp_sharpe_020:.2f})</p>
+            <img src="/comparison_plot" />
+        </div>
+
+        <h2>Detailed Performance (Filter: {best_threshold:.2f})</h2>
+        <img src="/plot" />
+
+        <h2>Monthly Performance</h2>
+        <div class="table-container" style="max-width: 600px;">
+            <table>
+                <thead><tr><th>Month</th><th>Total Return</th><th>Sharpe Ratio</th></tr></thead>
+                <tbody>{monthly_rows}</tbody>
+            </table>
+        </div>
+
+        <h2>Attribution (First 30 Days)</h2>
+        <div class="table-container">
+            <table class="attrib-table">
+                <thead><tr><th>Date</th><th>Exposure</th>{attribution_headers}</tr></thead>
+                <tbody>{attribution_rows}</tbody>
+            </table>
+        </div>
+        
+        <h2>Daily Position Log</h2>
+        <div class="table-container">
+            <table>
+                <thead><tr><th>Date</th><th>Close</th><th>Position</th><th>PnL</th><th>Equity</th></tr></thead>
+                <tbody>{table_rows}</tbody>
+            </table>
+        </div>
+    </body>
+    </html>
+    '''
+    return html_template
+    
+    
+@app.route('/plot')
+def plot():
+    buf = create_equity_plot(backtest_data['main_result'], long_signal_dates, short_signal_dates, HORIZON, THRESHOLD_1)
+    return send_file(buf, mimetype='image/png')
+
+@app.route('/comparison_plot')
+def comparison_plot():
+    buf = create_comparison_plot(backtest_data['comp_result_050'], backtest_data['comp_result_020'], backtest_data['comp_sharpe_020'])
+    return send_file(buf, mimetype='image/png')
 
 if __name__ == '__main__':
     df_data = fetch_binance_data()
@@ -579,20 +564,16 @@ if __name__ == '__main__':
         if df_signals.empty or len(df_signals) < 10:
              print("Not enough signals generated.")
         else:
-            # 1. Run Grid Search for Threshold
-            df_grid = run_grid_search_threshold(df_data, df_signals)
+            # 1. Run comparison backtests
+            backtest_data = run_comparison_backtests(df_data, df_signals)
             
-            # 2. Find Best Threshold (Max Sharpe)
-            best_row = df_grid.loc[df_grid['Sharpe'].idxmax()]
-            best_threshold = best_row['Threshold']
-            print(f"\nOPTIMAL FOUND: Threshold {best_threshold:.2f} (Sharpe: {best_row['Sharpe']:.2f})")
+            # 2. Extract data for server startup
+            res = backtest_data['main_result']
+            ret = backtest_data['main_ret']
             
-            # 3. Run Final Backtest
-            ret, res, sig_names = run_conviction_backtest(df_data, df_signals, threshold=best_threshold)
+            print(f"\n--- Strategy Comparison Complete ---")
+            print(f"Filter 0.50 (Main): Sharpe {backtest_data['main_sharpe']:.2f} | Return {ret*100:.2f}%")
+            print(f"Filter 0.20 (Comp): Sharpe {backtest_data['comp_sharpe_020']:.2f}")
+            print("====================================")
             
-            long_dates, short_dates = calculate_net_daily_signal_event(df_signals_raw, res)
-            
-            print(f"\nFinal Portfolio: ${res['Portfolio_Value'].iloc[-1]:,.2f}")
-            print(f"Strategy Return: {ret*100:.2f}%")
-            
-            start_web_server(res, long_dates, short_dates, sig_names, best_threshold, df_grid)
+            start_web_server(backtest_data, backtest_data['comp_sharpe_020'])
