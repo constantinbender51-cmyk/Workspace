@@ -205,17 +205,30 @@ def run_conviction_backtest(df_data, df_signals):
 def create_equity_plot(results_df):
     fig, (ax1, ax2) = plt.subplots(2, 1, figsize=(12, 10))
     
-    # Price Chart
-    ax1.set_facecolor('#e6f2ff') # Light Blue
+    # Define colors: Red for Long, Blue for Short (User Request)
+    long_color = 'red'
+    short_color = 'blue'
+    alpha = 0.15  # Transparency for background
+
+    exposure = results_df['Exposure']
+
+    # --- Plot 1: Price Chart ---
     ax1.plot(results_df.index, results_df['close'], 'k-', linewidth=1.5, label='BTC Price')
     ax1.set_title('BTC/USDT Price', fontsize=12, fontweight='bold')
     ax1.set_ylabel('Price', fontsize=10)
     ax1.grid(True, alpha=0.3)
     ax1.legend(loc='upper left')
     
-    # Equity Curve
-    ax2.set_facecolor('#ffe6e6') # Light Red
-    ax2.plot(results_df.index, results_df['Portfolio_Value'], 'b-', linewidth=1.5, label='Strategy Equity')
+    # Dynamic Background for Price
+    # transform=ax1.get_xaxis_transform() allows us to use x-data coordinates for X 
+    # and axes coordinates (0 to 1) for Y, effectively filling the vertical strip.
+    ax1.fill_between(results_df.index, 0, 1, where=exposure > 0, 
+                     color=long_color, alpha=alpha, transform=ax1.get_xaxis_transform())
+    ax1.fill_between(results_df.index, 0, 1, where=exposure < 0, 
+                     color=short_color, alpha=alpha, transform=ax1.get_xaxis_transform())
+
+    # --- Plot 2: Equity Curve ---
+    ax2.plot(results_df.index, results_df['Portfolio_Value'], 'k-', linewidth=1.5, label='Strategy Equity')
     
     # Add Buy & Hold for comparison
     bh_curve = results_df['close'] / results_df['close'].iloc[0] * INITIAL_CAPITAL
@@ -225,6 +238,12 @@ def create_equity_plot(results_df):
     ax2.set_ylabel('Value (USDT)', fontsize=10)
     ax2.grid(True, alpha=0.3)
     ax2.legend(loc='upper left')
+    
+    # Dynamic Background for Equity
+    ax2.fill_between(results_df.index, 0, 1, where=exposure > 0, 
+                     color=long_color, alpha=alpha, transform=ax2.get_xaxis_transform())
+    ax2.fill_between(results_df.index, 0, 1, where=exposure < 0, 
+                     color=short_color, alpha=alpha, transform=ax2.get_xaxis_transform())
     
     plt.tight_layout()
     
