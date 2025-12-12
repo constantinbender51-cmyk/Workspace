@@ -61,7 +61,7 @@ def fetch_binance_data():
     df['date'] = pd.to_datetime(df['timestamp'], unit='ms')
     df.set_index('date', inplace=True)
 
-    # Standard Close-to-Close Return (Standard for holding strategies)
+    # Standard Close-to-Close Return
     df['return'] = df['close'].pct_change()
     
     df.dropna(subset=['return'], inplace=True)
@@ -127,24 +127,19 @@ def generate_signals(df):
 
 # --- Backtest implementation ---
 def run_conviction_backtest(df_data, df_signals):
-    # Align Data
     common_idx = df_data.index.intersection(df_signals.index)
     df = df_data.loc[common_idx].copy()
     signals = df_signals.loc[common_idx]
 
     num_days = len(df)
-    
-    # We use Close-to-Close returns because we hold positions overnight (Conviction)
     daily_returns = df['return'].values 
     dates = df.index
 
-    # Arrays for speed
     portfolio = np.zeros(num_days)
     daily_pnl = np.zeros(num_days)
     conviction_raw = np.zeros(num_days)
     conviction_norm = np.zeros(num_days)
 
-    # State tracking
     signal_start_day = np.full(MAX_CONVICTION, -1, dtype=int)
     signal_direction = np.zeros(MAX_CONVICTION, dtype=int)
 
@@ -156,14 +151,10 @@ def run_conviction_backtest(df_data, df_signals):
         for i in range(len(WINNING_SIGNALS)):
             current_sig = signals.iloc[t, i]
 
-            # --- CRITICAL FIX: RECHARGING LOGIC ---
-            # If a signal fires (even if same direction), reset the decay.
-            # This "recharges" conviction if the market confirms the trend again.
             if current_sig != 0:
                 signal_start_day[i] = t
                 signal_direction[i] = current_sig
             
-            # Compute Decay
             if signal_direction[i] != 0:
                 d = t - signal_start_day[i]
                 if d < 0: 
@@ -173,16 +164,13 @@ def run_conviction_backtest(df_data, df_signals):
                 
                 daily_sum += signal_direction[i] * decay
 
-                # Clean up expired signals
                 if decay == 0.0:
                     signal_direction[i] = 0
                     signal_start_day[i] = -1
 
-        # Normalize Exposure
         exposure = daily_sum / MAX_CONVICTION
         exposure = np.clip(exposure, -1.0, 1.0)
 
-        # PnL Calculation
         if t > 0:
             pnl_amt = portfolio[t-1] * exposure * daily_returns[t]
             portfolio[t] = portfolio[t-1] + pnl_amt
@@ -205,10 +193,10 @@ def run_conviction_backtest(df_data, df_signals):
 def create_equity_plot(results_df):
     fig, (ax1, ax2) = plt.subplots(2, 1, figsize=(12, 10))
     
-    # Define colors: Red for Long, Blue for Short (User Request)
+    # Colors
     long_color = 'red'
     short_color = 'blue'
-    alpha = 0.15  # Transparency for background
+    alpha = 0.15
 
     exposure = results_df['Exposure']
 
@@ -219,18 +207,15 @@ def create_equity_plot(results_df):
     ax1.grid(True, alpha=0.3)
     ax1.legend(loc='upper left')
     
-    # Dynamic Background for Price
-    # transform=ax1.get_xaxis_transform() allows us to use x-data coordinates for X 
-    # and axes coordinates (0 to 1) for Y, effectively filling the vertical strip.
+    # Background for Price - Logic ensures no overlap
     ax1.fill_between(results_df.index, 0, 1, where=exposure > 0, 
-                     color=long_color, alpha=alpha, transform=ax1.get_xaxis_transform())
+                     color=long_color, alpha=alpha, transform=ax1.get_xaxis_transform(), interpolate=True)
     ax1.fill_between(results_df.index, 0, 1, where=exposure < 0, 
-                     color=short_color, alpha=alpha, transform=ax1.get_xaxis_transform())
+                     color=short_color, alpha=alpha, transform=ax1.get_xaxis_transform(), interpolate=True)
 
     # --- Plot 2: Equity Curve ---
     ax2.plot(results_df.index, results_df['Portfolio_Value'], 'k-', linewidth=1.5, label='Strategy Equity')
     
-    # Add Buy & Hold for comparison
     bh_curve = results_df['close'] / results_df['close'].iloc[0] * INITIAL_CAPITAL
     ax2.plot(results_df.index, bh_curve, 'g--', alpha=0.6, label='Buy & Hold')
     
@@ -239,11 +224,11 @@ def create_equity_plot(results_df):
     ax2.grid(True, alpha=0.3)
     ax2.legend(loc='upper left')
     
-    # Dynamic Background for Equity
+    # Background for Equity
     ax2.fill_between(results_df.index, 0, 1, where=exposure > 0, 
-                     color=long_color, alpha=alpha, transform=ax2.get_xaxis_transform())
+                     color=long_color, alpha=alpha, transform=ax2.get_xaxis_transform(), interpolate=True)
     ax2.fill_between(results_df.index, 0, 1, where=exposure < 0, 
-                     color=short_color, alpha=alpha, transform=ax2.get_xaxis_transform())
+                     color=short_color, alpha=alpha, transform=ax2.get_xaxis_transform(), interpolate=True)
     
     plt.tight_layout()
     
@@ -261,28 +246,88 @@ def start_web_server(results_df):
         final_val = results_df['Portfolio_Value'].iloc[-1]
         total_ret = ((final_val / INITIAL_CAPITAL) - 1) * 100
         
-        return f'''
+        # Build Table Rows (Reverse Chronological)
+        table_rows = ""
+        # Convert index to string for safe iterating
+        df_rev = results_df.sort_index(ascending=False)
+        
+        for date, row in df_rev.iterrows():
+            date_str = date.strftime('%Y-%m-%d')
+            close = f"${row['close']:,.2f}"
+            exposure_val = row['Exposure']
+            
+            # Formatting Exposure and Color
+            if exposure_val > 0:
+                exp_str = f"LONG {exposure_val*100:.1f}%"
+                row_color = "color: red; font-weight: bold;"
+            elif exposure_val < 0:
+                exp_str = f"SHORT {abs(exposure_val*100):.1f}%"
+                row_color = "color: blue; font-weight: bold;"
+            else:
+                exp_str = "NEUTRAL 0%"
+                row_color = "color: gray;"
+            
+            pnl = f"${row['Daily_PnL']:,.2f}"
+            equity = f"${row['Portfolio_Value']:,.2f}"
+            
+            table_rows += f"""
+            <tr>
+                <td>{date_str}</td>
+                <td>{close}</td>
+                <td style="{row_color}">{exp_str}</td>
+                <td>{pnl}</td>
+                <td>{equity}</td>
+            </tr>
+            """
+
+        html_template = f'''
         <!DOCTYPE html>
         <html>
         <head>
             <title>Conviction Backtest</title>
             <style>
-                body {{ font-family: sans-serif; margin: 40px; text-align: center; }}
-                .stats {{ margin: 20px auto; padding: 20px; background: #f0f0f0; max-width: 600px; border-radius: 8px; }}
-                img {{ max-width: 90%; height: auto; border: 1px solid #ccc; }}
+                body {{ font-family: sans-serif; margin: 40px; text-align: center; color: #333; }}
+                .stats {{ margin: 20px auto; padding: 20px; background: #f9f9f9; max-width: 800px; border-radius: 8px; box-shadow: 0 2px 4px rgba(0,0,0,0.1); }}
+                img {{ max-width: 95%; height: auto; border: 1px solid #ccc; margin-bottom: 30px; }}
+                h2 {{ margin-top: 40px; }}
+                .table-container {{ margin: 0 auto; max-width: 900px; max-height: 500px; overflow-y: auto; border: 1px solid #ddd; }}
+                table {{ width: 100%; border-collapse: collapse; }}
+                th {{ background: #eee; position: sticky; top: 0; padding: 10px; border-bottom: 2px solid #ccc; }}
+                td {{ padding: 8px; border-bottom: 1px solid #eee; }}
+                tr:hover {{ background-color: #f5f5f5; }}
             </style>
         </head>
         <body>
-            <h1>Strategy Results</h1>
+            <h1>Conviction Strategy Results</h1>
+            
             <div class="stats">
-                <p><strong>Initial Capital:</strong> ${INITIAL_CAPITAL:,.2f}</p>
-                <p><strong>Final Value:</strong> ${final_val:,.2f}</p>
-                <p><strong>Total Return:</strong> {total_ret:.2f}%</p>
+                <p><strong>Initial Capital:</strong> ${INITIAL_CAPITAL:,.2f} | <strong>Final Value:</strong> ${final_val:,.2f}</p>
+                <p><strong>Total Return:</strong> <span style="font-size: 1.2em; color: {'green' if total_ret > 0 else 'red'};">{total_ret:.2f}%</span></p>
             </div>
+            
             <img src="/plot" />
+            
+            <h2>Daily Position Log</h2>
+            <div class="table-container">
+                <table>
+                    <thead>
+                        <tr>
+                            <th>Date</th>
+                            <th>Close Price</th>
+                            <th>Position / Conviction</th>
+                            <th>Daily PnL</th>
+                            <th>Total Equity</th>
+                        </tr>
+                    </thead>
+                    <tbody>
+                        {table_rows}
+                    </tbody>
+                </table>
+            </div>
         </body>
         </html>
         '''
+        return html_template
     
     @app.route('/plot')
     def plot():
@@ -293,7 +338,6 @@ def start_web_server(results_df):
     print("Press Ctrl+C to stop.")
     print("=" * 60)
     
-    # Run in main thread to keep script alive
     app.run(host='0.0.0.0', port=8080, debug=False)
 
 
@@ -305,7 +349,6 @@ if __name__ == '__main__':
     else:
         df_signals = generate_signals(df_data)
         
-        # Ensure we have data to backtest
         if df_signals.empty or len(df_signals) < 10:
              print("Not enough signals generated.")
         else:
@@ -314,5 +357,4 @@ if __name__ == '__main__':
             print(f"\nFinal Portfolio: ${res['Portfolio_Value'].iloc[-1]:,.2f}")
             print(f"Strategy Return: {ret*100:.2f}%")
             
-            # Start server (Blocking)
             start_web_server(res)
