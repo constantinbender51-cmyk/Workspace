@@ -31,6 +31,43 @@ fwd_matrix = None
 weights = None
 data_loaded = False
 
+# --- Data Fetching ---
+def fetch_binance_data():
+    """Fetches daily OHLCV from Binance starting Jan 1, 2018."""
+    print(f"Fetching data for {SYMBOL} since {SINCE_STR}...")
+    exchange = ccxt.binance()
+    since = exchange.parse8601(SINCE_STR)
+    
+    all_ohlcv = []
+    # Binance rate limits require pagination
+    while True:
+        try:
+            ohlcv = exchange.fetch_ohlcv(SYMBOL, TIMEFRAME, since=since, limit=1000)
+            if not ohlcv:
+                break
+            
+            all_ohlcv.extend(ohlcv)
+            last_timestamp = ohlcv[-1][0]
+            since = last_timestamp + 1
+            time.sleep(0.1)
+            
+            if last_timestamp >= exchange.milliseconds() - 24*60*60*1000:
+                break
+                
+            print(f"Fetched {len(all_ohlcv)} candles...", end='\r')
+        except Exception as e:
+            print(f"\nError fetching data: {e}")
+            break
+            
+    print(f"\nTotal candles fetched: {len(all_ohlcv)}")
+    
+    df = pd.DataFrame(all_ohlcv, columns=['timestamp', 'open', 'high', 'low', 'close', 'volume'])
+    df['date'] = pd.to_datetime(df['timestamp'], unit='ms')
+    df.set_index('date', inplace=True)
+    # Daily return calculation (Close[i] / Close[i-1] - 1)
+    df['return'] = df['close'].pct_change()
+    return df
+
 # --- Core Metric Functions ---
 
 def precompute_forward_matrix(returns_array, horizon):
@@ -53,6 +90,7 @@ def calculate_dependability_score(signal_indices, is_long, fwd_matrix, weights, 
     """Calculates the average weighted expectancy for a set of signals."""
     
     # Filter indices to ensure enough forward data exists
+    # fwd_matrix.shape[0] is the length of the data series.
     valid_limit = fwd_matrix.shape[0] - horizon
     valid_indices = signal_indices[signal_indices < valid_limit]
     
@@ -127,7 +165,9 @@ def analyze_rsi_centerline_crossover(df, period, fwd_matrix, weights, horizon):
     delta = df['close'].diff()
     gain = (delta.where(delta > 0, 0)).rolling(window=period).mean()
     loss = (-delta.where(delta < 0, 0)).rolling(window=period).mean()
-    rs = gain / loss
+    # Handle division by zero warning/error if loss is zero
+    with np.errstate(divide='ignore', invalid='ignore'):
+        rs = gain / loss
     rsi = 100 - (100 / (1 + rs))
     rsi_values = rsi.values
     
@@ -249,18 +289,19 @@ def home():
     rank = 1
     for item in analysis_results:
         # Determine color based on score
-        color_class = 'bg-red-100' if item['score'] < 0 else 'bg-green-100' if item['score'] > 0 else 'bg-gray-100'
+        score = item['score']
+        color_class = 'bg-red-100' if score < 0 else 'bg-green-100' if score > 0 else 'bg-gray-100'
         
         # Highlight top 3
-        if rank <= 3 and item['score'] > 0:
+        if rank <= 3 and score > 0:
             color_class = 'bg-yellow-200 font-bold'
             
         table_rows += f"""
         <tr class="border-b hover:bg-gray-50 {color_class if rank > 3 else ''}">
             <td class="px-6 py-3 font-medium text-gray-900 whitespace-nowrap">{rank}</td>
             <td class="px-6 py-3 font-bold">{item['indicator']}</td>
-            <td class="px-6 py-3 text-right" style="color: {'green' if item['score'] >= 0 else 'red'};">
-                {item['score']:.5f}
+            <td class="px-6 py-3 text-right" style="color: {'green' if score >= 0 else 'red'};">
+                {score:.5f}
             </td>
             <td class="px-6 py-3 text-right">{item['count']}</td>
         </tr>
@@ -320,4 +361,4 @@ if __name__ == '__main__':
     load_data_and_run_analysis()
     
     print(f"Starting web server on port {PORT}...")
-    app.run(host='0.0.0.0', port=PORT)
+    app.run(host='0.0.0.0', port=PORT
