@@ -103,6 +103,7 @@ def generate_signals(df):
             with np.errstate(divide='ignore', invalid='ignore'):
                 rs = gain / loss
             rsi = 100 - (100 / (1 + rs))
+            rsi = rsi.fillna(50) # Fill NaN with neutral 50
             center = 50
             long_cond = (rsi.shift(1) < center) & (rsi > center)
             short_cond = (rsi.shift(1) > center) & (rsi < center)
@@ -138,12 +139,14 @@ def run_conviction_backtest(df_data, df_signals):
     daily_pnl = np.zeros(num_days)
     conviction_norm = np.zeros(num_days)
     
+    # Track the state of the lockdown
+    lockdown_state = np.zeros(num_days, dtype=bool)
+    
     daily_contributions = np.zeros((num_days, len(WINNING_SIGNALS)))
 
     signal_start_day = np.full(MAX_CONVICTION, -1, dtype=int)
     signal_direction = np.zeros(MAX_CONVICTION, dtype=int)
     
-    # New state variables for 3-day loss rule
     consecutive_losses = 0
     in_lockdown = False
     
@@ -151,6 +154,7 @@ def run_conviction_backtest(df_data, df_signals):
 
     for t in range(num_days):
         daily_sum = 0.0
+        fresh_signal_fired = False # Corrected Logic: Track FRESH signals
 
         for i in range(len(WINNING_SIGNALS)):
             current_sig = signals.iloc[t, i]
@@ -158,6 +162,7 @@ def run_conviction_backtest(df_data, df_signals):
             if current_sig != 0:
                 signal_start_day[i] = t
                 signal_direction[i] = current_sig
+                fresh_signal_fired = True # Mark that a new event happened today
             
             if signal_direction[i] != 0:
                 d = t - signal_start_day[i]
@@ -177,38 +182,38 @@ def run_conviction_backtest(df_data, df_signals):
         exposure = daily_sum / MAX_CONVICTION
         exposure = np.clip(exposure, -1.0, 1.0)
         
-        # --- NEW: APPLY LOCKDOWN RULE ---
+        # --- CORRECTED 3-DAY LOSS PAUSE LOGIC ---
         if in_lockdown:
-            # Check if a new net signal has arrived (resets lockdown)
-            if daily_sum != 0:
+            # ONLY exit lockdown if a FRESH signal fired today.
+            # daily_sum != 0 is meaningless because of long decay.
+            if fresh_signal_fired:
                 in_lockdown = False
                 consecutive_losses = 0
             else:
-                # If still in lockdown, set exposure to 0
-                exposure = 0.0
+                exposure = 0.0 # Force neutral
+        
+        # Store state for reporting
+        lockdown_state[t] = in_lockdown
 
         if t > 0:
             effective_return = daily_returns[t]
             
-            # PnL is based on compounding and exposure
             pnl_amt = portfolio[t-1] * exposure * effective_return
             portfolio[t] = portfolio[t-1] + pnl_amt
             daily_pnl[t] = pnl_amt
             
-            # Calculate daily strategy return for loss streak tracking
+            # Loss Streak Tracking
             daily_strat_return = pnl_amt / portfolio[t-1] if portfolio[t-1] > 0 else 0
             
-            # Update loss streak
-            if daily_strat_return < 0 and abs(daily_strat_return) > 1e-6: # Check for actual loss
+            if daily_strat_return < 0 and abs(daily_strat_return) > 1e-6:
                 consecutive_losses += 1
-            else:
+            elif daily_strat_return > 0: # Reset on profit
                 consecutive_losses = 0
+            # Note: if return is 0 (due to lockdown), streak persists but doesn't grow
             
-            # Activate lockdown if streak hits 3
             if consecutive_losses >= 3:
                 in_lockdown = True
-                consecutive_losses = 0 # Reset counter after entering lockdown
-
+                consecutive_losses = 0 # Reset counter immediately upon triggering
         else:
             portfolio[t] = INITIAL_CAPITAL
 
@@ -218,10 +223,10 @@ def run_conviction_backtest(df_data, df_signals):
     results['Exposure'] = conviction_norm
     results['Daily_PnL'] = daily_pnl
     results['Portfolio_Value'] = portfolio
+    results['Lockdown'] = lockdown_state
     
     results['Strategy_Daily_Return'] = results['Portfolio_Value'].pct_change().fillna(0)
     
-    # Calculate Drawdown
     rolling_max = results['Portfolio_Value'].cummax()
     results['Drawdown'] = (results['Portfolio_Value'] - rolling_max) / rolling_max
 
@@ -241,7 +246,6 @@ def calculate_net_daily_signal_event(df_signals_raw, results_df):
 
 
 def create_equity_plot(results_df, long_signal_dates, short_signal_dates, horizon):
-    # Use 3 subplots: Price, Equity, Drawdown
     fig, (ax1, ax2, ax3) = plt.subplots(3, 1, figsize=(12, 14), sharex=True, gridspec_kw={'height_ratios': [2, 2, 1]})
     
     # --- Plot 1: Price Chart (Log Scale) ---
@@ -298,7 +302,10 @@ def start_web_server(results_df, long_signal_dates, short_signal_dates, signal_n
             overall_sharpe = (strat_daily_rets.mean() / strat_daily_rets.std()) * np.sqrt(365)
         else:
             overall_sharpe = 0.0
-            
+        
+        # Count days in lockdown
+        lockdown_days = results_df['Lockdown'].sum()
+
         # --- Monthly Stats ---
         monthly_rows = ""
         monthly_groups = results_df.groupby(pd.Grouper(freq='M'))
@@ -362,45 +369,14 @@ def start_web_server(results_df, long_signal_dates, short_signal_dates, signal_n
         table_rows = ""
         df_rev = results_df.sort_index(ascending=False)
         
-        # Check for exposure in the current iteration to indicate lockdown
-        exposure_at_t_minus_1 = 0 
-        in_lockdown_day_col = []
-
-        for t, (date, row) in enumerate(df_rev.iterrows()):
+        for date, row in df_rev.iterrows():
+            date_str = date.strftime('%Y-%m-%d')
             exposure_val = row['Exposure']
-            daily_strat_return = row['Strategy_Daily_Return']
+            is_lockdown = row['Lockdown']
             
-            # --- Check for lockdown display ---
-            # This logic is complex to mirror the backtest:
-            # We need to look 3 days *before* a new signal breaks the streak.
-            # We use a temporary forward loop to detect if a lockdown was active on this day.
-            
-            if t < len(results_df) - 1:
-                # Get the reverse index
-                r_idx = len(results_df) - 1 - t
-                
-                # Check for 3 consecutive losses starting from r_idx
-                # The lock down starts 3 days after the first loss in the streak
-                
-                # Check if a loss streak of 3 started *before* this date
-                # Streak starts at t-3, applied at t
-                
-                # Get returns of this day and the next two older days
-                window = results_df['Strategy_Daily_Return'].iloc[r_idx+1:r_idx+4]
-                
-                # If the current day's exposure is 0 but the signal was active (or decaying)
-                # it means the lockdown took effect.
-                
-                # Simplified visualization based on exposure_val == 0
-                lockdown_badge = ""
-                # We can approximate lockdown if exposure is 0 AND the signal sum (daily_sum) was > 0 3 days ago.
-                # Since that data is not easily exposed here, we'll use a simpler rule:
-                # If exposure is 0 and the net signal sum is also 0, it is either neutral or locked down.
-                # Let's rely on the overall return/Sharpe change to validate the strategy logic.
-                
-                if exposure_val == 0 and daily_strat_return == 0:
-                    lockdown_badge = "<span style='background: #5DADE2; color: white; padding: 2px 6px; border-radius: 4px; font-size: 0.8em; margin-left: 5px;'>LOCKDOWN (NEUTRAL)</span>"
-
+            lockdown_badge = ""
+            if is_lockdown:
+                 lockdown_badge = "<span style='background: #5DADE2; color: white; padding: 2px 6px; border-radius: 4px; font-size: 0.8em; margin-left: 5px;'>PAUSED</span>"
             
             if exposure_val > 0:
                 exp_str = f"LONG {exposure_val*100:.1f}%"
@@ -411,7 +387,6 @@ def start_web_server(results_df, long_signal_dates, short_signal_dates, signal_n
             else:
                 exp_str = f"NEUTRAL 0% {lockdown_badge}"
                 row_color = "color: #7f8c8d;"
-            
             
             table_rows += f"""
             <tr>
@@ -452,7 +427,7 @@ def start_web_server(results_df, long_signal_dates, short_signal_dates, signal_n
                 </p>
                 <p>
                     <strong>Overall Sharpe Ratio:</strong> <span style="font-size: 1.2em; font-weight: bold;">{overall_sharpe:.2f}</span>
-                    <span style="font-size: 0.8em; color: #7f8c8d;">(Risk Rule: 3-Day Loss Exit)</span>
+                    | <strong>Days Paused:</strong> <span style="color: blue;">{lockdown_days}</span>
                 </p>
             </div>
             
