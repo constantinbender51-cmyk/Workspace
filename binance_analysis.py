@@ -208,11 +208,11 @@ def run_conviction_backtest(df_data, df_signals, horizon):
     return total_return, results, signal_names
 
 def run_grid_search(df_data, df_signals):
-    print("\nRunning Grid Search for Optimal Horizon (10-400 days)...")
+    print("\nRunning Grid Search for Optimal Horizon (10-1000 days)...")
     results = []
     
-    # Test range from 10 to 400 in steps of 10
-    search_space = range(10, 401, 10)
+    # Test range from 10 to 1000 in steps of 10
+    search_space = range(10, 1001, 10)
     
     for h in search_space:
         ret, res, _ = run_conviction_backtest(df_data, df_signals, horizon=h)
