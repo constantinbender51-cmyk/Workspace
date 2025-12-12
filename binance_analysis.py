@@ -294,12 +294,12 @@ def start_web_server(results_df):
         <head>
             <title>Conviction Backtest Results</title>
             <style>
-                body { font-family: Arial, sans-serif; margin: 40px; }
-                h1 { color: #333; }
-                .container { max-width: 1200px; margin: 0 auto; }
-                .info { background: #f5f5f5; padding: 20px; border-radius: 5px; margin-bottom: 20px; }
-                .plot-container { text-align: center; margin-top: 20px; }
-                img { max-width: 100%; height: auto; border: 1px solid #ddd; border-radius: 5px; }
+                body {font-family: Arial, sans-serif; margin: 40px; }
+                h1 {color: #333; }
+                .container {max-width: 1200px; margin: 0 auto; }
+                .info {background: #f5f5f5; padding: 20px; border-radius: 5px; margin-bottom: 20px; }
+                .plot-container {text-align: center; margin-top: 20px; }
+                img {max-width: 100%; height: auto; border: 1px solid #ddd; border-radius: 5px; }
             </style>
         </head>
         <body>
