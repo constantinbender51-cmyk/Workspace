@@ -55,18 +55,17 @@ def fetch_binance_data():
     df['return'] = df['close'].pct_change()
     return df
 
-def precompute_forward_matrix(returns, horizon):
+def precompute_forward_matrix(returns_array, horizon):
     """
     Creates a matrix where row 't' contains returns for [t+1, t+2, ... t+horizon].
-    Used for fast lookup of 30-day returns.
+    Accepts the returns as a NumPy array.
     """
-    values = returns.values
-    n = len(values)
+    n = len(returns_array)
     matrix = np.full((n, horizon), np.nan)
     
     for day in range(1, horizon + 1):
         # Shift returns back by 'day' steps
-        shifted = np.roll(values, -day)
+        shifted = np.roll(returns_array, -day)
         # Set the invalid end elements to NaN
         shifted[-day:] = np.nan
         matrix[:, day-1] = shifted
@@ -81,7 +80,7 @@ def get_fixed_window_signals_and_score(df, period, horizon):
     returns = df['return'].values
     dates = df.index
     
-    # 1. Precompute forward return matrix
+    # 1. Precompute forward return matrix (passing the NumPy array directly)
     print("Precomputing forward returns matrix...")
     fwd_matrix = precompute_forward_matrix(returns, horizon)
     
@@ -115,7 +114,8 @@ def get_fixed_window_signals_and_score(df, period, horizon):
             continue
 
         # Get the FIXED 30-day forward returns
-        fwd_returns = fwd_matrix[i]
+        # fwd_matrix[i] returns the array of 30 future returns for index i
+        fwd_returns = fwd_matrix[i] 
         
         # Calculate Score (Fixed-Window Logic)
         if signal_type == 'LONG':
