@@ -13,7 +13,7 @@ import threading
 SYMBOL = 'BTC/USDT'
 TIMEFRAME = '1d'
 SINCE_STR = '2018-01-01 00:00:00'
-HORIZON = 40  # Decay window for signal contribution (days) - INCREASED to 40
+HORIZON = 60  # Decay window for signal contribution (days) - INCREASED to 40
 INITIAL_CAPITAL = 10000.0
 
 # --- Winning Signals ---
