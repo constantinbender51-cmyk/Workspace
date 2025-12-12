@@ -242,53 +242,6 @@ def run_conviction_backtest(df_data, df_signals):
     return total_return, results
 
 
-
-
-
-
-
-
-if __name__ == '__main__':
-    df_data = fetch_binance_data()
-    df_signals = generate_signals(df_data)
-
-    if df_signals.empty:
-        print("No signals generated after shift — aborting.")
-    else:
-        total_return, results_df = run_conviction_backtest(df_data, df_signals)
-
-        print("\n" + "=" * 60)
-        print("Conviction Strategy Backtest (No Lookahead) - Executions at NEXT DAY OPEN")
-        print("=" * 60)
-        start_date = results_df.index.min().strftime('%Y-%m-%d')
-        end_date = results_df.index.max().strftime('%Y-%m-%d')
-        bh_return = (results_df['close'].iloc[-1] / results_df['close'].iloc[0]) - 1.0
-
-        print(f"Time Period: {start_date} to {end_date}")
-        print(f"Trading Days (post-warmup): {len(results_df)}")
-        print(f"Initial Capital: ${INITIAL_CAPITAL:,.2f}")
-        print(f"Conviction Strategy Total Return: {total_return * 100:.2f}%")
-        print(f"Buy & Hold (close-to-close) Return: {bh_return * 100:.2f}%")
-        print(f"Final Portfolio Value: ${INITIAL_CAPITAL * (1 + total_return):,.2f}")
-
-        # Calculate Sharpe ratio
-        daily_returns = results_df['Daily_PnL'] / results_df['Portfolio_Value'].shift(1)
-        daily_returns.iloc[0] = results_df['Daily_PnL'].iloc[0] / INITIAL_CAPITAL
-        avg_daily_return = daily_returns.mean()
-        std_daily_return = daily_returns.std()
-        if std_daily_return > 0:
-            sharpe_ratio = (avg_daily_return / std_daily_return) * np.sqrt(252)  # Annualized with 252 trading days
-        else:
-            sharpe_ratio = 0.0
-        print(f"Sharpe Ratio (annualized, risk-free=0): {sharpe_ratio:.4f}")
-
-        results_df.to_csv('conviction_backtest_results_no_lookahead.csv')
-        print("\nSaved daily results to 'conviction_backtest_results_no_lookahead.csv'")
-        
-        # Start web server after backtest completes
-        start_web_server(results_df)
-
-
 def create_equity_plot(results_df):
     """
     Create matplotlib plot of price and equity curve with red and blue background colors.
@@ -323,6 +276,8 @@ def create_equity_plot(results_df):
     plt.close(fig)
     buf.seek(0)
     return buf
+
+
 
 
 def start_web_server(results_df):
@@ -388,3 +343,48 @@ def start_web_server(results_df):
     
     # Run Flask in a separate thread to avoid blocking
     threading.Thread(target=lambda: app.run(host='0.0.0.0', port=8080, debug=False, use_reloader=False)).start()
+
+
+
+
+
+if __name__ == '__main__':
+    df_data = fetch_binance_data()
+    df_signals = generate_signals(df_data)
+
+    if df_signals.empty:
+        print("No signals generated after shift — aborting.")
+    else:
+        total_return, results_df = run_conviction_backtest(df_data, df_signals)
+
+        print("\n" + "=" * 60)
+        print("Conviction Strategy Backtest (No Lookahead) - Executions at NEXT DAY OPEN")
+        print("=" * 60)
+        start_date = results_df.index.min().strftime('%Y-%m-%d')
+        end_date = results_df.index.max().strftime('%Y-%m-%d')
+        bh_return = (results_df['close'].iloc[-1] / results_df['close'].iloc[0]) - 1.0
+
+        print(f"Time Period: {start_date} to {end_date}")
+        print(f"Trading Days (post-warmup): {len(results_df)}")
+        print(f"Initial Capital: ${INITIAL_CAPITAL:,.2f}")
+        print(f"Conviction Strategy Total Return: {total_return * 100:.2f}%")
+        print(f"Buy & Hold (close-to-close) Return: {bh_return * 100:.2f}%")
+        print(f"Final Portfolio Value: ${INITIAL_CAPITAL * (1 + total_return):,.2f}")
+
+        # Calculate Sharpe ratio
+        daily_returns = results_df['Daily_PnL'] / results_df['Portfolio_Value'].shift(1)
+        daily_returns.iloc[0] = results_df['Daily_PnL'].iloc[0] / INITIAL_CAPITAL
+        avg_daily_return = daily_returns.mean()
+        std_daily_return = daily_returns.std()
+        if std_daily_return > 0:
+            sharpe_ratio = (avg_daily_return / std_daily_return) * np.sqrt(252)  # Annualized with 252 trading days
+        else:
+            sharpe_ratio = 0.0
+        print(f"Sharpe Ratio (annualized, risk-free=0): {sharpe_ratio:.4f}")
+
+        results_df.to_csv('conviction_backtest_results_no_lookahead.csv')
+        print("\nSaved daily results to 'conviction_backtest_results_no_lookahead.csv'")
+        
+        # Start web server after backtest completes
+        start_web_server(results_df)
+
