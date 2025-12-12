@@ -13,7 +13,7 @@ import threading
 SYMBOL = 'BTC/USDT'
 TIMEFRAME = '1d'
 SINCE_STR = '2018-01-01 00:00:00'
-HORIZON = 120  # Decay window (days)
+HORIZON = 40  # Decay window (days)
 INITIAL_CAPITAL = 10000.0
 
 # --- Winning Signals ---
@@ -192,6 +192,9 @@ def run_conviction_backtest(df_data, df_signals):
     results['Daily_PnL'] = daily_pnl
     results['Portfolio_Value'] = portfolio
     
+    # Calculate Strategy Daily Return for Sharpe
+    results['Strategy_Daily_Return'] = results['Portfolio_Value'].pct_change().fillna(0)
+
     # Add contribution columns to results for detailed analysis
     signal_names = [f"{s[0]}_{s[1]}" for s in WINNING_SIGNALS]
     for i, name in enumerate(signal_names):
@@ -252,6 +255,67 @@ def start_web_server(results_df, long_signal_dates, short_signal_dates, signal_n
         final_val = results_df['Portfolio_Value'].iloc[-1]
         total_ret = ((final_val / INITIAL_CAPITAL) - 1) * 100
         
+        # --- Calculate Overall Sharpe ---
+        # Crypto markets trade 365 days a year
+        strat_daily_rets = results_df['Strategy_Daily_Return']
+        avg_ret = strat_daily_rets.mean()
+        std_ret = strat_daily_rets.std()
+        
+        if std_ret > 0:
+            overall_sharpe = (avg_ret / std_ret) * np.sqrt(365)
+        else:
+            overall_sharpe = 0.0
+
+        # --- Calculate Monthly Sharpe & Returns ---
+        monthly_rows = ""
+        # Group by month using the index
+        monthly_groups = results_df.groupby(pd.Grouper(freq='M'))
+        
+        # We collect stats in a list to reverse them later
+        monthly_stats = []
+        
+        for name, group in monthly_groups:
+            if len(group) < 5: continue  # Skip extremely partial months (e.g., start of data)
+            
+            m_daily_rets = group['Strategy_Daily_Return']
+            m_avg = m_daily_rets.mean()
+            m_std = m_daily_rets.std()
+            
+            # Month Total Return (Start of Month Equity to End of Month Equity)
+            # Safe calculation using the Portfolio Value
+            m_start_val = group['Portfolio_Value'].iloc[0]
+            m_end_val = group['Portfolio_Value'].iloc[-1]
+            m_ret_total = (m_end_val / m_start_val) - 1.0
+            
+            # Annualized Sharpe for this specific month's behavior
+            if m_std > 0:
+                m_sharpe = (m_avg / m_std) * np.sqrt(365)
+            else:
+                m_sharpe = 0.0
+                
+            monthly_stats.append({
+                'Date': name.strftime('%Y-%m'),
+                'Return': m_ret_total,
+                'Sharpe': m_sharpe
+            })
+            
+        # Reverse to show newest first
+        for stats in reversed(monthly_stats):
+            ret_val = stats['Return']
+            sharpe_val = stats['Sharpe']
+            
+            # Color coding
+            ret_color = "green" if ret_val > 0 else "red"
+            sharpe_color = "green" if sharpe_val > 1 else ("orange" if sharpe_val > 0 else "red")
+            
+            monthly_rows += f"""
+            <tr>
+                <td>{stats['Date']}</td>
+                <td style="color: {ret_color}; font-weight: bold;">{ret_val*100:.2f}%</td>
+                <td style="color: {sharpe_color};">{sharpe_val:.2f}</td>
+            </tr>
+            """
+
         # --- Generate Attribution Table (First 30 Days) ---
         first_month_df = results_df.iloc[:30]
         attribution_headers = "".join([f"<th>{name}</th>" for name in signal_names])
@@ -261,7 +325,6 @@ def start_web_server(results_df, long_signal_dates, short_signal_dates, signal_n
             date_str = date.strftime('%Y-%m-%d')
             exposure = row['Exposure']
             
-            # Exposure Color
             if exposure > 0:
                  exp_style = "color: #C0392B; font-weight: bold;"
             elif exposure < 0:
@@ -269,14 +332,13 @@ def start_web_server(results_df, long_signal_dates, short_signal_dates, signal_n
             else:
                  exp_style = "color: #7f8c8d;"
                  
-            # Build individual signal cells
             sig_cells = ""
             for name in signal_names:
                 val = row[f"Contrib_{name}"]
                 if val > 0:
-                    color = "background-color: #ffe6e6; color: #C0392B;" # Light Red bg
+                    color = "background-color: #ffe6e6; color: #C0392B;" 
                 elif val < 0:
-                    color = "background-color: #e6f2ff; color: #2980B9;" # Light Blue bg
+                    color = "background-color: #e6f2ff; color: #2980B9;" 
                 else:
                     color = "color: #ccc;"
                 
@@ -328,10 +390,10 @@ def start_web_server(results_df, long_signal_dates, short_signal_dates, signal_n
             <title>Conviction Backtest</title>
             <style>
                 body {{ font-family: sans-serif; margin: 40px; text-align: center; color: #333; }}
-                .stats {{ margin: 20px auto; padding: 20px; background: #f9f9f9; max-width: 800px; border-radius: 8px; box-shadow: 0 2px 4px rgba(0,0,0,0.1); }}
+                .stats {{ margin: 20px auto; padding: 20px; background: #f9f9f9; max-width: 900px; border-radius: 8px; box-shadow: 0 2px 4px rgba(0,0,0,0.1); }}
                 img {{ max-width: 95%; height: auto; border: 1px solid #ccc; margin-bottom: 30px; }}
                 h2 {{ margin-top: 40px; }}
-                .table-container {{ margin: 0 auto; max-width: 1000px; max-height: 500px; overflow-y: auto; border: 1px solid #ddd; border-radius: 4px; }}
+                .table-container {{ margin: 0 auto; max-width: 1000px; max-height: 400px; overflow-y: auto; border: 1px solid #ddd; border-radius: 4px; }}
                 table {{ width: 100%; border-collapse: collapse; font-size: 0.9em; }}
                 th {{ background: #eee; position: sticky; top: 0; padding: 10px; border-bottom: 2px solid #ccc; }}
                 td {{ padding: 8px; border-bottom: 1px solid #eee; }}
@@ -343,12 +405,34 @@ def start_web_server(results_df, long_signal_dates, short_signal_dates, signal_n
             <h1>Conviction Strategy Results</h1>
             
             <div class="stats">
-                <p><strong>Initial Capital:</strong> ${INITIAL_CAPITAL:,.2f} | <strong>Final Value:</strong> ${final_val:,.2f}</p>
-                <p><strong>Total Return:</strong> <span style="font-size: 1.2em; color: {'green' if total_ret > 0 else '#C0392B'};">{total_ret:.2f}%</span></p>
+                <p>
+                    <strong>Initial Capital:</strong> ${INITIAL_CAPITAL:,.2f} | 
+                    <strong>Final Value:</strong> ${final_val:,.2f} | 
+                    <strong>Return:</strong> <span style="color: {'green' if total_ret > 0 else 'red'};">{total_ret:.2f}%</span>
+                </p>
+                <p>
+                    <strong>Overall Sharpe Ratio:</strong> <span style="font-size: 1.2em; font-weight: bold;">{overall_sharpe:.2f}</span> (Annualized 365 days)
+                </p>
                 <p style="font-size: 0.9em;">Vertical Lines: <span style="color: red;">RED = Net Long Signal</span> | <span style="color: blue;">BLUE = Net Short Signal</span></p>
             </div>
             
             <img src="/plot" />
+
+            <h2>Monthly Performance & Sharpe</h2>
+            <div class="table-container" style="max-width: 600px;">
+                <table>
+                    <thead>
+                        <tr>
+                            <th>Month</th>
+                            <th>Total Return</th>
+                            <th>Sharpe Ratio</th>
+                        </tr>
+                    </thead>
+                    <tbody>
+                        {monthly_rows}
+                    </tbody>
+                </table>
+            </div>
 
             <h2>First Month Detailed Attribution (Decay Analysis)</h2>
             <div class="table-container">
@@ -412,7 +496,6 @@ if __name__ == '__main__':
         if df_signals.empty or len(df_signals) < 10:
              print("Not enough signals generated.")
         else:
-            # Unpack the 3 return values now including signal_names
             ret, res, sig_names = run_conviction_backtest(df_data, df_signals)
             
             long_dates, short_dates = calculate_net_daily_signal_event(df_signals_raw, res)
