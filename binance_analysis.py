@@ -152,8 +152,8 @@ def run_conviction_backtest(df_data, df_signals):
     portfolio[0] = INITIAL_CAPITAL
 
     # Stop Loss Constants (Updated to 4%)
-    SL_THRESHOLD = 0.04
-    SL_PENALTY = 0.0405 # 4% + 0.05% slippage
+    SL_THRESHOLD = 0.08
+    SL_PENALTY = 0.0805 # 4% + 0.05% slippage
 
     for t in range(num_days):
         daily_sum = 0.0
