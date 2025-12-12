@@ -31,8 +31,14 @@ WINNING_SIGNALS = [
 
 MAX_CONVICTION = len(WINNING_SIGNALS)
 
+# --- Global Data Storage for Plots (Retrieved once at start) ---
+# Store the initial market data frame globally after fetching.
+# This avoids re-fetching or recalculating the B&H curve inside plot functions.
+global_df_data = pd.DataFrame() 
+
 # --- Data Fetching ---
 def fetch_binance_data():
+    global global_df_data
     print(f"Fetching data for {SYMBOL} since {SINCE_STR}...")
     exchange = ccxt.binance()
     exchange.enableRateLimit = True 
@@ -68,6 +74,7 @@ def fetch_binance_data():
     df['return'] = df['close'].pct_change()
     
     df.dropna(subset=['return'], inplace=True)
+    global_df_data = df.copy() # Store globally
     return df
 
 
@@ -220,6 +227,7 @@ def run_conviction_backtest(df_data, df_signals, threshold):
     results['Strategy_Daily_Return'] = results['Portfolio_Value'].pct_change().fillna(0)
     
     rolling_max = results['Portfolio_Value'].cummax()
+    # Handle division by zero for bankruptcy
     results['Drawdown'] = np.where(rolling_max > 0, (results['Portfolio_Value'] - rolling_max) / rolling_max, -1.0)
 
     signal_names = [f"{s[0]}_{s[1]}" for s in WINNING_SIGNALS]
@@ -283,8 +291,12 @@ def create_equity_plot(results_df, long_signal_dates, short_signal_dates, horizo
     
     # --- Plot 2: Equity Curve (Log Scale) ---
     ax2.plot(results_df.index, results_df['Portfolio_Value'], 'b-', linewidth=1.5, label=f'Strategy Equity ({LEVERAGE}x Lev, Filter {threshold:.2f})')
-    bh_curve = results_df['close'] / results_df['close'].iloc[0] * INITIAL_CAPITAL
-    ax2.plot(results_df.index, bh_curve, 'g--', alpha=0.8, linewidth=1, label='Buy & Hold (1x)')
+    
+    # Calculate B&H curve based on the globally stored data, restricted to the backtest index
+    market_df = global_df_data.loc[results_df.index.min():results_df.index.max()]
+    bh_market_returns = market_df['return'].fillna(0) + 1
+    bh_equity = INITIAL_CAPITAL * bh_market_returns.cumprod()
+    ax2.plot(bh_equity.index, bh_equity.values, 'g--', alpha=0.8, linewidth=1, label='Buy & Hold (1x)')
     
     if (results_df['Portfolio_Value'] <= 0).any():
         ax2.set_yscale('symlog', linthresh=1.0) 
@@ -317,19 +329,8 @@ def create_comparison_plot(comp_result_050, comp_result_020, comp_sharpe_020):
     ax1.plot(comp_result_050.index, comp_result_050, 'b-', linewidth=2, label=f'Threshold 0.50 (Main)')
     ax1.plot(comp_result_020.index, comp_result_020, 'r--', linewidth=1.5, alpha=0.7, label=f'Threshold 0.20 (Sharpe {comp_sharpe_020:.2f})')
     
-    # Buy & Hold Curve
-    bh_curve = comp_result_050.index.to_series().apply(lambda x: INITIAL_CAPITAL).index
-    bh_price = comp_result_050.index.to_series().apply(lambda x: comp_result_050.loc[x] / (comp_result_050.iloc[-1] / INITIAL_CAPITAL))
-    
-    bh_curve = comp_result_050.index.to_series().apply(lambda x: INITIAL_CAPITAL)
-    # The simplest way is to calculate B&H using the market returns
-    market_returns = (comp_result_050.index.to_series().apply(lambda x: comp_result_050.index.get_loc(x)).index).to_series()
-    bh_returns = (comp_result_050.index.to_series().apply(lambda x: comp_result_050.index.get_loc(x)).index).to_series()
-    
-    # Calculate B&H curve separately using the original market data (close-to-close returns)
-    market_df = fetch_binance_data()
-    market_df = market_df.loc[comp_result_050.index.min():comp_result_050.index.max()]
-    
+    # Calculate B&H curve separately using the global market data
+    market_df = global_df_data.loc[comp_result_050.index.min():comp_result_050.index.max()]
     bh_market_returns = market_df['return'].fillna(0) + 1
     bh_equity = INITIAL_CAPITAL * bh_market_returns.cumprod()
     
@@ -354,11 +355,12 @@ def create_comparison_plot(comp_result_050, comp_result_020, comp_sharpe_020):
     buf.seek(0)
     return buf
 
-def start_web_server(backtest_data, comp_sharpe_020):
+def start_web_server(backtest_data, comp_sharpe_020, df_signals_raw):
     app = Flask(__name__)
     
     results_df = backtest_data['main_result']
     sig_names = backtest_data['sig_names']
+    # Calculation needed here to define long/short dates for the main plot route
     long_signal_dates, short_signal_dates = calculate_net_daily_signal_event(df_signals_raw, results_df)
     
     # Main stats for THRESHOLD 0.50
@@ -467,91 +469,102 @@ def start_web_server(backtest_data, comp_sharpe_020):
     if is_bust:
         bust_warning = "<h2 style='color: red; background: #fee; padding: 10px; border: 1px solid red;'>⚠️ STRATEGY BANKRUPT (LIQUIDATED) ⚠️</h2>"
 
-    html_template = f'''
-    <!DOCTYPE html>
-    <html>
-    <head>
-        <title>Conviction Strategy Results</title>
-        <style>
-            body {{ font-family: sans-serif; margin: 40px; text-align: center; color: #333; }}
-            .stats {{ margin: 20px auto; padding: 20px; background: #f9f9f9; max-width: 900px; border-radius: 8px; box-shadow: 0 2px 4px rgba(0,0,0,0.1); }}
-            img {{ max-width: 95%; height: auto; border: 1px solid #ccc; margin-bottom: 20px; }}
-            h2 {{ margin-top: 40px; border-bottom: 2px solid #eee; display: inline-block; padding-bottom: 5px; }}
-            .table-container {{ margin: 0 auto; max-width: 1000px; max-height: 400px; overflow-y: auto; border: 1px solid #ddd; border-radius: 4px; }}
-            table {{ width: 100%; border-collapse: collapse; font-size: 0.9em; }}
-            th {{ background: #eee; position: sticky; top: 0; padding: 10px; border-bottom: 1px solid #ccc; }}
-            td {{ padding: 8px; border-bottom: 1px solid #eee; }}
-            tr:hover {{ background-color: #f5f5f5; }}
-            .comparison-section {{ margin-top: 40px; }}
-        </style>
-    </head>
-    <body>
-        <h1>Conviction Strategy Results</h1>
-        
-        {bust_warning}
-        
-        <div class="stats">
-            <p>
-                <strong>Horizon Set:</strong> {HORIZON} days |
-                <strong>Leverage:</strong> {LEVERAGE}x |
-                <strong>Main Filter:</strong> {best_threshold:.2f} (50%)
-            </p>
-            <p>
-                <strong>Final Value:</strong> ${final_val:,.2f} | 
-                <strong>Return:</strong> <span style="color: {'green' if total_ret > 0 else 'red'};">{total_ret:.2f}%</span>
-            </p>
-            <p>
-                <strong>Overall Sharpe Ratio:</strong> <span style="font-size: 1.2em; font-weight: bold;">{overall_sharpe:.2f}</span>
-            </p>
-        </div>
-        
-        <h2>Strategy Performance Comparison</h2>
-        <div class="comparison-section">
-            <p>Comparing Threshold 0.50 (Tighter Filter) vs Threshold 0.20 (Looser Filter, Sharpe: {comp_sharpe_020:.2f})</p>
-            <img src="/comparison_plot" />
-        </div>
+    # --- Route Definitions ---
+    @app.route('/')
+    def index():
+        # HTML template uses variables defined above
+        html_template = f'''
+        <!DOCTYPE html>
+        <html>
+        <head>
+            <title>Conviction Strategy Results</title>
+            <style>
+                body {{ font-family: sans-serif; margin: 40px; text-align: center; color: #333; }}
+                .stats {{ margin: 20px auto; padding: 20px; background: #f9f9f9; max-width: 900px; border-radius: 8px; box-shadow: 0 2px 4px rgba(0,0,0,0.1); }}
+                img {{ max-width: 95%; height: auto; border: 1px solid #ccc; margin-bottom: 20px; }}
+                h2 {{ margin-top: 40px; border-bottom: 2px solid #eee; display: inline-block; padding-bottom: 5px; }}
+                .table-container {{ margin: 0 auto; max-width: 1000px; max-height: 400px; overflow-y: auto; border: 1px solid #ddd; border-radius: 4px; }}
+                table {{ width: 100%; border-collapse: collapse; font-size: 0.9em; }}
+                th {{ background: #eee; position: sticky; top: 0; padding: 10px; border-bottom: 1px solid #ccc; }}
+                td {{ padding: 8px; border-bottom: 1px solid #eee; }}
+                tr:hover {{ background-color: #f5f5f5; }}
+                .comparison-section {{ margin-top: 40px; }}
+            </style>
+        </head>
+        <body>
+            <h1>Conviction Strategy Results</h1>
+            
+            {bust_warning}
+            
+            <div class="stats">
+                <p>
+                    <strong>Horizon Set:</strong> {HORIZON} days |
+                    <strong>Leverage:</strong> {LEVERAGE}x |
+                    <strong>Main Filter:</strong> {best_threshold:.2f} (50%)
+                </p>
+                <p>
+                    <strong>Final Value:</strong> ${final_val:,.2f} | 
+                    <strong>Return:</strong> <span style="color: {'green' if total_ret > 0 else 'red'};">{total_ret:.2f}%</span>
+                </p>
+                <p>
+                    <strong>Overall Sharpe Ratio:</strong> <span style="font-size: 1.2em; font-weight: bold;">{overall_sharpe:.2f}</span>
+                </p>
+            </div>
+            
+            <h2>Strategy Performance Comparison</h2>
+            <div class="comparison-section">
+                <p>Comparing Threshold 0.50 (Tighter Filter) vs Threshold 0.20 (Looser Filter, Sharpe: {comp_sharpe_020:.2f})</p>
+                <img src="/comparison_plot" />
+            </div>
 
-        <h2>Detailed Performance (Filter: {best_threshold:.2f})</h2>
-        <img src="/plot" />
+            <h2>Detailed Performance (Filter: {best_threshold:.2f})</h2>
+            <img src="/plot" />
 
-        <h2>Monthly Performance</h2>
-        <div class="table-container" style="max-width: 600px;">
-            <table>
-                <thead><tr><th>Month</th><th>Total Return</th><th>Sharpe Ratio</th></tr></thead>
-                <tbody>{monthly_rows}</tbody>
-            </table>
-        </div>
+            <h2>Monthly Performance</h2>
+            <div class="table-container" style="max-width: 600px;">
+                <table>
+                    <thead><tr><th>Month</th><th>Total Return</th><th>Sharpe Ratio</th></tr></thead>
+                    <tbody>{monthly_rows}</tbody>
+                </table>
+            </div>
 
-        <h2>Attribution (First 30 Days)</h2>
-        <div class="table-container">
-            <table class="attrib-table">
-                <thead><tr><th>Date</th><th>Exposure</th>{attribution_headers}</tr></thead>
-                <tbody>{attribution_rows}</tbody>
-            </table>
-        </div>
-        
-        <h2>Daily Position Log</h2>
-        <div class="table-container">
-            <table>
-                <thead><tr><th>Date</th><th>Close</th><th>Position</th><th>PnL</th><th>Equity</th></tr></thead>
-                <tbody>{table_rows}</tbody>
-            </table>
-        </div>
-    </body>
-    </html>
-    '''
-    return html_template
+            <h2>Attribution (First 30 Days)</h2>
+            <div class="table-container">
+                <table class="attrib-table">
+                    <thead><tr><th>Date</th><th>Exposure</th>{attribution_headers}</tr></thead>
+                    <tbody>{attribution_rows}</tbody>
+                </table>
+            </div>
+            
+            <h2>Daily Position Log</h2>
+            <div class="table-container">
+                <table>
+                    <thead><tr><th>Date</th><th>Close</th><th>Position</th><th>PnL</th><th>Equity</th></tr></thead>
+                    <tbody>{table_rows}</tbody>
+                </table>
+            </div>
+        </body>
+        </html>
+        '''
+        return html_template
     
-    
-@app.route('/plot')
-def plot():
-    buf = create_equity_plot(backtest_data['main_result'], long_signal_dates, short_signal_dates, HORIZON, THRESHOLD_1)
-    return send_file(buf, mimetype='image/png')
+    @app.route('/plot')
+    def plot():
+        buf = create_equity_plot(results_df, long_signal_dates, short_signal_dates, HORIZON, THRESHOLD_1)
+        return send_file(buf, mimetype='image/png')
 
-@app.route('/comparison_plot')
-def comparison_plot():
-    buf = create_comparison_plot(backtest_data['comp_result_050'], backtest_data['comp_result_020'], backtest_data['comp_sharpe_020'])
-    return send_file(buf, mimetype='image/png')
+    @app.route('/comparison_plot')
+    def comparison_plot():
+        buf = create_comparison_plot(backtest_data['comp_result_050'], backtest_data['comp_result_020'], comp_sharpe_020)
+        return send_file(buf, mimetype='image/png')
+    
+    print("\n" + "=" * 60)
+    print(f"Server running on http://localhost:8080 (Filter: {best_threshold:.2f}, Leverage: {LEVERAGE}x)")
+    print("Press Ctrl+C to stop.")
+    print("=" * 60)
+    
+    app.run(host='0.0.0.0', port=8080, debug=False)
+
 
 if __name__ == '__main__':
     df_data = fetch_binance_data()
@@ -576,4 +589,4 @@ if __name__ == '__main__':
             print(f"Filter 0.20 (Comp): Sharpe {backtest_data['comp_sharpe_020']:.2f}")
             print("====================================")
             
-            start_web_server(backtest_data, backtest_data['comp_sharpe_020'])
+            start_web_server(backtest_data, backtest_data['comp_sharpe_020'], df_signals_raw)
