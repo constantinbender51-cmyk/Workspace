@@ -13,7 +13,7 @@ import threading
 SYMBOL = 'BTC/USDT'
 TIMEFRAME = '1d'
 SINCE_STR = '2018-01-01 00:00:00'
-HORIZON = 60  # Decay window for signal contribution (days) - INCREASED to 40
+HORIZON = 40  # Decay window (days)
 INITIAL_CAPITAL = 10000.0
 
 # --- Winning Signals ---
@@ -117,7 +117,6 @@ def generate_signals(df):
         df_signals[col] = np.where(long_cond, 1, np.where(short_cond, -1, 0))
 
     # --- Store ORIGINAL (non-decayed) signals before shifting ---
-    # This is needed for plotting the exact day an indicator fired (t+1 trade)
     df_signals_raw = df_signals.copy()
 
     # --- Shift signals forward for backtesting ---
@@ -141,6 +140,9 @@ def run_conviction_backtest(df_data, df_signals):
     portfolio = np.zeros(num_days)
     daily_pnl = np.zeros(num_days)
     conviction_norm = np.zeros(num_days)
+    
+    # Store detailed contributions: Shape [Days, Num_Signals]
+    daily_contributions = np.zeros((num_days, len(WINNING_SIGNALS)))
 
     signal_start_day = np.full(MAX_CONVICTION, -1, dtype=int)
     signal_direction = np.zeros(MAX_CONVICTION, dtype=int)
@@ -165,7 +167,9 @@ def run_conviction_backtest(df_data, df_signals):
                 else:
                     decay = max(0.0, 1.0 - (d / HORIZON))
                 
-                daily_sum += signal_direction[i] * decay
+                contribution = signal_direction[i] * decay
+                daily_contributions[t, i] = contribution
+                daily_sum += contribution
 
                 if decay == 0.0:
                     signal_direction[i] = 0
@@ -188,26 +192,19 @@ def run_conviction_backtest(df_data, df_signals):
     results['Daily_PnL'] = daily_pnl
     results['Portfolio_Value'] = portfolio
     
+    # Add contribution columns to results for detailed analysis
+    signal_names = [f"{s[0]}_{s[1]}" for s in WINNING_SIGNALS]
+    for i, name in enumerate(signal_names):
+        results[f"Contrib_{name}"] = daily_contributions[:, i]
+    
     total_return = (portfolio[-1] / portfolio[0]) - 1.0
-    return total_return, results
+    return total_return, results, signal_names
 
 def calculate_net_daily_signal_event(df_signals_raw, results_df):
-    """
-    Calculates the net signal event (Long/Short) for plotting purposes.
-    This uses the *unshifted* signals (df_signals_raw) aligned with the results index.
-    """
-    # Align the raw signals with the backtest results index
     aligned_signals = df_signals_raw.loc[results_df.index.min():results_df.index.max()]
-    
-    # Sum the signals for each day. If sum != 0, a signal fired.
     net_signal_sum = aligned_signals.sum(axis=1)
-    
-    # A Long signal event occurs if the sum is positive
     long_signal_dates = net_signal_sum[net_signal_sum > 0].index
-    
-    # A Short signal event occurs if the sum is negative
     short_signal_dates = net_signal_sum[net_signal_sum < 0].index
-    
     return long_signal_dates, short_signal_dates
 
 
@@ -223,8 +220,6 @@ def create_equity_plot(results_df, long_signal_dates, short_signal_dates):
 
     # --- Plot 2: Equity Curve ---
     ax2.plot(results_df.index, results_df['Portfolio_Value'], 'k-', linewidth=1.5, label='Strategy Equity')
-    
-    # Add Buy & Hold for comparison
     bh_curve = results_df['close'] / results_df['close'].iloc[0] * INITIAL_CAPITAL
     ax2.plot(results_df.index, bh_curve, 'g--', alpha=0.6, label='Buy & Hold')
     
@@ -234,27 +229,22 @@ def create_equity_plot(results_df, long_signal_dates, short_signal_dates):
     ax2.grid(True, alpha=0.3)
     ax2.legend(loc='upper left')
     
-    # --- Add Vertical Lines for Signal Events (Solid Lines) ---
-    
-    # Red Solid Lines for Long Signals
+    # --- Add Vertical Lines ---
     for date in long_signal_dates:
         ax1.axvline(x=date, color='red', linestyle='-', linewidth=1.5, alpha=0.7)
         ax2.axvline(x=date, color='red', linestyle='-', linewidth=1.5, alpha=0.7)
-        
-    # Blue Solid Lines for Short Signals
     for date in short_signal_dates:
         ax1.axvline(x=date, color='blue', linestyle='-', linewidth=1.5, alpha=0.7)
         ax2.axvline(x=date, color='blue', linestyle='-', linewidth=1.5, alpha=0.7)
 
     plt.tight_layout()
-    
     buf = io.BytesIO()
     plt.savefig(buf, format='png', dpi=100)
     plt.close(fig)
     buf.seek(0)
     return buf
 
-def start_web_server(results_df, long_signal_dates, short_signal_dates):
+def start_web_server(results_df, long_signal_dates, short_signal_dates, signal_names):
     app = Flask(__name__)
     
     @app.route('/')
@@ -262,25 +252,61 @@ def start_web_server(results_df, long_signal_dates, short_signal_dates):
         final_val = results_df['Portfolio_Value'].iloc[-1]
         total_ret = ((final_val / INITIAL_CAPITAL) - 1) * 100
         
-        # Build Table Rows (Reverse Chronological)
+        # --- Generate Attribution Table (First 30 Days) ---
+        first_month_df = results_df.iloc[:30]
+        attribution_headers = "".join([f"<th>{name}</th>" for name in signal_names])
+        attribution_rows = ""
+        
+        for date, row in first_month_df.iterrows():
+            date_str = date.strftime('%Y-%m-%d')
+            exposure = row['Exposure']
+            
+            # Exposure Color
+            if exposure > 0:
+                 exp_style = "color: #C0392B; font-weight: bold;"
+            elif exposure < 0:
+                 exp_style = "color: #2980B9; font-weight: bold;"
+            else:
+                 exp_style = "color: #7f8c8d;"
+                 
+            # Build individual signal cells
+            sig_cells = ""
+            for name in signal_names:
+                val = row[f"Contrib_{name}"]
+                if val > 0:
+                    color = "background-color: #ffe6e6; color: #C0392B;" # Light Red bg
+                elif val < 0:
+                    color = "background-color: #e6f2ff; color: #2980B9;" # Light Blue bg
+                else:
+                    color = "color: #ccc;"
+                
+                sig_cells += f"<td style='{color}'>{val:.2f}</td>"
+            
+            attribution_rows += f"""
+            <tr>
+                <td>{date_str}</td>
+                <td style="{exp_style}">{exposure:.2f}</td>
+                {sig_cells}
+            </tr>
+            """
+
+        # --- Generate Main Log Table ---
         table_rows = ""
         df_rev = results_df.sort_index(ascending=False)
-        
         for date, row in df_rev.iterrows():
             date_str = date.strftime('%Y-%m-%d')
             close = f"${row['close']:,.2f}"
             exposure_val = row['Exposure']
             
-            # Formatting Exposure and Color
             if exposure_val > 0:
                 exp_str = f"LONG {exposure_val*100:.1f}%"
-                row_color = "color: #C0392B; font-weight: bold;" # Darker Red
+                row_color = "color: #C0392B; font-weight: bold;"
             elif exposure_val < 0:
                 exp_str = f"SHORT {abs(exposure_val*100):.1f}%"
-                row_color = "color: #2980B9; font-weight: bold;" # Darker Blue
+                row_color = "color: #2980B9; font-weight: bold;"
             else:
                 exp_str = "NEUTRAL 0%"
-                row_color = "color: #7f8c8d;" # Gray
+                row_color = "color: #7f8c8d;"
             
             pnl = f"${row['Daily_PnL']:,.2f}"
             equity = f"${row['Portfolio_Value']:,.2f}"
@@ -305,11 +331,12 @@ def start_web_server(results_df, long_signal_dates, short_signal_dates):
                 .stats {{ margin: 20px auto; padding: 20px; background: #f9f9f9; max-width: 800px; border-radius: 8px; box-shadow: 0 2px 4px rgba(0,0,0,0.1); }}
                 img {{ max-width: 95%; height: auto; border: 1px solid #ccc; margin-bottom: 30px; }}
                 h2 {{ margin-top: 40px; }}
-                .table-container {{ margin: 0 auto; max-width: 900px; max-height: 500px; overflow-y: auto; border: 1px solid #ddd; border-radius: 4px; }}
-                table {{ width: 100%; border-collapse: collapse; }}
-                th {{ background: #eee; position: sticky; top: 0; padding: 12px; border-bottom: 2px solid #ccc; }}
-                td {{ padding: 10px; border-bottom: 1px solid #eee; }}
+                .table-container {{ margin: 0 auto; max-width: 1000px; max-height: 500px; overflow-y: auto; border: 1px solid #ddd; border-radius: 4px; }}
+                table {{ width: 100%; border-collapse: collapse; font-size: 0.9em; }}
+                th {{ background: #eee; position: sticky; top: 0; padding: 10px; border-bottom: 2px solid #ccc; }}
+                td {{ padding: 8px; border-bottom: 1px solid #eee; }}
                 tr:hover {{ background-color: #f5f5f5; }}
+                .attrib-table th {{ background: #e0e0e0; }}
             </style>
         </head>
         <body>
@@ -318,10 +345,26 @@ def start_web_server(results_df, long_signal_dates, short_signal_dates):
             <div class="stats">
                 <p><strong>Initial Capital:</strong> ${INITIAL_CAPITAL:,.2f} | <strong>Final Value:</strong> ${final_val:,.2f}</p>
                 <p><strong>Total Return:</strong> <span style="font-size: 1.2em; color: {'green' if total_ret > 0 else '#C0392B'};">{total_ret:.2f}%</span></p>
-                <p style="font-size: 0.9em;">Vertical Lines indicate days when an indicator triggered: <span style="color: red;">RED = Net Long Signal</span> | <span style="color: blue;">BLUE = Net Short Signal</span></p>
+                <p style="font-size: 0.9em;">Vertical Lines: <span style="color: red;">RED = Net Long Signal</span> | <span style="color: blue;">BLUE = Net Short Signal</span></p>
             </div>
             
             <img src="/plot" />
+
+            <h2>First Month Detailed Attribution (Decay Analysis)</h2>
+            <div class="table-container">
+                <table class="attrib-table">
+                    <thead>
+                        <tr>
+                            <th>Date</th>
+                            <th>Total Exp</th>
+                            {attribution_headers}
+                        </tr>
+                    </thead>
+                    <tbody>
+                        {attribution_rows}
+                    </tbody>
+                </table>
+            </div>
             
             <h2>Daily Position Log</h2>
             <div class="table-container">
@@ -347,7 +390,6 @@ def start_web_server(results_df, long_signal_dates, short_signal_dates):
     
     @app.route('/plot')
     def plot():
-        # The plot function now takes the signal dates
         buf = create_equity_plot(results_df, long_signal_dates, short_signal_dates)
         return send_file(buf, mimetype='image/png')
     
@@ -365,19 +407,17 @@ if __name__ == '__main__':
     if df_data.empty:
         print("No data fetched.")
     else:
-        # generate_signals now returns the backtest signals AND the raw signals
         df_signals, df_signals_raw = generate_signals(df_data)
         
         if df_signals.empty or len(df_signals) < 10:
              print("Not enough signals generated.")
         else:
-            ret, res = run_conviction_backtest(df_data, df_signals)
+            # Unpack the 3 return values now including signal_names
+            ret, res, sig_names = run_conviction_backtest(df_data, df_signals)
             
-            # Calculate the days for plotting signals
             long_dates, short_dates = calculate_net_daily_signal_event(df_signals_raw, res)
             
             print(f"\nFinal Portfolio: ${res['Portfolio_Value'].iloc[-1]:,.2f}")
             print(f"Strategy Return: {ret*100:.2f}%")
             
-            # Pass the signal dates to the web server function
-            start_web_server(res, long_dates, short_dates)
+            start_web_server(res, long_dates, short_dates, sig_names)
