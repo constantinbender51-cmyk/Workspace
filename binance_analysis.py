@@ -116,12 +116,16 @@ def generate_signals(df):
 
         df_signals[col] = np.where(long_cond, 1, np.where(short_cond, -1, 0))
 
-    # --- Shift signals forward ---
+    # --- Store ORIGINAL (non-decayed) signals before shifting ---
+    # This is needed for plotting the exact day an indicator fired (t+1 trade)
+    df_signals_raw = df_signals.copy()
+
+    # --- Shift signals forward for backtesting ---
     df_signals = df_signals.shift(1)
     df_signals.fillna(0, inplace=True)
     df_signals = df_signals.astype(int)
 
-    return df_signals
+    return df_signals, df_signals_raw
 
 
 # --- Backtest implementation ---
@@ -136,7 +140,6 @@ def run_conviction_backtest(df_data, df_signals):
 
     portfolio = np.zeros(num_days)
     daily_pnl = np.zeros(num_days)
-    conviction_raw = np.zeros(num_days)
     conviction_norm = np.zeros(num_days)
 
     signal_start_day = np.full(MAX_CONVICTION, -1, dtype=int)
@@ -178,7 +181,6 @@ def run_conviction_backtest(df_data, df_signals):
         else:
             portfolio[t] = INITIAL_CAPITAL
 
-        conviction_raw[t] = daily_sum
         conviction_norm[t] = exposure
 
     results = df[['close', 'return']].copy()
@@ -189,22 +191,28 @@ def run_conviction_backtest(df_data, df_signals):
     total_return = (portfolio[-1] / portfolio[0]) - 1.0
     return total_return, results
 
+def calculate_net_daily_signal_event(df_signals_raw, results_df):
+    """
+    Calculates the net signal event (Long/Short) for plotting purposes.
+    This uses the *unshifted* signals (df_signals_raw) aligned with the results index.
+    """
+    # Align the raw signals with the backtest results index
+    aligned_signals = df_signals_raw.loc[results_df.index.min():results_df.index.max()]
+    
+    # Sum the signals for each day. If sum != 0, a signal fired.
+    net_signal_sum = aligned_signals.sum(axis=1)
+    
+    # A Long signal event occurs if the sum is positive
+    long_signal_dates = net_signal_sum[net_signal_sum > 0].index
+    
+    # A Short signal event occurs if the sum is negative
+    short_signal_dates = net_signal_sum[net_signal_sum < 0].index
+    
+    return long_signal_dates, short_signal_dates
 
-def create_equity_plot(results_df):
+
+def create_equity_plot(results_df, long_signal_dates, short_signal_dates):
     fig, (ax1, ax2) = plt.subplots(2, 1, figsize=(12, 10), sharex=True)
-    
-    exposure = results_df['Exposure']
-    
-    # Calculate days where position starts or flips direction
-    # We check if the sign changes compared to the previous day
-    # np.sign(x) gives 1 for positive, -1 for negative, 0 for zero
-    position_change = np.sign(exposure).diff().fillna(0).abs() > 0
-    
-    # Exclude the first day unless exposure is non-zero
-    if exposure.iloc[0] == 0:
-        position_change.iloc[0] = False
-    
-    entry_dates = results_df.index[position_change]
     
     # --- Plot 1: Price Chart ---
     ax1.plot(results_df.index, results_df['close'], 'k-', linewidth=1.5, label='BTC Price')
@@ -226,15 +234,17 @@ def create_equity_plot(results_df):
     ax2.grid(True, alpha=0.3)
     ax2.legend(loc='upper left')
     
-    # --- Add Vertical Lines for Entries/Flips ---
-    for date in entry_dates:
-        # Determine color based on the exposure *after* the change
-        current_exposure = exposure.loc[date]
-        line_color = 'red' if current_exposure > 0 else 'blue'
+    # --- Add Vertical Lines for Signal Events (Solid Lines) ---
+    
+    # Red Solid Lines for Long Signals
+    for date in long_signal_dates:
+        ax1.axvline(x=date, color='red', linestyle='-', linewidth=1.5, alpha=0.7)
+        ax2.axvline(x=date, color='red', linestyle='-', linewidth=1.5, alpha=0.7)
         
-        # Add the vertical line to both plots
-        ax1.axvline(x=date, color=line_color, linestyle='--', linewidth=1, alpha=0.7)
-        ax2.axvline(x=date, color=line_color, linestyle='--', linewidth=1, alpha=0.7)
+    # Blue Solid Lines for Short Signals
+    for date in short_signal_dates:
+        ax1.axvline(x=date, color='blue', linestyle='-', linewidth=1.5, alpha=0.7)
+        ax2.axvline(x=date, color='blue', linestyle='-', linewidth=1.5, alpha=0.7)
 
     plt.tight_layout()
     
@@ -244,7 +254,7 @@ def create_equity_plot(results_df):
     buf.seek(0)
     return buf
 
-def start_web_server(results_df):
+def start_web_server(results_df, long_signal_dates, short_signal_dates):
     app = Flask(__name__)
     
     @app.route('/')
@@ -308,6 +318,7 @@ def start_web_server(results_df):
             <div class="stats">
                 <p><strong>Initial Capital:</strong> ${INITIAL_CAPITAL:,.2f} | <strong>Final Value:</strong> ${final_val:,.2f}</p>
                 <p><strong>Total Return:</strong> <span style="font-size: 1.2em; color: {'green' if total_ret > 0 else '#C0392B'};">{total_ret:.2f}%</span></p>
+                <p style="font-size: 0.9em;">Vertical Lines indicate days when an indicator triggered: <span style="color: red;">RED = Net Long Signal</span> | <span style="color: blue;">BLUE = Net Short Signal</span></p>
             </div>
             
             <img src="/plot" />
@@ -336,7 +347,9 @@ def start_web_server(results_df):
     
     @app.route('/plot')
     def plot():
-        return send_file(create_equity_plot(results_df), mimetype='image/png')
+        # The plot function now takes the signal dates
+        buf = create_equity_plot(results_df, long_signal_dates, short_signal_dates)
+        return send_file(buf, mimetype='image/png')
     
     print("\n" + "=" * 60)
     print("Server running on http://localhost:8080")
@@ -352,14 +365,19 @@ if __name__ == '__main__':
     if df_data.empty:
         print("No data fetched.")
     else:
-        df_signals = generate_signals(df_data)
+        # generate_signals now returns the backtest signals AND the raw signals
+        df_signals, df_signals_raw = generate_signals(df_data)
         
         if df_signals.empty or len(df_signals) < 10:
              print("Not enough signals generated.")
         else:
             ret, res = run_conviction_backtest(df_data, df_signals)
             
+            # Calculate the days for plotting signals
+            long_dates, short_dates = calculate_net_daily_signal_event(df_signals_raw, res)
+            
             print(f"\nFinal Portfolio: ${res['Portfolio_Value'].iloc[-1]:,.2f}")
             print(f"Strategy Return: {ret*100:.2f}%")
             
-            start_web_server(res)
+            # Pass the signal dates to the web server function
+            start_web_server(res, long_dates, short_dates)
