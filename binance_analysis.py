@@ -90,18 +90,17 @@ def calculate_dependability_scores(df):
     fwd_matrix = precompute_forward_matrix(returns, HORIZON)
     
     # 2. Precompute Weights: Linear Decay (1 - d/30)
-    # Days 1 to 30. Weight for day 1 = 29/30? No, 1 - 1/30 = 0.96. 
-    # Or should it be 1 - (d-1)/30 to start at 1.0? 
-    # User said "1-day/30". If day=30, weight=0. 
-    # Let's use weights that don't hit zero exactly at the end to keep the last day relevant?
-    # Actually, 1 - d/30 is fine.
     days = np.arange(1, HORIZON + 1)
     weights = 1 - (days / HORIZON) 
-    # Avoid zero weight if desired, but formula is formula.
-    # Note: If day=30, weight=0. That renders the 30th day useless. 
-    # Often "linear decay" implies triangular window. We'll stick to the user's "1 - day/30" literal.
     
-    results = {'sma': [], 'score': [], 'num_signals': []}
+    # Initialize results dictionary
+    results = {
+        'sma': [], 
+        'score_total': [], 
+        'score_long': [], 
+        'score_short': [], 
+        'num_signals': []
+    }
     
     print("Calculating scores for SMAs 10-400...")
     for period in range(SMA_START, SMA_END + 1):
@@ -109,9 +108,6 @@ def calculate_dependability_scores(df):
         sma = df['close'].rolling(window=period).mean().values
         
         # Identify Crosses (Vectorized)
-        # prev_price < prev_sma AND curr_price > curr_sma (Long)
-        # prev_price > prev_sma AND curr_price < curr_sma (Short)
-        
         prev_close = prices[:-1]
         curr_close = prices[1:]
         prev_sma = sma[:-1]
@@ -125,38 +121,59 @@ def calculate_dependability_scores(df):
         long_indices = np.where(long_signals)[0] + 1
         short_indices = np.where(short_signals)[0] + 1
         
-        # Combine valid indices
-        # We need to filter indices that don't have enough future data (where fwd_matrix row contains NaN)
+        # Filter indices near the end of data (not enough future days)
         valid_limit = len(prices) - HORIZON
-        
         long_indices = long_indices[long_indices < valid_limit]
         short_indices = short_indices[short_indices < valid_limit]
         
-        if len(long_indices) == 0 and len(short_indices) == 0:
+        # Initialize scores for this SMA
+        avg_long = np.nan
+        avg_short = np.nan
+        avg_total = np.nan
+        count = len(long_indices) + len(short_indices)
+
+        if count == 0:
             results['sma'].append(period)
-            results['score'].append(0)
+            results['score_total'].append(0)
+            results['score_long'].append(0)
+            results['score_short'].append(0)
             results['num_signals'].append(0)
             continue
 
-        # Get forward returns for these days
-        # Shape: (num_signals, 30)
-        long_fwd = fwd_matrix[long_indices]
-        short_fwd = fwd_matrix[short_indices]
-        
-        # Calculate Weighted Sums
-        # Long Score: Sum(R * Weight)
-        long_scores = np.sum(long_fwd * weights, axis=1) if len(long_indices) > 0 else np.array([])
-        
-        # Short Score: Sum(R * -1 * Weight) -> Sum(-R * Weight)
-        short_scores = np.sum(short_fwd * -1 * weights, axis=1) if len(short_indices) > 0 else np.array([])
-        
-        # Total Dependability: Average of all signal scores
-        all_scores = np.concatenate([long_scores, short_scores])
-        avg_score = np.mean(all_scores)
-        
+        # --- Calculate Long Scores ---
+        if len(long_indices) > 0:
+            long_fwd = fwd_matrix[long_indices]
+            # Sum(R * Weight)
+            long_weighted_sums = np.sum(long_fwd * weights, axis=1)
+            # We want the average dependability per signal
+            avg_long = np.mean(long_weighted_sums)
+            
+        # --- Calculate Short Scores ---
+        if len(short_indices) > 0:
+            short_fwd = fwd_matrix[short_indices]
+            # Sum(-R * Weight) -> Profit from price drop
+            short_weighted_sums = np.sum(short_fwd * -1 * weights, axis=1)
+            avg_short = np.mean(short_weighted_sums)
+            
+        # --- Calculate Total Score ---
+        # Combine all weighted sum values to get true weighted average
+        all_sums = []
+        if len(long_indices) > 0:
+            all_sums.extend(long_weighted_sums)
+        if len(short_indices) > 0:
+            all_sums.extend(short_weighted_sums)
+            
+        if all_sums:
+            avg_total = np.mean(all_sums)
+        else:
+            avg_total = 0
+
+        # Fill NaNs with 0 for plotting if no signals of that type occurred
         results['sma'].append(period)
-        results['score'].append(avg_score)
-        results['num_signals'].append(len(all_scores))
+        results['score_total'].append(avg_total if not np.isnan(avg_total) else 0)
+        results['score_long'].append(avg_long if not np.isnan(avg_long) else 0)
+        results['score_short'].append(avg_short if not np.isnan(avg_short) else 0)
+        results['num_signals'].append(count)
         
     return pd.DataFrame(results)
 
@@ -172,19 +189,26 @@ def plot_png():
     """Generates the plot and serves it."""
     
     # Setup the plot
-    fig, (ax1, ax2) = plt.subplots(2, 1, figsize=(12, 10), gridspec_kw={'height_ratios': [3, 1]})
+    fig, (ax1, ax2) = plt.subplots(2, 1, figsize=(12, 12), gridspec_kw={'height_ratios': [3, 1]})
     
-    # Plot 1: Dependability Score
-    ax1.plot(df_results['sma'], df_results['score'], color='#2ecc71', linewidth=2)
-    ax1.set_title(f'Signal Dependability Score (BTC/USDT 2018-Present)\nMetric: Linear Decay (1 - day/30) over 30 days', fontsize=14)
-    ax1.set_ylabel('Dependability Score (Weighted Avg Return)', fontsize=12)
+    # Plot 1: Dependability Score (Long vs Short vs Total)
+    ax1.plot(df_results['sma'], df_results['score_total'], color='black', linewidth=2, alpha=0.8, label='Total')
+    ax1.plot(df_results['sma'], df_results['score_long'], color='#2ecc71', linewidth=1.5, linestyle='--', label='Long Only')
+    ax1.plot(df_results['sma'], df_results['score_short'], color='#e74c3c', linewidth=1.5, linestyle='--', label='Short Only')
+    
+    ax1.set_title(f'Signal Dependability: Long vs Short (BTC/USDT 2018-Present)\nMetric: Linear Decay (1 - day/30)', fontsize=14)
+    ax1.set_ylabel('Dependability Score', fontsize=12)
+    ax1.legend(loc='upper left')
     ax1.grid(True, alpha=0.3)
     
-    # Highlight max score
-    max_idx = df_results['score'].idxmax()
+    # Add Zero Line
+    ax1.axhline(0, color='gray', linewidth=0.8, alpha=0.5)
+
+    # Highlight max Total score
+    max_idx = df_results['score_total'].idxmax()
     best_sma = df_results.loc[max_idx, 'sma']
-    best_score = df_results.loc[max_idx, 'score']
-    ax1.annotate(f'Best SMA: {best_sma}\nScore: {best_score:.4f}', 
+    best_score = df_results.loc[max_idx, 'score_total']
+    ax1.annotate(f'Best Total: SMA {best_sma}\nScore: {best_score:.4f}', 
                  xy=(best_sma, best_score), 
                  xytext=(best_sma+20, best_score),
                  arrowprops=dict(facecolor='black', shrink=0.05))
