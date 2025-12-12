@@ -14,6 +14,7 @@ import base64
 SYMBOL = 'BTC/USDT'
 TIMEFRAME = '1d'
 SINCE_STR = '2018-01-01 00:00:00'
+HORIZON = 380  # Decay window (days) - OPTIMAL VALUE SET TO 380
 INITIAL_CAPITAL = 10000.0
 
 # --- Winning Signals ---
@@ -128,10 +129,12 @@ def generate_signals(df):
 
 
 # --- Backtest implementation ---
-def run_conviction_backtest(df_data, df_signals, horizon):
+def run_conviction_backtest(df_data, df_signals):
     """
-    Runs the backtest with a specific horizon decay parameter.
+    Runs the backtest using the global HORIZON parameter.
     """
+    horizon = HORIZON # Use the fixed global horizon
+    
     common_idx = df_data.index.intersection(df_signals.index)
     df = df_data.loc[common_idx].copy()
     signals = df_signals.loc[common_idx]
@@ -168,7 +171,6 @@ def run_conviction_backtest(df_data, df_signals, horizon):
                 if d < 0: 
                     decay = 0.0
                 else:
-                    # Use the passed horizon parameter
                     decay = max(0.0, 1.0 - (d / horizon))
                 
                 contribution = signal_direction[i] * decay
@@ -207,33 +209,7 @@ def run_conviction_backtest(df_data, df_signals, horizon):
     total_return = (portfolio[-1] / portfolio[0]) - 1.0
     return total_return, results, signal_names
 
-def run_grid_search(df_data, df_signals):
-    print("\nRunning Grid Search for Optimal Horizon (10-1000 days)...")
-    results = []
-    
-    # Test range from 10 to 1000 in steps of 10
-    search_space = range(10, 1001, 10)
-    
-    for h in search_space:
-        ret, res, _ = run_conviction_backtest(df_data, df_signals, horizon=h)
-        
-        # Calculate Sharpe
-        daily_rets = res['Strategy_Daily_Return']
-        if daily_rets.std() > 0:
-            sharpe = (daily_rets.mean() / daily_rets.std()) * np.sqrt(365)
-        else:
-            sharpe = 0.0
-            
-        results.append({
-            'Horizon': h,
-            'Return': ret,
-            'Sharpe': sharpe
-        })
-        print(f"Horizon {h}: Sharpe {sharpe:.2f} | Return {ret*100:.1f}%", end='\r')
-        
-    print("\nGrid Search Complete.")
-    df_grid = pd.DataFrame(results)
-    return df_grid
+# The grid search function is now removed, as the HORIZON is fixed.
 
 def calculate_net_daily_signal_event(df_signals_raw, results_df):
     aligned_signals = df_signals_raw.loc[results_df.index.min():results_df.index.max()]
@@ -279,32 +255,9 @@ def create_equity_plot(results_df, long_signal_dates, short_signal_dates, horizo
     buf.seek(0)
     return buf
 
-def create_grid_plot(df_grid):
-    fig, ax1 = plt.subplots(figsize=(10, 6))
-    
-    color = 'tab:blue'
-    ax1.set_xlabel('Horizon (Days)')
-    ax1.set_ylabel('Sharpe Ratio', color=color, fontweight='bold')
-    ax1.plot(df_grid['Horizon'], df_grid['Sharpe'], color=color, linewidth=2, marker='o', markersize=4)
-    ax1.tick_params(axis='y', labelcolor=color)
-    ax1.grid(True, alpha=0.3)
-    
-    ax2 = ax1.twinx()  # instantiate a second axes that shares the same x-axis
-    color = 'tab:gray'
-    ax2.set_ylabel('Total Return', color=color, fontweight='bold')  # we already handled the x-label with ax1
-    ax2.plot(df_grid['Horizon'], df_grid['Return'], color=color, linestyle='--', linewidth=1.5, alpha=0.5)
-    ax2.tick_params(axis='y', labelcolor=color)
+# Removed create_grid_plot since grid search is no longer performed.
 
-    plt.title("Grid Search: Horizon vs Performance")
-    fig.tight_layout()
-    
-    buf = io.BytesIO()
-    plt.savefig(buf, format='png', dpi=100)
-    plt.close(fig)
-    buf.seek(0)
-    return buf
-
-def start_web_server(results_df, long_signal_dates, short_signal_dates, signal_names, df_grid, best_horizon):
+def start_web_server(results_df, long_signal_dates, short_signal_dates, signal_names, best_horizon):
     app = Flask(__name__)
     
     @app.route('/')
@@ -317,20 +270,6 @@ def start_web_server(results_df, long_signal_dates, short_signal_dates, signal_n
             overall_sharpe = (strat_daily_rets.mean() / strat_daily_rets.std()) * np.sqrt(365)
         else:
             overall_sharpe = 0.0
-
-        # --- Grid Search Table (Top 5) ---
-        top_5 = df_grid.sort_values(by='Sharpe', ascending=False).head(5)
-        grid_rows = ""
-        for _, row in top_5.iterrows():
-            is_best = int(row['Horizon']) == best_horizon
-            style = "background-color: #d4edda;" if is_best else ""
-            grid_rows += f"""
-            <tr style="{style}">
-                <td>{int(row['Horizon'])}</td>
-                <td>{row['Sharpe']:.2f}</td>
-                <td>{row['Return']*100:.1f}%</td>
-            </tr>
-            """
 
         # --- Calculate Monthly Sharpe & Returns ---
         monthly_rows = ""
@@ -440,7 +379,7 @@ def start_web_server(results_df, long_signal_dates, short_signal_dates, signal_n
             
             <div class="stats">
                 <p>
-                    <strong>Selected Horizon:</strong> {best_horizon} days |
+                    <strong>Horizon Set:</strong> {best_horizon} days |
                     <strong>Initial Capital:</strong> ${INITIAL_CAPITAL:,.2f} | 
                     <strong>Final Value:</strong> ${final_val:,.2f} | 
                     <strong>Return:</strong> <span style="color: {'green' if total_ret > 0 else 'red'};">{total_ret:.2f}%</span>
@@ -450,21 +389,7 @@ def start_web_server(results_df, long_signal_dates, short_signal_dates, signal_n
                 </p>
             </div>
             
-            <h2>Grid Search Analysis</h2>
-            <div class="grid-section">
-                <div>
-                    <img src="/grid_plot" style="max-width: 600px;" />
-                </div>
-                <div class="table-container" style="max-width: 300px; height: auto;">
-                    <h3>Top 5 Settings</h3>
-                    <table>
-                        <thead>
-                            <tr><th>Horizon</th><th>Sharpe</th><th>Return</th></tr>
-                        </thead>
-                        <tbody>{grid_rows}</tbody>
-                    </table>
-                </div>
-            </div>
+            <!-- Grid search section removed for faster execution -->
 
             <h2>Performance (Horizon: {best_horizon})</h2>
             <img src="/plot" />
@@ -499,16 +424,13 @@ def start_web_server(results_df, long_signal_dates, short_signal_dates, signal_n
     
     @app.route('/plot')
     def plot():
-        buf = create_equity_plot(results_df, long_signal_dates, short_signal_dates, best_horizon)
+        buf = create_equity_plot(results_df, long_signal_dates, short_signal_dates, HORIZON)
         return send_file(buf, mimetype='image/png')
     
-    @app.route('/grid_plot')
-    def grid_plot():
-        buf = create_grid_plot(df_grid)
-        return send_file(buf, mimetype='image/png')
+    # Removed grid_plot route
     
     print("\n" + "=" * 60)
-    print(f"Server running on http://localhost:8080 (Showing Best Horizon: {best_horizon})")
+    print(f"Server running on http://localhost:8080 (Fixed Horizon: {HORIZON})")
     print("Press Ctrl+C to stop.")
     print("=" * 60)
     
@@ -526,20 +448,12 @@ if __name__ == '__main__':
         if df_signals.empty or len(df_signals) < 10:
              print("Not enough signals generated.")
         else:
-            # 1. Run Grid Search
-            df_grid = run_grid_search(df_data, df_signals)
-            
-            # 2. Find Best Horizon (Max Sharpe)
-            best_row = df_grid.loc[df_grid['Sharpe'].idxmax()]
-            best_h = int(best_row['Horizon'])
-            print(f"\nOPTIMAL FOUND: Horizon {best_h} days (Sharpe: {best_row['Sharpe']:.2f})")
-            
-            # 3. Run Final Backtest with Best Horizon
-            ret, res, sig_names = run_conviction_backtest(df_data, df_signals, horizon=best_h)
+            # Run Final Backtest with fixed Horizon
+            ret, res, sig_names = run_conviction_backtest(df_data, df_signals)
             
             long_dates, short_dates = calculate_net_daily_signal_event(df_signals_raw, res)
             
-            print(f"Final Portfolio: ${res['Portfolio_Value'].iloc[-1]:,.2f}")
+            print(f"\nFinal Portfolio: ${res['Portfolio_Value'].iloc[-1]:,.2f}")
             print(f"Strategy Return: {ret*100:.2f}%")
             
-            start_web_server(res, long_dates, short_dates, sig_names, df_grid, best_h)
+            start_web_server(res, long_dates, short_dates, sig_names, HORIZON)
