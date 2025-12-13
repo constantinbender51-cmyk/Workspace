@@ -81,12 +81,14 @@ def generate_signals(df):
             fast = close.ewm(span=p1, adjust=False).mean()
             slow = close.ewm(span=p2, adjust=False).mean()
             long_cond = (fast.shift(1) < slow.shift(1)) & (fast > slow)
-            short_cond = (fast.shift(1) > slow.shift(1)) & (fast < slow)
+            # Remove short condition for long-only strategy
+            short_cond = False
 
         elif sig_type == 'PRICE_SMA':
             sma = close.rolling(window=p1).mean()
             long_cond = (close.shift(1) < sma.shift(1)) & (close > sma)
-            short_cond = (close.shift(1) > sma.shift(1)) & (close < sma)
+            # Remove short condition for long-only strategy
+            short_cond = False
 
         elif sig_type == 'MACD_CROSS':
             ema_fast = close.ewm(span=p1, adjust=False).mean()
@@ -94,7 +96,8 @@ def generate_signals(df):
             macd = ema_fast - ema_slow
             sig_line = macd.ewm(span=p3, adjust=False).mean()
             long_cond = (macd.shift(1) < sig_line.shift(1)) & (macd > sig_line)
-            short_cond = (macd.shift(1) > sig_line.shift(1)) & (macd < sig_line)
+            # Remove short condition for long-only strategy
+            short_cond = False
 
         elif sig_type == 'RSI_CROSS':
             period = p1
@@ -107,12 +110,14 @@ def generate_signals(df):
             rsi = rsi.fillna(50) 
             center = 50
             long_cond = (rsi.shift(1) < center) & (rsi > center)
-            short_cond = (rsi.shift(1) > center) & (rsi < center)
+            # Remove short condition for long-only strategy
+            short_cond = False
         else:
             df_signals[col] = 0
             continue
 
-        df_signals[col] = np.where(long_cond, 1, np.where(short_cond, -1, 0))
+        # Only generate long signals (1) or neutral (0), no short signals (-1)
+        df_signals[col] = np.where(long_cond, 1, 0)
 
     df_signals_shifted = df_signals.shift(1)
     df_signals_shifted.fillna(0, inplace=True)
@@ -170,9 +175,11 @@ def run_simple_backtest(df_data, contributions, common_idx):
     # (T,) vector of overall conviction score (-1.0 to 1.0)
     raw_conviction = np.sum(contributions, axis=1) / N_SIGNALS
     
-    # Calculate Exposure: Raw Conviction * Fixed Leverage
-    exposure = raw_conviction * LEVERAGE
-    exposure = np.clip(exposure, -LEVERAGE, LEVERAGE)
+    # Calculate Exposure: Raw Conviction * Fixed Leverage (Long Only)
+    # Clip raw_conviction to be non-negative (0 to 1) for long-only strategy
+    raw_conviction_long = np.clip(raw_conviction, 0, 1)
+    exposure = raw_conviction_long * LEVERAGE
+    exposure = np.clip(exposure, 0, LEVERAGE)  # Only positive exposure for long-only
     
     # Run Portfolio Loop
     portfolio[0] = INITIAL_CAPITAL
@@ -229,21 +236,20 @@ def create_equity_plot(results_df, contributions):
     
     # --- Plot 2: Individual Signal Contributions (Stacked Area) ---
     
+    # For long-only strategy, contributions should only be positive or zero
     pos_contributions = np.clip(contributions, 0, None)
-    neg_contributions = np.clip(contributions, None, 0)
     
     ax2.axhline(0, color='gray', linestyle='-', linewidth=0.5)
     
-    # Stackplot uses the raw contribution matrix
+    # Stackplot uses the raw contribution matrix (only positive for long-only)
     ax2.stackplot(results_df.index, pos_contributions.T, colors=SIGNAL_COLORS, labels=SIGNAL_NAMES, alpha=0.7)
-    ax2.stackplot(results_df.index, neg_contributions.T, colors=SIGNAL_COLORS, alpha=0.7)
 
     # Plot total used conviction (Conviction * N_SIGNALS)
     ax2.plot(results_df.index, results_df['Raw_Conviction'] * N_SIGNALS, 'k--', linewidth=1, alpha=0.5, label='Total Conviction Score')
     
-    ax2.set_ylim(-N_SIGNALS, N_SIGNALS)
-    ax2.set_ylabel('Signal Contribution (Max +/-5)', fontsize=10)
-    ax2.set_title('Individual Signal Contributions (MACD Normal)', fontweight='bold')
+    ax2.set_ylim(0, N_SIGNALS)  # Only positive range for long-only
+    ax2.set_ylabel('Signal Contribution (Max +5)', fontsize=10)
+    ax2.set_title('Individual Signal Contributions (Long Only)', fontweight='bold')
     ax2.grid(True, axis='y', alpha=0.3)
     ax2.legend(loc='upper right', fontsize=8, ncol=2)
     
@@ -307,10 +313,10 @@ def start_web_server(results_df, contributions, overall_sharpe):
         </style>
         </head>
         <body>
-            <h1>Conviction Strategy (Simple 5x Leverage)</h1>
+            <h1>Conviction Strategy (Long Only, 5x Leverage)</h1>
             <div class="stats">
                 <p><strong>Horizon:</strong> {HORIZON} days | <strong>Fixed Leverage:</strong> {LEVERAGE}x</p>
-                <p><strong>Rule:</strong> All 5 signals contribute equally.</p>
+                <p><strong>Rule:</strong> All 5 signals contribute equally. LONG ONLY - No short positions.</p>
                 <p><strong>Final:</strong> ${final_val:,.2f} | <strong>Return:</strong> {total_ret:.2f}%</p>
                 <p><strong>Overall Sharpe:</strong> {overall_sharpe:.2f}</p>
             </div>
