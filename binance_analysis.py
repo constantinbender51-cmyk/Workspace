@@ -24,12 +24,11 @@ WINNING_SIGNALS = [
     ('EMA_CROSS', 50, 150, 0),         # 0: EMA 50/150
     ('PRICE_SMA', 380, 0, 0),          # 1: Price/SMA 380
     ('PRICE_SMA', 140, 0, 0),          # 2: Price/SMA 140
-    ('MACD_CROSS', 12, 26, 15),        # 3: MACD (12/26/15) - Contradiction Check
+    ('MACD_CROSS', 12, 26, 15),        # 3: MACD (12/26/15) - Standard Weight
     ('RSI_CROSS', 35, 0, 0),           # 4: RSI 35 (Crossover)
 ]
 
 N_SIGNALS = len(WINNING_SIGNALS)
-MACD_SIGNAL_INDEX = 3 # Index of the MACD signal
 SIGNAL_NAMES = [f"{s[0]}_{s[1]}_{s[2]}" for s in WINNING_SIGNALS]
 SIGNAL_COLORS = ['#3498DB', '#E67E22', '#F1C40F', '#2ECC71', '#E74C3C'] # Blue, Orange, Yellow, Green, Red
 
@@ -157,8 +156,8 @@ def precalculate_contributions(df_data, df_signals):
                     
     return contributions, common_idx
 
-# --- Backtest Runner (Contradiction Lockout) ---
-def run_contradiction_backtest(df_data, contributions, common_idx):
+# --- Backtest Runner (Simple Conviction, MACD is Normal) ---
+def run_simple_backtest(df_data, contributions, common_idx):
     df = df_data.loc[common_idx].copy()
     num_days = len(df)
     returns = df['return'].values
@@ -166,87 +165,54 @@ def run_contradiction_backtest(df_data, contributions, common_idx):
     # Initialize backtest arrays
     portfolio = np.zeros(num_days)
     daily_pnl = np.zeros(num_days)
-    scaled_contributions_matrix = np.zeros_like(contributions) # Store final conviction for plotting
-    lockout_mask = np.zeros(num_days, dtype=bool)
+    
+    # Simple Conviction: Sum of all decaying contributions, normalized by N_SIGNALS
+    # (T,) vector of overall conviction score (-1.0 to 1.0)
+    raw_conviction = np.sum(contributions, axis=1) / N_SIGNALS
+    
+    # Calculate Exposure: Raw Conviction * Fixed Leverage
+    exposure = raw_conviction * LEVERAGE
+    exposure = np.clip(exposure, -LEVERAGE, LEVERAGE)
     
     # Run Portfolio Loop
     portfolio[0] = INITIAL_CAPITAL
     is_bankrupt = False
     
-    for t in range(num_days):
+    for t in range(1, num_days):
+        exposure_t = exposure[t]
         
-        current_contributions = contributions[t]
-        macd_contribution = current_contributions[MACD_SIGNAL_INDEX]
-        
-        # 1. Calculate non-MACD consensus
-        non_macd_contributions = np.delete(current_contributions, MACD_SIGNAL_INDEX)
-        non_macd_sum = np.sum(non_macd_contributions)
-        
-        # Contradiction check: Non-MACD consensus and MACD signal have opposite signs
-        # Check for non-zero contributions before comparing signs
-        non_macd_sign = np.sign(non_macd_sum)
-        macd_sign = np.sign(macd_contribution)
-        
-        is_contradiction = (non_macd_sign != 0 and macd_sign != 0 and non_macd_sign != macd_sign)
-        
-        if is_contradiction:
-            # Rule: Stay out of the market
-            raw_conviction_t = 0.0
-            exposure_t = 0.0
-            lockout_mask[t] = True
+        if not is_bankrupt:
+            pnl = portfolio[t-1] * exposure_t * returns[t]
+            portfolio[t] = portfolio[t-1] + pnl
+            daily_pnl[t] = pnl
             
-            # For visualization: contributions are zeroed out
-            scaled_contributions_t = np.zeros(N_SIGNALS)
-            
-        else:
-            # Use standard unweighted conviction
-            raw_conviction_t = np.sum(current_contributions) / N_SIGNALS
-            
-            exposure_t = raw_conviction_t * LEVERAGE
-            exposure_t = np.clip(exposure_t, -LEVERAGE, LEVERAGE)
-            
-            # For visualization: standard normalized scaling
-            scaled_contributions_t = current_contributions / N_SIGNALS * N_SIGNALS 
-            
-        # Store scaled contributions for plotting
-        scaled_contributions_matrix[t] = scaled_contributions_t
-        
-        # --- Run PnL ---
-        if t > 0:
-            if not is_bankrupt:
-                pnl = portfolio[t-1] * exposure_t * returns[t]
-                portfolio[t] = portfolio[t-1] + pnl
-                daily_pnl[t] = pnl
-                
-                if portfolio[t] <= 0:
-                    portfolio[t] = 0
-                    is_bankrupt = True
-            else:
+            if portfolio[t] <= 0:
                 portfolio[t] = 0
-        
-        # Store final metrics
-        df.loc[df.index[t], 'Exposure'] = exposure_t
-        df.loc[df.index[t], 'Raw_Conviction'] = raw_conviction_t
-
+                is_bankrupt = True
+        else:
+            portfolio[t] = 0
+            
     # Compile results
-    results = df[['close', 'return', 'Exposure', 'Raw_Conviction']].copy()
+    results = df[['close', 'return']].copy()
+    results['Exposure'] = exposure
+    results['Raw_Conviction'] = raw_conviction
     results['Portfolio_Value'] = portfolio
     results['Daily_PnL'] = daily_pnl
-    results['Contradiction_Lockout'] = lockout_mask
     
     results['Strategy_Daily_Return'] = results['Portfolio_Value'].pct_change().fillna(0)
     
     rolling_max = results['Portfolio_Value'].cummax()
     results['Drawdown'] = np.where(rolling_max > 0, (results['Portfolio_Value'] - rolling_max) / rolling_max, -1.0)
     
-    return results, scaled_contributions_matrix
+    # Return results and the original contributions (as no scaling was applied)
+    return results, contributions
 
 def calculate_sharpe(results_df):
     d_rets = results_df['Strategy_Daily_Return']
     sharpe = (d_rets.mean()/d_rets.std())*np.sqrt(365) if d_rets.std()>0 else 0
     return sharpe
 
-def create_equity_plot(results_df, contributions_scaled):
+def create_equity_plot(results_df, contributions):
     fig = Figure(figsize=(12, 16))
     
     # 4 Subplots: Price, Signal Contributions, Equity, Drawdown
@@ -263,32 +229,26 @@ def create_equity_plot(results_df, contributions_scaled):
     
     # --- Plot 2: Individual Signal Contributions (Stacked Area) ---
     
-    pos_contributions = np.clip(contributions_scaled, 0, None)
-    neg_contributions = np.clip(contributions_scaled, None, 0)
+    pos_contributions = np.clip(contributions, 0, None)
+    neg_contributions = np.clip(contributions, None, 0)
     
     ax2.axhline(0, color='gray', linestyle='-', linewidth=0.5)
     
-    # Note: If lockout is active, the contributions_scaled matrix should be all zeros for that day,
-    # correctly reflecting zero net conviction used for the trade.
+    # Stackplot uses the raw contribution matrix
     ax2.stackplot(results_df.index, pos_contributions.T, colors=SIGNAL_COLORS, labels=SIGNAL_NAMES, alpha=0.7)
     ax2.stackplot(results_df.index, neg_contributions.T, colors=SIGNAL_COLORS, alpha=0.7)
 
-    # Plot total used conviction
-    ax2.plot(results_df.index, results_df['Raw_Conviction'] * N_SIGNALS, 'k--', linewidth=1, alpha=0.5, label='Total Used Conviction')
+    # Plot total used conviction (Conviction * N_SIGNALS)
+    ax2.plot(results_df.index, results_df['Raw_Conviction'] * N_SIGNALS, 'k--', linewidth=1, alpha=0.5, label='Total Conviction Score')
     
     ax2.set_ylim(-N_SIGNALS, N_SIGNALS)
     ax2.set_ylabel('Signal Contribution (Max +/-5)', fontsize=10)
-    ax2.set_title('Individual Signal Contributions (MACD Contradiction Lockout)', fontweight='bold')
+    ax2.set_title('Individual Signal Contributions (MACD Normal)', fontweight='bold')
     ax2.grid(True, axis='y', alpha=0.3)
     ax2.legend(loc='upper right', fontsize=8, ncol=2)
     
-    # --- Plot 3: Equity and Lockout Background ---
+    # --- Plot 3: Equity ---
     
-    # Draw Lockout background
-    ax3_ymin, ax3_ymax = 0.0, 1.0 # Normalized vertical position for fill_between
-    ax3.fill_between(results_df.index, ax3_ymin, ax3_ymax, where=results_df['Contradiction_Lockout'], 
-                     color='#808080', alpha=0.15, transform=ax3.get_xaxis_transform(), label='Contradiction Lockout (Cash)')
-
     ax3.plot(results_df.index, results_df['Portfolio_Value'], 'b-', linewidth=1.5, label=f'Strategy ({LEVERAGE}x)')
     bh = results_df['close'] / results_df['close'].iloc[0] * INITIAL_CAPITAL
     ax3.plot(results_df.index, bh, 'g--', alpha=0.8, label='Buy & Hold')
@@ -312,7 +272,7 @@ def create_equity_plot(results_df, contributions_scaled):
     buf.seek(0)
     return buf
 
-def start_web_server(results_df, contributions_scaled, overall_sharpe):
+def start_web_server(results_df, contributions, overall_sharpe):
     app = Flask(__name__)
     
     final_val = results_df['Portfolio_Value'].iloc[-1]
@@ -337,7 +297,7 @@ def start_web_server(results_df, contributions_scaled, overall_sharpe):
         ts = int(time.time())
         return f'''
         <html>
-        <head><title>Conviction Strategy MACD Lockout</title>
+        <head><title>Conviction Strategy Simple</title>
         <style>
             body {{ font-family: sans-serif; text-align: center; margin: 40px; color: #333; }}
             .stats {{ background: #f9f9f9; padding: 20px; border-radius: 8px; display: inline-block; margin-bottom: 20px; }}
@@ -347,10 +307,10 @@ def start_web_server(results_df, contributions_scaled, overall_sharpe):
         </style>
         </head>
         <body>
-            <h1>Conviction Strategy (MACD Contradiction Lockout)</h1>
+            <h1>Conviction Strategy (Simple 5x Leverage)</h1>
             <div class="stats">
                 <p><strong>Horizon:</strong> {HORIZON} days | <strong>Fixed Leverage:</strong> {LEVERAGE}x</p>
-                <p><strong>Rule:</strong> Strategy goes to Cash when MACD contradicts the 4-signal consensus.</p>
+                <p><strong>Rule:</strong> All 5 signals contribute equally.</p>
                 <p><strong>Final:</strong> ${final_val:,.2f} | <strong>Return:</strong> {total_ret:.2f}%</p>
                 <p><strong>Overall Sharpe:</strong> {overall_sharpe:.2f}</p>
             </div>
@@ -367,7 +327,7 @@ def start_web_server(results_df, contributions_scaled, overall_sharpe):
     @app.route('/plot')
     def plot():
         try:
-            buf = create_equity_plot(results_df, contributions_scaled)
+            buf = create_equity_plot(results_df, contributions)
             return send_file(buf, mimetype='image/png')
         except Exception as e:
             print(f"Error creating plot: {e}")
@@ -384,10 +344,10 @@ if __name__ == '__main__':
     contributions, common_idx = precalculate_contributions(df_data, df_signals)
     df_clean = df_data.loc[common_idx]
     
-    # 2. Run Contradiction Lockout Backtest
-    results, contributions_scaled = run_contradiction_backtest(df_clean, contributions, common_idx)
+    # 2. Run Simple Backtest (No Rules)
+    results, contributions_raw = run_simple_backtest(df_clean, contributions, common_idx)
     
     # 3. Calculate Sharpe
     sharpe = calculate_sharpe(results)
     
-    start_web_server(results, contributions_scaled, sharpe)
+    start_web_server(results, contributions_raw, sharpe)
