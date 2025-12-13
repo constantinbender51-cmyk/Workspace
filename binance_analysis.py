@@ -24,7 +24,7 @@ WINNING_SIGNALS = [
     ('EMA_CROSS', 50, 150, 0),         # 0: EMA 50/150
     ('PRICE_SMA', 380, 0, 0),          # 1: Price/SMA 380
     ('PRICE_SMA', 140, 0, 0),          # 2: Price/SMA 140
-    ('MACD_CROSS', 12, 26, 15),        # 3: MACD (12/26/15) - Special role when conviction is negative
+    ('MACD_CROSS', 12, 26, 15),        # 3: MACD (12/26/15) - Contradiction Override Role
     ('RSI_CROSS', 35, 0, 0),           # 4: RSI 35 (Crossover)
 ]
 
@@ -157,7 +157,7 @@ def precalculate_contributions(df_data, df_signals):
                     
     return contributions, common_idx
 
-# --- Backtest Runner (MACD Tie-breaker/Decider Logic) ---
+# --- Backtest Runner (MACD Contradiction Override Logic - Bi-Directional) ---
 def run_simple_backtest(df_data, contributions, common_idx):
     df = df_data.loc[common_idx].copy()
     num_days = len(df)
@@ -171,29 +171,39 @@ def run_simple_backtest(df_data, contributions, common_idx):
     raw_conviction_sum = np.sum(contributions, axis=1) 
     raw_conviction = raw_conviction_sum / N_SIGNALS
     
-    # Final Conviction Score used for exposure (will hold the MACD-only score if needed)
     final_conviction = np.zeros(num_days)
     
-    # --- LOGIC IMPLEMENTATION ---
+    # --- LOGIC IMPLEMENTATION (Contradiction Override) ---
     for t in range(num_days):
-        R_conv_t = raw_conviction[t]
+        current_contributions = contributions[t]
+        macd_contrib_t = current_contributions[MACD_SIGNAL_INDEX]
         
-        if R_conv_t >= 0:
-            # Case 1: Overall conviction is non-negative, use standard score
-            final_conviction[t] = R_conv_t
+        # 1. Calculate the non-MACD consensus sum
+        non_macd_contributions = np.delete(current_contributions, MACD_SIGNAL_INDEX)
+        non_macd_sum = np.sum(non_macd_contributions)
+        
+        non_macd_sign = np.sign(non_macd_sum)
+        macd_sign = np.sign(macd_contrib_t)
+        
+        # Contradiction check: Signs are opposite and both groups are active
+        is_contradiction = (non_macd_sign != 0 and macd_sign != 0 and non_macd_sign != macd_sign)
+        
+        if is_contradiction:
+            # Rule: Trade solely based on MACD signal
+            # Final conviction is MACD's contribution, normalized by N_SIGNALS
+            final_conviction_t = macd_contrib_t / N_SIGNALS
         else:
-            # Case 2: Overall conviction is negative, ONLY MACD signal contributes
-            macd_contrib_t = contributions[t, MACD_SIGNAL_INDEX]
-            # Normalize the MACD score by N_SIGNALS to keep the exposure scaling correct
-            final_conviction[t] = macd_contrib_t / N_SIGNALS
+            # Rule: Use full 5-signal consensus (Raw Conviction)
+            final_conviction_t = raw_conviction[t]
+        
+        final_conviction[t] = final_conviction_t
             
-    # --- LONG ONLY EXPOSURE LOGIC ---
-    # Apply long-only clamp: Exposure is 0 if final conviction is negative
-    long_only_conviction = np.clip(final_conviction, 0, None)
+    # --- EXPOSURE LOGIC (Bi-Directional) ---
     
     # Calculate Exposure: Final Conviction * Fixed Leverage
-    exposure = long_only_conviction * LEVERAGE
-    exposure = np.clip(exposure, 0.0, LEVERAGE) 
+    exposure = final_conviction * LEVERAGE
+    # Clamp exposure to the leverage limits (-5.0x to +5.0x)
+    exposure = np.clip(exposure, -LEVERAGE, LEVERAGE) 
     
     # Run Portfolio Loop
     portfolio[0] = INITIAL_CAPITAL
@@ -218,6 +228,7 @@ def run_simple_backtest(df_data, contributions, common_idx):
     results['Exposure'] = exposure
     results['Raw_Conviction'] = raw_conviction # Unfiltered conviction for plot
     results['Final_Conviction'] = final_conviction # Conviction used to determine exposure
+    results['Contradiction_Override'] = (final_conviction != raw_conviction) # Mask for plotting override
     results['Portfolio_Value'] = portfolio
     results['Daily_PnL'] = daily_pnl
     
@@ -250,7 +261,6 @@ def create_equity_plot(results_df, contributions):
     
     # --- Plot 2: Individual Signal Contributions (Stacked Area) ---
     
-    # Contributions are raw (unfiltered) for this plot to show what the signals are doing
     pos_contributions = np.clip(contributions, 0, None)
     neg_contributions = np.clip(contributions, None, 0)
     
@@ -266,18 +276,18 @@ def create_equity_plot(results_df, contributions):
 
     ax2.set_ylim(-N_SIGNALS, N_SIGNALS)
     ax2.set_ylabel('Signal Contribution (Max +/-5)', fontsize=10)
-    ax2.set_title('Individual Signal Contributions (MACD Decides on Negative Conviction)', fontweight='bold')
+    ax2.set_title('Individual Signal Contributions (MACD Contradiction Override)', fontweight='bold')
     ax2.grid(True, axis='y', alpha=0.3)
     ax2.legend(loc='upper right', fontsize=8, ncol=2)
     
     # --- Plot 3: Equity ---
     
-    # Highlight flat/cash periods (when Final_Conviction <= 0)
-    ax3_ymin, ax3_ymax = 0.0, 1.0 # Normalized vertical position for fill_between
-    ax3.fill_between(results_df.index, ax3_ymin, ax3_ymax, where=results_df['Final_Conviction'] <= 0, 
-                     color='#808080', alpha=0.2, transform=ax3.get_xaxis_transform(), label='Flat (Final Conviction <= 0)')
-    
-    ax3.plot(results_df.index, results_df['Portfolio_Value'], 'b-', linewidth=1.5, label=f'Strategy (Long Only {LEVERAGE}x)')
+    # Highlight periods where the MACD override took place
+    ax3_ymin, ax3_ymax = 0.0, 1.0 
+    ax3.fill_between(results_df.index, ax3_ymin, ax3_ymax, where=results_df['Contradiction_Override'], 
+                     color='#FFC300', alpha=0.2, transform=ax3.get_xaxis_transform(), label='MACD Override Active')
+                     
+    ax3.plot(results_df.index, results_df['Portfolio_Value'], 'b-', linewidth=1.5, label=f'Strategy (Bi-Dir {LEVERAGE}x)')
     bh = results_df['close'] / results_df['close'].iloc[0] * INITIAL_CAPITAL
     ax3.plot(results_df.index, bh, 'g--', alpha=0.8, label='Buy & Hold')
     
@@ -285,7 +295,7 @@ def create_equity_plot(results_df, contributions):
     else: ax3.set_yscale('log')
     
     ax3.legend(loc='upper left')
-    ax3.set_title('Equity Curve (MACD Tie-Breaker)', fontweight='bold')
+    ax3.set_title('Equity Curve (Bi-Directional)', fontweight='bold')
     ax3.grid(True, alpha=0.3)
     
     # --- Plot 4: Drawdown ---
@@ -335,10 +345,10 @@ def start_web_server(results_df, contributions, overall_sharpe):
         </style>
         </head>
         <body>
-            <h1>Conviction Strategy (MACD Tie-Breaker)</h1>
+            <h1>Conviction Strategy (MACD Contradiction Override - Bi-Directional)</h1>
             <div class="stats">
                 <p><strong>Horizon:</strong> {HORIZON} days | <strong>Fixed Leverage:</strong> {LEVERAGE}x</p>
-                <p><strong>Rule:</strong> If overall conviction is negative, only the MACD signal can push the position long (Long Only).</p>
+                <p><strong>Rule:</strong> MACD overrides consensus when signs contradict (Bi-Directional).</p>
                 <p><strong>Final:</strong> ${final_val:,.2f} | <strong>Return:</strong> {total_ret:.2f}%</p>
                 <p><strong>Overall Sharpe:</strong> {overall_sharpe:.2f}</p>
             </div>
