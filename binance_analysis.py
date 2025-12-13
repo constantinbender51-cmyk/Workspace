@@ -17,7 +17,6 @@ TIMEFRAME = '1d'
 SINCE_STR = '2018-01-01 00:00:00'
 HORIZON = 380  # Decay window (days)
 INITIAL_CAPITAL = 10000.0
-LEVERAGE = 5.0  # Multiplier applied to conviction exposure
 
 # --- Winning Signals ---
 WINNING_SIGNALS = [
@@ -163,27 +162,15 @@ def precalculate_contributions(df_data, df_signals):
 def fitness_function(weights, contributions, returns):
     """
     Calculates Sharpe Ratio for a given set of weights.
+    NO NORMALIZATION: Exposure is purely additive.
     """
-    # Normalize weights so they sum to something (avoid div by zero)
-    w_sum = np.sum(weights)
-    if w_sum == 0:
-        return -999.0
-    
-    # Weighted Conviction: (Matrix @ Weights) / Sum(Weights)
+    # Exposure = Sum(Signal_Contribution * Weight)
     # Shape: (T, N) @ (N,) -> (T,)
-    weighted_conviction = (contributions @ weights) / w_sum
+    exposure = contributions @ weights
     
-    # Exposure
-    exposure = weighted_conviction * LEVERAGE
-    exposure = np.clip(exposure, -LEVERAGE, LEVERAGE)
-    
-    # Fast PnL (Shifted returns)
-    # Returns are already T aligned, but strat returns depend on exposure at T-1
-    # Actually, fetch_binance_data calculates close-to-close return at T.
-    # Exposure determined at T (using T-1 signals shifted in generate_signals).
-    # So Exposure[T] * Return[T] is correct because 'signals' were already shifted in generate_signals.
-    # Wait, generate_signals does df.shift(1). So row T contains signal from T-1.
-    # So we can simply multiply.
+    # Clip exposure to safeguard against craziness (e.g. > 5x)
+    # If weights are 0-1, max possible is N_SIGNALS (5.0).
+    exposure = np.clip(exposure, -N_SIGNALS, N_SIGNALS)
     
     strat_ret = exposure * returns
     
@@ -264,17 +251,9 @@ def run_weighted_backtest(df_data, contributions, common_idx, weights):
     num_days = len(df)
     returns = df['return'].values
     
-    # Normalize Weights
-    w_sum = np.sum(weights)
-    norm_weights = weights / w_sum if w_sum > 0 else weights
-    
-    # Calculate Weighted Conviction
-    # (T, N) @ (N,) -> (T,)
-    weighted_conviction = contributions @ norm_weights
-    
-    # Calculate Exposure
-    exposure = weighted_conviction * LEVERAGE
-    exposure = np.clip(exposure, -LEVERAGE, LEVERAGE)
+    # Calculate Exposure (Additive, no normalization)
+    exposure = contributions @ weights
+    exposure = np.clip(exposure, -N_SIGNALS, N_SIGNALS)
     
     # Run Portfolio Loop
     portfolio = np.zeros(num_days)
@@ -306,7 +285,7 @@ def run_weighted_backtest(df_data, contributions, common_idx, weights):
     
     # Add contributions for display
     # We multiply raw contribution by its weight
-    weighted_contribs = contributions * norm_weights
+    weighted_contribs = contributions * weights
     signal_names = [f"{s[0]}_{s[1]}" for s in WINNING_SIGNALS]
     for i, name in enumerate(signal_names):
         results[f"W_Contrib_{name}"] = weighted_contribs[:, i]
@@ -369,10 +348,13 @@ def start_web_server(results_df, best_weights, split_date):
     
     # Weights Table
     signal_names = [f"{s[0]}_{s[1]}" for s in WINNING_SIGNALS]
-    weights_html = "<table border='1' cellpadding='5'><tr><th>Signal</th><th>Optimized Weight</th></tr>"
+    weights_html = "<table border='1' cellpadding='5'><tr><th>Signal</th><th>Optimized Weight (Leverage)</th></tr>"
     for name, w in zip(signal_names, best_weights):
-        weights_html += f"<tr><td>{name}</td><td>{w:.4f}</td></tr>"
-    weights_html += "</table>"
+        weights_html += f"<tr><td>{name}</td><td>{w:.4f}x</td></tr>"
+    
+    # Calculate Theoretical Max Leverage
+    max_lev = np.sum(best_weights)
+    weights_html += f"<tr><td><b>Total Max Leverage</b></td><td><b>{max_lev:.2f}x</b></td></tr></table>"
     
     monthly_rows = ""
     monthly_groups = results_df.groupby(pd.Grouper(freq='M'))
@@ -405,15 +387,16 @@ def start_web_server(results_df, best_weights, split_date):
         </style>
         </head>
         <body>
-            <h1>Conviction Strategy (GA Optimized)</h1>
+            <h1>Conviction Strategy (GA Optimized - Additive)</h1>
             <div class="stats">
-                <p><strong>Horizon:</strong> {HORIZON} | <strong>Leverage:</strong> {LEVERAGE}x</p>
+                <p><strong>Horizon:</strong> {HORIZON} | <strong>Leverage:</strong> Dynamic (Weights)</p>
                 <p><strong>Split Date (70%):</strong> {split_date.strftime('%Y-%m-%d')}</p>
                 <p><strong>Final:</strong> ${final_val:,.2f} | <strong>Return:</strong> {total_ret:.2f}%</p>
                 <p><strong>Overall Sharpe:</strong> {overall_sharpe:.2f} | <strong>Test Set Sharpe:</strong> {test_sharpe:.2f}</p>
             </div>
             
             <h2>Optimized Weights (0.0 - 1.0)</h2>
+            <p>Sum of Weights = Total Leverage Capacity</p>
             {weights_html}
             
             <h2>Equity Curve (Train vs Test)</h2>
