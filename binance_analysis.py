@@ -212,7 +212,7 @@ def simulate_strategy(raw_conviction, returns, chop_values, a, b):
 
 # --- Grid Search ---
 def run_grid_search(df_data, raw_conviction):
-    print("Running Grid Search for a (0-1) and b (0.001-1)...")
+    print("Running Grid Search for a (0-1) and b (0.001-0.3)...")
     
     common_idx = df_data.index
     # Align data
@@ -226,7 +226,8 @@ def run_grid_search(df_data, raw_conviction):
     
     # --- High Granularity ---
     a_values = np.linspace(0.0, 1.0, 101)  # 0.00, 0.01 ... 1.00
-    b_values = np.arange(0.001, 1.001, 0.005) # 0.001 to 1 in 0.005 steps (~200 steps)
+    # b range reduced to max 0.3
+    b_values = np.arange(0.001, 0.301, 0.005) 
     
     results = []
     best_sharpe = -999
@@ -326,15 +327,14 @@ def create_heatmap_plot(heatmap_data, a_values, b_values, best_params):
     fig = Figure(figsize=(10, 8))
     ax = fig.add_subplot(1, 1, 1)
     
-    # Downsample ticks for readability (show every 10th a, every 20th b)
+    # Downsample ticks for readability 
     xtick_freq = 10
-    ytick_freq = 20
+    ytick_freq = 10 # Adjusted for smaller b range
     
     sns.heatmap(heatmap_data, ax=ax, cmap='viridis', 
                 xticklabels=xtick_freq, 
                 yticklabels=ytick_freq)
     
-    # Set tick labels manually based on frequency to ensure correct values
     ax.set_xticks(np.arange(0, len(a_values), xtick_freq))
     ax.set_xticklabels([f"{a_values[i]:.2f}" for i in range(0, len(a_values), xtick_freq)])
     
@@ -396,7 +396,7 @@ def create_equity_plot(results_df, horizon, a, b):
     buf.seek(0)
     return buf
 
-def start_web_server(results_df, heatmap_img_buf, best_params, main_sharpe):
+def start_web_server(results_df, heatmap_bytes, best_params, main_sharpe):
     app = Flask(__name__)
     
     final_val = results_df['Portfolio_Value'].iloc[-1]
@@ -458,8 +458,8 @@ def start_web_server(results_df, heatmap_img_buf, best_params, main_sharpe):
         
     @app.route('/heatmap')
     def heatmap():
-        heatmap_img_buf.seek(0)
-        return send_file(heatmap_img_buf, mimetype='image/png')
+        # Store bytes in memory and create fresh stream per request to avoid closed file error
+        return send_file(io.BytesIO(heatmap_bytes), mimetype='image/png')
 
     print(f"Server running on http://localhost:8080")
     app.run(host='0.0.0.0', port=8080, debug=False)
@@ -475,8 +475,10 @@ if __name__ == '__main__':
     # 2. Run Grid Search
     best_params, heatmap_data, a_vals, b_vals = run_grid_search(df_grid_data, raw_conviction)
     
-    # 3. Create Heatmap Image
+    # 3. Create Heatmap Image & Extract Bytes
     heatmap_buf = create_heatmap_plot(heatmap_data, a_vals, b_vals, best_params)
+    heatmap_bytes = heatmap_buf.getvalue()
+    heatmap_buf.close()
     
     # 4. Run Final Backtest
     res, sig_names = run_final_backtest(df_grid_data, raw_conviction, contributions, common_idx, best_params[0], best_params[1])
@@ -485,4 +487,4 @@ if __name__ == '__main__':
     daily_rets = res['Strategy_Daily_Return']
     sharpe = (daily_rets.mean()/daily_rets.std())*np.sqrt(365) if daily_rets.std() > 0 else 0
     
-    start_web_server(res, heatmap_buf, best_params, sharpe)
+    start_web_server(res, heatmap_bytes, best_params, sharpe)
