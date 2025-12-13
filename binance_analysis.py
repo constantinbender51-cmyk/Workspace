@@ -194,20 +194,8 @@ def simulate_strategy(raw_conviction, returns, chop_values, a, b):
     exposure = raw_conviction * LEVERAGE * scale_factor
     exposure = np.clip(exposure, -LEVERAGE, LEVERAGE)
     
-    # Vectorized PnL calculation approx (compounding requires loop but approx is ok for grid)
-    # For accurate Sharpe, we need daily PnL relative to equity.
-    # We can do a quick loop here as N is small (~2000 days)
-    
-    portfolio = np.zeros(len(returns))
-    portfolio[0] = INITIAL_CAPITAL
-    
-    # Fast loop using Numba would be better, but standard python loop is fine for 2k days
-    # To optimize further, we can just calculate log returns:
-    # Strat_Ret = Exposure * Market_Ret
-    # Equity = Cumprod(1 + Strat_Ret)
-    
+    # Fast PnL Calc
     strat_daily_ret = exposure[:-1] * returns[1:] # Shift exposure to match return t+1
-    # Pad first day
     strat_daily_ret = np.insert(strat_daily_ret, 0, 0.0)
     
     # Check bankruptcy
@@ -224,13 +212,11 @@ def simulate_strategy(raw_conviction, returns, chop_values, a, b):
 
 # --- Grid Search ---
 def run_grid_search(df_data, raw_conviction):
-    print("Running Grid Search for a (0-1) and b (0.01-0.5)...")
+    print("Running Grid Search for a (0-1) and b (0.001-1)...")
     
     common_idx = df_data.index
     # Align data
     if len(common_idx) != len(raw_conviction):
-        # Truncate to match if needed (should be aligned by precalculate_conviction)
-        print("Warning: Index mismatch in grid search, aligning...")
         limit = min(len(common_idx), len(raw_conviction))
         common_idx = common_idx[:limit]
         raw_conviction = raw_conviction[:limit]
@@ -238,15 +224,21 @@ def run_grid_search(df_data, raw_conviction):
     returns = df_data.loc[common_idx, 'return'].values
     chop_values = df_data.loc[common_idx, 'chop'].values
     
-    a_values = np.linspace(0.0, 1.0, 21) # 0, 0.05 ... 1.0
-    b_values = np.linspace(0.01, 0.51, 26) # 0.01, 0.03 ... 0.5
+    # --- High Granularity ---
+    a_values = np.linspace(0.0, 1.0, 101)  # 0.00, 0.01 ... 1.00
+    b_values = np.arange(0.001, 1.001, 0.005) # 0.001 to 1 in 0.005 steps (~200 steps)
     
     results = []
-    
     best_sharpe = -999
     best_params = (0.5, 0.1) # Default
     
     heatmap_data = np.zeros((len(b_values), len(a_values)))
+    
+    total_iter = len(a_values) * len(b_values)
+    print(f"Total iterations: {total_iter}")
+    
+    count = 0
+    start_time = time.time()
     
     for i, b in enumerate(b_values):
         for j, a in enumerate(a_values):
@@ -256,8 +248,14 @@ def run_grid_search(df_data, raw_conviction):
             if sharpe > best_sharpe:
                 best_sharpe = sharpe
                 best_params = (a, b)
+            
+            count += 1
+            if count % 2000 == 0:
+                print(f"Progress: {count}/{total_iter}...", end='\r')
     
-    print(f"Grid Search Complete. Best Sharpe: {best_sharpe:.4f} | a={best_params[0]:.2f}, b={best_params[1]:.2f}")
+    elapsed = time.time() - start_time
+    print(f"\nGrid Search Complete in {elapsed:.2f}s.")
+    print(f"Best Sharpe: {best_sharpe:.4f} | a={best_params[0]:.3f}, b={best_params[1]:.3f}")
     
     return best_params, heatmap_data, a_values, b_values
 
@@ -276,7 +274,6 @@ def run_final_backtest(df_data, raw_conviction, contributions, common_idx, a, b)
     portfolio[0] = INITIAL_CAPITAL
     is_bankrupt = False
     
-    # Calculate Scaling Factors Vectorized
     chop_norm = chop_values / 100.0
     term = (chop_norm - a) ** 2
     scale_vec = 1.0 - (term ** b)
@@ -329,16 +326,25 @@ def create_heatmap_plot(heatmap_data, a_values, b_values, best_params):
     fig = Figure(figsize=(10, 8))
     ax = fig.add_subplot(1, 1, 1)
     
-    # Flip Y axis for correct visualization (low b at bottom)
+    # Downsample ticks for readability (show every 10th a, every 20th b)
+    xtick_freq = 10
+    ytick_freq = 20
+    
     sns.heatmap(heatmap_data, ax=ax, cmap='viridis', 
-                xticklabels=[f"{x:.2f}" for x in a_values], 
-                yticklabels=[f"{y:.2f}" for y in b_values])
+                xticklabels=xtick_freq, 
+                yticklabels=ytick_freq)
+    
+    # Set tick labels manually based on frequency to ensure correct values
+    ax.set_xticks(np.arange(0, len(a_values), xtick_freq))
+    ax.set_xticklabels([f"{a_values[i]:.2f}" for i in range(0, len(a_values), xtick_freq)])
+    
+    ax.set_yticks(np.arange(0, len(b_values), ytick_freq))
+    ax.set_yticklabels([f"{b_values[i]:.3f}" for i in range(0, len(b_values), ytick_freq)])
     
     ax.set_xlabel('a (Ideal Chop Level)', fontsize=12)
     ax.set_ylabel('b (Curve Steepness)', fontsize=12)
-    ax.set_title(f'Grid Search Sharpe Ratio\nBest: a={best_params[0]:.2f}, b={best_params[1]:.2f}', fontsize=14, fontweight='bold')
+    ax.set_title(f'Grid Search Sharpe Ratio\nBest: a={best_params[0]:.3f}, b={best_params[1]:.3f}', fontsize=14, fontweight='bold')
     
-    # Inverse y-axis to match values
     ax.invert_yaxis()
     
     fig.tight_layout()
@@ -361,7 +367,7 @@ def create_equity_plot(results_df, horizon, a, b):
     ax1.grid(True, alpha=0.3)
     
     # Plot 2: Scaling Factor
-    ax2.plot(results_df.index, results_df['Scaling_Factor'], 'purple', linewidth=1, label=f'Factor (a={a:.2f}, b={b:.2f})')
+    ax2.plot(results_df.index, results_df['Scaling_Factor'], 'purple', linewidth=1, label=f'Factor (a={a:.3f}, b={b:.3f})')
     ax2.fill_between(results_df.index, results_df['Scaling_Factor'], 0, color='purple', alpha=0.1)
     ax2.set_ylim(0, 1.1)
     ax2b = ax2.twinx()
@@ -399,7 +405,7 @@ def start_web_server(results_df, heatmap_img_buf, best_params, main_sharpe):
     # --- Monthly Stats ---
     monthly_rows = ""
     monthly_groups = results_df.groupby(pd.Grouper(freq='M'))
-    for name, group in reversed(list(monthly_groups)): # Reverse order
+    for name, group in reversed(list(monthly_groups)): 
         if len(group) < 5: continue
         m_daily_rets = group['Strategy_Daily_Return']
         m_start = group['Portfolio_Value'].iloc[0]
@@ -428,7 +434,7 @@ def start_web_server(results_df, heatmap_img_buf, best_params, main_sharpe):
             <h1>Conviction Strategy Results</h1>
             <div class="stats">
                 <p><strong>Horizon:</strong> {HORIZON} | <strong>Leverage:</strong> {LEVERAGE}x</p>
-                <p><strong>Optimal Params:</strong> a={best_params[0]:.2f}, b={best_params[1]:.2f}</p>
+                <p><strong>Optimal Params:</strong> a={best_params[0]:.3f}, b={best_params[1]:.3f}</p>
                 <p><strong>Final:</strong> ${final_val:,.2f} | <strong>Return:</strong> {total_ret:.2f}% | <strong>Sharpe:</strong> {main_sharpe:.2f}</p>
             </div>
             
@@ -452,10 +458,6 @@ def start_web_server(results_df, heatmap_img_buf, best_params, main_sharpe):
         
     @app.route('/heatmap')
     def heatmap():
-        # Re-create heatmap buffer from stored data
-        # Note: In a real app we'd store the image, but re-generating here is fine for this context
-        # Actually, we need to pass the data. 
-        # For simplicity, we just return the pre-generated buffer passed to this function.
         heatmap_img_buf.seek(0)
         return send_file(heatmap_img_buf, mimetype='image/png')
 
@@ -468,8 +470,6 @@ if __name__ == '__main__':
     
     # 1. Precalculate Raw Conviction
     raw_conviction, contributions, common_idx = precalculate_conviction(df_data, df_signals)
-    
-    # Align df_data to common_idx for grid search
     df_grid_data = df_data.loc[common_idx].copy()
     
     # 2. Run Grid Search
