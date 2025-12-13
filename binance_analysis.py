@@ -18,20 +18,17 @@ SINCE_STR = '2018-01-01 00:00:00'
 HORIZON = 380  # Decay window (days)
 INITIAL_CAPITAL = 10000.0
 LEVERAGE = 5.0 # Fixed 5x leverage based on normalized conviction score (0 to 1)
-STOP_LOSS_PCT = 0.05
-SL_HIT_RETURN = -0.0505 # 5.05% loss (5% + 0.05% slippage/fee)
 
 # --- Winning Signals ---
 WINNING_SIGNALS = [
     ('EMA_CROSS', 50, 150, 0),         # 0: EMA 50/150
     ('PRICE_SMA', 380, 0, 0),          # 1: Price/SMA 380
     ('PRICE_SMA', 140, 0, 0),          # 2: Price/SMA 140
-    ('MACD_CROSS', 12, 26, 15),        # 3: MACD (12/26/15) - Used for SL Re-entry
+    ('MACD_CROSS', 12, 26, 15),        # 3: MACD (12/26/15)
     ('RSI_CROSS', 35, 0, 0),           # 4: RSI 35 (Crossover)
 ]
 
 N_SIGNALS = len(WINNING_SIGNALS)
-MACD_SIGNAL_INDEX = 3 # Index of the MACD signal
 SIGNAL_NAMES = [f"{s[0]}_{s[1]}_{s[2]}" for s in WINNING_SIGNALS]
 SIGNAL_COLORS = ['#3498DB', '#E67E22', '#F1C40F', '#2ECC71', '#E74C3C'] # Blue, Orange, Yellow, Green, Red
 
@@ -117,13 +114,12 @@ def generate_signals(df):
 
         df_signals[col] = np.where(long_cond, 1, np.where(short_cond, -1, 0))
 
-    df_signals_raw = df_signals.copy() # UN-shifted signals (used for SL re-entry check)
-    
     df_signals_shifted = df_signals.shift(1)
     df_signals_shifted.fillna(0, inplace=True)
     df_signals_shifted = df_signals_shifted.astype(int)
 
-    return df_signals_shifted, df_signals_raw
+    # Only shifted signals are needed now
+    return df_signals_shifted 
 
 # --- Pre-calculate Signal Contributions (The "Decay" Matrix) ---
 def precalculate_contributions(df_data, df_signals):
@@ -161,92 +157,35 @@ def precalculate_contributions(df_data, df_signals):
                     
     return contributions, common_idx
 
-# --- Backtest Runner (Simple Conviction with Stop Loss) ---
-def run_simple_backtest(df_data, contributions, common_idx, macd_raw_signals):
+# --- Backtest Runner (Simple Conviction, NO Stop Loss) ---
+def run_simple_backtest(df_data, contributions, common_idx):
     df = df_data.loc[common_idx].copy()
     num_days = len(df)
     
-    # Extract necessary price and signal data
+    # Extract necessary price data
     returns = df['return'].values
-    closes = df['close'].values
-    highs = df['high'].values
-    lows = df['low'].values
     
     # Initialize backtest arrays
     portfolio = np.zeros(num_days)
     daily_pnl = np.zeros(num_days)
-    exposure = np.zeros(num_days)
-    raw_conviction = np.zeros(num_days)
-    sl_lockdown_status = np.zeros(num_days, dtype=bool)
     
+    # Simple Conviction: Sum of all decaying contributions, normalized by N_SIGNALS
+    raw_conviction = np.sum(contributions, axis=1) / N_SIGNALS
+    
+    # Calculate Exposure: Raw Conviction * Fixed Leverage
+    exposure = raw_conviction * LEVERAGE
+    exposure = np.clip(exposure, -LEVERAGE, LEVERAGE)
+    
+    # Run Portfolio Loop
     portfolio[0] = INITIAL_CAPITAL
     is_bankrupt = False
-    in_sl_lockdown = False
-    
-    sl_pct = STOP_LOSS_PCT
     
     for t in range(1, num_days):
-        prev_close = closes[t-1]
-        
-        # --- 1. SL Lockdown / Re-entry Check ---
-        if in_sl_lockdown:
-            # Check for MACD re-entry signal (a non-zero signal today)
-            if macd_raw_signals.iloc[t] != 0:
-                in_sl_lockdown = False
-            else:
-                # Stay flat and roll over capital
-                exposure[t] = 0.0
-                portfolio[t] = portfolio[t-1]
-                daily_pnl[t] = 0.0
-                sl_lockdown_status[t] = True
-                continue
-        
-        # --- 2. Calculate Base Exposure ---
-        
-        # Raw Conviction (normalized -1 to 1)
-        raw_conviction_t = np.sum(contributions[t]) / N_SIGNALS
-        raw_conviction[t] = raw_conviction_t
-        
-        # Base Exposure
-        base_exposure = raw_conviction_t * LEVERAGE
-        base_exposure = np.clip(base_exposure, -LEVERAGE, LEVERAGE)
-        exposure[t] = base_exposure
-        
-        # --- 3. Intraday Stop Loss Check (if not in lockdown and position is open) ---
-        
-        sl_hit = False
-        pnl_for_day = 0.0
-        
-        if abs(base_exposure) > 0.01: # Only check SL if we have a position
-            
-            # Long SL Check
-            if base_exposure > 0:
-                sl_price = prev_close * (1 - sl_pct)
-                if lows[t] <= sl_price:
-                    sl_hit = True
-            
-            # Short SL Check
-            elif base_exposure < 0:
-                sl_price = prev_close * (1 + sl_pct)
-                if highs[t] >= sl_price:
-                    sl_hit = True
-
-        # --- 4. Apply PnL and Manage State ---
-        
-        if sl_hit:
-            # SL hit: Apply fixed loss and enter lockdown
-            pnl_for_day = portfolio[t-1] * SL_HIT_RETURN
-            portfolio[t] = portfolio[t-1] + pnl_for_day
-            daily_pnl[t] = pnl_for_day
-            exposure[t] = 0.0 # Exit position
-            in_sl_lockdown = True
-            sl_lockdown_status[t] = True
-            
-        elif not is_bankrupt:
-            # Standard PnL calculation
-            pnl_for_day = portfolio[t-1] * exposure[t] * returns[t]
-            portfolio[t] = portfolio[t-1] + pnl_for_day
-            daily_pnl[t] = pnl_for_day
+        if not is_bankrupt:
+            # PnL = Previous Equity * Exposure * Return
+            pnl = portfolio[t-1] * exposure[t] * returns[t]
+            portfolio[t] = portfolio[t-1] + pnl
+            daily_pnl[t] = pnl
             
             if portfolio[t] <= 0:
                 portfolio[t] = 0
@@ -255,12 +194,11 @@ def run_simple_backtest(df_data, contributions, common_idx, macd_raw_signals):
             portfolio[t] = 0
             
     # Compile results
-    results = df[['close', 'return', 'high', 'low']].copy()
+    results = df[['close', 'return']].copy()
     results['Exposure'] = exposure
     results['Raw_Conviction'] = raw_conviction
     results['Portfolio_Value'] = portfolio
     results['Daily_PnL'] = daily_pnl
-    results['SL_Lockdown'] = sl_lockdown_status
     
     results['Strategy_Daily_Return'] = results['Portfolio_Value'].pct_change().fillna(0)
     
@@ -289,7 +227,7 @@ def create_equity_plot(results_df, contributions):
     ax1.set_title('BTC Price (Log)', fontweight='bold')
     ax1.grid(True, alpha=0.3)
     
-    # --- Plot 2: Individual Signal Contributions ---
+    # --- Plot 2: Individual Signal Contributions (Stacked Area) ---
     
     pos_contributions = np.clip(contributions, 0, None)
     neg_contributions = np.clip(contributions, None, 0)
@@ -307,12 +245,7 @@ def create_equity_plot(results_df, contributions):
     ax2.grid(True, axis='y', alpha=0.3)
     ax2.legend(loc='upper right', fontsize=8, ncol=2)
     
-    # --- Plot 3: Equity and SL Lockdown Background ---
-    
-    # Draw Stop-Loss Lockdown background
-    ax3_ymin, ax3_ymax = 0.0, 1.0 # Normalized vertical position for fill_between
-    ax3.fill_between(results_df.index, ax3_ymin, ax3_ymax, where=results_df['SL_Lockdown'], 
-                     color='#FFC300', alpha=0.2, transform=ax3.get_xaxis_transform(), label='SL Lockdown (Cash)')
+    # --- Plot 3: Equity ---
     
     ax3.plot(results_df.index, results_df['Portfolio_Value'], 'b-', linewidth=1.5, label=f'Strategy ({LEVERAGE}x)')
     bh = results_df['close'] / results_df['close'].iloc[0] * INITIAL_CAPITAL
@@ -322,7 +255,7 @@ def create_equity_plot(results_df, contributions):
     else: ax3.set_yscale('log')
     
     ax3.legend(loc='upper left')
-    ax3.set_title(f'Equity Curve (SL: {STOP_LOSS_PCT*100:.0f}% vs MACD Re-entry)', fontweight='bold')
+    ax3.set_title('Equity Curve', fontweight='bold')
     ax3.grid(True, alpha=0.3)
     
     # --- Plot 4: Drawdown ---
@@ -362,7 +295,7 @@ def start_web_server(results_df, contributions, overall_sharpe):
         ts = int(time.time())
         return f'''
         <html>
-        <head><title>Conviction Strategy SL</title>
+        <head><title>Conviction Strategy Signal Breakdown</title>
         <style>
             body {{ font-family: sans-serif; text-align: center; margin: 40px; color: #333; }}
             .stats {{ background: #f9f9f9; padding: 20px; border-radius: 8px; display: inline-block; margin-bottom: 20px; }}
@@ -372,15 +305,14 @@ def start_web_server(results_df, contributions, overall_sharpe):
         </style>
         </head>
         <body>
-            <h1>Conviction Strategy (5x Leverage + 5% Stop Loss)</h1>
+            <h1>Conviction Strategy (5x Leverage - No SL)</h1>
             <div class="stats">
                 <p><strong>Horizon:</strong> {HORIZON} days | <strong>Fixed Leverage:</strong> {LEVERAGE}x</p>
-                <p><strong>Stop Loss:</strong> {STOP_LOSS_PCT*100:.0f}% Intraday | <strong>Re-entry:</strong> New MACD Signal</p>
                 <p><strong>Final:</strong> ${final_val:,.2f} | <strong>Return:</strong> {total_ret:.2f}%</p>
                 <p><strong>Overall Sharpe:</strong> {overall_sharpe:.2f}</p>
             </div>
             
-            <h2>Performance Breakdown</h2>
+            <h2>Signal Contributions Breakdown</h2>
             <img src="/plot?v={ts}" />
             
             <h2>Monthly Returns</h2>
@@ -403,20 +335,16 @@ def start_web_server(results_df, contributions, overall_sharpe):
 
 if __name__ == '__main__':
     df_data = fetch_binance_data()
-    df_signals_shifted, df_signals_raw = generate_signals(df_data)
+    df_signals = generate_signals(df_data)
     
     # 1. Precalculate Signal Contributions (Decay Matrix)
-    contributions, common_idx = precalculate_contributions(df_data, df_signals_shifted)
+    contributions, common_idx = precalculate_contributions(df_data, df_signals)
     df_clean = df_data.loc[common_idx]
     
-    # 2. Isolate the MACD raw signal column for SL re-entry check
-    macd_col_name = SIGNAL_NAMES[MACD_SIGNAL_INDEX]
-    macd_raw_signals = df_signals_raw.loc[common_idx, macd_col_name]
+    # 2. Run Simple Backtest (No SL)
+    results = run_simple_backtest(df_clean, contributions, common_idx)
     
-    # 3. Run Stop Loss Backtest
-    results = run_simple_backtest(df_clean, contributions, common_idx, macd_raw_signals)
-    
-    # 4. Calculate Sharpe
+    # 3. Calculate Sharpe
     sharpe = calculate_sharpe(results)
     
     start_web_server(results, contributions, sharpe)
