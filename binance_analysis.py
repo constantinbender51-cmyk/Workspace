@@ -18,17 +18,19 @@ SINCE_STR = '2018-01-01 00:00:00'
 HORIZON = 380  # Decay window (days)
 INITIAL_CAPITAL = 10000.0
 LEVERAGE = 5.0 # Fixed 5x leverage based on normalized conviction score (0 to 1)
+MACD_CONTRARIAN_FACTOR = 2.0 # The factor by which MACD is multiplied when it contradicts the non-MACD consensus
 
 # --- Winning Signals ---
 WINNING_SIGNALS = [
     ('EMA_CROSS', 50, 150, 0),         # 0: EMA 50/150
     ('PRICE_SMA', 380, 0, 0),          # 1: Price/SMA 380
     ('PRICE_SMA', 140, 0, 0),          # 2: Price/SMA 140
-    ('MACD_CROSS', 12, 26, 15),        # 3: MACD (12/26/15)
+    ('MACD_CROSS', 12, 26, 15),        # 3: MACD (12/26/15) - Dynamic Weight
     ('RSI_CROSS', 35, 0, 0),           # 4: RSI 35 (Crossover)
 ]
 
 N_SIGNALS = len(WINNING_SIGNALS)
+MACD_SIGNAL_INDEX = 3 
 SIGNAL_NAMES = [f"{s[0]}_{s[1]}_{s[2]}" for s in WINNING_SIGNALS]
 SIGNAL_COLORS = ['#3498DB', '#E67E22', '#F1C40F', '#2ECC71', '#E74C3C'] # Blue, Orange, Yellow, Green, Red
 
@@ -118,7 +120,6 @@ def generate_signals(df):
     df_signals_shifted.fillna(0, inplace=True)
     df_signals_shifted = df_signals_shifted.astype(int)
 
-    # Only shifted signals are needed now
     return df_signals_shifted 
 
 # --- Pre-calculate Signal Contributions (The "Decay" Matrix) ---
@@ -157,46 +158,86 @@ def precalculate_contributions(df_data, df_signals):
                     
     return contributions, common_idx
 
-# --- Backtest Runner (Simple Conviction, NO Stop Loss) ---
-def run_simple_backtest(df_data, contributions, common_idx):
+# --- Backtest Runner (Dynamic Weighted Conviction) ---
+def run_dynamic_backtest(df_data, contributions, common_idx):
     df = df_data.loc[common_idx].copy()
     num_days = len(df)
-    
-    # Extract necessary price data
     returns = df['return'].values
     
     # Initialize backtest arrays
     portfolio = np.zeros(num_days)
     daily_pnl = np.zeros(num_days)
-    
-    # Simple Conviction: Sum of all decaying contributions, normalized by N_SIGNALS
-    raw_conviction = np.sum(contributions, axis=1) / N_SIGNALS
-    
-    # Calculate Exposure: Raw Conviction * Fixed Leverage
-    exposure = raw_conviction * LEVERAGE
-    exposure = np.clip(exposure, -LEVERAGE, LEVERAGE)
+    dynamic_conviction_matrix = np.zeros_like(contributions) # Store scaled contributions
     
     # Run Portfolio Loop
     portfolio[0] = INITIAL_CAPITAL
     is_bankrupt = False
     
-    for t in range(1, num_days):
-        if not is_bankrupt:
-            # PnL = Previous Equity * Exposure * Return
-            pnl = portfolio[t-1] * exposure[t] * returns[t]
-            portfolio[t] = portfolio[t-1] + pnl
-            daily_pnl[t] = pnl
-            
-            if portfolio[t] <= 0:
+    # Base weight for non-MACD signals
+    base_weight = 1.0
+    
+    for t in range(num_days):
+        
+        current_contributions = contributions[t]
+        macd_contribution = current_contributions[MACD_SIGNAL_INDEX]
+        
+        # 1. Calculate non-MACD consensus
+        non_macd_contributions = np.delete(current_contributions, MACD_SIGNAL_INDEX)
+        non_macd_sum = np.sum(non_macd_contributions)
+        
+        # Determine MACD weight
+        macd_weight = base_weight
+        
+        # Contradiction check: Non-MACD consensus and MACD signal have opposite signs
+        # We check for a non-zero consensus/MACD to avoid unnecessary scaling when all are zero/neutral
+        non_macd_sign = np.sign(non_macd_sum)
+        macd_sign = np.sign(macd_contribution)
+        
+        if non_macd_sign != 0 and macd_sign != 0 and non_macd_sign != macd_sign:
+            macd_weight = MACD_CONTRARIAN_FACTOR
+        
+        # 2. Calculate Final Conviction Score
+        
+        # Total numerator (sum of weighted contributions)
+        weighted_sum = non_macd_sum + (macd_contribution * macd_weight)
+        
+        # Total denominator (sum of weights)
+        total_weight = (N_SIGNALS - 1) * base_weight + macd_weight
+        
+        # Normalized Raw Conviction (-1.0 to 1.0)
+        raw_conviction_t = weighted_sum / total_weight
+        
+        # Calculate Exposure
+        exposure_t = raw_conviction_t * LEVERAGE
+        exposure_t = np.clip(exposure_t, -LEVERAGE, LEVERAGE)
+        
+        # Store scaled contributions for plotting
+        scaled_contributions = current_contributions.copy()
+        scaled_contributions[MACD_SIGNAL_INDEX] *= macd_weight
+        # Re-normalize contributions so they stack up to the overall weighted sum (for visualization)
+        scaled_contributions /= total_weight
+        scaled_contributions *= N_SIGNALS # Scale back up to +/-5 for the plot range
+        dynamic_conviction_matrix[t] = scaled_contributions
+        
+        # --- Run PnL ---
+        if t > 0:
+            if not is_bankrupt:
+                pnl = portfolio[t-1] * exposure_t * returns[t]
+                portfolio[t] = portfolio[t-1] + pnl
+                daily_pnl[t] = pnl
+                
+                if portfolio[t] <= 0:
+                    portfolio[t] = 0
+                    is_bankrupt = True
+            else:
                 portfolio[t] = 0
-                is_bankrupt = True
-        else:
-            portfolio[t] = 0
-            
+        
+        # Store final exposure (used for drawdown/metrics calc)
+        df.loc[df.index[t], 'Exposure'] = exposure_t
+        df.loc[df.index[t], 'Raw_Conviction'] = raw_conviction_t
+
     # Compile results
-    results = df[['close', 'return']].copy()
-    results['Exposure'] = exposure
-    results['Raw_Conviction'] = raw_conviction
+    results = df[['close', 'return', 'Exposure', 'Raw_Conviction']].copy()
     results['Portfolio_Value'] = portfolio
     results['Daily_PnL'] = daily_pnl
     
@@ -205,14 +246,14 @@ def run_simple_backtest(df_data, contributions, common_idx):
     rolling_max = results['Portfolio_Value'].cummax()
     results['Drawdown'] = np.where(rolling_max > 0, (results['Portfolio_Value'] - rolling_max) / rolling_max, -1.0)
     
-    return results
+    return results, dynamic_conviction_matrix
 
 def calculate_sharpe(results_df):
     d_rets = results_df['Strategy_Daily_Return']
     sharpe = (d_rets.mean()/d_rets.std())*np.sqrt(365) if d_rets.std()>0 else 0
     return sharpe
 
-def create_equity_plot(results_df, contributions):
+def create_equity_plot(results_df, contributions_scaled):
     fig = Figure(figsize=(12, 16))
     
     # 4 Subplots: Price, Signal Contributions, Equity, Drawdown
@@ -229,19 +270,21 @@ def create_equity_plot(results_df, contributions):
     
     # --- Plot 2: Individual Signal Contributions (Stacked Area) ---
     
-    pos_contributions = np.clip(contributions, 0, None)
-    neg_contributions = np.clip(contributions, None, 0)
+    # Contributions are already dynamically scaled and normalized for plotting
+    pos_contributions = np.clip(contributions_scaled, 0, None)
+    neg_contributions = np.clip(contributions_scaled, None, 0)
     
     ax2.axhline(0, color='gray', linestyle='-', linewidth=0.5)
     
     ax2.stackplot(results_df.index, pos_contributions.T, colors=SIGNAL_COLORS, labels=SIGNAL_NAMES, alpha=0.7)
     ax2.stackplot(results_df.index, neg_contributions.T, colors=SIGNAL_COLORS, alpha=0.7)
 
-    ax2.plot(results_df.index, results_df['Raw_Conviction'] * N_SIGNALS, 'k--', linewidth=1, alpha=0.5, label='Total Conviction Score')
+    # Total Raw Conviction * N_SIGNALS is now the sum of the scaled stackplot layers
+    ax2.plot(results_df.index, results_df['Raw_Conviction'] * N_SIGNALS, 'k--', linewidth=1, alpha=0.5, label='Total Scaled Conviction')
     
     ax2.set_ylim(-N_SIGNALS, N_SIGNALS)
     ax2.set_ylabel('Signal Contribution (Max +/-5)', fontsize=10)
-    ax2.set_title('Individual Signal Contributions (Decay Included)', fontweight='bold')
+    ax2.set_title('Individual Signal Contributions (MACD x2 on Contradiction)', fontweight='bold')
     ax2.grid(True, axis='y', alpha=0.3)
     ax2.legend(loc='upper right', fontsize=8, ncol=2)
     
@@ -270,7 +313,7 @@ def create_equity_plot(results_df, contributions):
     buf.seek(0)
     return buf
 
-def start_web_server(results_df, contributions, overall_sharpe):
+def start_web_server(results_df, contributions_scaled, overall_sharpe):
     app = Flask(__name__)
     
     final_val = results_df['Portfolio_Value'].iloc[-1]
@@ -295,7 +338,7 @@ def start_web_server(results_df, contributions, overall_sharpe):
         ts = int(time.time())
         return f'''
         <html>
-        <head><title>Conviction Strategy Signal Breakdown</title>
+        <head><title>Conviction Strategy MACD Weighted</title>
         <style>
             body {{ font-family: sans-serif; text-align: center; margin: 40px; color: #333; }}
             .stats {{ background: #f9f9f9; padding: 20px; border-radius: 8px; display: inline-block; margin-bottom: 20px; }}
@@ -305,9 +348,10 @@ def start_web_server(results_df, contributions, overall_sharpe):
         </style>
         </head>
         <body>
-            <h1>Conviction Strategy (5x Leverage - No SL)</h1>
+            <h1>Conviction Strategy (MACD x2 Contradiction)</h1>
             <div class="stats">
                 <p><strong>Horizon:</strong> {HORIZON} days | <strong>Fixed Leverage:</strong> {LEVERAGE}x</p>
+                <p><strong>Rule:</strong> MACD signal influence is {MACD_CONTRARIAN_FACTOR}x when it contradicts the 4 other signals.</p>
                 <p><strong>Final:</strong> ${final_val:,.2f} | <strong>Return:</strong> {total_ret:.2f}%</p>
                 <p><strong>Overall Sharpe:</strong> {overall_sharpe:.2f}</p>
             </div>
@@ -324,7 +368,7 @@ def start_web_server(results_df, contributions, overall_sharpe):
     @app.route('/plot')
     def plot():
         try:
-            buf = create_equity_plot(results_df, contributions)
+            buf = create_equity_plot(results_df, contributions_scaled)
             return send_file(buf, mimetype='image/png')
         except Exception as e:
             print(f"Error creating plot: {e}")
@@ -341,10 +385,10 @@ if __name__ == '__main__':
     contributions, common_idx = precalculate_contributions(df_data, df_signals)
     df_clean = df_data.loc[common_idx]
     
-    # 2. Run Simple Backtest (No SL)
-    results = run_simple_backtest(df_clean, contributions, common_idx)
+    # 2. Run Dynamic Weighted Backtest
+    results, contributions_scaled = run_dynamic_backtest(df_clean, contributions, common_idx)
     
     # 3. Calculate Sharpe
     sharpe = calculate_sharpe(results)
     
-    start_web_server(results, contributions, sharpe)
+    start_web_server(results, contributions_scaled, sharpe)
