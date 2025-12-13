@@ -17,18 +17,20 @@ TIMEFRAME = '1d'
 SINCE_STR = '2018-01-01 00:00:00'
 HORIZON = 380  # Decay window (days)
 INITIAL_CAPITAL = 10000.0
-LEVERAGE = 5.0 # Re-introducing 5x fixed leverage based on conviction score
+LEVERAGE = 5.0 # Fixed 5x leverage based on normalized conviction score (0 to 1)
 
 # --- Winning Signals ---
 WINNING_SIGNALS = [
-    ('EMA_CROSS', 50, 150, 0),         # EMA 50/150
-    ('PRICE_SMA', 380, 0, 0),          # Price/SMA 380
-    ('PRICE_SMA', 140, 0, 0),          # Price/SMA 140
-    ('MACD_CROSS', 12, 26, 15),        # MACD (12/26/15)
-    ('RSI_CROSS', 35, 0, 0),           # RSI 35 (Crossover)
+    ('EMA_CROSS', 50, 150, 0),         # 0: EMA 50/150
+    ('PRICE_SMA', 380, 0, 0),          # 1: Price/SMA 380
+    ('PRICE_SMA', 140, 0, 0),          # 2: Price/SMA 140
+    ('MACD_CROSS', 12, 26, 15),        # 3: MACD (12/26/15)
+    ('RSI_CROSS', 35, 0, 0),           # 4: RSI 35 (Crossover)
 ]
 
 N_SIGNALS = len(WINNING_SIGNALS)
+SIGNAL_NAMES = [f"{s[0]}_{s[1]}_{s[2]}" for s in WINNING_SIGNALS]
+SIGNAL_COLORS = ['#3498DB', '#E67E22', '#F1C40F', '#2ECC71', '#E74C3C'] # Blue, Orange, Yellow, Green, Red
 
 # --- Data Fetching ---
 def fetch_binance_data():
@@ -161,7 +163,7 @@ def run_simple_backtest(df_data, contributions, common_idx):
     returns = df['return'].values
     
     # Simple Conviction: Sum of all decaying contributions, normalized by N_SIGNALS
-    # Max possible conviction sum is N_SIGNALS (5)
+    # (T,) vector of overall conviction score (-1.0 to 1.0)
     raw_conviction = np.sum(contributions, axis=1) / N_SIGNALS
     
     # Calculate Exposure: Raw Conviction * Fixed Leverage
@@ -203,11 +205,14 @@ def calculate_sharpe(results_df):
     sharpe = (d_rets.mean()/d_rets.std())*np.sqrt(365) if d_rets.std()>0 else 0
     return sharpe
 
-def create_equity_plot(results_df):
-    fig = Figure(figsize=(12, 12))
-    ax1 = fig.add_subplot(3, 1, 1)
-    ax2 = fig.add_subplot(3, 1, 2, sharex=ax1)
-    ax3 = fig.add_subplot(3, 1, 3, sharex=ax1)
+def create_equity_plot(results_df, contributions):
+    fig = Figure(figsize=(12, 16))
+    
+    # 4 Subplots: Price, Signal Contributions, Equity, Drawdown
+    ax1 = fig.add_subplot(4, 1, 1)
+    ax2 = fig.add_subplot(4, 1, 2, sharex=ax1)
+    ax3 = fig.add_subplot(4, 1, 3, sharex=ax1)
+    ax4 = fig.add_subplot(4, 1, 4, sharex=ax1)
     
     # --- Plot 1: Price ---
     ax1.plot(results_df.index, results_df['close'], 'k-', linewidth=1)
@@ -215,38 +220,46 @@ def create_equity_plot(results_df):
     ax1.set_title('BTC Price (Log)', fontweight='bold')
     ax1.grid(True, alpha=0.3)
     
-    # --- Plot 2: Equity and Conviction Background ---
+    # --- Plot 2: Individual Signal Contributions ---
     
-    # 2a. Draw Background based on Conviction Sign
-    ax2_ymin, ax2_ymax = 0.05, 1.05 # Reserve space for legend
+    # Separate Positive and Negative Contributions for clean stacking
+    pos_contributions = np.clip(contributions, 0, None)
+    neg_contributions = np.clip(contributions, None, 0)
     
-    # Find segments: Long (Conviction > 0.01), Short (Conviction < -0.01), Cash (Neutral)
-    conviction = results_df['Raw_Conviction']
+    ax2.axhline(0, color='gray', linestyle='-', linewidth=0.5)
     
-    # Draw long regime (light green)
-    ax2.fill_between(results_df.index, ax2_ymin, ax2_ymax, where=conviction > 0.01, 
-                     color='#e8f5e9', alpha=0.6, transform=ax2.get_xaxis_transform(), label='Long Conviction')
-    # Draw short regime (light red/pink)
-    ax2.fill_between(results_df.index, ax2_ymin, ax2_ymax, where=conviction < -0.01, 
-                     color='#ffebee', alpha=0.6, transform=ax2.get_xaxis_transform(), label='Short Conviction')
+    # Plot positive contributions (stacked area)
+    ax2.stackplot(results_df.index, pos_contributions.T, colors=SIGNAL_COLORS, labels=SIGNAL_NAMES, alpha=0.7)
+    
+    # Plot negative contributions (stacked area - note: use absolute value for stackplot)
+    ax2.stackplot(results_df.index, neg_contributions.T, colors=SIGNAL_COLORS, alpha=0.7)
 
-    # 2b. Plot Equity Lines
-    ax2.plot(results_df.index, results_df['Portfolio_Value'], 'b-', linewidth=1.5, label=f'Strategy ({LEVERAGE}x)')
+    # Plot total raw conviction (optional overlay line)
+    ax2.plot(results_df.index, results_df['Raw_Conviction'] * N_SIGNALS, 'k--', linewidth=1, alpha=0.5, label='Total Conviction Score')
+    
+    ax2.set_ylim(-N_SIGNALS, N_SIGNALS)
+    ax2.set_ylabel('Signal Contribution (Max +/-5)', fontsize=10)
+    ax2.set_title('Individual Signal Contributions (Decay Included)', fontweight='bold')
+    ax2.grid(True, axis='y', alpha=0.3)
+    ax2.legend(loc='upper right', fontsize=8, ncol=2)
+    
+    # --- Plot 3: Equity ---
+    ax3.plot(results_df.index, results_df['Portfolio_Value'], 'b-', linewidth=1.5, label=f'Strategy ({LEVERAGE}x)')
     bh = results_df['close'] / results_df['close'].iloc[0] * INITIAL_CAPITAL
-    ax2.plot(results_df.index, bh, 'g--', alpha=0.8, label='Buy & Hold')
+    ax3.plot(results_df.index, bh, 'g--', alpha=0.8, label='Buy & Hold')
     
-    if (results_df['Portfolio_Value'] <= 0).any(): ax2.set_yscale('symlog', linthresh=1.0)
-    else: ax2.set_yscale('log')
+    if (results_df['Portfolio_Value'] <= 0).any(): ax3.set_yscale('symlog', linthresh=1.0)
+    else: ax3.set_yscale('log')
     
-    ax2.legend(loc='upper left')
-    ax2.set_title('Equity Curve (Background: Conviction Regime)', fontweight='bold')
-    ax2.grid(True, alpha=0.3)
-    
-    # --- Plot 3: Drawdown ---
-    ax3.fill_between(results_df.index, results_df['Drawdown']*100, 0, color='red', alpha=0.3)
-    ax3.plot(results_df.index, results_df['Drawdown']*100, 'r-', linewidth=0.5)
-    ax3.set_title('Drawdown %', fontweight='bold')
+    ax3.legend(loc='upper left')
+    ax3.set_title('Equity Curve', fontweight='bold')
     ax3.grid(True, alpha=0.3)
+    
+    # --- Plot 4: Drawdown ---
+    ax4.fill_between(results_df.index, results_df['Drawdown']*100, 0, color='red', alpha=0.3)
+    ax4.plot(results_df.index, results_df['Drawdown']*100, 'r-', linewidth=0.5)
+    ax4.set_title('Drawdown %', fontweight='bold')
+    ax4.grid(True, alpha=0.3)
     
     fig.tight_layout()
     buf = io.BytesIO()
@@ -254,7 +267,7 @@ def create_equity_plot(results_df):
     buf.seek(0)
     return buf
 
-def start_web_server(results_df, overall_sharpe):
+def start_web_server(results_df, contributions, overall_sharpe):
     app = Flask(__name__)
     
     final_val = results_df['Portfolio_Value'].iloc[-1]
@@ -279,7 +292,7 @@ def start_web_server(results_df, overall_sharpe):
         ts = int(time.time())
         return f'''
         <html>
-        <head><title>Conviction Strategy Simple</title>
+        <head><title>Conviction Strategy Signal Breakdown</title>
         <style>
             body {{ font-family: sans-serif; text-align: center; margin: 40px; color: #333; }}
             .stats {{ background: #f9f9f9; padding: 20px; border-radius: 8px; display: inline-block; margin-bottom: 20px; }}
@@ -289,14 +302,15 @@ def start_web_server(results_df, overall_sharpe):
         </style>
         </head>
         <body>
-            <h1>Conviction Strategy (Simple 5x Leverage)</h1>
+            <h1>Conviction Strategy (5x Leverage)</h1>
             <div class="stats">
                 <p><strong>Horizon:</strong> {HORIZON} days | <strong>Fixed Leverage:</strong> {LEVERAGE}x</p>
                 <p><strong>Final:</strong> ${final_val:,.2f} | <strong>Return:</strong> {total_ret:.2f}%</p>
                 <p><strong>Overall Sharpe:</strong> {overall_sharpe:.2f}</p>
             </div>
             
-            <h2>Equity Curve (Background indicates Conviction)</h2>
+            <h2>Signal Contributions Breakdown</h2>
+            <p>Plot 2 shows the stacked decay value of each of the {N_SIGNALS} indicators.</p>
             <img src="/plot?v={ts}" />
             
             <h2>Monthly Returns</h2>
@@ -307,9 +321,14 @@ def start_web_server(results_df, overall_sharpe):
 
     @app.route('/plot')
     def plot():
-        buf = create_equity_plot(results_df)
-        return send_file(buf, mimetype='image/png')
-        
+        try:
+            # Pass the static contributions matrix to the plotting function
+            buf = create_equity_plot(results_df, contributions)
+            return send_file(buf, mimetype='image/png')
+        except Exception as e:
+            print(f"Error creating plot: {e}")
+            return f"Error creating plot: {e}", 500
+
     print(f"Server running on http://localhost:8080")
     app.run(host='0.0.0.0', port=8080, debug=False)
 
@@ -327,4 +346,4 @@ if __name__ == '__main__':
     # 3. Calculate Sharpe
     sharpe = calculate_sharpe(results)
     
-    start_web_server(results, sharpe)
+    start_web_server(results, contributions, sharpe)
