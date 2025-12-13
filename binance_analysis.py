@@ -18,7 +18,8 @@ SINCE_STR = '2018-01-01 00:00:00'
 HORIZON = 380  # Decay window (days) - OPTIMAL VALUE
 INITIAL_CAPITAL = 10000.0
 LEVERAGE = 5.0  # Multiplier applied to conviction exposure
-# Conviction Threshold is effectively 0.0 (disabled)
+CHOP_PERIOD = 14
+CHOP_THRESHOLD = 61.8
 
 # --- Winning Signals ---
 WINNING_SIGNALS = [
@@ -30,6 +31,37 @@ WINNING_SIGNALS = [
 ]
 
 MAX_CONVICTION = len(WINNING_SIGNALS)
+
+# --- Helper: Choppiness Index ---
+def calculate_choppiness(df, period=14):
+    # TR = Max(H-L, Abs(H-PrevC), Abs(L-PrevC))
+    high = df['high']
+    low = df['low']
+    close = df['close']
+    prev_close = close.shift(1)
+    
+    tr1 = high - low
+    tr2 = (high - prev_close).abs()
+    tr3 = (low - prev_close).abs()
+    
+    tr = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
+    
+    # Sum of TR over period
+    atr_sum = tr.rolling(window=period).sum()
+    
+    # Range (MaxHi - MinLo) over period
+    max_hi = high.rolling(window=period).max()
+    min_lo = low.rolling(window=period).min()
+    
+    # CHOP Formula
+    # 100 * LOG10( SUM(TR, n) / ( MaxHi(n) - MinLo(n) ) ) / LOG10(n)
+    
+    numerator = atr_sum / (max_hi - min_lo)
+    # Handle division by zero or log of zero if range is 0 (unlikely on BTC daily)
+    numerator = numerator.replace(0, np.nan) 
+    
+    chop = 100 * np.log10(numerator) / np.log10(period)
+    return chop.fillna(50) # Default neutral
 
 # --- Data Fetching ---
 def fetch_binance_data():
@@ -67,7 +99,10 @@ def fetch_binance_data():
     # Standard Close-to-Close Return
     df['return'] = df['close'].pct_change()
     
-    df.dropna(subset=['return'], inplace=True)
+    # Calculate Choppiness
+    df['chop'] = calculate_choppiness(df, CHOP_PERIOD)
+    
+    df.dropna(subset=['return', 'chop'], inplace=True)
     return df
 
 
@@ -128,9 +163,6 @@ def generate_signals(df):
 
 # --- Backtest implementation ---
 def run_conviction_backtest(df_data, df_signals):
-    """
-    Runs the backtest with NO Conviction Threshold applied.
-    """
     horizon = HORIZON
     
     common_idx = df_data.index.intersection(df_signals.index)
@@ -139,10 +171,12 @@ def run_conviction_backtest(df_data, df_signals):
 
     num_days = len(df)
     daily_returns = df['return'].values 
+    chop_values = df['chop'].values # Access chop array
     
     portfolio = np.zeros(num_days)
     daily_pnl = np.zeros(num_days)
     conviction_norm = np.zeros(num_days)
+    lockdown_status = np.zeros(num_days, dtype=bool)
     
     daily_contributions = np.zeros((num_days, len(WINNING_SIGNALS)))
 
@@ -151,9 +185,11 @@ def run_conviction_backtest(df_data, df_signals):
     
     portfolio[0] = INITIAL_CAPITAL
     is_bankrupt = False
+    in_chop_lockdown = False
 
     for t in range(num_days):
         daily_sum = 0.0
+        fresh_signal_fired = False
 
         for i in range(len(WINNING_SIGNALS)):
             current_sig = signals.iloc[t, i]
@@ -161,6 +197,7 @@ def run_conviction_backtest(df_data, df_signals):
             if current_sig != 0:
                 signal_start_day[i] = t
                 signal_direction[i] = current_sig
+                fresh_signal_fired = True
             
             if signal_direction[i] != 0:
                 d = t - signal_start_day[i]
@@ -180,13 +217,24 @@ def run_conviction_backtest(df_data, df_signals):
         # Calculate Normalized Conviction (-1 to 1)
         raw_conviction = daily_sum / MAX_CONVICTION
         
-        # --- CONVICTION FILTER DISABLED ---
-        # Threshold logic is skipped; raw conviction is used directly.
+        # --- CHOP LOCKDOWN LOGIC ---
+        current_chop = chop_values[t]
         
+        # 1. Trigger Lockdown if Chop is high
+        if current_chop > CHOP_THRESHOLD:
+            in_chop_lockdown = True
+            
+        # 2. If in lockdown, stay in lockdown unless a FRESH signal breaks it
+        if in_chop_lockdown:
+            if fresh_signal_fired:
+                in_chop_lockdown = False
+            else:
+                raw_conviction = 0.0 # Force Cash
+        
+        lockdown_status[t] = in_chop_lockdown
+
         # Apply LEVERAGE
         exposure = raw_conviction * LEVERAGE
-        
-        # Clip to max leverage
         exposure = np.clip(exposure, -LEVERAGE, LEVERAGE)
 
         if t > 0:
@@ -210,15 +258,15 @@ def run_conviction_backtest(df_data, df_signals):
 
         conviction_norm[t] = exposure
         
-    results = df[['close', 'return']].copy()
+    results = df[['close', 'return', 'chop']].copy()
     results['Exposure'] = conviction_norm
     results['Daily_PnL'] = daily_pnl
     results['Portfolio_Value'] = portfolio
+    results['Lockdown'] = lockdown_status
     
     results['Strategy_Daily_Return'] = results['Portfolio_Value'].pct_change().fillna(0)
     
     rolling_max = results['Portfolio_Value'].cummax()
-    # Handle division by zero for bankruptcy
     results['Drawdown'] = np.where(rolling_max > 0, (results['Portfolio_Value'] - rolling_max) / rolling_max, -1.0)
 
     signal_names = [f"{s[0]}_{s[1]}" for s in WINNING_SIGNALS]
@@ -227,7 +275,6 @@ def run_conviction_backtest(df_data, df_signals):
     
     total_return = (portfolio[-1] / portfolio[0]) - 1.0
     
-    # Calculate Sharpe Ratio
     daily_rets = results['Strategy_Daily_Return']
     if daily_rets.std() > 0:
         sharpe = (daily_rets.mean() / daily_rets.std()) * np.sqrt(365)
@@ -245,52 +292,70 @@ def calculate_net_daily_signal_event(df_signals_raw, results_df):
 
 
 def create_equity_plot(results_df, long_signal_dates, short_signal_dates, horizon):
-    # Use explicitly created Figure for thread safety in Flask
-    fig = Figure(figsize=(12, 14))
+    fig = Figure(figsize=(12, 16))
     
-    # Create subplots manually
-    ax1 = fig.add_subplot(3, 1, 1)
-    ax2 = fig.add_subplot(3, 1, 2, sharex=ax1)
-    ax3 = fig.add_subplot(3, 1, 3, sharex=ax1)
+    # 4 Subplots: Price, Chop, Equity, Drawdown
+    ax1 = fig.add_subplot(4, 1, 1)
+    ax2 = fig.add_subplot(4, 1, 2, sharex=ax1)
+    ax3 = fig.add_subplot(4, 1, 3, sharex=ax1)
+    ax4 = fig.add_subplot(4, 1, 4, sharex=ax1)
     
-    # --- Plot 1: Price Chart (Log Scale) ---
+    # --- Plot 1: Price Chart ---
     ax1.plot(results_df.index, results_df['close'], 'k-', linewidth=1, label='BTC Price')
     ax1.set_yscale('log')
     ax1.set_title(f'BTC/USDT Price (Log Scale)', fontsize=12, fontweight='bold')
-    ax1.set_ylabel('Price ($)', fontsize=10)
     ax1.grid(True, which="both", ls="-", alpha=0.2)
-    ax1.legend(loc='upper left')
 
     # Signals
     long_prices = results_df.loc[long_signal_dates, 'close']
     short_prices = results_df.loc[short_signal_dates, 'close']
     ax1.scatter(long_signal_dates, long_prices, marker='^', color='green', s=50, label='Long Signal', zorder=5)
     ax1.scatter(short_signal_dates, short_prices, marker='v', color='red', s=50, label='Short Signal', zorder=5)
+    ax1.legend(loc='upper left')
+
+    # --- Plot 2: Choppiness Index ---
+    ax2.plot(results_df.index, results_df['chop'], 'm-', linewidth=1, label='Choppiness (14)')
+    ax2.axhline(y=61.8, color='r', linestyle='--', label='Chop Threshold (61.8)')
+    ax2.axhline(y=38.2, color='g', linestyle='--', label='Trend Threshold (38.2)')
     
-    # --- Plot 2: Equity Curve (Log Scale) ---
-    ax2.plot(results_df.index, results_df['Portfolio_Value'], 'b-', linewidth=1.5, label=f'Strategy Equity ({LEVERAGE}x Lev)')
+    # Shade lockdown areas
+    lockdown_dates = results_df[results_df['Lockdown']].index
+    if len(lockdown_dates) > 0:
+        # Create segments to shade
+        # Simple hack: shade entire background where lockdown is true.
+        # Since fill_between requires x and y, and we want vertical bands, we use logic:
+        # We fill where lockdown is 1
+        ymin, ymax = ax2.get_ylim()
+        ax2.fill_between(results_df.index, ymin, ymax, where=results_df['Lockdown'], color='gray', alpha=0.3, label='Lockdown Mode')
+        
+    ax2.set_title('Choppiness Index & Lockdown Zones', fontsize=12, fontweight='bold')
+    ax2.set_ylabel('CHOP', fontsize=10)
+    ax2.grid(True, alpha=0.3)
+    ax2.legend(loc='upper right')
+
+    # --- Plot 3: Equity Curve (Log Scale) ---
+    ax3.plot(results_df.index, results_df['Portfolio_Value'], 'b-', linewidth=1.5, label=f'Strategy Equity ({LEVERAGE}x Lev)')
     
-    # Calculate B&H curve
     bh_curve = results_df['close'] / results_df['close'].iloc[0] * INITIAL_CAPITAL
-    ax2.plot(results_df.index, bh_curve, 'g--', alpha=0.8, linewidth=1, label='Buy & Hold (1x)')
+    ax3.plot(results_df.index, bh_curve, 'g--', alpha=0.8, linewidth=1, label='Buy & Hold (1x)')
     
     if (results_df['Portfolio_Value'] <= 0).any():
-        ax2.set_yscale('symlog', linthresh=1.0) 
+        ax3.set_yscale('symlog', linthresh=1.0) 
     else:
-        ax2.set_yscale('log')
+        ax3.set_yscale('log')
         
-    ax2.set_title(f'Strategy Equity - {LEVERAGE}x Leverage', fontsize=12, fontweight='bold')
-    ax2.set_ylabel('Value ($)', fontsize=10)
-    ax2.grid(True, which="both", ls="-", alpha=0.2)
-    ax2.legend(loc='upper left')
+    ax3.set_title(f'Strategy Equity - {LEVERAGE}x Leverage', fontsize=12, fontweight='bold')
+    ax3.set_ylabel('Value ($)', fontsize=10)
+    ax3.grid(True, which="both", ls="-", alpha=0.2)
+    ax3.legend(loc='upper left')
     
-    # --- Plot 3: Drawdown ---
-    ax3.fill_between(results_df.index, results_df['Drawdown'] * 100, 0, color='red', alpha=0.3)
-    ax3.plot(results_df.index, results_df['Drawdown'] * 100, 'r-', linewidth=0.5)
-    ax3.set_title('Strategy Drawdown (%)', fontsize=10, fontweight='bold')
-    ax3.set_ylabel('Drawdown %', fontsize=10)
-    ax3.set_xlabel('Date', fontsize=10)
-    ax3.grid(True, alpha=0.3)
+    # --- Plot 4: Drawdown ---
+    ax4.fill_between(results_df.index, results_df['Drawdown'] * 100, 0, color='red', alpha=0.3)
+    ax4.plot(results_df.index, results_df['Drawdown'] * 100, 'r-', linewidth=0.5)
+    ax4.set_title('Strategy Drawdown (%)', fontsize=10, fontweight='bold')
+    ax4.set_ylabel('Drawdown %', fontsize=10)
+    ax4.set_xlabel('Date', fontsize=10)
+    ax4.grid(True, alpha=0.3)
 
     fig.tight_layout()
     buf = io.BytesIO()
@@ -301,14 +366,14 @@ def create_equity_plot(results_df, long_signal_dates, short_signal_dates, horizo
 def start_web_server(results_df, df_signals_raw, main_sharpe):
     app = Flask(__name__)
     
-    sig_names = [f"{s[0]}_{s[1]}" for s in WINNING_SIGNALS] # Recalc sig names
+    sig_names = [f"{s[0]}_{s[1]}" for s in WINNING_SIGNALS]
     long_signal_dates, short_signal_dates = calculate_net_daily_signal_event(df_signals_raw, results_df)
     
-    # Stats logic...
     final_val = results_df['Portfolio_Value'].iloc[-1]
     total_ret = ((final_val / INITIAL_CAPITAL) - 1) * 100
     overall_sharpe = main_sharpe
     is_bust = (final_val <= 0)
+    lockdown_days = results_df['Lockdown'].sum()
 
     # --- Monthly Stats ---
     monthly_rows = ""
@@ -350,13 +415,19 @@ def start_web_server(results_df, df_signals_raw, main_sharpe):
     for date, row in results_df.sort_index(ascending=False).iterrows():
         date_str = date.strftime('%Y-%m-%d')
         exposure_val = row['Exposure']
+        chop_val = row['chop']
+        is_locked = row['Lockdown']
+        
+        lock_badge = "<span style='background: #5DADE2; color: white; padding: 2px 6px; border-radius: 4px; font-size: 0.8em;'>LOCKED</span>" if is_locked else ""
+        
         if exposure_val > 0:
             exp_str, row_color = f"LONG {exposure_val:.2f}x", "color: #C0392B; font-weight: bold;"
         elif exposure_val < 0:
             exp_str, row_color = f"SHORT {abs(exposure_val):.2f}x", "color: #2980B9; font-weight: bold;"
         else:
-            exp_str, row_color = "NEUTRAL 0x", "color: #7f8c8d;"
-        table_rows += f"<tr><td>{date_str}</td><td>${row['close']:,.2f}</td><td style='{row_color}'>{exp_str}</td><td>${row['Daily_PnL']:,.2f}</td><td>${row['Portfolio_Value']:,.2f}</td></tr>"
+            exp_str, row_color = "CASH (Wait)", "color: #7f8c8d;"
+            
+        table_rows += f"<tr><td>{date_str}</td><td>${row['close']:,.2f}</td><td>{chop_val:.1f} {lock_badge}</td><td style='{row_color}'>{exp_str}</td><td>${row['Daily_PnL']:,.2f}</td><td>${row['Portfolio_Value']:,.2f}</td></tr>"
     
     bust_warning = "<h2 style='color: red; background: #fee; padding: 10px; border: 1px solid red;'>⚠️ STRATEGY BANKRUPT (LIQUIDATED) ⚠️</h2>" if is_bust else ""
 
@@ -385,9 +456,9 @@ def start_web_server(results_df, df_signals_raw, main_sharpe):
             {bust_warning}
             <div class="stats">
                 <p>
-                    <strong>Horizon Set:</strong> {HORIZON} days |
+                    <strong>Horizon:</strong> {HORIZON} days |
                     <strong>Leverage:</strong> {LEVERAGE}x |
-                    <strong>Filter:</strong> Disabled
+                    <strong>Rule:</strong> CHOP > {CHOP_THRESHOLD} -> Wait for New Signal
                 </p>
                 <p>
                     <strong>Final Value:</strong> ${final_val:,.2f} | 
@@ -395,11 +466,11 @@ def start_web_server(results_df, df_signals_raw, main_sharpe):
                 </p>
                 <p>
                     <strong>Overall Sharpe Ratio:</strong> <span style="font-size: 1.2em; font-weight: bold;">{overall_sharpe:.2f}</span>
-                    <span style="font-size: 0.8em; color: #7f8c8d;">(No external risk rules active)</span>
+                    | <strong>Days Locked:</strong> {lockdown_days}
                 </p>
             </div>
             
-            <h2>Detailed Performance</h2>
+            <h2>Detailed Performance (with CHOP)</h2>
             <img src="/plot?v={timestamp}" />
 
             <h2>Monthly Performance</h2>
@@ -409,7 +480,7 @@ def start_web_server(results_df, df_signals_raw, main_sharpe):
             
             <h2>Daily Position Log</h2>
             <div class="table-container">
-                <table><thead><tr><th>Date</th><th>Close</th><th>Position</th><th>PnL</th><th>Equity</th></tr></thead><tbody>{table_rows}</tbody></table>
+                <table><thead><tr><th>Date</th><th>Close</th><th>CHOP (14)</th><th>Position</th><th>PnL</th><th>Equity</th></tr></thead><tbody>{table_rows}</tbody></table>
             </div>
         </body>
         </html>
@@ -422,12 +493,11 @@ def start_web_server(results_df, df_signals_raw, main_sharpe):
             buf = create_equity_plot(results_df, long_signal_dates, short_signal_dates, HORIZON)
             return send_file(buf, mimetype='image/png')
         except Exception as e:
-            # Added error logging for debugging plot issues
             print(f"Error creating plot: {e}")
             return f"Error creating plot: {e}", 500
 
     print("\n" + "=" * 60)
-    print(f"Server running on http://localhost:8080 (Filter Disabled, Leverage: {LEVERAGE}x)")
+    print(f"Server running on http://localhost:8080 (CHOP Filter Active)")
     print("Press Ctrl+C to stop.")
     print("=" * 60)
     
