@@ -17,6 +17,7 @@ TIMEFRAME = '1d'
 SINCE_STR = '2018-01-01 00:00:00'
 HORIZON = 380  # Decay window (days)
 INITIAL_CAPITAL = 10000.0
+LEVERAGE = 5.0 # Re-introducing 5x fixed leverage based on conviction score
 
 # --- Winning Signals ---
 WINNING_SIGNALS = [
@@ -127,29 +128,24 @@ def precalculate_contributions(df_data, df_signals):
     signals = df_signals.loc[common_idx]
     num_days = len(common_idx)
     
-    # Matrix to store the calculated contribution of each signal over time
     contributions = np.zeros((num_days, N_SIGNALS))
     
     signal_start_day = np.full(N_SIGNALS, -1, dtype=int)
     signal_direction = np.zeros(N_SIGNALS, dtype=int)
 
-    # We iterate once to build the static history of conviction
     for t in range(num_days):
         for i in range(N_SIGNALS):
             current_sig = signals.iloc[t, i]
             
-            # New signal triggers logic reset
             if current_sig != 0:
                 signal_start_day[i] = t
                 signal_direction[i] = current_sig
             
-            # Calculate decay
             if signal_direction[i] != 0:
                 d = t - signal_start_day[i]
                 if d < 0: decay = 0.0
                 else: decay = max(0.0, 1.0 - (d / HORIZON))
                 
-                # Store
                 contributions[t, i] = signal_direction[i] * decay
                 
                 if decay == 0.0:
@@ -158,102 +154,19 @@ def precalculate_contributions(df_data, df_signals):
                     
     return contributions, common_idx
 
-# --- Genetic Algorithm Implementation ---
-def fitness_function(weights, contributions, returns):
-    """
-    Calculates Sharpe Ratio for a given set of weights.
-    NO NORMALIZATION: Exposure is purely additive.
-    """
-    # Exposure = Sum(Signal_Contribution * Weight)
-    # Shape: (T, N) @ (N,) -> (T,)
-    exposure = contributions @ weights
-    
-    # Clip exposure to safeguard against craziness (e.g. > 5x)
-    # If weights are 0-1, max possible is N_SIGNALS (5.0).
-    exposure = np.clip(exposure, -N_SIGNALS, N_SIGNALS)
-    
-    strat_ret = exposure * returns
-    
-    if np.std(strat_ret) == 0:
-        return 0.0
-    
-    # Annualized Sharpe
-    sharpe = (np.mean(strat_ret) / np.std(strat_ret)) * np.sqrt(365)
-    return sharpe
-
-def run_ga_optimization(contributions, returns, split_idx):
-    print(f"\nRunning GA Optimization on first {split_idx} days (70% Training Data)...")
-    
-    # Train Data
-    train_contrib = contributions[:split_idx]
-    train_returns = returns[:split_idx]
-    
-    # GA Parameters
-    pop_size = 300
-    generations = 60
-    mutation_rate = 0.1
-    mutation_scale = 0.1
-    n_genes = N_SIGNALS
-    
-    # Initialize Population (random weights 0.0 to 1.0)
-    population = np.random.rand(pop_size, n_genes)
-    
-    best_weights = None
-    best_fitness = -999.0
-    
-    for gen in range(generations):
-        fitness_scores = np.zeros(pop_size)
-        
-        # Evaluate
-        for i in range(pop_size):
-            fitness_scores[i] = fitness_function(population[i], train_contrib, train_returns)
-            
-        # Track Best
-        gen_best_idx = np.argmax(fitness_scores)
-        gen_best_score = fitness_scores[gen_best_idx]
-        
-        if gen_best_score > best_fitness:
-            best_fitness = gen_best_score
-            best_weights = population[gen_best_idx].copy()
-            
-        # Selection (Tournament)
-        new_pop = np.zeros_like(population)
-        # Elitism: Keep best
-        new_pop[0] = population[gen_best_idx]
-        
-        for i in range(1, pop_size):
-            # Tournament size 3
-            candidates_idx = np.random.choice(pop_size, 3, replace=False)
-            winner_idx = candidates_idx[np.argmax(fitness_scores[candidates_idx])]
-            parent = population[winner_idx]
-            
-            # Mutation
-            child = parent.copy()
-            if np.random.rand() < 0.5: # 50% chance to mutate a gene set
-                 mask = np.random.rand(n_genes) < mutation_rate
-                 noise = np.random.normal(0, mutation_scale, n_genes)
-                 child[mask] += noise[mask]
-                 child = np.clip(child, 0.0, 1.0)
-            
-            new_pop[i] = child
-            
-        population = new_pop
-        
-        if gen % 5 == 0:
-            print(f"Gen {gen}: Best Sharpe = {best_fitness:.4f}")
-
-    print(f"Optimization Complete. Best Training Sharpe: {best_fitness:.4f}")
-    return best_weights
-
-# --- Backtest Runner ---
-def run_weighted_backtest(df_data, contributions, common_idx, weights):
+# --- Backtest Runner (Simple Conviction) ---
+def run_simple_backtest(df_data, contributions, common_idx):
     df = df_data.loc[common_idx].copy()
     num_days = len(df)
     returns = df['return'].values
     
-    # Calculate Exposure (Additive, no normalization)
-    exposure = contributions @ weights
-    exposure = np.clip(exposure, -N_SIGNALS, N_SIGNALS)
+    # Simple Conviction: Sum of all decaying contributions, normalized by N_SIGNALS
+    # Max possible conviction sum is N_SIGNALS (5)
+    raw_conviction = np.sum(contributions, axis=1) / N_SIGNALS
+    
+    # Calculate Exposure: Raw Conviction * Fixed Leverage
+    exposure = raw_conviction * LEVERAGE
+    exposure = np.clip(exposure, -LEVERAGE, LEVERAGE)
     
     # Run Portfolio Loop
     portfolio = np.zeros(num_days)
@@ -263,7 +176,6 @@ def run_weighted_backtest(df_data, contributions, common_idx, weights):
     
     for t in range(1, num_days):
         if not is_bankrupt:
-            # PnL = Previous Equity * Exposure * Return
             pnl = portfolio[t-1] * exposure[t] * returns[t]
             portfolio[t] = portfolio[t-1] + pnl
             daily_pnl[t] = pnl
@@ -276,6 +188,7 @@ def run_weighted_backtest(df_data, contributions, common_idx, weights):
             
     results = df[['close', 'return']].copy()
     results['Exposure'] = exposure
+    results['Raw_Conviction'] = raw_conviction
     results['Portfolio_Value'] = portfolio
     results['Daily_PnL'] = daily_pnl
     results['Strategy_Daily_Return'] = results['Portfolio_Value'].pct_change().fillna(0)
@@ -283,47 +196,57 @@ def run_weighted_backtest(df_data, contributions, common_idx, weights):
     rolling_max = results['Portfolio_Value'].cummax()
     results['Drawdown'] = np.where(rolling_max > 0, (results['Portfolio_Value'] - rolling_max) / rolling_max, -1.0)
     
-    # Add contributions for display
-    # We multiply raw contribution by its weight
-    weighted_contribs = contributions * weights
-    signal_names = [f"{s[0]}_{s[1]}" for s in WINNING_SIGNALS]
-    for i, name in enumerate(signal_names):
-        results[f"W_Contrib_{name}"] = weighted_contribs[:, i]
-        
-    return results, signal_names
+    return results
 
-def create_equity_plot(results_df, split_date):
+def calculate_sharpe(results_df):
+    d_rets = results_df['Strategy_Daily_Return']
+    sharpe = (d_rets.mean()/d_rets.std())*np.sqrt(365) if d_rets.std()>0 else 0
+    return sharpe
+
+def create_equity_plot(results_df):
     fig = Figure(figsize=(12, 12))
     ax1 = fig.add_subplot(3, 1, 1)
     ax2 = fig.add_subplot(3, 1, 2, sharex=ax1)
     ax3 = fig.add_subplot(3, 1, 3, sharex=ax1)
     
-    # Plot 1: Price
+    # --- Plot 1: Price ---
     ax1.plot(results_df.index, results_df['close'], 'k-', linewidth=1)
     ax1.set_yscale('log')
     ax1.set_title('BTC Price (Log)', fontweight='bold')
     ax1.grid(True, alpha=0.3)
-    ax1.axvline(x=split_date, color='orange', linestyle='--', linewidth=2, label='Train/Test Split')
-    ax1.legend()
     
-    # Plot 2: Equity
-    ax2.plot(results_df.index, results_df['Portfolio_Value'], 'b-', linewidth=1.5, label='Strategy (GA Opt)')
+    # --- Plot 2: Equity and Conviction Background ---
+    
+    # 2a. Draw Background based on Conviction Sign
+    ax2_ymin, ax2_ymax = 0.05, 1.05 # Reserve space for legend
+    
+    # Find segments: Long (Conviction > 0.01), Short (Conviction < -0.01), Cash (Neutral)
+    conviction = results_df['Raw_Conviction']
+    
+    # Draw long regime (light green)
+    ax2.fill_between(results_df.index, ax2_ymin, ax2_ymax, where=conviction > 0.01, 
+                     color='#e8f5e9', alpha=0.6, transform=ax2.get_xaxis_transform(), label='Long Conviction')
+    # Draw short regime (light red/pink)
+    ax2.fill_between(results_df.index, ax2_ymin, ax2_ymax, where=conviction < -0.01, 
+                     color='#ffebee', alpha=0.6, transform=ax2.get_xaxis_transform(), label='Short Conviction')
+
+    # 2b. Plot Equity Lines
+    ax2.plot(results_df.index, results_df['Portfolio_Value'], 'b-', linewidth=1.5, label=f'Strategy ({LEVERAGE}x)')
     bh = results_df['close'] / results_df['close'].iloc[0] * INITIAL_CAPITAL
     ax2.plot(results_df.index, bh, 'g--', alpha=0.8, label='Buy & Hold')
-    ax2.axvline(x=split_date, color='orange', linestyle='--', linewidth=2)
     
     if (results_df['Portfolio_Value'] <= 0).any(): ax2.set_yscale('symlog', linthresh=1.0)
     else: ax2.set_yscale('log')
     
     ax2.legend(loc='upper left')
-    ax2.set_title('Equity Curve (Train vs Test)', fontweight='bold')
+    ax2.set_title('Equity Curve (Background: Conviction Regime)', fontweight='bold')
     ax2.grid(True, alpha=0.3)
     
-    # Plot 3: Drawdown
+    # --- Plot 3: Drawdown ---
     ax3.fill_between(results_df.index, results_df['Drawdown']*100, 0, color='red', alpha=0.3)
+    ax3.plot(results_df.index, results_df['Drawdown']*100, 'r-', linewidth=0.5)
     ax3.set_title('Drawdown %', fontweight='bold')
     ax3.grid(True, alpha=0.3)
-    ax3.axvline(x=split_date, color='orange', linestyle='--', linewidth=2)
     
     fig.tight_layout()
     buf = io.BytesIO()
@@ -331,31 +254,13 @@ def create_equity_plot(results_df, split_date):
     buf.seek(0)
     return buf
 
-def start_web_server(results_df, best_weights, split_date):
+def start_web_server(results_df, overall_sharpe):
     app = Flask(__name__)
     
     final_val = results_df['Portfolio_Value'].iloc[-1]
     total_ret = ((final_val / INITIAL_CAPITAL) - 1) * 100
     
-    # Overall Sharpe
-    d_rets = results_df['Strategy_Daily_Return']
-    overall_sharpe = (d_rets.mean()/d_rets.std())*np.sqrt(365) if d_rets.std()>0 else 0
-    
-    # Test Set Sharpe (Out of Sample)
-    test_df = results_df[results_df.index > split_date]
-    t_rets = test_df['Strategy_Daily_Return']
-    test_sharpe = (t_rets.mean()/t_rets.std())*np.sqrt(365) if t_rets.std()>0 else 0
-    
-    # Weights Table
-    signal_names = [f"{s[0]}_{s[1]}" for s in WINNING_SIGNALS]
-    weights_html = "<table border='1' cellpadding='5'><tr><th>Signal</th><th>Optimized Weight (Leverage)</th></tr>"
-    for name, w in zip(signal_names, best_weights):
-        weights_html += f"<tr><td>{name}</td><td>{w:.4f}x</td></tr>"
-    
-    # Calculate Theoretical Max Leverage
-    max_lev = np.sum(best_weights)
-    weights_html += f"<tr><td><b>Total Max Leverage</b></td><td><b>{max_lev:.2f}x</b></td></tr></table>"
-    
+    # Monthly Stats
     monthly_rows = ""
     monthly_groups = results_df.groupby(pd.Grouper(freq='M'))
     for name, group in reversed(list(monthly_groups)): 
@@ -366,18 +271,15 @@ def start_web_server(results_df, best_weights, split_date):
         m_ret = (m_end / m_start) - 1.0 if m_start > 0 else 0.0
         m_sharpe = (m_daily_rets.mean()/m_daily_rets.std())*np.sqrt(365) if m_daily_rets.std()>0 else 0
         
-        # Highlight Test vs Train months?
-        bg = "#eaffea" if name > split_date else "#fff"
-        
         color = "green" if m_ret > 0 else "red"
-        monthly_rows += f"<tr style='background:{bg}'><td>{name.strftime('%Y-%m')}</td><td style='color:{color}'><b>{m_ret*100:.2f}%</b></td><td>{m_sharpe:.2f}</td></tr>"
+        monthly_rows += f"<tr><td>{name.strftime('%Y-%m')}</td><td style='color:{color}'><b>{m_ret*100:.2f}%</b></td><td>{m_sharpe:.2f}</td></tr>"
 
     @app.route('/')
     def index():
         ts = int(time.time())
         return f'''
         <html>
-        <head><title>Conviction Strategy GA</title>
+        <head><title>Conviction Strategy Simple</title>
         <style>
             body {{ font-family: sans-serif; text-align: center; margin: 40px; color: #333; }}
             .stats {{ background: #f9f9f9; padding: 20px; border-radius: 8px; display: inline-block; margin-bottom: 20px; }}
@@ -387,22 +289,17 @@ def start_web_server(results_df, best_weights, split_date):
         </style>
         </head>
         <body>
-            <h1>Conviction Strategy (GA Optimized - Additive)</h1>
+            <h1>Conviction Strategy (Simple 5x Leverage)</h1>
             <div class="stats">
-                <p><strong>Horizon:</strong> {HORIZON} | <strong>Leverage:</strong> Dynamic (Weights)</p>
-                <p><strong>Split Date (70%):</strong> {split_date.strftime('%Y-%m-%d')}</p>
+                <p><strong>Horizon:</strong> {HORIZON} days | <strong>Fixed Leverage:</strong> {LEVERAGE}x</p>
                 <p><strong>Final:</strong> ${final_val:,.2f} | <strong>Return:</strong> {total_ret:.2f}%</p>
-                <p><strong>Overall Sharpe:</strong> {overall_sharpe:.2f} | <strong>Test Set Sharpe:</strong> {test_sharpe:.2f}</p>
+                <p><strong>Overall Sharpe:</strong> {overall_sharpe:.2f}</p>
             </div>
             
-            <h2>Optimized Weights (0.0 - 1.0)</h2>
-            <p>Sum of Weights = Total Leverage Capacity</p>
-            {weights_html}
-            
-            <h2>Equity Curve (Train vs Test)</h2>
+            <h2>Equity Curve (Background indicates Conviction)</h2>
             <img src="/plot?v={ts}" />
             
-            <h2>Monthly Returns (Green BG = Test Set)</h2>
+            <h2>Monthly Returns</h2>
             <table><thead><tr><th>Month</th><th>Return</th><th>Sharpe</th></tr></thead><tbody>{monthly_rows}</tbody></table>
         </body>
         </html>
@@ -410,7 +307,7 @@ def start_web_server(results_df, best_weights, split_date):
 
     @app.route('/plot')
     def plot():
-        buf = create_equity_plot(results_df, split_date)
+        buf = create_equity_plot(results_df)
         return send_file(buf, mimetype='image/png')
         
     print(f"Server running on http://localhost:8080")
@@ -423,16 +320,11 @@ if __name__ == '__main__':
     # 1. Precalculate Signal Contributions (Decay Matrix)
     contributions, common_idx = precalculate_contributions(df_data, df_signals)
     df_clean = df_data.loc[common_idx]
-    returns = df_clean['return'].values
     
-    # 2. Determine Split Index (70%)
-    split_idx = int(len(common_idx) * 0.70)
-    split_date = common_idx[split_idx]
+    # 2. Run Simple Backtest
+    results = run_simple_backtest(df_clean, contributions, common_idx)
     
-    # 3. Run GA Optimization on Training Data
-    best_weights = run_ga_optimization(contributions, returns, split_idx)
+    # 3. Calculate Sharpe
+    sharpe = calculate_sharpe(results)
     
-    # 4. Run Backtest on FULL Data using Optimized Weights
-    results, _ = run_weighted_backtest(df_clean, contributions, common_idx, best_weights)
-    
-    start_web_server(results, best_weights, split_date)
+    start_web_server(results, sharpe)
