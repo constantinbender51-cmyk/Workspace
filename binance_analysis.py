@@ -18,17 +18,20 @@ SINCE_STR = '2018-01-01 00:00:00'
 HORIZON = 380  # Decay window (days)
 INITIAL_CAPITAL = 10000.0
 LEVERAGE = 5.0 # Fixed 5x leverage based on normalized conviction score (0 to 1)
+STOP_LOSS_PCT = 0.05
+SL_HIT_RETURN = -0.0505 # 5.05% loss (5% + 0.05% slippage/fee)
 
 # --- Winning Signals ---
 WINNING_SIGNALS = [
     ('EMA_CROSS', 50, 150, 0),         # 0: EMA 50/150
     ('PRICE_SMA', 380, 0, 0),          # 1: Price/SMA 380
     ('PRICE_SMA', 140, 0, 0),          # 2: Price/SMA 140
-    ('MACD_CROSS', 12, 26, 15),        # 3: MACD (12/26/15)
+    ('MACD_CROSS', 12, 26, 15),        # 3: MACD (12/26/15) - Used for SL Re-entry
     ('RSI_CROSS', 35, 0, 0),           # 4: RSI 35 (Crossover)
 ]
 
 N_SIGNALS = len(WINNING_SIGNALS)
+MACD_SIGNAL_INDEX = 3 # Index of the MACD signal
 SIGNAL_NAMES = [f"{s[0]}_{s[1]}_{s[2]}" for s in WINNING_SIGNALS]
 SIGNAL_COLORS = ['#3498DB', '#E67E22', '#F1C40F', '#2ECC71', '#E74C3C'] # Blue, Orange, Yellow, Green, Red
 
@@ -114,11 +117,13 @@ def generate_signals(df):
 
         df_signals[col] = np.where(long_cond, 1, np.where(short_cond, -1, 0))
 
-    df_signals = df_signals.shift(1)
-    df_signals.fillna(0, inplace=True)
-    df_signals = df_signals.astype(int)
+    df_signals_raw = df_signals.copy() # UN-shifted signals (used for SL re-entry check)
+    
+    df_signals_shifted = df_signals.shift(1)
+    df_signals_shifted.fillna(0, inplace=True)
+    df_signals_shifted = df_signals_shifted.astype(int)
 
-    return df_signals
+    return df_signals_shifted, df_signals_raw
 
 # --- Pre-calculate Signal Contributions (The "Decay" Matrix) ---
 def precalculate_contributions(df_data, df_signals):
@@ -156,31 +161,92 @@ def precalculate_contributions(df_data, df_signals):
                     
     return contributions, common_idx
 
-# --- Backtest Runner (Simple Conviction) ---
-def run_simple_backtest(df_data, contributions, common_idx):
+# --- Backtest Runner (Simple Conviction with Stop Loss) ---
+def run_simple_backtest(df_data, contributions, common_idx, macd_raw_signals):
     df = df_data.loc[common_idx].copy()
     num_days = len(df)
+    
+    # Extract necessary price and signal data
     returns = df['return'].values
+    closes = df['close'].values
+    highs = df['high'].values
+    lows = df['low'].values
     
-    # Simple Conviction: Sum of all decaying contributions, normalized by N_SIGNALS
-    # (T,) vector of overall conviction score (-1.0 to 1.0)
-    raw_conviction = np.sum(contributions, axis=1) / N_SIGNALS
-    
-    # Calculate Exposure: Raw Conviction * Fixed Leverage
-    exposure = raw_conviction * LEVERAGE
-    exposure = np.clip(exposure, -LEVERAGE, LEVERAGE)
-    
-    # Run Portfolio Loop
+    # Initialize backtest arrays
     portfolio = np.zeros(num_days)
     daily_pnl = np.zeros(num_days)
+    exposure = np.zeros(num_days)
+    raw_conviction = np.zeros(num_days)
+    sl_lockdown_status = np.zeros(num_days, dtype=bool)
+    
     portfolio[0] = INITIAL_CAPITAL
     is_bankrupt = False
+    in_sl_lockdown = False
+    
+    sl_pct = STOP_LOSS_PCT
     
     for t in range(1, num_days):
-        if not is_bankrupt:
-            pnl = portfolio[t-1] * exposure[t] * returns[t]
-            portfolio[t] = portfolio[t-1] + pnl
-            daily_pnl[t] = pnl
+        prev_close = closes[t-1]
+        
+        # --- 1. SL Lockdown / Re-entry Check ---
+        if in_sl_lockdown:
+            # Check for MACD re-entry signal (a non-zero signal today)
+            if macd_raw_signals.iloc[t] != 0:
+                in_sl_lockdown = False
+            else:
+                # Stay flat and roll over capital
+                exposure[t] = 0.0
+                portfolio[t] = portfolio[t-1]
+                daily_pnl[t] = 0.0
+                sl_lockdown_status[t] = True
+                continue
+        
+        # --- 2. Calculate Base Exposure ---
+        
+        # Raw Conviction (normalized -1 to 1)
+        raw_conviction_t = np.sum(contributions[t]) / N_SIGNALS
+        raw_conviction[t] = raw_conviction_t
+        
+        # Base Exposure
+        base_exposure = raw_conviction_t * LEVERAGE
+        base_exposure = np.clip(base_exposure, -LEVERAGE, LEVERAGE)
+        exposure[t] = base_exposure
+        
+        # --- 3. Intraday Stop Loss Check (if not in lockdown and position is open) ---
+        
+        sl_hit = False
+        pnl_for_day = 0.0
+        
+        if abs(base_exposure) > 0.01: # Only check SL if we have a position
+            
+            # Long SL Check
+            if base_exposure > 0:
+                sl_price = prev_close * (1 - sl_pct)
+                if lows[t] <= sl_price:
+                    sl_hit = True
+            
+            # Short SL Check
+            elif base_exposure < 0:
+                sl_price = prev_close * (1 + sl_pct)
+                if highs[t] >= sl_price:
+                    sl_hit = True
+
+        # --- 4. Apply PnL and Manage State ---
+        
+        if sl_hit:
+            # SL hit: Apply fixed loss and enter lockdown
+            pnl_for_day = portfolio[t-1] * SL_HIT_RETURN
+            portfolio[t] = portfolio[t-1] + pnl_for_day
+            daily_pnl[t] = pnl_for_day
+            exposure[t] = 0.0 # Exit position
+            in_sl_lockdown = True
+            sl_lockdown_status[t] = True
+            
+        elif not is_bankrupt:
+            # Standard PnL calculation
+            pnl_for_day = portfolio[t-1] * exposure[t] * returns[t]
+            portfolio[t] = portfolio[t-1] + pnl_for_day
+            daily_pnl[t] = pnl_for_day
             
             if portfolio[t] <= 0:
                 portfolio[t] = 0
@@ -188,11 +254,14 @@ def run_simple_backtest(df_data, contributions, common_idx):
         else:
             portfolio[t] = 0
             
-    results = df[['close', 'return']].copy()
+    # Compile results
+    results = df[['close', 'return', 'high', 'low']].copy()
     results['Exposure'] = exposure
     results['Raw_Conviction'] = raw_conviction
     results['Portfolio_Value'] = portfolio
     results['Daily_PnL'] = daily_pnl
+    results['SL_Lockdown'] = sl_lockdown_status
+    
     results['Strategy_Daily_Return'] = results['Portfolio_Value'].pct_change().fillna(0)
     
     rolling_max = results['Portfolio_Value'].cummax()
@@ -222,19 +291,14 @@ def create_equity_plot(results_df, contributions):
     
     # --- Plot 2: Individual Signal Contributions ---
     
-    # Separate Positive and Negative Contributions for clean stacking
     pos_contributions = np.clip(contributions, 0, None)
     neg_contributions = np.clip(contributions, None, 0)
     
     ax2.axhline(0, color='gray', linestyle='-', linewidth=0.5)
     
-    # Plot positive contributions (stacked area)
     ax2.stackplot(results_df.index, pos_contributions.T, colors=SIGNAL_COLORS, labels=SIGNAL_NAMES, alpha=0.7)
-    
-    # Plot negative contributions (stacked area - note: use absolute value for stackplot)
     ax2.stackplot(results_df.index, neg_contributions.T, colors=SIGNAL_COLORS, alpha=0.7)
 
-    # Plot total raw conviction (optional overlay line)
     ax2.plot(results_df.index, results_df['Raw_Conviction'] * N_SIGNALS, 'k--', linewidth=1, alpha=0.5, label='Total Conviction Score')
     
     ax2.set_ylim(-N_SIGNALS, N_SIGNALS)
@@ -243,7 +307,13 @@ def create_equity_plot(results_df, contributions):
     ax2.grid(True, axis='y', alpha=0.3)
     ax2.legend(loc='upper right', fontsize=8, ncol=2)
     
-    # --- Plot 3: Equity ---
+    # --- Plot 3: Equity and SL Lockdown Background ---
+    
+    # Draw Stop-Loss Lockdown background
+    ax3_ymin, ax3_ymax = 0.0, 1.0 # Normalized vertical position for fill_between
+    ax3.fill_between(results_df.index, ax3_ymin, ax3_ymax, where=results_df['SL_Lockdown'], 
+                     color='#FFC300', alpha=0.2, transform=ax3.get_xaxis_transform(), label='SL Lockdown (Cash)')
+    
     ax3.plot(results_df.index, results_df['Portfolio_Value'], 'b-', linewidth=1.5, label=f'Strategy ({LEVERAGE}x)')
     bh = results_df['close'] / results_df['close'].iloc[0] * INITIAL_CAPITAL
     ax3.plot(results_df.index, bh, 'g--', alpha=0.8, label='Buy & Hold')
@@ -252,7 +322,7 @@ def create_equity_plot(results_df, contributions):
     else: ax3.set_yscale('log')
     
     ax3.legend(loc='upper left')
-    ax3.set_title('Equity Curve', fontweight='bold')
+    ax3.set_title(f'Equity Curve (SL: {STOP_LOSS_PCT*100:.0f}% vs MACD Re-entry)', fontweight='bold')
     ax3.grid(True, alpha=0.3)
     
     # --- Plot 4: Drawdown ---
@@ -292,7 +362,7 @@ def start_web_server(results_df, contributions, overall_sharpe):
         ts = int(time.time())
         return f'''
         <html>
-        <head><title>Conviction Strategy Signal Breakdown</title>
+        <head><title>Conviction Strategy SL</title>
         <style>
             body {{ font-family: sans-serif; text-align: center; margin: 40px; color: #333; }}
             .stats {{ background: #f9f9f9; padding: 20px; border-radius: 8px; display: inline-block; margin-bottom: 20px; }}
@@ -302,15 +372,15 @@ def start_web_server(results_df, contributions, overall_sharpe):
         </style>
         </head>
         <body>
-            <h1>Conviction Strategy (5x Leverage)</h1>
+            <h1>Conviction Strategy (5x Leverage + 5% Stop Loss)</h1>
             <div class="stats">
                 <p><strong>Horizon:</strong> {HORIZON} days | <strong>Fixed Leverage:</strong> {LEVERAGE}x</p>
+                <p><strong>Stop Loss:</strong> {STOP_LOSS_PCT*100:.0f}% Intraday | <strong>Re-entry:</strong> New MACD Signal</p>
                 <p><strong>Final:</strong> ${final_val:,.2f} | <strong>Return:</strong> {total_ret:.2f}%</p>
                 <p><strong>Overall Sharpe:</strong> {overall_sharpe:.2f}</p>
             </div>
             
-            <h2>Signal Contributions Breakdown</h2>
-            <p>Plot 2 shows the stacked decay value of each of the {N_SIGNALS} indicators.</p>
+            <h2>Performance Breakdown</h2>
             <img src="/plot?v={ts}" />
             
             <h2>Monthly Returns</h2>
@@ -322,7 +392,6 @@ def start_web_server(results_df, contributions, overall_sharpe):
     @app.route('/plot')
     def plot():
         try:
-            # Pass the static contributions matrix to the plotting function
             buf = create_equity_plot(results_df, contributions)
             return send_file(buf, mimetype='image/png')
         except Exception as e:
@@ -334,16 +403,20 @@ def start_web_server(results_df, contributions, overall_sharpe):
 
 if __name__ == '__main__':
     df_data = fetch_binance_data()
-    df_signals = generate_signals(df_data)
+    df_signals_shifted, df_signals_raw = generate_signals(df_data)
     
     # 1. Precalculate Signal Contributions (Decay Matrix)
-    contributions, common_idx = precalculate_contributions(df_data, df_signals)
+    contributions, common_idx = precalculate_contributions(df_data, df_signals_shifted)
     df_clean = df_data.loc[common_idx]
     
-    # 2. Run Simple Backtest
-    results = run_simple_backtest(df_clean, contributions, common_idx)
+    # 2. Isolate the MACD raw signal column for SL re-entry check
+    macd_col_name = SIGNAL_NAMES[MACD_SIGNAL_INDEX]
+    macd_raw_signals = df_signals_raw.loc[common_idx, macd_col_name]
     
-    # 3. Calculate Sharpe
+    # 3. Run Stop Loss Backtest
+    results = run_simple_backtest(df_clean, contributions, common_idx, macd_raw_signals)
+    
+    # 4. Calculate Sharpe
     sharpe = calculate_sharpe(results)
     
     start_web_server(results, contributions, sharpe)
