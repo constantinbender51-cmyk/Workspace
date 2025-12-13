@@ -189,8 +189,8 @@ def run_ga_optimization(contributions, returns, split_idx):
     train_returns = returns[:split_idx]
     
     # GA Parameters
-    pop_size = 100
-    generations = 30
+    pop_size = 300
+    generations = 60
     mutation_rate = 0.1
     mutation_scale = 0.1
     n_genes = N_SIGNALS
