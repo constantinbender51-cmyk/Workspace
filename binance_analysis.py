@@ -19,7 +19,6 @@ HORIZON = 380  # Decay window (days) - OPTIMAL VALUE
 INITIAL_CAPITAL = 10000.0
 LEVERAGE = 5.0  # Multiplier applied to conviction exposure
 CHOP_PERIOD = 14
-CHOP_THRESHOLD = 61.8
 
 # --- Winning Signals ---
 WINNING_SIGNALS = [
@@ -57,7 +56,6 @@ def calculate_choppiness(df, period=14):
     # 100 * LOG10( SUM(TR, n) / ( MaxHi(n) - MinLo(n) ) ) / LOG10(n)
     
     numerator = atr_sum / (max_hi - min_lo)
-    # Handle division by zero or log of zero if range is 0 (unlikely on BTC daily)
     numerator = numerator.replace(0, np.nan) 
     
     chop = 100 * np.log10(numerator) / np.log10(period)
@@ -171,12 +169,12 @@ def run_conviction_backtest(df_data, df_signals):
 
     num_days = len(df)
     daily_returns = df['return'].values 
-    chop_values = df['chop'].values # Access chop array
+    chop_values = df['chop'].values
     
     portfolio = np.zeros(num_days)
     daily_pnl = np.zeros(num_days)
     conviction_norm = np.zeros(num_days)
-    lockdown_status = np.zeros(num_days, dtype=bool)
+    scaling_factors = np.zeros(num_days)
     
     daily_contributions = np.zeros((num_days, len(WINNING_SIGNALS)))
 
@@ -185,11 +183,9 @@ def run_conviction_backtest(df_data, df_signals):
     
     portfolio[0] = INITIAL_CAPITAL
     is_bankrupt = False
-    in_chop_lockdown = False
 
     for t in range(num_days):
         daily_sum = 0.0
-        fresh_signal_fired = False
 
         for i in range(len(WINNING_SIGNALS)):
             current_sig = signals.iloc[t, i]
@@ -197,7 +193,6 @@ def run_conviction_backtest(df_data, df_signals):
             if current_sig != 0:
                 signal_start_day[i] = t
                 signal_direction[i] = current_sig
-                fresh_signal_fired = True
             
             if signal_direction[i] != 0:
                 d = t - signal_start_day[i]
@@ -217,24 +212,22 @@ def run_conviction_backtest(df_data, df_signals):
         # Calculate Normalized Conviction (-1 to 1)
         raw_conviction = daily_sum / MAX_CONVICTION
         
-        # --- CHOP LOCKDOWN LOGIC ---
+        # --- CHOP SCALING ---
+        # Formula: 1 - ((CHOP_norm - 0.5)^2)^0.1
         current_chop = chop_values[t]
+        chop_norm = current_chop / 100.0 # Normalize 0-100 to 0-1
         
-        # 1. Trigger Lockdown if Chop is high
-        if current_chop > CHOP_THRESHOLD:
-            in_chop_lockdown = True
-            
-        # 2. If in lockdown, stay in lockdown unless a FRESH signal breaks it
-        if in_chop_lockdown:
-            if fresh_signal_fired:
-                in_chop_lockdown = False
-            else:
-                raw_conviction = 0.0 # Force Cash
+        # Calculate damping factor
+        # At chop=50 (0.5), term is 0, factor is 1.0 (Full Exposure)
+        # At chop=0 or 100, term is 0.25, factor is 1 - 0.25^0.1 ~= 0.13 (Low Exposure)
+        term = (chop_norm - 0.5) ** 2
+        scale_factor = 1.0 - (term ** 0.1)
+        scale_factor = np.clip(scale_factor, 0.0, 1.0) # Safety clip
         
-        lockdown_status[t] = in_chop_lockdown
-
-        # Apply LEVERAGE
-        exposure = raw_conviction * LEVERAGE
+        scaling_factors[t] = scale_factor
+        
+        # Apply Scaling & Leverage
+        exposure = raw_conviction * LEVERAGE * scale_factor
         exposure = np.clip(exposure, -LEVERAGE, LEVERAGE)
 
         if t > 0:
@@ -260,9 +253,9 @@ def run_conviction_backtest(df_data, df_signals):
         
     results = df[['close', 'return', 'chop']].copy()
     results['Exposure'] = conviction_norm
+    results['Scaling_Factor'] = scaling_factors
     results['Daily_PnL'] = daily_pnl
     results['Portfolio_Value'] = portfolio
-    results['Lockdown'] = lockdown_status
     
     results['Strategy_Daily_Return'] = results['Portfolio_Value'].pct_change().fillna(0)
     
@@ -294,7 +287,7 @@ def calculate_net_daily_signal_event(df_signals_raw, results_df):
 def create_equity_plot(results_df, long_signal_dates, short_signal_dates, horizon):
     fig = Figure(figsize=(12, 16))
     
-    # 4 Subplots: Price, Chop, Equity, Drawdown
+    # 4 Subplots: Price, Chop/Scaling, Equity, Drawdown
     ax1 = fig.add_subplot(4, 1, 1)
     ax2 = fig.add_subplot(4, 1, 2, sharex=ax1)
     ax3 = fig.add_subplot(4, 1, 3, sharex=ax1)
@@ -313,25 +306,20 @@ def create_equity_plot(results_df, long_signal_dates, short_signal_dates, horizo
     ax1.scatter(short_signal_dates, short_prices, marker='v', color='red', s=50, label='Short Signal', zorder=5)
     ax1.legend(loc='upper left')
 
-    # --- Plot 2: Choppiness Index ---
-    ax2.plot(results_df.index, results_df['chop'], 'm-', linewidth=1, label='Choppiness (14)')
-    ax2.axhline(y=61.8, color='r', linestyle='--', label='Chop Threshold (61.8)')
-    ax2.axhline(y=38.2, color='g', linestyle='--', label='Trend Threshold (38.2)')
+    # --- Plot 2: Scaling Factor (Inverse Chop Curve) ---
+    ax2.plot(results_df.index, results_df['Scaling_Factor'], 'purple', linewidth=1, label='Exposure Factor (0-1)')
+    ax2.fill_between(results_df.index, results_df['Scaling_Factor'], 0, color='purple', alpha=0.1)
+    ax2.set_ylim(0, 1.1)
     
-    # Shade lockdown areas
-    lockdown_dates = results_df[results_df['Lockdown']].index
-    if len(lockdown_dates) > 0:
-        # Create segments to shade
-        # Simple hack: shade entire background where lockdown is true.
-        # Since fill_between requires x and y, and we want vertical bands, we use logic:
-        # We fill where lockdown is 1
-        ymin, ymax = ax2.get_ylim()
-        ax2.fill_between(results_df.index, ymin, ymax, where=results_df['Lockdown'], color='gray', alpha=0.3, label='Lockdown Mode')
-        
-    ax2.set_title('Choppiness Index & Lockdown Zones', fontsize=12, fontweight='bold')
-    ax2.set_ylabel('CHOP', fontsize=10)
+    # Add simple chop reference on twin axis
+    ax2b = ax2.twinx()
+    ax2b.plot(results_df.index, results_df['chop'], 'gray', alpha=0.3, linewidth=0.5, label='Raw CHOP')
+    ax2b.set_ylabel('Raw CHOP', color='gray')
+    
+    ax2.set_title('Exposure Scaling Factor (1 = Full, <0.2 = Extreme Trend/Chop)', fontsize=12, fontweight='bold')
+    ax2.set_ylabel('Factor', fontsize=10)
     ax2.grid(True, alpha=0.3)
-    ax2.legend(loc='upper right')
+    ax2.legend(loc='upper left')
 
     # --- Plot 3: Equity Curve (Log Scale) ---
     ax3.plot(results_df.index, results_df['Portfolio_Value'], 'b-', linewidth=1.5, label=f'Strategy Equity ({LEVERAGE}x Lev)')
@@ -344,7 +332,7 @@ def create_equity_plot(results_df, long_signal_dates, short_signal_dates, horizo
     else:
         ax3.set_yscale('log')
         
-    ax3.set_title(f'Strategy Equity - {LEVERAGE}x Leverage', fontsize=12, fontweight='bold')
+    ax3.set_title(f'Strategy Equity - {LEVERAGE}x Leverage with Chop Scaling', fontsize=12, fontweight='bold')
     ax3.set_ylabel('Value ($)', fontsize=10)
     ax3.grid(True, which="both", ls="-", alpha=0.2)
     ax3.legend(loc='upper left')
@@ -373,7 +361,6 @@ def start_web_server(results_df, df_signals_raw, main_sharpe):
     total_ret = ((final_val / INITIAL_CAPITAL) - 1) * 100
     overall_sharpe = main_sharpe
     is_bust = (final_val <= 0)
-    lockdown_days = results_df['Lockdown'].sum()
 
     # --- Monthly Stats ---
     monthly_rows = ""
@@ -415,19 +402,16 @@ def start_web_server(results_df, df_signals_raw, main_sharpe):
     for date, row in results_df.sort_index(ascending=False).iterrows():
         date_str = date.strftime('%Y-%m-%d')
         exposure_val = row['Exposure']
-        chop_val = row['chop']
-        is_locked = row['Lockdown']
-        
-        lock_badge = "<span style='background: #5DADE2; color: white; padding: 2px 6px; border-radius: 4px; font-size: 0.8em;'>LOCKED</span>" if is_locked else ""
+        scale_fac = row['Scaling_Factor']
         
         if exposure_val > 0:
             exp_str, row_color = f"LONG {exposure_val:.2f}x", "color: #C0392B; font-weight: bold;"
         elif exposure_val < 0:
             exp_str, row_color = f"SHORT {abs(exposure_val):.2f}x", "color: #2980B9; font-weight: bold;"
         else:
-            exp_str, row_color = "CASH (Wait)", "color: #7f8c8d;"
+            exp_str, row_color = "NEUTRAL 0x", "color: #7f8c8d;"
             
-        table_rows += f"<tr><td>{date_str}</td><td>${row['close']:,.2f}</td><td>{chop_val:.1f} {lock_badge}</td><td style='{row_color}'>{exp_str}</td><td>${row['Daily_PnL']:,.2f}</td><td>${row['Portfolio_Value']:,.2f}</td></tr>"
+        table_rows += f"<tr><td>{date_str}</td><td>${row['close']:,.2f}</td><td>{scale_fac:.2f}</td><td style='{row_color}'>{exp_str}</td><td>${row['Daily_PnL']:,.2f}</td><td>${row['Portfolio_Value']:,.2f}</td></tr>"
     
     bust_warning = "<h2 style='color: red; background: #fee; padding: 10px; border: 1px solid red;'>⚠️ STRATEGY BANKRUPT (LIQUIDATED) ⚠️</h2>" if is_bust else ""
 
@@ -458,7 +442,7 @@ def start_web_server(results_df, df_signals_raw, main_sharpe):
                 <p>
                     <strong>Horizon:</strong> {HORIZON} days |
                     <strong>Leverage:</strong> {LEVERAGE}x |
-                    <strong>Rule:</strong> CHOP > {CHOP_THRESHOLD} -> Wait for New Signal
+                    <strong>Scaling:</strong> CHOP Based (Bell Curve)
                 </p>
                 <p>
                     <strong>Final Value:</strong> ${final_val:,.2f} | 
@@ -466,11 +450,10 @@ def start_web_server(results_df, df_signals_raw, main_sharpe):
                 </p>
                 <p>
                     <strong>Overall Sharpe Ratio:</strong> <span style="font-size: 1.2em; font-weight: bold;">{overall_sharpe:.2f}</span>
-                    | <strong>Days Locked:</strong> {lockdown_days}
                 </p>
             </div>
             
-            <h2>Detailed Performance (with CHOP)</h2>
+            <h2>Detailed Performance (Chop Scaled)</h2>
             <img src="/plot?v={timestamp}" />
 
             <h2>Monthly Performance</h2>
@@ -480,7 +463,7 @@ def start_web_server(results_df, df_signals_raw, main_sharpe):
             
             <h2>Daily Position Log</h2>
             <div class="table-container">
-                <table><thead><tr><th>Date</th><th>Close</th><th>CHOP (14)</th><th>Position</th><th>PnL</th><th>Equity</th></tr></thead><tbody>{table_rows}</tbody></table>
+                <table><thead><tr><th>Date</th><th>Close</th><th>Scale Factor</th><th>Position</th><th>PnL</th><th>Equity</th></tr></thead><tbody>{table_rows}</tbody></table>
             </div>
         </body>
         </html>
@@ -497,7 +480,7 @@ def start_web_server(results_df, df_signals_raw, main_sharpe):
             return f"Error creating plot: {e}", 500
 
     print("\n" + "=" * 60)
-    print(f"Server running on http://localhost:8080 (CHOP Filter Active)")
+    print(f"Server running on http://localhost:8080 (CHOP Bell Curve Scaling)")
     print("Press Ctrl+C to stop.")
     print("=" * 60)
     
