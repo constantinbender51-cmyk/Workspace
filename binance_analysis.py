@@ -17,21 +17,25 @@ TIMEFRAME = '1d'
 SINCE_STR = '2018-01-01 00:00:00'
 HORIZON = 380  # Decay window (days)
 INITIAL_CAPITAL = 10000.0
-LEVERAGE = 5.0 # Fixed 5x leverage based on normalized conviction score (0 to 1)
+LEVERAGE = 5.0 # Fixed 5x leverage
 
-# --- Winning Signals ---
-WINNING_SIGNALS = [
+# --- Signals (now referred to as ALL_SIGNALS) ---
+ALL_SIGNALS = [
     ('EMA_CROSS', 50, 150, 0),         # 0: EMA 50/150
     ('PRICE_SMA', 380, 0, 0),          # 1: Price/SMA 380
     ('PRICE_SMA', 140, 0, 0),          # 2: Price/SMA 140
-    ('MACD_CROSS', 12, 26, 15),        # 3: MACD (12/26/15) - Standard Weight
+    ('MACD_CROSS', 12, 26, 15),        # 3: MACD (12/26/15)
     ('RSI_CROSS', 35, 0, 0),           # 4: RSI 35 (Crossover)
 ]
 
-N_SIGNALS = len(WINNING_SIGNALS)
-MACD_SIGNAL_INDEX = 3 # Index of the MACD signal
-SIGNAL_NAMES = [f"{s[0]}_{s[1]}_{s[2]}" for s in WINNING_SIGNALS]
-SIGNAL_COLORS = ['#3498DB', '#E67E22', '#F1C40F', '#2ECC71', '#E74C3C'] # Blue, Orange, Yellow, Green, Red
+N_SIGNALS = len(ALL_SIGNALS)
+SIGNAL_NAMES = [f"{s[0]}_{s[1]}_{s[2]}" for s in ALL_SIGNALS]
+SIGNAL_COLORS = ['#3498DB', '#E67E22', '#F1C40F', '#2ECC71', '#E74C3C'] # For visual consistency, though plots are independent
+
+# --- Global Storage for Results ---
+# Will store: [{'name': str, 'sharpe': float, 'return': float, 'df': DataFrame, 'contributions': np.array}]
+INDIVIDUAL_RESULTS = []
+GLOBAL_DF_DATA = None 
 
 # --- Data Fetching ---
 def fetch_binance_data():
@@ -75,7 +79,7 @@ def generate_signals(df):
     df_signals = pd.DataFrame(index=df.index, dtype=int)
     close = df['close']
 
-    for sig_type, p1, p2, p3 in WINNING_SIGNALS:
+    for sig_type, p1, p2, p3 in ALL_SIGNALS:
         col = f"{sig_type}_{p1}_{p2}_{p3}"
 
         if sig_type == 'EMA_CROSS':
@@ -121,68 +125,54 @@ def generate_signals(df):
 
     return df_signals_shifted 
 
-# --- Pre-calculate Signal Contributions (The "Decay" Matrix) ---
-def precalculate_contributions(df_data, df_signals):
-    """
-    Creates a (Days, Signals) matrix where each cell is the decayed value (-1 to 1)
-    of that signal for that day.
-    """
-    common_idx = df_data.index.intersection(df_signals.index)
-    signals = df_signals.loc[common_idx]
-    num_days = len(common_idx)
+# --- Backtest Runner for Single Signal ---
+def run_single_signal_backtest(df_data, df_signals_all, signal_index, signal_name):
+    """Runs decay and backtest for one signal treated as a standalone system."""
     
-    contributions = np.zeros((num_days, N_SIGNALS))
+    # 1. Pre-calculate Decay Contribution (Matrix will be N_DAYS x 1)
+    signal_column = df_signals_all.iloc[:, signal_index:signal_index+1]
     
-    signal_start_day = np.full(N_SIGNALS, -1, dtype=int)
-    signal_direction = np.zeros(N_SIGNALS, dtype=int)
-
-    for t in range(num_days):
-        for i in range(N_SIGNALS):
-            current_sig = signals.iloc[t, i]
-            
-            if current_sig != 0:
-                signal_start_day[i] = t
-                signal_direction[i] = current_sig
-            
-            if signal_direction[i] != 0:
-                d = t - signal_start_day[i]
-                if d < 0: decay = 0.0
-                else: decay = max(0.0, 1.0 - (d / HORIZON))
-                
-                contributions[t, i] = signal_direction[i] * decay
-                
-                if decay == 0.0:
-                    signal_direction[i] = 0
-                    signal_start_day[i] = -1
-                    
-    return contributions, common_idx
-
-# --- Backtest Runner (Simple Conviction, Long Only) ---
-def run_simple_backtest(df_data, contributions, common_idx):
+    common_idx = df_data.index.intersection(signal_column.index)
+    signals = signal_column.loc[common_idx]
     df = df_data.loc[common_idx].copy()
-    num_days = len(df)
+    num_days = len(common_idx)
     returns = df['return'].values
     
-    # Initialize backtest arrays
-    portfolio = np.zeros(num_days)
-    daily_pnl = np.zeros(num_days)
+    contributions = np.zeros(num_days)
+    signal_start_day = -1
+    signal_direction = 0
+
+    # Calculate Decay
+    for t in range(num_days):
+        current_sig = signals.iloc[t, 0]
+        
+        if current_sig != 0:
+            signal_start_day = t
+            signal_direction = current_sig
+        
+        if signal_direction != 0:
+            d = t - signal_start_day
+            decay = max(0.0, 1.0 - (d / HORIZON)) if d >= 0 else 0.0
+            contributions[t] = signal_direction * decay
+            
+            if decay == 0.0:
+                signal_direction = 0
+                signal_start_day = -1
+                
+    # 2. Exposure Logic (Single Signal, Long Only)
     
-    # Raw Conviction: Sum of all decaying contributions, normalized by N_SIGNALS
-    raw_conviction_sum = np.sum(contributions, axis=1) 
-    raw_conviction = raw_conviction_sum / N_SIGNALS
+    raw_conviction = contributions 
     
-    # Final conviction is just the raw conviction score (no override)
-    final_conviction = raw_conviction
-    
-    # --- LONG ONLY EXPOSURE LOGIC ---
     # Apply long-only clamp: Exposure is 0 if conviction is negative
-    long_only_conviction = np.clip(final_conviction, 0, None)
+    long_only_conviction = np.clip(raw_conviction, 0, None)
     
     # Calculate Exposure: Long Only Conviction * Fixed Leverage
     exposure = long_only_conviction * LEVERAGE
     exposure = np.clip(exposure, 0.0, LEVERAGE) 
     
-    # Run Portfolio Loop
+    # 3. Run PnL Loop
+    portfolio = np.zeros(num_days)
+    daily_pnl = np.zeros(num_days)
     portfolio[0] = INITIAL_CAPITAL
     is_bankrupt = False
     
@@ -200,83 +190,47 @@ def run_simple_backtest(df_data, contributions, common_idx):
         else:
             portfolio[t] = 0
             
-    # Compile results
+    # 4. Compile Results
     results = df[['close', 'return']].copy()
     results['Exposure'] = exposure
-    results['Raw_Conviction'] = raw_conviction # The overall score
+    results['Raw_Conviction'] = raw_conviction
     results['Portfolio_Value'] = portfolio
     results['Daily_PnL'] = daily_pnl
-    
     results['Strategy_Daily_Return'] = results['Portfolio_Value'].pct_change().fillna(0)
     
-    rolling_max = results['Portfolio_Value'].cummax()
-    results['Drawdown'] = np.where(rolling_max > 0, (results['Portfolio_Value'] - rolling_max) / rolling_max, -1.0)
-    
-    # Return results and the raw contributions (as no special scaling was applied)
-    return results, contributions
-
-def calculate_sharpe(results_df):
-    d_rets = results_df['Strategy_Daily_Return']
+    # Metrics
+    total_return = (portfolio[-1] / portfolio[0]) - 1.0
+    d_rets = results['Strategy_Daily_Return']
     sharpe = (d_rets.mean()/d_rets.std())*np.sqrt(365) if d_rets.std()>0 else 0
-    return sharpe
+    
+    return {'name': signal_name, 'sharpe': sharpe, 'return': total_return, 'df': results, 'contributions': contributions}
 
-def create_equity_plot(results_df, contributions):
-    fig = Figure(figsize=(12, 16))
+def create_single_equity_plot(result_entry, plot_index):
+    fig = Figure(figsize=(10, 6))
+    ax = fig.add_subplot(1, 1, 1)
     
-    # 4 Subplots: Price, Signal Contributions, Equity, Drawdown
-    ax1 = fig.add_subplot(4, 1, 1)
-    ax2 = fig.add_subplot(4, 1, 2, sharex=ax1)
-    ax3 = fig.add_subplot(4, 1, 3, sharex=ax1)
-    ax4 = fig.add_subplot(4, 1, 4, sharex=ax1)
-    
-    # --- Plot 1: Price ---
-    ax1.plot(results_df.index, results_df['close'], 'k-', linewidth=1)
-    ax1.set_yscale('log')
-    ax1.set_title('BTC Price (Log)', fontweight='bold')
-    ax1.grid(True, alpha=0.3)
-    
-    # --- Plot 2: Individual Signal Contributions (Stacked Area) ---
-    
-    pos_contributions = np.clip(contributions, 0, None)
-    neg_contributions = np.clip(contributions, None, 0)
-    
-    ax2.axhline(0, color='gray', linestyle='-', linewidth=0.5)
-    
-    ax2.stackplot(results_df.index, pos_contributions.T, colors=SIGNAL_COLORS, labels=SIGNAL_NAMES, alpha=0.7)
-    ax2.stackplot(results_df.index, neg_contributions.T, colors=SIGNAL_COLORS, alpha=0.7)
-
-    # Plot total raw conviction
-    ax2.plot(results_df.index, results_df['Raw_Conviction'] * N_SIGNALS, 'k--', linewidth=1, alpha=0.5, label='Total Conviction Score')
-    
-    ax2.set_ylim(-N_SIGNALS, N_SIGNALS)
-    ax2.set_ylabel('Signal Contribution (Max +/-5)', fontsize=10)
-    ax2.set_title('Individual Signal Contributions (Long Only Filter Applied)', fontweight='bold')
-    ax2.grid(True, axis='y', alpha=0.3)
-    ax2.legend(loc='upper right', fontsize=8, ncol=2)
-    
-    # --- Plot 3: Equity ---
+    results_df = result_entry['df']
     
     # Highlight flat/cash periods (when Raw_Conviction <= 0)
-    ax3_ymin, ax3_ymax = 0.0, 1.0 # Normalized vertical position for fill_between
-    ax3.fill_between(results_df.index, ax3_ymin, ax3_ymax, where=results_df['Raw_Conviction'] <= 0, 
-                     color='#808080', alpha=0.2, transform=ax3.get_xaxis_transform(), label='Flat (Conviction <= 0)')
+    ax_ymin, ax_ymax = 0.0, 1.0
+    ax.fill_between(results_df.index, ax_ymin, ax_ymax, where=results_df['Raw_Conviction'] <= 0, 
+                     color='#808080', alpha=0.2, transform=ax.get_xaxis_transform())
+                     
+    # Plot Strategy Equity
+    ax.plot(results_df.index, results_df['Portfolio_Value'], color=SIGNAL_COLORS[plot_index % len(SIGNAL_COLORS)], 
+            linewidth=1.5, label=f'Strategy (Sharpe: {result_entry["sharpe"]:.2f})')
     
-    ax3.plot(results_df.index, results_df['Portfolio_Value'], 'b-', linewidth=1.5, label=f'Strategy (Long Only {LEVERAGE}x)')
+    # Plot Buy & Hold
     bh = results_df['close'] / results_df['close'].iloc[0] * INITIAL_CAPITAL
-    ax3.plot(results_df.index, bh, 'g--', alpha=0.8, label='Buy & Hold')
+    ax.plot(results_df.index, bh, 'g--', alpha=0.8, linewidth=1, label='Buy & Hold')
     
-    if (results_df['Portfolio_Value'] <= 0).any(): ax3.set_yscale('symlog', linthresh=1.0)
-    else: ax3.set_yscale('log')
+    if (results_df['Portfolio_Value'] <= 0).any(): ax.set_yscale('symlog', linthresh=1.0)
+    else: ax.set_yscale('log')
     
-    ax3.legend(loc='upper left')
-    ax3.set_title('Equity Curve (Long Only)', fontweight='bold')
-    ax3.grid(True, alpha=0.3)
-    
-    # --- Plot 4: Drawdown ---
-    ax4.fill_between(results_df.index, results_df['Drawdown']*100, 0, color='red', alpha=0.3)
-    ax4.plot(results_df.index, results_df['Drawdown']*100, 'r-', linewidth=0.5)
-    ax4.set_title('Drawdown %', fontweight='bold')
-    ax4.grid(True, alpha=0.3)
+    ax.set_title(f'Equity Curve: {result_entry["name"]} (Long Only {LEVERAGE}x)', fontweight='bold')
+    ax.set_ylabel('Portfolio Value (Log Scale)', fontsize=10)
+    ax.grid(True, alpha=0.3)
+    ax.legend(loc='upper left')
     
     fig.tight_layout()
     buf = io.BytesIO()
@@ -284,66 +238,74 @@ def create_equity_plot(results_df, contributions):
     buf.seek(0)
     return buf
 
-def start_web_server(results_df, contributions, overall_sharpe):
+def start_web_server(all_results):
     app = Flask(__name__)
     
-    final_val = results_df['Portfolio_Value'].iloc[-1]
-    total_ret = ((final_val / INITIAL_CAPITAL) - 1) * 100
-    
-    # Monthly Stats
-    monthly_rows = ""
-    monthly_groups = results_df.groupby(pd.Grouper(freq='M'))
-    for name, group in reversed(list(monthly_groups)): 
-        if len(group) < 5: continue
-        m_daily_rets = group['Strategy_Daily_Return']
-        m_start = group['Portfolio_Value'].iloc[0]
-        m_end = group['Portfolio_Value'].iloc[-1]
-        m_ret = (m_end / m_start) - 1.0 if m_start > 0 else 0.0
-        m_sharpe = (m_daily_rets.mean()/m_daily_rets.std())*np.sqrt(365) if m_daily_rets.std()>0 else 0
-        
-        color = "green" if m_ret > 0 else "red"
-        monthly_rows += f"<tr><td>{name.strftime('%Y-%m')}</td><td style='color:{color}'><b>{m_ret*100:.2f}%</b></td><td>{m_sharpe:.2f}</td></tr>"
+    # --- Generate Stats Table ---
+    stats_rows = ""
+    for i, res in enumerate(all_results):
+        sharpe_color = "green" if res['sharpe'] > 1.0 else ("orange" if res['sharpe'] > 0 else "red")
+        ret_color = "green" if res['return'] > 0 else "red"
+        stats_rows += f"""
+        <tr>
+            <td>{res['name']}</td>
+            <td style='color: {sharpe_color}; font-weight: bold;'>{res['sharpe']:.2f}</td>
+            <td style='color: {ret_color}; font-weight: bold;'>{res['return']*100:.2f}%</td>
+            <td><img src="/plot/{i}" width="100%"></td>
+        </tr>
+        """
 
     @app.route('/')
     def index():
         ts = int(time.time())
+        plot_rows = ""
+        for i, res in enumerate(all_results):
+            # Each individual plot will be loaded from its route
+            plot_rows += f'<img src="/plot/{i}?v={ts}" alt="{res["name"]}" style="max-width: 95%; height: auto; border: 1px solid #ccc; margin: 20px 0;">'
+            
         return f'''
         <html>
-        <head><title>Conviction Strategy Simple</title>
+        <head><title>Individual Signal Backtests</title>
         <style>
             body {{ font-family: sans-serif; text-align: center; margin: 40px; color: #333; }}
-            .stats {{ background: #f9f9f9; padding: 20px; border-radius: 8px; display: inline-block; margin-bottom: 20px; }}
-            img {{ max-width: 95%; border: 1px solid #ccc; margin: 20px 0; }}
-            table {{ margin: 0 auto; border-collapse: collapse; width: 100%; max-width: 600px; }}
-            td, th {{ padding: 8px; border-bottom: 1px solid #ddd; }}
+            h1 {{ margin-bottom: 30px; }}
+            .stats-table {{ margin: 0 auto; border-collapse: collapse; max-width: 1200px; }}
+            .stats-table th, .stats-table td {{ padding: 10px; border: 1px solid #ddd; text-align: left; }}
+            .stats-table th {{ background: #f0f0f0; }}
+            .summary-table {{ width: 100%; }}
         </style>
         </head>
         <body>
-            <h1>Conviction Strategy (Simple Long Only)</h1>
-            <div class="stats">
-                <p><strong>Horizon:</strong> {HORIZON} days | <strong>Fixed Leverage:</strong> {LEVERAGE}x</p>
-                <p><strong>Rule:</strong> Long only, flat when conviction is negative or zero.</p>
-                <p><strong>Final:</strong> ${final_val:,.2f} | <strong>Return:</strong> {total_ret:.2f}%</p>
-                <p><strong>Overall Sharpe:</strong> {overall_sharpe:.2f}</p>
-            </div>
+            <h1>Independent Single-Signal Performance</h1>
+            <p>Each signal is tested individually with the Long Only constraint (flat when conviction is negative) and 5x fixed leverage.</p>
             
-            <h2>Signal Contributions Breakdown</h2>
-            <img src="/plot?v={ts}" />
-            
-            <h2>Monthly Returns</h2>
-            <table><thead><tr><th>Month</th><th>Return</th><th>Sharpe</th></tr></thead><tbody>{monthly_rows}</tbody></table>
+            <table class="stats-table summary-table">
+                <thead>
+                    <tr>
+                        <th style="width: 20%;">Signal</th>
+                        <th style="width: 10%;">Sharpe Ratio</th>
+                        <th style="width: 15%;">Total Return</th>
+                        <th style="width: 55%;">Equity Curve</th>
+                    </tr>
+                </thead>
+                <tbody>
+                    {stats_rows}
+                </tbody>
+            </table>
         </body>
         </html>
         '''
 
-    @app.route('/plot')
-    def plot():
-        try:
-            buf = create_equity_plot(results_df, contributions)
-            return send_file(buf, mimetype='image/png')
-        except Exception as e:
-            print(f"Error creating plot: {e}")
-            return f"Error creating plot: {e}", 500
+    @app.route('/plot/<int:plot_index>')
+    def plot(plot_index):
+        if 0 <= plot_index < len(all_results):
+            try:
+                buf = create_single_equity_plot(all_results[plot_index], plot_index)
+                return send_file(buf, mimetype='image/png')
+            except Exception as e:
+                print(f"Error creating plot {plot_index}: {e}")
+                return f"Error creating plot: {e}", 500
+        return "Plot not found", 404
 
     print(f"Server running on http://localhost:8080")
     app.run(host='0.0.0.0', port=8080, debug=False)
@@ -352,14 +314,12 @@ if __name__ == '__main__':
     df_data = fetch_binance_data()
     df_signals = generate_signals(df_data)
     
-    # 1. Precalculate Signal Contributions (Decay Matrix)
-    contributions, common_idx = precalculate_contributions(df_data, df_signals)
-    df_clean = df_data.loc[common_idx]
+    all_results = []
     
-    # 2. Run Simple Backtest (Long Only)
-    results, contributions_raw = run_simple_backtest(df_clean, contributions, common_idx)
-    
-    # 3. Calculate Sharpe
-    sharpe = calculate_sharpe(results)
-    
-    start_web_server(results, contributions_raw, sharpe)
+    print("\n--- Running Independent Backtests ---")
+    for i, sig_name in enumerate(SIGNAL_NAMES):
+        print(f"Testing Signal {i+1}/{N_SIGNALS}: {sig_name}...")
+        result = run_single_signal_backtest(df_data, df_signals, i, sig_name)
+        all_results.append(result)
+        
+    start_web_server(all_results)
