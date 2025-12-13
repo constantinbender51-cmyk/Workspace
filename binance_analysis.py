@@ -24,11 +24,12 @@ WINNING_SIGNALS = [
     ('EMA_CROSS', 50, 150, 0),         # 0: EMA 50/150
     ('PRICE_SMA', 380, 0, 0),          # 1: Price/SMA 380
     ('PRICE_SMA', 140, 0, 0),          # 2: Price/SMA 140
-    ('MACD_CROSS', 12, 26, 15),        # 3: MACD (12/26/15) - Standard Weight
+    ('MACD_CROSS', 12, 26, 15),        # 3: MACD (12/26/15) - Special role when conviction is negative
     ('RSI_CROSS', 35, 0, 0),           # 4: RSI 35 (Crossover)
 ]
 
 N_SIGNALS = len(WINNING_SIGNALS)
+MACD_SIGNAL_INDEX = 3 # Index of the MACD signal
 SIGNAL_NAMES = [f"{s[0]}_{s[1]}_{s[2]}" for s in WINNING_SIGNALS]
 SIGNAL_COLORS = ['#3498DB', '#E67E22', '#F1C40F', '#2ECC71', '#E74C3C'] # Blue, Orange, Yellow, Green, Red
 
@@ -156,7 +157,7 @@ def precalculate_contributions(df_data, df_signals):
                     
     return contributions, common_idx
 
-# --- Backtest Runner (Long Only Logic) ---
+# --- Backtest Runner (MACD Tie-breaker/Decider Logic) ---
 def run_simple_backtest(df_data, contributions, common_idx):
     df = df_data.loc[common_idx].copy()
     num_days = len(df)
@@ -167,16 +168,32 @@ def run_simple_backtest(df_data, contributions, common_idx):
     daily_pnl = np.zeros(num_days)
     
     # Simple Conviction: Sum of all decaying contributions, normalized by N_SIGNALS
-    raw_conviction = np.sum(contributions, axis=1) / N_SIGNALS
+    raw_conviction_sum = np.sum(contributions, axis=1) 
+    raw_conviction = raw_conviction_sum / N_SIGNALS
     
-    # --- LONG ONLY LOGIC ---
-    # 1. If conviction is positive, calculate exposure as Conviction * Leverage
-    # 2. If conviction is zero or negative, exposure is 0 (flat)
-    long_only_conviction = np.clip(raw_conviction, 0, None)
+    # Final Conviction Score used for exposure (will hold the MACD-only score if needed)
+    final_conviction = np.zeros(num_days)
     
-    # Calculate Exposure: Long Only Conviction * Fixed Leverage
+    # --- LOGIC IMPLEMENTATION ---
+    for t in range(num_days):
+        R_conv_t = raw_conviction[t]
+        
+        if R_conv_t >= 0:
+            # Case 1: Overall conviction is non-negative, use standard score
+            final_conviction[t] = R_conv_t
+        else:
+            # Case 2: Overall conviction is negative, ONLY MACD signal contributes
+            macd_contrib_t = contributions[t, MACD_SIGNAL_INDEX]
+            # Normalize the MACD score by N_SIGNALS to keep the exposure scaling correct
+            final_conviction[t] = macd_contrib_t / N_SIGNALS
+            
+    # --- LONG ONLY EXPOSURE LOGIC ---
+    # Apply long-only clamp: Exposure is 0 if final conviction is negative
+    long_only_conviction = np.clip(final_conviction, 0, None)
+    
+    # Calculate Exposure: Final Conviction * Fixed Leverage
     exposure = long_only_conviction * LEVERAGE
-    exposure = np.clip(exposure, 0.0, LEVERAGE) # Ensure max is LEVERAGE and min is 0
+    exposure = np.clip(exposure, 0.0, LEVERAGE) 
     
     # Run Portfolio Loop
     portfolio[0] = INITIAL_CAPITAL
@@ -199,7 +216,8 @@ def run_simple_backtest(df_data, contributions, common_idx):
     # Compile results
     results = df[['close', 'return']].copy()
     results['Exposure'] = exposure
-    results['Raw_Conviction'] = raw_conviction # Keep raw score for metrics, even though filtered for exposure
+    results['Raw_Conviction'] = raw_conviction # Unfiltered conviction for plot
+    results['Final_Conviction'] = final_conviction # Conviction used to determine exposure
     results['Portfolio_Value'] = portfolio
     results['Daily_PnL'] = daily_pnl
     
@@ -232,30 +250,32 @@ def create_equity_plot(results_df, contributions):
     
     # --- Plot 2: Individual Signal Contributions (Stacked Area) ---
     
+    # Contributions are raw (unfiltered) for this plot to show what the signals are doing
     pos_contributions = np.clip(contributions, 0, None)
     neg_contributions = np.clip(contributions, None, 0)
     
     ax2.axhline(0, color='gray', linestyle='-', linewidth=0.5)
     
-    # Stackplot uses the raw contribution matrix
     ax2.stackplot(results_df.index, pos_contributions.T, colors=SIGNAL_COLORS, labels=SIGNAL_NAMES, alpha=0.7)
     ax2.stackplot(results_df.index, neg_contributions.T, colors=SIGNAL_COLORS, alpha=0.7)
 
-    # Plot total raw conviction (used to determine exposure)
-    ax2.plot(results_df.index, results_df['Raw_Conviction'] * N_SIGNALS, 'k--', linewidth=1, alpha=0.5, label='Raw Conviction Score')
-    
+    # Plot total raw conviction (unfiltered, for comparison)
+    ax2.plot(results_df.index, results_df['Raw_Conviction'] * N_SIGNALS, 'k--', linewidth=1, alpha=0.5, label='Total Raw Conviction')
+    # Plot final conviction used for exposure calculation
+    ax2.plot(results_df.index, results_df['Final_Conviction'] * N_SIGNALS, 'm-', linewidth=1.5, label='Final Conviction (Used)')
+
     ax2.set_ylim(-N_SIGNALS, N_SIGNALS)
     ax2.set_ylabel('Signal Contribution (Max +/-5)', fontsize=10)
-    ax2.set_title('Individual Signal Contributions (Long Only Filter Applied)', fontweight='bold')
+    ax2.set_title('Individual Signal Contributions (MACD Decides on Negative Conviction)', fontweight='bold')
     ax2.grid(True, axis='y', alpha=0.3)
     ax2.legend(loc='upper right', fontsize=8, ncol=2)
     
     # --- Plot 3: Equity ---
     
-    # Highlight flat/cash periods
+    # Highlight flat/cash periods (when Final_Conviction <= 0)
     ax3_ymin, ax3_ymax = 0.0, 1.0 # Normalized vertical position for fill_between
-    ax3.fill_between(results_df.index, ax3_ymin, ax3_ymax, where=results_df['Raw_Conviction'] <= 0, 
-                     color='#E0E0E0', alpha=0.3, transform=ax3.get_xaxis_transform(), label='Flat (Negative Conviction)')
+    ax3.fill_between(results_df.index, ax3_ymin, ax3_ymax, where=results_df['Final_Conviction'] <= 0, 
+                     color='#808080', alpha=0.2, transform=ax3.get_xaxis_transform(), label='Flat (Final Conviction <= 0)')
     
     ax3.plot(results_df.index, results_df['Portfolio_Value'], 'b-', linewidth=1.5, label=f'Strategy (Long Only {LEVERAGE}x)')
     bh = results_df['close'] / results_df['close'].iloc[0] * INITIAL_CAPITAL
@@ -265,7 +285,7 @@ def create_equity_plot(results_df, contributions):
     else: ax3.set_yscale('log')
     
     ax3.legend(loc='upper left')
-    ax3.set_title('Equity Curve (Long Only)', fontweight='bold')
+    ax3.set_title('Equity Curve (MACD Tie-Breaker)', fontweight='bold')
     ax3.grid(True, alpha=0.3)
     
     # --- Plot 4: Drawdown ---
@@ -305,7 +325,7 @@ def start_web_server(results_df, contributions, overall_sharpe):
         ts = int(time.time())
         return f'''
         <html>
-        <head><title>Conviction Strategy Long Only</title>
+        <head><title>Conviction Strategy MACD Filter</title>
         <style>
             body {{ font-family: sans-serif; text-align: center; margin: 40px; color: #333; }}
             .stats {{ background: #f9f9f9; padding: 20px; border-radius: 8px; display: inline-block; margin-bottom: 20px; }}
@@ -315,10 +335,10 @@ def start_web_server(results_df, contributions, overall_sharpe):
         </style>
         </head>
         <body>
-            <h1>Conviction Strategy (Long Only 5x Leverage)</h1>
+            <h1>Conviction Strategy (MACD Tie-Breaker)</h1>
             <div class="stats">
                 <p><strong>Horizon:</strong> {HORIZON} days | <strong>Fixed Leverage:</strong> {LEVERAGE}x</p>
-                <p><strong>Rule:</strong> Long only, flat when conviction is negative or zero.</p>
+                <p><strong>Rule:</strong> If overall conviction is negative, only the MACD signal can push the position long (Long Only).</p>
                 <p><strong>Final:</strong> ${final_val:,.2f} | <strong>Return:</strong> {total_ret:.2f}%</p>
                 <p><strong>Overall Sharpe:</strong> {overall_sharpe:.2f}</p>
             </div>
@@ -352,7 +372,7 @@ if __name__ == '__main__':
     contributions, common_idx = precalculate_contributions(df_data, df_signals)
     df_clean = df_data.loc[common_idx]
     
-    # 2. Run Long Only Backtest
+    # 2. Run Backtest with MACD Exemption
     results, contributions_raw = run_simple_backtest(df_clean, contributions, common_idx)
     
     # 3. Calculate Sharpe
