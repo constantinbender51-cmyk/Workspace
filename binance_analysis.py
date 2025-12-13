@@ -18,19 +18,18 @@ SINCE_STR = '2018-01-01 00:00:00'
 HORIZON = 380  # Decay window (days)
 INITIAL_CAPITAL = 10000.0
 LEVERAGE = 5.0 # Fixed 5x leverage based on normalized conviction score (0 to 1)
-MACD_CONTRARIAN_FACTOR = 2.0 # The factor by which MACD is multiplied when it contradicts the non-MACD consensus
 
 # --- Winning Signals ---
 WINNING_SIGNALS = [
     ('EMA_CROSS', 50, 150, 0),         # 0: EMA 50/150
     ('PRICE_SMA', 380, 0, 0),          # 1: Price/SMA 380
     ('PRICE_SMA', 140, 0, 0),          # 2: Price/SMA 140
-    ('MACD_CROSS', 12, 26, 15),        # 3: MACD (12/26/15) - Dynamic Weight
+    ('MACD_CROSS', 12, 26, 15),        # 3: MACD (12/26/15) - Contradiction Check
     ('RSI_CROSS', 35, 0, 0),           # 4: RSI 35 (Crossover)
 ]
 
 N_SIGNALS = len(WINNING_SIGNALS)
-MACD_SIGNAL_INDEX = 3 
+MACD_SIGNAL_INDEX = 3 # Index of the MACD signal
 SIGNAL_NAMES = [f"{s[0]}_{s[1]}_{s[2]}" for s in WINNING_SIGNALS]
 SIGNAL_COLORS = ['#3498DB', '#E67E22', '#F1C40F', '#2ECC71', '#E74C3C'] # Blue, Orange, Yellow, Green, Red
 
@@ -158,8 +157,8 @@ def precalculate_contributions(df_data, df_signals):
                     
     return contributions, common_idx
 
-# --- Backtest Runner (Dynamic Weighted Conviction) ---
-def run_dynamic_backtest(df_data, contributions, common_idx):
+# --- Backtest Runner (Contradiction Lockout) ---
+def run_contradiction_backtest(df_data, contributions, common_idx):
     df = df_data.loc[common_idx].copy()
     num_days = len(df)
     returns = df['return'].values
@@ -167,14 +166,12 @@ def run_dynamic_backtest(df_data, contributions, common_idx):
     # Initialize backtest arrays
     portfolio = np.zeros(num_days)
     daily_pnl = np.zeros(num_days)
-    dynamic_conviction_matrix = np.zeros_like(contributions) # Store scaled contributions
+    scaled_contributions_matrix = np.zeros_like(contributions) # Store final conviction for plotting
+    lockout_mask = np.zeros(num_days, dtype=bool)
     
     # Run Portfolio Loop
     portfolio[0] = INITIAL_CAPITAL
     is_bankrupt = False
-    
-    # Base weight for non-MACD signals
-    base_weight = 1.0
     
     for t in range(num_days):
         
@@ -185,39 +182,34 @@ def run_dynamic_backtest(df_data, contributions, common_idx):
         non_macd_contributions = np.delete(current_contributions, MACD_SIGNAL_INDEX)
         non_macd_sum = np.sum(non_macd_contributions)
         
-        # Determine MACD weight
-        macd_weight = base_weight
-        
         # Contradiction check: Non-MACD consensus and MACD signal have opposite signs
-        # We check for a non-zero consensus/MACD to avoid unnecessary scaling when all are zero/neutral
+        # Check for non-zero contributions before comparing signs
         non_macd_sign = np.sign(non_macd_sum)
         macd_sign = np.sign(macd_contribution)
         
-        if non_macd_sign != 0 and macd_sign != 0 and non_macd_sign != macd_sign:
-            macd_weight = MACD_CONTRARIAN_FACTOR
+        is_contradiction = (non_macd_sign != 0 and macd_sign != 0 and non_macd_sign != macd_sign)
         
-        # 2. Calculate Final Conviction Score
-        
-        # Total numerator (sum of weighted contributions)
-        weighted_sum = non_macd_sum + (macd_contribution * macd_weight)
-        
-        # Total denominator (sum of weights)
-        total_weight = (N_SIGNALS - 1) * base_weight + macd_weight
-        
-        # Normalized Raw Conviction (-1.0 to 1.0)
-        raw_conviction_t = weighted_sum / total_weight
-        
-        # Calculate Exposure
-        exposure_t = raw_conviction_t * LEVERAGE
-        exposure_t = np.clip(exposure_t, -LEVERAGE, LEVERAGE)
-        
+        if is_contradiction:
+            # Rule: Stay out of the market
+            raw_conviction_t = 0.0
+            exposure_t = 0.0
+            lockout_mask[t] = True
+            
+            # For visualization: contributions are zeroed out
+            scaled_contributions_t = np.zeros(N_SIGNALS)
+            
+        else:
+            # Use standard unweighted conviction
+            raw_conviction_t = np.sum(current_contributions) / N_SIGNALS
+            
+            exposure_t = raw_conviction_t * LEVERAGE
+            exposure_t = np.clip(exposure_t, -LEVERAGE, LEVERAGE)
+            
+            # For visualization: standard normalized scaling
+            scaled_contributions_t = current_contributions / N_SIGNALS * N_SIGNALS 
+            
         # Store scaled contributions for plotting
-        scaled_contributions = current_contributions.copy()
-        scaled_contributions[MACD_SIGNAL_INDEX] *= macd_weight
-        # Re-normalize contributions so they stack up to the overall weighted sum (for visualization)
-        scaled_contributions /= total_weight
-        scaled_contributions *= N_SIGNALS # Scale back up to +/-5 for the plot range
-        dynamic_conviction_matrix[t] = scaled_contributions
+        scaled_contributions_matrix[t] = scaled_contributions_t
         
         # --- Run PnL ---
         if t > 0:
@@ -232,7 +224,7 @@ def run_dynamic_backtest(df_data, contributions, common_idx):
             else:
                 portfolio[t] = 0
         
-        # Store final exposure (used for drawdown/metrics calc)
+        # Store final metrics
         df.loc[df.index[t], 'Exposure'] = exposure_t
         df.loc[df.index[t], 'Raw_Conviction'] = raw_conviction_t
 
@@ -240,13 +232,14 @@ def run_dynamic_backtest(df_data, contributions, common_idx):
     results = df[['close', 'return', 'Exposure', 'Raw_Conviction']].copy()
     results['Portfolio_Value'] = portfolio
     results['Daily_PnL'] = daily_pnl
+    results['Contradiction_Lockout'] = lockout_mask
     
     results['Strategy_Daily_Return'] = results['Portfolio_Value'].pct_change().fillna(0)
     
     rolling_max = results['Portfolio_Value'].cummax()
     results['Drawdown'] = np.where(rolling_max > 0, (results['Portfolio_Value'] - rolling_max) / rolling_max, -1.0)
     
-    return results, dynamic_conviction_matrix
+    return results, scaled_contributions_matrix
 
 def calculate_sharpe(results_df):
     d_rets = results_df['Strategy_Daily_Return']
@@ -270,26 +263,32 @@ def create_equity_plot(results_df, contributions_scaled):
     
     # --- Plot 2: Individual Signal Contributions (Stacked Area) ---
     
-    # Contributions are already dynamically scaled and normalized for plotting
     pos_contributions = np.clip(contributions_scaled, 0, None)
     neg_contributions = np.clip(contributions_scaled, None, 0)
     
     ax2.axhline(0, color='gray', linestyle='-', linewidth=0.5)
     
+    # Note: If lockout is active, the contributions_scaled matrix should be all zeros for that day,
+    # correctly reflecting zero net conviction used for the trade.
     ax2.stackplot(results_df.index, pos_contributions.T, colors=SIGNAL_COLORS, labels=SIGNAL_NAMES, alpha=0.7)
     ax2.stackplot(results_df.index, neg_contributions.T, colors=SIGNAL_COLORS, alpha=0.7)
 
-    # Total Raw Conviction * N_SIGNALS is now the sum of the scaled stackplot layers
-    ax2.plot(results_df.index, results_df['Raw_Conviction'] * N_SIGNALS, 'k--', linewidth=1, alpha=0.5, label='Total Scaled Conviction')
+    # Plot total used conviction
+    ax2.plot(results_df.index, results_df['Raw_Conviction'] * N_SIGNALS, 'k--', linewidth=1, alpha=0.5, label='Total Used Conviction')
     
     ax2.set_ylim(-N_SIGNALS, N_SIGNALS)
     ax2.set_ylabel('Signal Contribution (Max +/-5)', fontsize=10)
-    ax2.set_title('Individual Signal Contributions (MACD x2 on Contradiction)', fontweight='bold')
+    ax2.set_title('Individual Signal Contributions (MACD Contradiction Lockout)', fontweight='bold')
     ax2.grid(True, axis='y', alpha=0.3)
     ax2.legend(loc='upper right', fontsize=8, ncol=2)
     
-    # --- Plot 3: Equity ---
+    # --- Plot 3: Equity and Lockout Background ---
     
+    # Draw Lockout background
+    ax3_ymin, ax3_ymax = 0.0, 1.0 # Normalized vertical position for fill_between
+    ax3.fill_between(results_df.index, ax3_ymin, ax3_ymax, where=results_df['Contradiction_Lockout'], 
+                     color='#808080', alpha=0.15, transform=ax3.get_xaxis_transform(), label='Contradiction Lockout (Cash)')
+
     ax3.plot(results_df.index, results_df['Portfolio_Value'], 'b-', linewidth=1.5, label=f'Strategy ({LEVERAGE}x)')
     bh = results_df['close'] / results_df['close'].iloc[0] * INITIAL_CAPITAL
     ax3.plot(results_df.index, bh, 'g--', alpha=0.8, label='Buy & Hold')
@@ -338,7 +337,7 @@ def start_web_server(results_df, contributions_scaled, overall_sharpe):
         ts = int(time.time())
         return f'''
         <html>
-        <head><title>Conviction Strategy MACD Weighted</title>
+        <head><title>Conviction Strategy MACD Lockout</title>
         <style>
             body {{ font-family: sans-serif; text-align: center; margin: 40px; color: #333; }}
             .stats {{ background: #f9f9f9; padding: 20px; border-radius: 8px; display: inline-block; margin-bottom: 20px; }}
@@ -348,10 +347,10 @@ def start_web_server(results_df, contributions_scaled, overall_sharpe):
         </style>
         </head>
         <body>
-            <h1>Conviction Strategy (MACD x2 Contradiction)</h1>
+            <h1>Conviction Strategy (MACD Contradiction Lockout)</h1>
             <div class="stats">
                 <p><strong>Horizon:</strong> {HORIZON} days | <strong>Fixed Leverage:</strong> {LEVERAGE}x</p>
-                <p><strong>Rule:</strong> MACD signal influence is {MACD_CONTRARIAN_FACTOR}x when it contradicts the 4 other signals.</p>
+                <p><strong>Rule:</strong> Strategy goes to Cash when MACD contradicts the 4-signal consensus.</p>
                 <p><strong>Final:</strong> ${final_val:,.2f} | <strong>Return:</strong> {total_ret:.2f}%</p>
                 <p><strong>Overall Sharpe:</strong> {overall_sharpe:.2f}</p>
             </div>
@@ -385,8 +384,8 @@ if __name__ == '__main__':
     contributions, common_idx = precalculate_contributions(df_data, df_signals)
     df_clean = df_data.loc[common_idx]
     
-    # 2. Run Dynamic Weighted Backtest
-    results, contributions_scaled = run_dynamic_backtest(df_clean, contributions, common_idx)
+    # 2. Run Contradiction Lockout Backtest
+    results, contributions_scaled = run_contradiction_backtest(df_clean, contributions, common_idx)
     
     # 3. Calculate Sharpe
     sharpe = calculate_sharpe(results)
