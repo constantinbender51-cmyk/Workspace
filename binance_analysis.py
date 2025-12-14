@@ -13,18 +13,9 @@ import time
 SYMBOL = 'BTC/USDT'
 TIMEFRAME = '1d'
 START_YEAR = 2018
+SMA_PERIOD = 120
+DECAY_DAYS = 40
 PORT = 8080
-
-# --- Strategy Constants ---
-# Strategy 1 (Updated Challenger)
-S1_SMA = 120
-S1_DECAY_DAYS = 40
-S1_STOP_PCT = 0.10   # 10% Trailing Stop
-
-# Strategy 2 (The Winner)
-S2_SMA = 400
-S2_PROX_PCT = 0.05   # 5% Proximity
-S2_STOP_PCT = 0.27   # 27% Trailing Stop
 
 app = Flask(__name__)
 
@@ -54,46 +45,53 @@ def fetch_data():
     df.set_index('date', inplace=True)
     df = df[~df.index.duplicated(keep='first')]
     
-    # Pre-calc Indicators
+    # Pre-calculate indicators
+    df['SMA'] = df['close'].rolling(window=SMA_PERIOD).mean()
     df['Asset_Ret'] = df['close'].pct_change().fillna(0.0)
-    df['SMA_120'] = df['close'].rolling(window=S1_SMA).mean()
-    df['SMA_400'] = df['close'].rolling(window=S2_SMA).mean()
-    df['Dist_Pct_400'] = (df['close'] - df['SMA_400']).abs() / df['SMA_400']
+    
+    # Pre-calculate Trend to speed up loop
+    df['Trend_Base'] = np.where(df['close'] > df['SMA'], 1, -1)
     
     df.dropna(inplace=True)
     print(f"Data ready: {len(df)} rows.")
     return df
 
-# --- Strategy 1: SMA 120 Decay + 10% Stop ---
-def run_strategy_1(df):
-    data = df.copy()
-    closes = data['close'].values
-    smas = data['SMA_120'].values
-    asset_rets = data['Asset_Ret'].values
-    n = len(data)
+# --- Backtest Function ---
+def backtest_sma120(df, stop_pct):
+    """
+    Runs SMA 120 + Decay + Variable Stop Loss
+    Returns: Annualized Sharpe Ratio, Total Return %
+    """
+    trends = df['Trend_Base'].values
+    asset_rets = df['Asset_Ret'].values
+    n = len(df)
     
-    position_arr = np.zeros(n)
-    strat_daily_ret = np.zeros(n)
+    strat_daily_rets = np.zeros(n)
     
+    # State
     current_trend = 0
     last_signal_idx = -9999
     
-    # Trade State
     trade_equity = 1.0
     max_trade_equity = 1.0
     is_stopped_out = False
     
-    stop_threshold = 1.0 - S1_STOP_PCT # 0.90
+    stop_threshold = 1.0 - stop_pct
+    current_pos = 0.0
+    
+    # Pre-calc weights for speed
+    # weights[d] = 1 - (d/40)^2
+    decay_weights = np.zeros(DECAY_DAYS + 1)
+    for d in range(1, DECAY_DAYS + 1):
+        decay_weights[d] = 1 - (d / float(DECAY_DAYS))**2
     
     for i in range(n):
-        # 1. Update PnL & Equity from YESTERDAY'S position
-        prev_pos = position_arr[i-1] if i > 0 else 0
-        todays_pnl = prev_pos * asset_rets[i]
-        strat_daily_ret[i] = todays_pnl
+        # 1. PnL from yesterday's pos
+        todays_pnl = current_pos * asset_rets[i]
+        strat_daily_rets[i] = todays_pnl
         
-        # Track Trade Equity if active
-        # We track equity even if weight is small, it represents the trade's health
-        if prev_pos != 0 and np.sign(prev_pos) == current_trend:
+        # Track Trade Equity
+        if current_pos != 0 and np.sign(current_pos) == current_trend:
              trade_equity *= (1 + todays_pnl)
              if trade_equity > max_trade_equity:
                  max_trade_equity = trade_equity
@@ -102,182 +100,104 @@ def run_strategy_1(df):
              if not is_stopped_out and trade_equity < (max_trade_equity * stop_threshold):
                  is_stopped_out = True
         
-        # 2. Determine Trend & Position for TODAY
-        trend_now = 1 if closes[i] > smas[i] else -1
+        # 2. Logic for Tomorrow
+        trend_now = trends[i]
         
         if trend_now != current_trend:
-            # NEW SIGNAL -> Reset everything
+            # New Trend -> Reset
             current_trend = trend_now
-            last_signal_idx = i 
+            last_signal_idx = i
             trade_equity = 1.0
             max_trade_equity = 1.0
             is_stopped_out = False
             
-            # Entry Day 0: Weight 1.0
-            position_arr[i] = current_trend * 1.0
+            # Day 0 (technically day 1 of trade execution tomorrow)
+            # We use weight for d=0 which is 1.0 in formula logic, or logic below
+            current_pos = current_trend * 1.0
             
         else:
-            # SAME TREND
+            # Same Trend
             d_trade = i - last_signal_idx
             
             if is_stopped_out:
-                # Flat until next signal
-                position_arr[i] = 0.0
-            elif 1 <= d_trade <= S1_DECAY_DAYS:
-                # Decay
-                weight = 1 - (d_trade / float(S1_DECAY_DAYS))**2
-                position_arr[i] = current_trend * weight
+                current_pos = 0.0
+            elif 1 <= d_trade <= DECAY_DAYS:
+                weight = decay_weights[d_trade]
+                current_pos = current_trend * weight
             else:
-                # Expired (Natural end of 40 days)
-                position_arr[i] = 0.0
-            
-    data['Pos_1'] = position_arr
-    data['Active_Pos_1'] = data['Pos_1'].shift(1).fillna(0.0)
-    data['Strat_1_Ret'] = strat_daily_ret
-    data['Equity_1'] = (1 + data['Strat_1_Ret']).cumprod()
-    return data
-
-# --- Strategy 2: SMA 400 (5% Prox, 27% Stop) ---
-def run_strategy_2(df):
-    data = df.copy()
-    closes = data['close'].values
-    smas = data['SMA_400'].values
-    dists = data['Dist_Pct_400'].values
-    asset_rets = data['Asset_Ret'].values
-    n = len(data)
-    
-    position_arr = np.zeros(n)
-    strat_daily_ret = np.zeros(n)
-    
-    current_trend = 0
-    trade_equity = 1.0
-    max_trade_equity = 1.0
-    is_stopped_out = False
-    
-    stop_threshold = 1.0 - S2_STOP_PCT
-    
-    for i in range(n):
-        trend_now = 1 if closes[i] > smas[i] else -1
-        is_proximal = dists[i] < S2_PROX_PCT
-        target_weight = 0.5 if is_proximal else 1.0
-        
-        if trend_now != current_trend:
-            current_trend = trend_now
-            trade_equity = 1.0
-            max_trade_equity = 1.0
-            is_stopped_out = False
-            position_arr[i] = current_trend * target_weight
-            
-        else:
-            prev_pos = position_arr[i-1] if i > 0 else 0
-            todays_pnl = prev_pos * asset_rets[i]
-            strat_daily_ret[i] = todays_pnl
-            
-            if prev_pos != 0 and np.sign(prev_pos) == current_trend:
-                trade_equity *= (1 + todays_pnl)
-                if trade_equity > max_trade_equity:
-                    max_trade_equity = trade_equity
+                current_pos = 0.0
                 
-                if not is_stopped_out and trade_equity < (max_trade_equity * stop_threshold):
-                    is_stopped_out = True
-            
-            if is_stopped_out:
-                if is_proximal:
-                    is_stopped_out = False
-                    trade_equity = 1.0
-                    max_trade_equity = 1.0
-                    position_arr[i] = current_trend * target_weight
-                else:
-                    position_arr[i] = 0.0
-            else:
-                position_arr[i] = current_trend * target_weight
-
-    data['Pos_2'] = position_arr
-    data['Active_Pos_2'] = data['Pos_2'].shift(1).fillna(0.0) 
-    data['Strat_2_Ret'] = strat_daily_ret
-    data['Equity_2'] = (1 + data['Strat_2_Ret']).cumprod()
-    return data
-
-def calc_stats(equity_series):
-    total_ret = (equity_series.iloc[-1] - 1) * 100
+    # Metrics
+    mean_ret = np.mean(strat_daily_rets)
+    std_ret = np.std(strat_daily_rets)
     
-    daily_rets = equity_series.pct_change().dropna()
-    mean = daily_rets.mean()
-    std = daily_rets.std()
+    if std_ret == 0:
+        sharpe = 0.0
+    else:
+        sharpe = (mean_ret / std_ret) * np.sqrt(365)
+        
+    total_ret_equity = (np.prod(1 + strat_daily_rets) - 1) * 100
     
-    sharpe = (mean / std) * np.sqrt(365) if std != 0 else 0
-    
-    running_max = equity_series.cummax()
-    drawdown = (equity_series - running_max) / running_max
-    max_dd = drawdown.min() * 100
-    
-    return total_ret, sharpe, max_dd
+    return sharpe, total_ret_equity
 
 @app.route('/')
-def dashboard():
-    df_raw = fetch_data()
-    df_s1 = run_strategy_1(df_raw)
-    df_final = run_strategy_2(df_s1)
+def run_optimization():
+    df = fetch_data()
     
-    s1_tot, s1_shp, s1_dd = calc_stats(df_final['Equity_1'])
-    s2_tot, s2_shp, s2_dd = calc_stats(df_final['Equity_2'])
+    # Parameter Range: 1% to 50%
+    stop_range = range(1, 51)
     
-    fig = plt.figure(figsize=(16, 12), constrained_layout=True)
-    gs = fig.add_gridspec(3, 2)
+    results = []
     
-    # 1. Price
-    ax1 = fig.add_subplot(gs[0, :])
-    ax1.set_title(f'Market Context: {SYMBOL} (Log Scale)', fontsize=14, fontweight='bold')
-    ax1.plot(df_final.index, df_final['close'], color='black', alpha=0.4, lw=1, label='Price')
-    ax1.plot(df_final.index, df_final['SMA_120'], color='orange', linestyle='--', lw=1.5, label='SMA 120')
-    ax1.plot(df_final.index, df_final['SMA_400'], color='blue', linestyle='-', lw=1.5, label='SMA 400')
-    ax1.set_yscale('log')
-    ax1.legend(loc='upper left')
-    ax1.grid(axis='both', alpha=0.2)
+    print("Starting optimization loop...")
+    start_time = time.time()
     
-    # 2. Equity Curves
-    ax2 = fig.add_subplot(gs[1, :])
-    ax2.set_title('Head-to-Head Equity Growth (Daily Compounding)', fontsize=14, fontweight='bold')
-    ax2.plot(df_final.index, df_final['Equity_1'], color='orange', lw=2, label=f'S1: SMA 120 (40d + 10% Stop) | Total: {s1_tot:,.0f}%')
-    ax2.plot(df_final.index, df_final['Equity_2'], color='blue', lw=2.5, label=f'S2: SMA 400 (5% Prox + 27% Stop) | Total: {s2_tot:,.0f}%')
-    ax2.fill_between(df_final.index, df_final['Equity_2'], df_final['Equity_1'], where=(df_final['Equity_2']>df_final['Equity_1']), color='blue', alpha=0.05, interpolate=True)
-    ax2.fill_between(df_final.index, df_final['Equity_2'], df_final['Equity_1'], where=(df_final['Equity_2']<df_final['Equity_1']), color='orange', alpha=0.05, interpolate=True)
+    for stop_val in stop_range:
+        s_pct = stop_val / 100.0
+        sharpe, tot_ret = backtest_sma120(df, s_pct)
+        results.append({
+            'Stop %': stop_val,
+            'Sharpe': sharpe,
+            'Total Return': tot_ret
+        })
+        
+    print(f"Optimization complete in {time.time() - start_time:.2f}s")
     
-    ax2.axhline(1.0, color='black', linestyle='--')
-    ax2.legend(fontsize=12)
-    ax2.grid(axis='both', alpha=0.3)
-    ax2.set_ylabel('Equity Multiple')
+    res_df = pd.DataFrame(results)
     
-    # 3. Annual Returns
-    ax3 = fig.add_subplot(gs[2, :])
-    ann_ret_1 = df_final['Strat_1_Ret'].resample('Y').apply(lambda x: (1 + x).prod() - 1) * 100
-    ann_ret_2 = df_final['Strat_2_Ret'].resample('Y').apply(lambda x: (1 + x).prod() - 1) * 100
+    # Find Best
+    best_sharpe_row = res_df.loc[res_df['Sharpe'].idxmax()]
+    best_return_row = res_df.loc[res_df['Total Return'].idxmax()]
     
-    years = ann_ret_1.index.year
-    x = np.arange(len(years))
-    width = 0.35
+    # --- Visualization ---
+    fig, ax1 = plt.subplots(figsize=(14, 8))
     
-    rects1 = ax3.bar(x - width/2, ann_ret_1, width, label='SMA 120 (S1)', color='orange', alpha=0.85)
-    rects2 = ax3.bar(x + width/2, ann_ret_2, width, label='SMA 400 (S2)', color='blue', alpha=0.85)
+    # Plot Sharpe (Primary Y)
+    line1, = ax1.plot(res_df['Stop %'], res_df['Sharpe'], color='blue', marker='o', markersize=4, label='Sharpe Ratio')
+    ax1.set_xlabel('Trailing Stop Loss (%)', fontsize=12)
+    ax1.set_ylabel('Annualized Sharpe Ratio', color='blue', fontsize=12)
+    ax1.tick_params(axis='y', labelcolor='blue')
+    ax1.grid(True, alpha=0.3)
     
-    ax3.set_title('Annual Performance Comparison (%)', fontsize=12)
-    ax3.set_xticks(x)
-    ax3.set_xticklabels(years)
-    ax3.axhline(0, color='black', lw=1)
-    ax3.legend()
-    ax3.grid(axis='y', alpha=0.2)
+    # Plot Return (Secondary Y)
+    ax2 = ax1.twinx()
+    line2, = ax2.plot(res_df['Stop %'], res_df['Total Return'], color='orange', linestyle='--', alpha=0.7, label='Total Return %')
+    ax2.set_ylabel('Total Equity Return (%)', color='orange', fontsize=12)
+    ax2.tick_params(axis='y', labelcolor='orange')
     
-    def autolabel(rects):
-        for rect in rects:
-            height = rect.get_height()
-            ax3.annotate(f'{height:.0f}',
-                        xy=(rect.get_x() + rect.get_width() / 2, height),
-                        xytext=(0, 3 if height > 0 else -12),
-                        textcoords="offset points",
-                        ha='center', va='bottom' if height > 0 else 'top', fontsize=9)
-    autolabel(rects1)
-    autolabel(rects2)
+    # Highlight Peak Sharpe
+    ax1.axvline(best_sharpe_row['Stop %'], color='green', linestyle=':', alpha=0.8)
+    ax1.text(best_sharpe_row['Stop %'] + 1, best_sharpe_row['Sharpe'], 
+             f"Best Sharpe: {best_sharpe_row['Sharpe']:.2f} @ {best_sharpe_row['Stop %']:.0f}%", 
+             color='green', fontweight='bold')
 
+    plt.title(f'SMA 120 Optimization: Trailing Stop Sensitivity', fontsize=14, fontweight='bold')
+    
+    # Combined Legend
+    lines = [line1, line2]
+    labels = [l.get_label() for l in lines]
+    ax1.legend(lines, labels, loc='upper center')
+    
     buf = io.BytesIO()
     plt.savefig(buf, format='png', dpi=100)
     plt.close(fig)
@@ -288,45 +208,37 @@ def dashboard():
     <html lang="en">
     <head>
         <meta charset="UTF-8">
-        <title>Strategy Showdown</title>
+        <title>SMA 120 Optimization</title>
         <style>
-            body {{ font-family: 'Segoe UI', sans-serif; background: #f4f6f9; padding: 20px; text-align: center; }}
-            .container {{ max-width: 1200px; margin: 0 auto; background: white; padding: 30px; border-radius: 15px; box-shadow: 0 10px 20px rgba(0,0,0,0.1); }}
-            .header {{ margin-bottom: 30px; }}
-            .comparison-box {{ display: flex; justify-content: space-around; margin-bottom: 30px; gap: 20px; }}
-            .stat-panel {{ flex: 1; padding: 20px; border-radius: 10px; color: white; box-shadow: 0 4px 6px rgba(0,0,0,0.1); }}
-            .panel-s1 {{ background: linear-gradient(135deg, #f6d365 0%, #fda085 100%); }}
-            .panel-s2 {{ background: linear-gradient(135deg, #667eea 0%, #764ba2 100%); transform: scale(1.05); border: 2px solid gold; }}
-            .stat-row {{ display: flex; justify-content: space-between; margin: 10px 0; border-bottom: 1px solid rgba(255,255,255,0.3); padding-bottom: 5px; }}
-            .stat-val {{ font-weight: bold; font-size: 1.2em; }}
+            body {{ font-family: 'Segoe UI', sans-serif; background: #f0f2f5; padding: 20px; text-align: center; }}
+            .container {{ max-width: 1000px; margin: 0 auto; background: white; padding: 30px; border-radius: 12px; box-shadow: 0 4px 6px rgba(0,0,0,0.1); }}
+            .highlight {{ color: #2e7d32; font-weight: bold; font-size: 1.2em; }}
+            .stat-box {{ display: flex; justify-content: space-around; margin: 20px 0; }}
+            .card {{ background: #e3f2fd; padding: 15px; border-radius: 8px; border: 1px solid #90caf9; width: 40%; }}
         </style>
     </head>
     <body>
         <div class="container">
-            <div class="header">
-                <h1>🏆 Strategy Showdown 🏆</h1>
-                <p>SMA 120 (Stop Loss Added) vs SMA 400 (Champion)</p>
-            </div>
+            <h1>Optimization Results: SMA 120 Strategy</h1>
+            <p>Scanning Trailing Stop Loss from 1% to 50%</p>
             
-            <div class="comparison-box">
-                <div class="stat-panel panel-s1">
-                    <h2>Strategy 1 (SMA 120)</h2>
-                    <div class="stat-row"><span>Total Return:</span> <span class="stat-val">{s1_tot:,.0f}%</span></div>
-                    <div class="stat-row"><span>Sharpe Ratio:</span> <span class="stat-val">{s1_shp:.2f}</span></div>
-                    <div class="stat-row"><span>Max Drawdown:</span> <span class="stat-val">{s1_dd:.1f}%</span></div>
-                    <p style="font-size:0.9em; margin-top:15px;">Decay 40d + 10% Stop Loss</p>
+            <div class="stat-box">
+                <div class="card">
+                    <h3>🏆 Best Risk-Adjusted (Sharpe)</h3>
+                    <p>Stop Loss: <span class="highlight">{best_sharpe_row['Stop %']:.0f}%</span></p>
+                    <p>Sharpe Ratio: {best_sharpe_row['Sharpe']:.2f}</p>
+                    <p>Total Return: {best_sharpe_row['Total Return']:.0f}%</p>
                 </div>
-                
-                <div class="stat-panel panel-s2">
-                    <h2>Strategy 2 (SMA 400) 👑</h2>
-                    <div class="stat-row"><span>Total Return:</span> <span class="stat-val">{s2_tot:,.0f}%</span></div>
-                    <div class="stat-row"><span>Sharpe Ratio:</span> <span class="stat-val">{s2_shp:.2f}</span></div>
-                    <div class="stat-row"><span>Max Drawdown:</span> <span class="stat-val">{s2_dd:.1f}%</span></div>
-                    <p style="font-size:0.9em; margin-top:15px;">5% Prox, 27% Stop, Re-entry</p>
+                <div class="card" style="background: #fff3e0; border-color: #ffcc80;">
+                    <h3>💰 Best Absolute Return</h3>
+                    <p>Stop Loss: <span class="highlight">{best_return_row['Stop %']:.0f}%</span></p>
+                    <p>Sharpe Ratio: {best_return_row['Sharpe']:.2f}</p>
+                    <p>Total Return: {best_return_row['Total Return']:.0f}%</p>
                 </div>
             </div>
             
-            <img src="data:image/png;base64,{img_data}" style="max-width:100%; height:auto; border-radius: 8px; border: 1px solid #ddd;" />
+            <img src="data:image/png;base64,{img_data}" style="max-width:100%; height:auto;" />
+            <p style="color: #666; font-size: 0.9em; margin-top: 15px;">Note: Very tight stops (1-5%) may choke the trade before the 40-day decay can capture the move.</p>
         </div>
     </body>
     </html>
@@ -334,5 +246,5 @@ def dashboard():
     return render_template_string(html)
 
 if __name__ == '__main__':
-    print(f"Starting showdown server on port {PORT}...")
+    print(f"Starting SMA 120 optimization on port {PORT}...")
     app.run(host='0.0.0.0', port=PORT, debug=False)
