@@ -16,7 +16,7 @@ START_YEAR = 2018
 SMA_PERIOD_1 = 120
 SMA_PERIOD_2 = 400
 PORT = 8080
-EVENT_STUDY_WINDOW = 365 # Extended to view the full year of Strat 2
+EVENT_STUDY_WINDOW = 365 
 
 app = Flask(__name__)
 
@@ -70,7 +70,6 @@ def run_strategy_1(df):
             
         d_trade = i - last_signal_idx
         
-        # Weighted Decay Days 1-40
         if 1 <= d_trade <= 40:
             weight = 1 - (d_trade / 40.0)**2
             position_arr[i] = current_trend * weight
@@ -85,58 +84,118 @@ def run_strategy_1(df):
     
     return data
 
-# --- Strategy 2: SMA 400 Weighted Growth ((d/365)^2) ---
+# --- Strategy 2: SMA 400 Growth + Dynamic Exit ---
 def run_strategy_2(df):
-    data = df.copy() # Works on top of Strat 1 df
+    data = df.copy()
     data['SMA_400'] = data['close'].rolling(window=SMA_PERIOD_2).mean()
     
     closes = data['close'].values
     smas = data['SMA_400'].values
+    asset_rets = data['Asset_Ret'].values # Pre-calculated in S1
     n = len(data)
-    position_arr = np.zeros(n)
     
+    position_arr = np.zeros(n)
+    strat_2_daily_ret = np.zeros(n)
+    
+    # State Variables
     current_trend = 0
     last_signal_idx = -9999
     
+    # Trade Management State
+    trade_equity = 1.0       # Tracks the equity of the CURRENT trade (starts at 1.0)
+    max_trade_equity = 1.0   # High water mark for the current trade
+    
+    exit_mode = False        # Are we scaling out?
+    exit_start_idx = -1      # When did scale out start?
+    weight_at_exit = 0.0     # Snapshot of weight when trigger happened
+    
     for i in range(SMA_PERIOD_2, n):
-        # Determine trend
+        # 1. Check Trend Trigger (Base Signal)
         trend_now = 1 if closes[i] > smas[i] else -1
         
-        # If trend flips, we reset the timer (scale in starts from 0 again)
+        # 2. Update Trade Equity based on YESTERDAY'S position (simulation step)
+        # Position at i-1 determines return at i
+        prev_pos = position_arr[i-1] if i > 0 else 0
+        daily_ret = prev_pos * asset_rets[i]
+        strat_2_daily_ret[i] = daily_ret
+        
+        # If we have an active trade, update its specific equity curve
+        if prev_pos != 0:
+            trade_equity *= (1 + daily_ret)
+            if trade_equity > max_trade_equity:
+                max_trade_equity = trade_equity
+        
+        # 3. Handle Trend Flip (Hard Reset)
         if trend_now != current_trend:
             current_trend = trend_now
-            last_signal_idx = i 
+            last_signal_idx = i
+            # Reset Trade State
+            trade_equity = 1.0
+            max_trade_equity = 1.0
+            exit_mode = False
+            exit_start_idx = -1
+            weight_at_exit = 0.0
             
-        d_trade = i - last_signal_idx
+            # Position for TODAY is just the start of scale in? 
+            # Usually day 0 weight is 0 anyway using (d/365)^2 logic
+            position_arr[i] = 0.0 
+            continue
+
+        # 4. Logic if Trend is Sustained
+        days_since_signal = i - last_signal_idx
         
-        # Weighted Growth Days 1-365
-        if 1 <= d_trade <= 365:
-            # Formula: (d/365)^2
-            # This starts small and grows parabolically
-            weight = (d_trade / 365.0)**2
-            position_arr[i] = current_trend * weight
+        # Check Triggers (only if not already exiting)
+        if not exit_mode and prev_pos != 0:
+            # Condition A: Profit Take (+200%) -> Equity >= 3.0
+            cond_a = trade_equity >= 3.0
+            
+            # Condition B: Trailing Stop (-10% from High Water Mark)
+            # "Loses 10% from gains" interpreted as 10% drawdown from peak trade equity
+            # Only trigger if we actually had some gains (e.g., peak > 1.0) to avoid noise at start?
+            # User said "loses 10% from gains", implies gains existed. 
+            # Safety: Ensure Max > 1.01 to avoid floating point noise triggering on flat start
+            cond_b = (max_trade_equity > 1.01) and (trade_equity <= max_trade_equity * 0.90)
+            
+            if cond_a or cond_b:
+                exit_mode = True
+                exit_start_idx = i
+                weight_at_exit = abs(prev_pos) # Snapshot current size magnitude
+        
+        # 5. Calculate Position Weight for TODAY
+        if exit_mode:
+            # Scale Out: 1 - (d/21)^2
+            days_since_exit = i - exit_start_idx
+            if days_since_exit <= 21:
+                decay_factor = 1 - (days_since_exit / 21.0)**2
+                # Apply decay to the snapshot weight
+                current_weight = weight_at_exit * decay_factor
+                position_arr[i] = current_trend * current_weight
+            else:
+                # Fully exited
+                position_arr[i] = 0.0
+                # Note: We stay flat until trend flips (reset)
         else:
-            # Go flat after 1 year (365 days)
-            position_arr[i] = 0.0
-    
+            # Scale In: (d/365)^2
+            if days_since_signal <= 365:
+                weight = (days_since_signal / 365.0)**2
+                position_arr[i] = current_trend * weight
+            else:
+                # After 365 days, do we hold? Or flat? 
+                # Previous prompt said "flat with weights...", implied structure ends at 365?
+                # User's prev prompt: "Hold 400 SMA strategy signals one year then flat"
+                position_arr[i] = 0.0
+
     data['Pos_2'] = position_arr
-    # Enter next day
-    data['Active_Pos_2'] = data['Pos_2'].shift(1).fillna(0.0)
-    
-    # Calc Returns
-    data['Strat_2_Daily_Ret'] = data['Active_Pos_2'] * data['Asset_Ret']
+    data['Active_Pos_2'] = data['Pos_2'].shift(1).fillna(0.0) # Actually calculated inside loop, but good for display
+    data['Strat_2_Daily_Ret'] = strat_2_daily_ret
     data['Equity_2'] = (1 + data['Strat_2_Daily_Ret']).cumprod()
     
     return data
 
 def analyze_stats(df):
-    # --- Stats Strat 1 ---
     s1_total_ret = (df['Equity_1'].iloc[-1] - 1) * 100
-    
-    # --- Stats Strat 2 ---
     s2_total_ret = (df['Equity_2'].iloc[-1] - 1) * 100
     
-    # Calculate simple annual returns for both
     ann_1 = df['Strat_1_Daily_Ret'].resample('Y').apply(lambda x: (1 + x).prod() - 1).mean() * 100
     ann_2 = df['Strat_2_Daily_Ret'].resample('Y').apply(lambda x: (1 + x).prod() - 1).mean() * 100
     
@@ -147,72 +206,59 @@ def analyze_stats(df):
         'S2_Ann': ann_2
     }
 
-# --- Server & Plotting ---
 @app.route('/')
 def dashboard():
     df_raw = fetch_data()
     df_s1 = run_strategy_1(df_raw)
     df_final = run_strategy_2(df_s1)
-    
     stats = analyze_stats(df_final)
     
     # Plotting
     fig = plt.figure(figsize=(16, 16), constrained_layout=True)
     gs = fig.add_gridspec(5, 2)
     
-    # 1. Price + SMAs + Active Zones
+    # 1. Price + SMAs
     ax1 = fig.add_subplot(gs[0:2, :])
-    ax1.set_title(f'{SYMBOL} Analysis: SMA 120 (Decay) vs SMA 400 (Growth)', fontsize=14, fontweight='bold')
+    ax1.set_title(f'{SYMBOL} Analysis: S1 (Decay) vs S2 (Growth + Dynamic Exit)', fontsize=14, fontweight='bold')
     ax1.plot(df_final.index, df_final['close'], color='black', alpha=0.5, label='Price', linewidth=0.8)
     ax1.plot(df_final.index, df_final['SMA_120'], color='orange', linestyle='--', label='SMA 120', linewidth=1)
     ax1.plot(df_final.index, df_final['SMA_400'], color='blue', linestyle='-', label='SMA 400', linewidth=1.5)
     
-    # Highlight Active Zones (Simple fills for visibility)
-    # Strat 1 (Decay)
+    # Highlight S2 Activity (where pos is significant)
     ax1.fill_between(df_final.index, df_final['close'].min(), df_final['close'].max(), 
-                     where=(df_final['Active_Pos_1'].abs() > 0.1), color='orange', alpha=0.1, label='S1 Active (Decay)')
-    # Strat 2 (Growth)
-    ax1.fill_between(df_final.index, df_final['close'].min(), df_final['close'].max(), 
-                     where=(df_final['Active_Pos_2'].abs() > 0.1), color='blue', alpha=0.1, label='S2 Active (Growth)')
+                     where=(df_final['Active_Pos_2'].abs() > 0.05), color='blue', alpha=0.1, label='S2 Active')
     
     ax1.legend(loc='upper left')
     ax1.grid(True, alpha=0.2)
-    ax1.set_ylabel('Price (Log Scale)')
     ax1.set_yscale('log')
     
-    # 2. Equity Curves Comparison
+    # 2. Equity Curves
     ax2 = fig.add_subplot(gs[2, :])
     ax2.set_title(f"Equity Curves (Daily Compounded)", fontsize=12, fontweight='bold')
-    
-    ax2.plot(df_final.index, df_final['Equity_1'], color='orange', linewidth=2, label=f'S1: SMA 120 (40d Decay) | Total: {stats["S1_Total"]:.0f}%')
-    ax2.plot(df_final.index, df_final['Equity_2'], color='blue', linewidth=2, label=f'S2: SMA 400 (365d Growth) | Total: {stats["S2_Total"]:.0f}%')
-    
+    ax2.plot(df_final.index, df_final['Equity_1'], color='orange', linewidth=2, label=f'S1: SMA 120 (Decay) | Total: {stats["S1_Total"]:.0f}%')
+    ax2.plot(df_final.index, df_final['Equity_2'], color='blue', linewidth=2, label=f'S2: SMA 400 (Growth + Exit) | Total: {stats["S2_Total"]:.0f}%')
     ax2.axhline(1.0, color='black', linestyle='--')
     ax2.legend()
     ax2.grid(True, alpha=0.3)
     ax2.set_ylabel('Equity Multiple')
     
-    # 3. Weight Profile S1 (Decay)
+    # 3. Weight Profile S1 (Static)
     ax3 = fig.add_subplot(gs[3, 0])
     days_1 = np.arange(0, 50)
     weights_1 = [1 - (d/40)**2 if 1 <= d <= 40 else 0 for d in days_1]
     ax3.plot(days_1, weights_1, color='orange', marker='.', markersize=5)
-    ax3.set_title('Strategy 1 Weight: 1 - (d/40)^2')
-    ax3.set_xlabel('Days Since Signal')
-    ax3.set_ylabel('Exposure')
+    ax3.set_title('S1 Weight: 1 - (d/40)^2')
     ax3.grid(True, alpha=0.3)
 
-    # 4. Weight Profile S2 (Growth)
+    # 4. Weight Profile S2 (Dynamic Visualization)
+    # Since S2 is dynamic, we plot the ACTUAL position sizes used over time
     ax4 = fig.add_subplot(gs[3, 1])
-    days_2 = np.arange(0, 400)
-    weights_2 = [(d/365)**2 if 1 <= d <= 365 else 0 for d in days_2]
-    ax4.plot(days_2, weights_2, color='blue', linewidth=2)
-    ax4.set_title('Strategy 2 Weight: (d/365)^2')
-    ax4.set_xlabel('Days Since Signal')
-    ax4.set_ylabel('Exposure')
+    ax4.plot(df_final.index, df_final['Pos_2'].abs(), color='blue', linewidth=1)
+    ax4.set_title('S2 Actual Position Weights (Dynamic)')
+    ax4.set_ylabel('Abs Weight')
     ax4.grid(True, alpha=0.3)
     
-    # 5. Annual Returns Comparison
+    # 5. Annual Returns
     ax5 = fig.add_subplot(gs[4, :])
     ann_ret_1 = df_final['Strat_1_Daily_Ret'].resample('Y').apply(lambda x: (1 + x).prod() - 1)
     ann_ret_2 = df_final['Strat_2_Daily_Ret'].resample('Y').apply(lambda x: (1 + x).prod() - 1)
@@ -221,9 +267,8 @@ def dashboard():
     x = np.arange(len(ann_ret_1))
     years = ann_ret_1.index.year
     
-    ax5.bar(x - width/2, ann_ret_1.values, width, label='Strat 1 (Decay)', color='orange', alpha=0.8)
-    ax5.bar(x + width/2, ann_ret_2.values, width, label='Strat 2 (Growth)', color='blue', alpha=0.8)
-    
+    ax5.bar(x - width/2, ann_ret_1.values, width, label='Strat 1', color='orange', alpha=0.8)
+    ax5.bar(x + width/2, ann_ret_2.values, width, label='Strat 2', color='blue', alpha=0.8)
     ax5.set_title('Annual Returns Comparison')
     ax5.set_xticks(x)
     ax5.set_xticklabels(years, rotation=45)
@@ -251,31 +296,25 @@ def dashboard():
             .card.s2 {{ background: #e3f2fd; border-left: 5px solid blue; }}
             .val {{ font-size: 24px; font-weight: bold; color: #333; }}
             .lbl {{ font-size: 14px; color: #666; }}
-            .title-s1 {{ color: #e65100; font-weight:bold; }}
-            .title-s2 {{ color: #0d47a1; font-weight:bold; }}
         </style>
     </head>
     <body>
         <div class="container">
-            <h1>Strategy Comparison: SMA 120 Decay vs SMA 400 Growth</h1>
-            
+            <h1>Strategy Comparison</h1>
             <div class="stats">
                 <div class="card s1">
-                    <div class="title-s1">Strategy 1 (SMA 120)</div>
-                    <hr>
+                    <h3 style="color:#e65100">Strategy 1 (SMA 120)</h3>
                     <div class="val">{stats['S1_Total']:.0f}%</div>
                     <div class="lbl">Total Equity Return</div>
-                    <div class="lbl" style="margin-top:5px">Weight: Starts 100%, Decays to 0% (40 days)</div>
+                    <div class="lbl">Decay 40d</div>
                 </div>
                 <div class="card s2">
-                    <div class="title-s2">Strategy 2 (SMA 400)</div>
-                    <hr>
+                    <h3 style="color:#0d47a1">Strategy 2 (SMA 400)</h3>
                     <div class="val">{stats['S2_Total']:.0f}%</div>
                     <div class="lbl">Total Equity Return</div>
-                    <div class="lbl" style="margin-top:5px">Weight: Starts ~0%, Grows to 100% (365 days)</div>
+                    <div class="lbl">Growth 365d + Dynamic Exit</div>
                 </div>
             </div>
-            
             <img src="data:image/png;base64,{img_data}" style="max-width:100%; height:auto;" />
         </div>
     </body>
