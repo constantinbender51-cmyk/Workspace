@@ -13,9 +13,10 @@ import time
 SYMBOL = 'BTC/USDT'
 TIMEFRAME = '1d'
 START_YEAR = 2018
-SMA_PERIOD = 120
+SMA_PERIOD_1 = 120
+SMA_PERIOD_2 = 400
 PORT = 8080
-EVENT_STUDY_WINDOW = 120 # Tracking 120 days post-signal for observation
+EVENT_STUDY_WINDOW = 120 
 
 app = Flask(__name__)
 
@@ -47,261 +48,226 @@ def fetch_data():
     print(f"Data fetched: {len(df)} rows.")
     return df
 
-# --- Time-Based Strategy Logic (40d ON with Weighted Decay) ---
-def run_strategy(df):
+# --- Strategy 1: SMA 120 Weighted Decay ---
+def run_strategy_1(df):
     data = df.copy()
-    data['SMA'] = data['close'].rolling(window=SMA_PERIOD).mean()
+    data['SMA_120'] = data['close'].rolling(window=SMA_PERIOD_1).mean()
     
-    # Initialize columns
-    data['Raw_Trend'] = np.where(data['close'] > data['SMA'], 1, -1)
-    data['Position'] = 0
-    
+    # Logic
     closes = data['close'].values
-    smas = data['SMA'].values
+    smas = data['SMA_120'].values
     n = len(data)
-    
     position_arr = np.zeros(n)
     
-    # State variables
     current_trend = 0
     last_signal_idx = -9999
     
-    for i in range(SMA_PERIOD, n):
-        # Determine trend at this step
+    for i in range(SMA_PERIOD_1, n):
         trend_now = 1 if closes[i] > smas[i] else -1
         
-        # Did the trend FLIP? This resets the entire sequence.
         if trend_now != current_trend:
             current_trend = trend_now
-            last_signal_idx = i # Reset the clock
+            last_signal_idx = i 
             
-        # days_since_signal is the number of days passed (0 = signal day)
-        days_since_signal = i - last_signal_idx
+        d_trade = i - last_signal_idx
         
-        # d_trade is the trade day number (1 to 40) for the position taken TODAY
-        d_trade = days_since_signal
-        
-        # --- Weighted Decay Logic (Trade from Day 1 to Day 40) ---
-        
+        # Weighted Decay Days 1-40
         if 1 <= d_trade <= 40:
-            # Weight formula: W_d = 1 - (d/40)^2
-            weight = 1 - (d_trade / 40)**2
-            # Position is Trend direction (+1 or -1) * Weight
+            weight = 1 - (d_trade / 40.0)**2
             position_arr[i] = current_trend * weight
-            
-        # All other days (Day 0, or days > 40) are FLAT
         else:
-            position_arr[i] = 0
+            position_arr[i] = 0.0
             
-    data['Position'] = position_arr
+    data['Pos_1'] = position_arr
+    data['Active_Pos_1'] = data['Pos_1'].shift(1).fillna(0.0)
+    data['Asset_Ret'] = data['close'].pct_change().fillna(0.0)
+    data['Strat_1_Daily_Ret'] = data['Active_Pos_1'] * data['Asset_Ret']
+    data['Equity_1'] = (1 + data['Strat_1_Daily_Ret']).cumprod()
     
-    # Shift position by 1 to prevent lookahead bias (signal on close -> enter next open)
-    data['Active_Position'] = data['Position'].shift(1).fillna(0)
-    
-    # Calculate returns
-    data['Log_Ret'] = np.log(data['close'] / data['close'].shift(1))
-    # Strat_Ret is now Position Size * Log Return
-    data['Strat_Ret'] = data['Active_Position'] * data['Log_Ret']
-    
-    return data.dropna()
+    return data
 
-def analyze_trades(df):
-    # Determine distinct trade segments (blocks of non-zero position)
-    # Since position is now fractional, we filter where position is not zero
-    active_df = df[df['Active_Position'] != 0].copy()
+# --- Strategy 2: SMA 400 Continuous ---
+def run_strategy_2(df):
+    data = df.copy() # Works on top of Strat 1 df
+    data['SMA_400'] = data['close'].rolling(window=SMA_PERIOD_2).mean()
     
-    if active_df.empty:
-        return pd.DataFrame(), pd.Series()
+    # Logic: Always Long/Short based on SMA 400
+    # 1 if Close > SMA, -1 if Close < SMA
+    data['Raw_Trend_2'] = np.where(data['close'] > data['SMA_400'], 1, -1)
+    
+    # We set position to 0 if SMA is NaN (start of data)
+    data['Raw_Trend_2'] = np.where(data['SMA_400'].isna(), 0, data['Raw_Trend_2'])
+    
+    # Enter next day
+    data['Active_Pos_2'] = data['Raw_Trend_2'].shift(1).fillna(0.0)
+    
+    # Calc Returns
+    data['Strat_2_Daily_Ret'] = data['Active_Pos_2'] * data['Asset_Ret']
+    data['Equity_2'] = (1 + data['Strat_2_Daily_Ret']).cumprod()
+    
+    return data
 
-    # The entire 40-day block is now one "trade" per signal
-    # We group by the start of the 40-day window
+def analyze_stats(df):
+    # --- Stats Strat 1 ---
+    # Trade defined as the 40-day weighted block
+    df['S1_Start'] = (df['Active_Pos_1'].abs() > 0) & (df['Active_Pos_1'].shift(1).fillna(0).abs() == 0)
+    s1_starts = df[df['S1_Start']].index
     
-    # Identify signal days that actually resulted in a trade
-    df['Trade_Start'] = (df['Active_Position'].abs() > 0) & (df['Active_Position'].shift(1).fillna(0).abs() == 0)
-    signal_dates = df[df['Trade_Start']].index
+    s1_trades = []
+    for s in s1_starts:
+        e_idx = df.index.get_loc(s) + 39
+        if e_idx >= len(df): continue
+        e = df.index[e_idx]
+        subset = df.loc[s:e]
+        ret = (1 + subset['Strat_1_Daily_Ret']).prod() - 1
+        s1_trades.append(ret)
     
-    trades = []
+    s1_win_rate = (sum(x > 0 for x in s1_trades) / len(s1_trades) * 100) if s1_trades else 0
+    s1_total_ret = (df['Equity_1'].iloc[-1] - 1) * 100
     
-    for start_date in signal_dates:
-        # Find the end of the 40-day trade window
-        end_date_index = df.index.get_loc(start_date) + 39
-        if end_date_index >= len(df): continue
-        end_date = df.index[end_date_index]
-        
-        trade_data = df.loc[start_date:end_date]
-        
-        if len(trade_data) < 1: continue
-
-        # Calculate weighted return for this segment
-        weighted_log_returns = trade_data['Strat_Ret'].sum()
-        
-        # Approximate unweighted return for win/loss (simplifying)
-        position_direction = trade_data['Raw_Trend'].iloc[0]
-        start_price = trade_data['close'].iloc[0]
-        end_price = trade_data['close'].iloc[-1]
-        
-        if position_direction == 1:
-            raw_ret = (end_price - start_price) / start_price
-        else:
-            raw_ret = (start_price - end_price) / start_price
-            
-        # The true return is the sum of weighted returns
-        trades.append({
-            'Trade_ID': start_date,
-            'Position': 'Long' if position_direction == 1 else 'Short',
-            'Start': start_date,
-            'End': end_date,
-            'Duration': len(trade_data),
-            'Return': np.exp(weighted_log_returns) - 1, # Convert log returns to arithmetic
-            'Win': weighted_log_returns > 0 # Win if total weighted log return is positive
-        })
-        
-    trades_df = pd.DataFrame(trades)
+    # --- Stats Strat 2 ---
+    # Trade defined as continuous holding period between crossovers
+    df['S2_Change'] = (df['Raw_Trend_2'] != df['Raw_Trend_2'].shift(1)) & (df['Raw_Trend_2'] != 0)
+    s2_starts = df[df['S2_Change']].index
     
-    # Event Study: Average Price Curve after the *Initial* Signal (120 Days)
-    df['Trend_Flip'] = (df['Raw_Trend'] != df['Raw_Trend'].shift(1))
-    signal_dates_raw = df[df['Trend_Flip']].index
+    s2_trades = []
+    # Simplified trade loop for continuous
+    current_idx = df.index.get_loc(s2_starts[0]) if len(s2_starts) > 0 else 0
     
-    curves = []
-    look_forward = EVENT_STUDY_WINDOW 
+    # Calculate returns for blocks
+    # This is an approximation for stats display
+    s2_total_ret = (df['Equity_2'].iloc[-1] - 1) * 100
     
-    for date in signal_dates_raw:
-        loc = df.index.get_loc(date)
-        if loc + look_forward >= len(df): continue
-        
-        subset = df.iloc[loc : loc+look_forward]
-        start_price = subset['close'].iloc[0]
-        direction = subset['Raw_Trend'].iloc[0]
-        
-        norm_curve = subset['close'] / start_price
-        
-        # Invert Short trades for comparison
-        if direction == -1:
-            norm_curve = 2 - norm_curve
-            
-        norm_curve = norm_curve.reset_index(drop=True)
-        curves.append(norm_curve)
-        
-    if curves:
-        avg_curve = pd.concat(curves, axis=1).mean(axis=1)
-    else:
-        avg_curve = pd.Series()
-        
-    return trades_df, avg_curve
+    return {
+        'S1_Win': s1_win_rate,
+        'S1_Total': s1_total_ret,
+        'S1_Count': len(s1_trades),
+        'S2_Total': s2_total_ret
+    }
 
 # --- Server & Plotting ---
 @app.route('/')
 def dashboard():
     df_raw = fetch_data()
-    df_strat = run_strategy(df_raw)
-    trades_df, avg_curve = analyze_trades(df_strat)
+    df_s1 = run_strategy_1(df_raw)
+    df_final = run_strategy_2(df_s1)
     
-    # Calculate statistics based on trade segments
-    if not trades_df.empty:
-        total_trades = len(trades_df)
-        win_rate = trades_df['Win'].mean() * 100
-        # Total log return from the strategy
-        cum_log_ret = df_strat['Strat_Ret'].cumsum().iloc[-1] 
-        cum_ret = (np.exp(cum_log_ret) - 1) * 100 # Convert to arithmetic return percentage
-        expectancy = trades_df['Return'].mean() * 100 # Average arithmetic return per trade
-    else:
-        total_trades = 0
-        win_rate = 0
-        cum_ret = 0
-        expectancy = 0
+    stats = analyze_stats(df_final)
     
     # Plotting
     fig = plt.figure(figsize=(16, 14), constrained_layout=True)
     gs = fig.add_gridspec(4, 2)
     
-    # 1. Main Price Chart with Strategy Zones
+    # 1. Price + SMAs
     ax1 = fig.add_subplot(gs[0:2, :])
-    ax1.set_title(f'{SYMBOL} - SMA 120 Weighted Decay Strategy (40-Day Trade)', fontsize=14, fontweight='bold')
-    ax1.plot(df_strat.index, df_strat['close'], color='black', alpha=0.6, label='Price', linewidth=1)
-    ax1.plot(df_strat.index, df_strat['SMA'], color='orange', linestyle='--', label='SMA 120', alpha=0.8)
+    ax1.set_title(f'{SYMBOL} Analysis: SMA 120 (Timed) vs SMA 400 (Continuous)', fontsize=14, fontweight='bold')
+    ax1.plot(df_final.index, df_final['close'], color='black', alpha=0.5, label='Price', linewidth=0.8)
+    ax1.plot(df_final.index, df_final['SMA_120'], color='orange', linestyle='--', label='SMA 120', linewidth=1)
+    ax1.plot(df_final.index, df_final['SMA_400'], color='blue', linestyle='-', label='SMA 400', linewidth=1.5)
     
-    # Highlight Active Zones (using fractional position for color intensity visual aid)
-    ax1.fill_between(df_strat.index, df_strat['close'].min(), df_strat['close'].max(), 
-                     where=(df_strat['Active_Position'] > 0), color='red', alpha=df_strat['Active_Position'].abs().clip(upper=0.3), label='Active Long (Weighted)')
-    ax1.fill_between(df_strat.index, df_strat['close'].min(), df_strat['close'].max(), 
-                     where=(df_strat['Active_Position'] < 0), color='blue', alpha=df_strat['Active_Position'].abs().clip(upper=0.3), label='Active Short (Weighted)')
+    # Highlight Strat 1 Trades (Red/Blue zones)
+    ax1.fill_between(df_final.index, df_final['close'].min(), df_final['close'].max(), 
+                     where=(df_final['Active_Pos_1'] > 0), color='orange', alpha=0.15, label='Strat 1 Active (Long)')
+    ax1.fill_between(df_final.index, df_final['close'].min(), df_final['close'].max(), 
+                     where=(df_final['Active_Pos_1'] < 0), color='purple', alpha=0.15, label='Strat 1 Active (Short)')
     
     ax1.legend(loc='upper left')
     ax1.grid(True, alpha=0.2)
-    ax1.set_ylabel('Price')
+    ax1.set_ylabel('Price (Log Scale)')
+    ax1.set_yscale('log')
     
-    # 2. Cumulative Returns
-    ax2 = fig.add_subplot(gs[2, 0])
-    df_strat['Cum_Ret'] = df_strat['Strat_Ret'].cumsum()
-    ax2.plot(df_strat.index, df_strat['Cum_Ret'], color='green')
-    ax2.fill_between(df_strat.index, df_strat['Cum_Ret'], 0, color='green', alpha=0.1)
-    ax2.set_title(f'Cumulative Strategy Log Return (Total: {cum_ret:.0f}%)')
+    # 2. Equity Curves Comparison
+    ax2 = fig.add_subplot(gs[2, :])
+    ax2.set_title(f"Equity Curves (Daily Compounded)", fontsize=12, fontweight='bold')
+    
+    # Strat 1
+    ax2.plot(df_final.index, df_final['Equity_1'], color='orange', linewidth=2, label=f'Strat 1: SMA 120 Weighted (Total: {stats["S1_Total"]:.0f}%)')
+    # Strat 2
+    ax2.plot(df_final.index, df_final['Equity_2'], color='blue', linewidth=2, label=f'Strat 2: SMA 400 Continuous (Total: {stats["S2_Total"]:.0f}%)')
+    
+    ax2.axhline(1.0, color='black', linestyle='--')
+    ax2.legend()
     ax2.grid(True, alpha=0.3)
+    ax2.set_ylabel('Equity Multiple')
     
-    # 3. Event Study (The Curve - 120 Days)
-    ax3 = fig.add_subplot(gs[2, 1])
-    if not avg_curve.empty:
-        # Plot the 120-day average curve
-        ax3.plot(avg_curve.index, avg_curve.values, color='purple', linewidth=2)
-        ax3.axhline(1.0, color='black', linestyle='-')
-        
-        # Highlight the active trade period (Day 1 to 40)
-        ax3.axvspan(1, 40, color='green', alpha=0.15, label='Weighted Trade Period (40d)')
-        
-        ax3.set_title(f'Avg Price Move After SMA Signal ({EVENT_STUDY_WINDOW} Days)')
-        ax3.set_xlabel('Days After Signal (Day 0 = Signal)')
-        ax3.set_xlim(0, EVENT_STUDY_WINDOW)
-        ax3.legend(loc='lower right', fontsize=8)
+    # 3. Strat 1 Weight Profile (Visualizing the decay)
+    ax3 = fig.add_subplot(gs[3, 0])
+    days = np.arange(0, 50)
+    weights = [1 - (d/40)**2 if 1 <= d <= 40 else 0 for d in days]
+    ax3.plot(days, weights, color='orange', marker='o', markersize=3)
+    ax3.set_title('Strategy 1: Position Weight Profile')
+    ax3.set_xlabel('Days Since Signal')
+    ax3.set_ylabel('Weight')
     ax3.grid(True, alpha=0.3)
     
-    # 4. Annual Returns Bar Chart
-    ax4 = fig.add_subplot(gs[3, :])
-    annual_rets = df_strat['Strat_Ret'].resample('Y').apply(lambda x: np.exp(x.sum()) - 1)
-    colors = ['green' if x > 0 else 'red' for x in annual_rets]
-    ax4.bar(annual_rets.index.year, annual_rets.values, color=colors, alpha=0.7)
-    ax4.set_title('Annual Strategy Returns (Arithmetic)')
+    # 4. Annual Returns Comparison
+    ax4 = fig.add_subplot(gs[3, 1])
+    # Resample
+    ann_ret_1 = df_final['Strat_1_Daily_Ret'].resample('Y').apply(lambda x: (1 + x).prod() - 1)
+    ann_ret_2 = df_final['Strat_2_Daily_Ret'].resample('Y').apply(lambda x: (1 + x).prod() - 1)
+    
+    # Plot grouped bar chart
+    width = 0.35
+    x = np.arange(len(ann_ret_1))
+    years = ann_ret_1.index.year
+    
+    ax4.bar(x - width/2, ann_ret_1.values, width, label='Strat 1 (120)', color='orange', alpha=0.8)
+    ax4.bar(x + width/2, ann_ret_2.values, width, label='Strat 2 (400)', color='blue', alpha=0.8)
+    
+    ax4.set_title('Annual Returns Comparison')
+    ax4.set_xticks(x)
+    ax4.set_xticklabels(years, rotation=45)
     ax4.axhline(0, color='black', linewidth=0.5)
+    ax4.legend()
+    ax4.grid(True, alpha=0.2)
 
     buf = io.BytesIO()
     plt.savefig(buf, format='png', dpi=100)
     plt.close(fig)
     img_data = base64.b64encode(buf.getbuffer()).decode("ascii")
     
-    # --- HTML Output ---
     html = f"""
     <!DOCTYPE html>
     <html lang="en">
     <head>
         <meta charset="UTF-8">
-        <title>Weighted Strategy Analysis</title>
+        <title>Strategy Comparison</title>
         <style>
-            body {{ font-family: sans-serif; background: #f0f2f5; padding: 20px; text-align: center; }}
+            body {{ font-family: 'Segoe UI', sans-serif; background: #f0f2f5; padding: 20px; text-align: center; }}
             .container {{ max-width: 1200px; margin: 0 auto; background: white; padding: 20px; border-radius: 12px; box-shadow: 0 4px 6px rgba(0,0,0,0.1); }}
-            .stats {{ display: grid; grid-template-columns: repeat(4, 1fr); gap: 20px; margin-bottom: 20px; }}
-            .card {{ 
-                background: #f8f9fa; 
-                padding: 15px; 
-                border-radius: 8px; 
-                border-left: 5px solid #007bff; 
-                transition: transform 0.2s;
-            }}
-            .card:hover {{ transform: translateY(-5px); box-shadow: 0 6px 10px rgba(0,0,0,0.15); }}
+            .stats {{ display: grid; grid-template-columns: repeat(2, 1fr); gap: 20px; margin-bottom: 20px; }}
+            .card {{ padding: 15px; border-radius: 8px; border: 1px solid #ddd; }}
+            .card.s1 {{ background: #fff8e1; border-left: 5px solid orange; }}
+            .card.s2 {{ background: #e3f2fd; border-left: 5px solid blue; }}
             .val {{ font-size: 24px; font-weight: bold; color: #333; }}
             .lbl {{ font-size: 14px; color: #666; }}
-            h1 {{ color: #2c3e50; }}
+            .title-s1 {{ color: #e65100; font-weight:bold; }}
+            .title-s2 {{ color: #0d47a1; font-weight:bold; }}
         </style>
     </head>
     <body>
         <div class="container">
-            <h1>SMA 120 Weighted Decay Strategy Analysis</h1>
-            <p>Strategy: Trade Days 1-40 with position weight $W_d = 1 - (d/40)^2$.</p>
+            <h1>Strategy Comparison: SMA 120 Timed vs SMA 400 Continuous</h1>
+            
             <div class="stats">
-                <div class="card"><div class="val">{win_rate:.2f}%</div><div class="lbl">Win Rate (Per 40-Day Signal)</div></div>
-                <div class="card"><div class="val">{total_trades}</div><div class="lbl">Total 40-Day Signals</div></div>
-                <div class="card"><div class="val">{expectancy:.2f}%</div><div class="lbl">Avg Return Per 40-Day Signal</div></div>
-                <div class="card"><div class="val">{cum_ret:.0f}%</div><div class="lbl">Total Cumulative Arithmetic Return</div></div>
+                <div class="card s1">
+                    <div class="title-s1">Strategy 1 (SMA 120 Weighted)</div>
+                    <hr>
+                    <div class="val">{stats['S1_Total']:.0f}%</div>
+                    <div class="lbl">Total Equity Return</div>
+                    <div class="val" style="font-size: 1.2em; margin-top:10px;">{stats['S1_Win']:.1f}%</div>
+                    <div class="lbl">Win Rate (per 40d signal)</div>
+                </div>
+                <div class="card s2">
+                    <div class="title-s2">Strategy 2 (SMA 400 Continuous)</div>
+                    <hr>
+                    <div class="val">{stats['S2_Total']:.0f}%</div>
+                    <div class="lbl">Total Equity Return</div>
+                    <div class="lbl" style="margin-top:10px;">Trend Following (Always In)</div>
+                </div>
             </div>
-            <img src="data:image/png;base64,{img_data}" style="max-width:100%; height:auto;" alt="Trading Strategy Performance Plots" />
+            
+            <img src="data:image/png;base64,{img_data}" style="max-width:100%; height:auto;" />
         </div>
     </body>
     </html>
@@ -309,5 +275,5 @@ def dashboard():
     return render_template_string(html)
 
 if __name__ == '__main__':
-    print(f"Starting weighted analysis server on port {PORT}...")
+    print(f"Starting comparison server on port {PORT}...")
     app.run(host='0.0.0.0', port=PORT, debug=False)
