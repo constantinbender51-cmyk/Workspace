@@ -71,30 +71,59 @@ def calculate_indicators(df):
     rs = gain / loss
     df['rsi'] = 100 - (100 / (1 + rs))
     
-    # Calculate EMA of the RSI
+    # Calculate EMA of the RSI (Optional now, but kept for reference)
     df['rsi_ema'] = df['rsi'].ewm(span=RSI_EMA_PERIOD, adjust=False).mean()
     
     return df
 
 def run_backtest(df):
     """
-    Applies the Long/Short logic.
-    Long (1) when RSI > EMA
-    Short (-1) when RSI < EMA
+    Applies the Decaying Long/Short logic.
+    Long if RSI < 30.
+    Short if RSI > 70.
+    Exposure decays over 30 days using formula: 1 - (x/30)^2
     """
     df = df.copy()
     
-    # 1 for Long, -1 for Short
-    # We use shift(1) because we trade at the Open of the next candle based on Close of previous
-    df['signal'] = np.where(df['rsi'] > df['rsi_ema'], 1, -1)
-    df['position'] = df['signal'].shift(1)
+    positions = []
+    
+    # State variables
+    current_dir = 0 # 1 for Long, -1 for Short, 0 for Neutral
+    days_since = 31 # Start > 30 so we don't trade immediately
+    
+    # Iterate to handle the stateful 'days_since' logic
+    for i in range(len(df)):
+        rsi = df['rsi'].iloc[i]
+        
+        # Check for Signal Triggers
+        if rsi > 70:
+            current_dir = -1 # Go Short
+            days_since = 0
+        elif rsi < 30:
+            current_dir = 1  # Go Long
+            days_since = 0
+        else:
+            days_since += 1
+            
+        # Calculate Weight/Exposure
+        if days_since < 30:
+            # Formula: 1 - (x/30)^2
+            weight = 1 - (days_since / 30) ** 2
+            pos = current_dir * weight
+        else:
+            pos = 0.0
+            
+        positions.append(pos)
+    
+    df['target_position'] = positions
+    
+    # Shift position by 1 to simulate trading on the next open based on today's close signal
+    df['position'] = df['target_position'].shift(1)
     
     # Calculate returns
-    # Market return: (Close - Open) / Open or pct_change
     df['market_returns'] = df['close'].pct_change()
     
     # Strategy return: Position * Market Return
-    # If we are short (-1) and price drops (negative return), we make profit.
     df['strategy_returns'] = df['position'] * df['market_returns']
     
     # Cumulative returns for plotting
@@ -111,7 +140,7 @@ def create_plot(df):
     
     # Plot 1: Cumulative Returns
     ax1.plot(df.index, df['cumulative_market'], label='Buy & Hold (BTC)', color='gray', alpha=0.5)
-    ax1.plot(df.index, df['cumulative_strategy'], label='RSI/EMA Strategy', color='blue')
+    ax1.plot(df.index, df['cumulative_strategy'], label='RSI Decay Strategy', color='blue')
     ax1.set_title(f'Backtest Results: {SYMBOL} ({START_DATE} - Present)')
     ax1.set_ylabel('Cumulative Return (Multiplier)')
     ax1.legend()
@@ -121,9 +150,8 @@ def create_plot(df):
     # Slice the last 365 days for clearer view of the indicators, or plot all
     recent_df = df.tail(365) # Just showing last year for clarity on indicators
     ax2.plot(recent_df.index, recent_df['rsi'], label='RSI', color='purple', linewidth=1)
-    ax2.plot(recent_df.index, recent_df['rsi_ema'], label='EMA of RSI', color='orange', linewidth=1)
-    ax2.axhline(70, linestyle='--', color='red', alpha=0.3)
-    ax2.axhline(30, linestyle='--', color='green', alpha=0.3)
+    ax2.axhline(70, linestyle='--', color='red', alpha=0.5, label='Overbought (70)')
+    ax2.axhline(30, linestyle='--', color='green', alpha=0.5, label='Oversold (30)')
     ax2.set_title('Indicator View (Last 365 Days)')
     ax2.set_ylabel('RSI Value')
     ax2.legend()
@@ -159,6 +187,15 @@ def dashboard():
     total_return = df['cumulative_strategy'].iloc[-1]
     market_return = df['cumulative_market'].iloc[-1]
     
+    # Current pos logic slightly different now since it's a float
+    curr_pos_val = df['position'].iloc[-1]
+    if curr_pos_val > 0:
+        pos_str = f"LONG ({curr_pos_val:.2f}x exposure)"
+    elif curr_pos_val < 0:
+        pos_str = f"SHORT ({abs(curr_pos_val):.2f}x exposure)"
+    else:
+        pos_str = "NEUTRAL"
+
     html = f"""
     <!DOCTYPE html>
     <html>
@@ -174,15 +211,15 @@ def dashboard():
     </head>
     <body>
         <div class="container">
-            <h1>Strategy Backtest: RSI Cross EMA</h1>
+            <h1>Strategy Backtest: RSI Reversion with Decay</h1>
             <div class="stats">
                 <div class="stat-box"><strong>Strategy Return:</strong> {total_return:.2f}x</div>
                 <div class="stat-box"><strong>Buy & Hold Return:</strong> {market_return:.2f}x</div>
-                <div class="stat-box"><strong>Current Position:</strong> {'LONG' if df['position'].iloc[-1] == 1 else 'SHORT'}</div>
+                <div class="stat-box"><strong>Current Position:</strong> {pos_str}</div>
             </div>
             <img src="data:image/png;base64,{plot_url}" style="width:100%; height:auto;" />
             <br><br>
-            <p><em>Data fetched from Binance. Strategy: Long when RSI > EMA(RSI), Short when RSI < EMA(RSI).</em></p>
+            <p><em>Data fetched from Binance. Strategy: Long < 30, Short > 70. Weight decays over 30 days.</em></p>
         </div>
     </body>
     </html>
