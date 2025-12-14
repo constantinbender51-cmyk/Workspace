@@ -15,6 +15,7 @@ TIMEFRAME = '1d'
 START_YEAR = 2018
 SMA_PERIOD = 120
 PORT = 8080
+EVENT_STUDY_WINDOW = 120 # Updated to 120 days as requested
 
 app = Flask(__name__)
 
@@ -43,6 +44,7 @@ def fetch_data():
     df['date'] = pd.to_datetime(df['timestamp'], unit='ms')
     df.set_index('date', inplace=True)
     df = df[~df.index.duplicated(keep='first')]
+    print(f"Data fetched: {len(df)} rows.")
     return df
 
 # --- Time-Based Strategy Logic ---
@@ -55,7 +57,6 @@ def run_strategy(df):
     data['Position'] = 0
     
     # We need to iterate to handle the "Days Since Signal" logic with resets
-    # Converting to numpy arrays for speed
     closes = data['close'].values
     smas = data['SMA'].values
     n = len(data)
@@ -78,10 +79,7 @@ def run_strategy(df):
         # How long has this trend been active?
         days_since_signal = i - last_signal_idx
         
-        # --- The Specific Time Logic ---
-        # Note: We apply position to i (which is 'today'). 
-        # In backtesting, we usually shift(1) later to simulate entering 'tomorrow'.
-        
+        # --- The Specific Time Logic (7 days ON, 14 days FLAT, 14 days ON) ---
         # 1. First Week: Days 0 to 6 (7 days total)
         if 0 <= days_since_signal < 7:
             position_arr[i] = current_trend
@@ -110,14 +108,12 @@ def run_strategy(df):
 
 def analyze_trades(df):
     # Determine distinct trade segments (blocks of non-zero position)
-    # We filter for only active days to identify distinct trades
     active_df = df[df['Active_Position'] != 0].copy()
     
     if active_df.empty:
         return pd.DataFrame(), pd.Series()
 
     # Create Trade IDs for continuous blocks
-    # If the index difference > 1 day, it's a new block (e.g. the gap between week 1 and week 3)
     active_df['Time_Diff'] = active_df.index.to_series().diff().dt.days
     active_df['Trade_ID'] = (active_df['Time_Diff'] > 1).cumsum()
     
@@ -125,8 +121,10 @@ def analyze_trades(df):
     
     grouped = active_df.groupby('Trade_ID')
     for trade_id, trade_data in grouped:
+        if len(trade_data) < 1: continue
         position = trade_data['Active_Position'].iloc[0]
-        entry_price = df.loc[trade_data.index[0], 'open'] # Approximation using open of first day
+        # Use close price for entry and exit for simplicity in daily candles
+        entry_price = df.loc[trade_data.index[0], 'close'] 
         exit_price = df.loc[trade_data.index[-1], 'close']
         
         if position == 1:
@@ -147,28 +145,24 @@ def analyze_trades(df):
     trades_df = pd.DataFrame(trades)
     
     # Event Study: Average Price Curve after the *Initial* Signal
-    # We want to see the curve for the full 40 days to validate the gap logic
-    
-    # Find indices where 'Raw_Trend' flipped (True Signals)
     df['Trend_Flip'] = (df['Raw_Trend'] != df['Raw_Trend'].shift(1))
     signal_dates = df[df['Trend_Flip']].index
     
     curves = []
-    look_forward = 45 # Look a bit past the 35 day mark
+    look_forward = EVENT_STUDY_WINDOW # Use the 120 day window
     
     for date in signal_dates:
-        if date not in df.index: continue
-        
-        # Get location integer
         loc = df.index.get_loc(date)
         if loc + look_forward >= len(df): continue
         
         subset = df.iloc[loc : loc+look_forward]
         start_price = subset['close'].iloc[0]
-        direction = subset['Raw_Trend'].iloc[0] # 1 or -1
+        direction = subset['Raw_Trend'].iloc[0]
         
+        # Normalized price curve relative to the signal day's closing price
         norm_curve = subset['close'] / start_price
         
+        # Invert Short trades for comparison (so a price drop looks like a profit)
         if direction == -1:
             norm_curve = 2 - norm_curve
             
@@ -206,12 +200,11 @@ def dashboard():
     
     # 1. Main Price Chart with Strategy Zones
     ax1 = fig.add_subplot(gs[0:2, :])
-    ax1.set_title(f'{SYMBOL} - SMA 120 with Time-Based Entries\n(Week 1 ON, Week 2-3 OFF, Week 4-5 ON)', fontsize=14, fontweight='bold')
+    ax1.set_title(f'{SYMBOL} - SMA 120 with Timed Trend Entries (7d ON, 14d FLAT, 14d ON)', fontsize=14, fontweight='bold')
     ax1.plot(df_strat.index, df_strat['close'], color='black', alpha=0.6, label='Price', linewidth=1)
     ax1.plot(df_strat.index, df_strat['SMA'], color='orange', linestyle='--', label='SMA 120', alpha=0.8)
     
     # Highlight Active Zones
-    # Red for Long, Blue for Short
     ax1.fill_between(df_strat.index, df_strat['close'].min(), df_strat['close'].max(), 
                      where=(df_strat['Active_Position'] == 1), color='red', alpha=0.3, label='Active Long')
     ax1.fill_between(df_strat.index, df_strat['close'].min(), df_strat['close'].max(), 
@@ -226,31 +219,33 @@ def dashboard():
     df_strat['Cum_Ret'] = df_strat['Strat_Ret'].cumsum()
     ax2.plot(df_strat.index, df_strat['Cum_Ret'], color='green')
     ax2.fill_between(df_strat.index, df_strat['Cum_Ret'], 0, color='green', alpha=0.1)
-    ax2.set_title(f'Cumulative Strategy Return: {cum_ret:.1f}%')
+    ax2.set_title(f'Cumulative Strategy Log Return: {cum_ret:.1f}%')
     ax2.grid(True, alpha=0.3)
     
-    # 3. Event Study (The Curve)
+    # 3. Event Study (The Curve - 120 Days)
     ax3 = fig.add_subplot(gs[2, 1])
     if not avg_curve.empty:
+        # Plot the 120-day average curve
         ax3.plot(avg_curve.index, avg_curve.values, color='purple', linewidth=2)
         ax3.axhline(1.0, color='black', linestyle='-')
         
-        # Highlight the active windows on the curve
+        # Highlight the active trading windows
         ax3.axvspan(0, 7, color='green', alpha=0.1, label='Trade 1 (7d)')
-        ax3.axvspan(21, 35, color='green', alpha=0.1, label='Trade 2 (14d)')
+        ax3.axvspan(21, 35, color='darkgreen', alpha=0.1, label='Trade 2 (14d)')
         ax3.axvspan(7, 21, color='gray', alpha=0.1, label='Flat (Gap)')
         
-        ax3.set_title('Avg Price Move After SMA Signal (45 Days)')
+        ax3.set_title(f'Avg Price Move After SMA Signal ({EVENT_STUDY_WINDOW} Days)')
         ax3.set_xlabel('Days After Signal')
+        ax3.set_xlim(0, EVENT_STUDY_WINDOW) # Ensure X-axis goes up to 120
         ax3.legend()
     ax3.grid(True, alpha=0.3)
     
-    # 4. Monthly Returns Heatmap (simplified as annual bar for readability)
+    # 4. Annual Returns Bar Chart
     ax4 = fig.add_subplot(gs[3, :])
     annual_rets = df_strat['Strat_Ret'].resample('Y').sum()
     colors = ['green' if x > 0 else 'red' for x in annual_rets]
     ax4.bar(annual_rets.index.year, annual_rets.values, color=colors, alpha=0.7)
-    ax4.set_title('Annual Strategy Returns')
+    ax4.set_title('Annual Strategy Returns (Log)')
     ax4.axhline(0, color='black', linewidth=0.5)
 
     buf = io.BytesIO()
@@ -258,6 +253,7 @@ def dashboard():
     plt.close(fig)
     img_data = base64.b64encode(buf.getbuffer()).decode("ascii")
     
+    # --- HTML Output ---
     html = f"""
     <!DOCTYPE html>
     <html lang="en">
@@ -268,21 +264,30 @@ def dashboard():
             body {{ font-family: sans-serif; background: #f0f2f5; padding: 20px; text-align: center; }}
             .container {{ max-width: 1200px; margin: 0 auto; background: white; padding: 20px; border-radius: 12px; box-shadow: 0 4px 6px rgba(0,0,0,0.1); }}
             .stats {{ display: grid; grid-template-columns: repeat(4, 1fr); gap: 20px; margin-bottom: 20px; }}
-            .card {{ background: #f8f9fa; padding: 15px; border-radius: 8px; border-left: 5px solid #007bff; }}
+            .card {{ 
+                background: #f8f9fa; 
+                padding: 15px; 
+                border-radius: 8px; 
+                border-left: 5px solid #007bff; 
+                transition: transform 0.2s;
+            }}
+            .card:hover {{ transform: translateY(-5px); box-shadow: 0 6px 10px rgba(0,0,0,0.15); }}
             .val {{ font-size: 24px; font-weight: bold; color: #333; }}
             .lbl {{ font-size: 14px; color: #666; }}
+            h1 {{ color: #2c3e50; }}
         </style>
     </head>
     <body>
         <div class="container">
-            <h1>SMA 120 Timed Strategy (7d + Gap + 14d)</h1>
+            <h1>SMA 120 Timed Strategy Analysis (7d + Gap + 14d)</h1>
+            <p>Analysis period: 2018-01-01 to present ({TIMEFRAME} data)</p>
             <div class="stats">
-                <div class="card"><div class="val">{win_rate:.2f}%</div><div class="lbl">Win Rate (Per Leg)</div></div>
-                <div class="card"><div class="val">{total_trades}</div><div class="lbl">Total Active Legs</div></div>
-                <div class="card"><div class="val">{expectancy:.2f}%</div><div class="lbl">Avg Return Per Leg</div></div>
-                <div class="card"><div class="val">{cum_ret:.0f}%</div><div class="lbl">Total Cumulative Return</div></div>
+                <div class="card"><div class="val">{win_rate:.2f}%</div><div class="lbl">Win Rate (Per Trade Leg)</div></div>
+                <div class="card"><div class="val">{total_trades}</div><div class="lbl">Total Active Trade Legs</div></div>
+                <div class="card"><div class="val">{expectancy:.2f}%</div><div class="lbl">Avg Return Per Trade Leg</div></div>
+                <div class="card"><div class="val">{cum_ret:.0f}%</div><div class="lbl">Total Cumulative Log Return</div></div>
             </div>
-            <img src="data:image/png;base64,{img_data}" style="max-width:100%; height:auto;" />
+            <img src="data:image/png;base64,{img_data}" style="max-width:100%; height:auto;" alt="Trading Strategy Performance Plots" />
         </div>
     </body>
     </html>
@@ -290,5 +295,5 @@ def dashboard():
     return render_template_string(html)
 
 if __name__ == '__main__':
-    print(f"Starting timed analysis on port {PORT}...")
+    print(f"Starting timed analysis server on port {PORT}...")
     app.run(host='0.0.0.0', port=PORT, debug=False)
