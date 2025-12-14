@@ -15,9 +15,13 @@ from matplotlib.figure import Figure
 SYMBOL = 'BTC/USDT'
 TIMEFRAME = '1d'
 SINCE_STR = '2018-01-01 00:00:00'
-HORIZON = 380  # Decay window (days)
 INITIAL_CAPITAL = 10000.0
-LEVERAGE = 1.0 # Fixed 1x leverage (no external multiplier)
+LEVERAGE = 1.0 # Fixed 1x leverage
+
+# Grid Search Config
+HORIZON_START = 5
+HORIZON_END = 400
+HORIZON_STEP = 5
 
 # --- Signals (now referred to as ALL_SIGNALS) ---
 ALL_SIGNALS = [
@@ -30,12 +34,7 @@ ALL_SIGNALS = [
 
 N_SIGNALS = len(ALL_SIGNALS)
 SIGNAL_NAMES = [f"{s[0]}_{s[1]}_{s[2]}" for s in ALL_SIGNALS]
-SIGNAL_COLORS = ['#3498DB', '#E67E22', '#F1C40F', '#2ECC71', '#E74C3C'] # For visual consistency, though plots are independent
-
-# --- Global Storage for Results ---
-# Will store: [{'name': str, 'sharpe': float, 'return': float, 'df': DataFrame, 'contributions': np.array}]
-INDIVIDUAL_RESULTS = []
-GLOBAL_DF_DATA = None 
+SIGNAL_COLORS = ['#3498DB', '#E67E22', '#F1C40F', '#2ECC71', '#E74C3C'] 
 
 # --- Data Fetching ---
 def fetch_binance_data():
@@ -125,26 +124,19 @@ def generate_signals(df):
 
     return df_signals_shifted 
 
-# --- Backtest Runner for Single Signal (Bi-directional, 1x Exposure) ---
-def run_single_signal_backtest(df_data, df_signals_all, signal_index, signal_name):
-    """Runs decay and backtest for one signal treated as a standalone system."""
-    
-    # 1. Pre-calculate Decay Contribution (Matrix will be N_DAYS x 1)
-    signal_column = df_signals_all.iloc[:, signal_index:signal_index+1]
-    
-    common_idx = df_data.index.intersection(signal_column.index)
-    signals = signal_column.loc[common_idx]
-    df = df_data.loc[common_idx].copy()
-    num_days = len(common_idx)
-    returns = df['return'].values
-    
+# --- Optimization & Backtest Logic ---
+
+def calculate_contributions(signals_vec, horizon, num_days):
+    """Calculates decay array for a given horizon."""
     contributions = np.zeros(num_days)
     signal_start_day = -1
     signal_direction = 0
 
-    # Calculate Decay
+    # Optimization: using a simple loop is fast enough for 2500 days
+    # Vectorizing the inner logic of 'stateful decay' is complex, 
+    # but since N is small, JIT/Cython isn't strictly needed for grid search.
     for t in range(num_days):
-        current_sig = signals.iloc[t, 0]
+        current_sig = signals_vec[t]
         
         if current_sig != 0:
             signal_start_day = t
@@ -152,81 +144,135 @@ def run_single_signal_backtest(df_data, df_signals_all, signal_index, signal_nam
         
         if signal_direction != 0:
             d = t - signal_start_day
-            decay = max(0.0, 1.0 - (d / HORIZON)) if d >= 0 else 0.0
+            if d < 0: 
+                decay = 0.0
+            else:
+                # Linear decay
+                decay = max(0.0, 1.0 - (d / horizon))
+            
             contributions[t] = signal_direction * decay
             
             if decay == 0.0:
                 signal_direction = 0
                 signal_start_day = -1
-                
-    # 2. Exposure Logic (Bi-directional, 1x Exposure)
+    return contributions
+
+def optimize_signal_horizon(df_data, df_signals_all, signal_index, signal_name):
+    """Grid searches for the best horizon for a single signal."""
     
-    raw_conviction = contributions 
+    # Extract data for this signal once
+    signal_column = df_signals_all.iloc[:, signal_index:signal_index+1]
+    common_idx = df_data.index.intersection(signal_column.index)
     
-    # Calculate Exposure: Raw Conviction * Fixed 1x Leverage
-    exposure = raw_conviction * LEVERAGE
-    # Clamp exposure to the leverage limits (-1.0x to +1.0x)
-    exposure = np.clip(exposure, -LEVERAGE, LEVERAGE) 
+    # Working data
+    signals_series = signal_column.loc[common_idx].iloc[:, 0]
+    signals_vec = signals_series.values
     
-    # 3. Run PnL Loop
+    df_slice = df_data.loc[common_idx].copy()
+    returns_vec = df_slice['return'].values
+    num_days = len(common_idx)
+    
+    best_sharpe = -999.0
+    best_horizon = HORIZON_START
+    best_results = None
+    
+    horizons = range(HORIZON_START, HORIZON_END + 1, HORIZON_STEP)
+    
+    print(f"Optimizing {signal_name}: ", end="", flush=True)
+    
+    for h in horizons:
+        # 1. Calculate Decay
+        contributions = calculate_contributions(signals_vec, h, num_days)
+        
+        # 2. Exposure (Bi-directional, 1x)
+        exposure = contributions * LEVERAGE
+        exposure = np.clip(exposure, -LEVERAGE, LEVERAGE)
+        
+        # 3. Fast PnL for Optimization (Vectorized Approx)
+        # Shifted PnL: Portfolio[t] approx PnL accumulation
+        # Exact portfolio loop is safer for compound returns
+        
+        portfolio = np.zeros(num_days)
+        portfolio[0] = INITIAL_CAPITAL
+        
+        # We can optimize this loop or use cumprod for speed
+        # Strat Returns = Exposure[t] * Market_Return[t]
+        # Note: 'exposure' at t is determined by signals at t (which are shifted)
+        # So strategy_daily_ret[t] = exposure[t] * returns[t]
+        
+        # Vectorized simulation for speed
+        # Padding first element (t=0) as 0 return
+        strat_daily_rets = exposure * returns_vec
+        strat_daily_rets[0] = 0.0
+        
+        # Check std dev to avoid div by zero
+        std_dev = np.std(strat_daily_rets)
+        if std_dev > 0:
+            sharpe = (np.mean(strat_daily_rets) / std_dev) * np.sqrt(365)
+        else:
+            sharpe = 0.0
+            
+        if sharpe > best_sharpe:
+            best_sharpe = sharpe
+            best_horizon = h
+            # We don't store the full DF yet to save memory, only best param
+            
+    print(f"Best H={best_horizon}, Sharpe={best_sharpe:.2f}")
+
+    # --- Re-run with Best Horizon to get Full Data ---
+    final_contributions = calculate_contributions(signals_vec, best_horizon, num_days)
+    final_exposure = np.clip(final_contributions * LEVERAGE, -LEVERAGE, LEVERAGE)
+    
     portfolio = np.zeros(num_days)
-    daily_pnl = np.zeros(num_days)
     portfolio[0] = INITIAL_CAPITAL
-    is_bankrupt = False
+    daily_pnl = np.zeros(num_days)
     
     for t in range(1, num_days):
-        exposure_t = exposure[t]
-        
-        if not is_bankrupt:
-            # PnL = Previous Equity * Exposure * Return
-            pnl = portfolio[t-1] * exposure_t * returns[t]
-            portfolio[t] = portfolio[t-1] + pnl
-            daily_pnl[t] = pnl
+        pnl = portfolio[t-1] * final_exposure[t] * returns_vec[t]
+        portfolio[t] = portfolio[t-1] + pnl
+        daily_pnl[t] = pnl
+        if portfolio[t] <= 0: portfolio[t] = 0
             
-            if portfolio[t] <= 0:
-                portfolio[t] = 0
-                is_bankrupt = True
-        else:
-            portfolio[t] = 0
-            
-    # 4. Compile Results
-    results = df[['close', 'return']].copy()
-    results['Exposure'] = exposure
-    results['Raw_Conviction'] = raw_conviction
+    # Compile Final DF
+    results = df_slice[['close', 'return']].copy()
+    results['Exposure'] = final_exposure
+    results['Raw_Conviction'] = final_contributions
     results['Portfolio_Value'] = portfolio
     results['Daily_PnL'] = daily_pnl
     results['Strategy_Daily_Return'] = results['Portfolio_Value'].pct_change().fillna(0)
     
-    # Metrics
     total_return = (portfolio[-1] / portfolio[0]) - 1.0
-    d_rets = results['Strategy_Daily_Return']
-    sharpe = (d_rets.mean()/d_rets.std())*np.sqrt(365) if d_rets.std()>0 else 0
     
-    return {'name': signal_name, 'sharpe': sharpe, 'return': total_return, 'df': results, 'contributions': contributions}
+    return {
+        'name': signal_name,
+        'horizon': best_horizon,
+        'sharpe': best_sharpe,
+        'return': total_return,
+        'df': results
+    }
 
 def create_single_equity_plot(result_entry, plot_index):
     fig = Figure(figsize=(10, 6))
     ax = fig.add_subplot(1, 1, 1)
     
     results_df = result_entry['df']
+    h = result_entry['horizon']
     
-    # Highlight Short periods (when Raw_Conviction < 0)
+    # Highlight Short periods
     ax_ymin, ax_ymax = 0.0, 1.0
     ax.fill_between(results_df.index, ax_ymin, ax_ymax, where=results_df['Raw_Conviction'] < 0, 
                      color='#FFC0CB', alpha=0.3, transform=ax.get_xaxis_transform(), label='Short Position')
                      
-    # Plot Strategy Equity
     ax.plot(results_df.index, results_df['Portfolio_Value'], color=SIGNAL_COLORS[plot_index % len(SIGNAL_COLORS)], 
             linewidth=1.5, label=f'Strategy (Sharpe: {result_entry["sharpe"]:.2f})')
     
-    # Plot Buy & Hold
     bh = results_df['close'] / results_df['close'].iloc[0] * INITIAL_CAPITAL
     ax.plot(results_df.index, bh, 'g--', alpha=0.8, linewidth=1, label='Buy & Hold')
     
     if (results_df['Portfolio_Value'] <= 0).any(): ax.set_yscale('symlog', linthresh=1.0)
     else: ax.set_yscale('log')
     
-    ax.set_title(f'Equity Curve: {result_entry["name"]} (Bi-Dir {LEVERAGE:.0f}x)', fontweight='bold')
+    ax.set_title(f'Equity Curve: {result_entry["name"]} (Opt Horizon: {h} days)', fontweight='bold')
     ax.set_ylabel('Portfolio Value (Log Scale)', fontsize=10)
     ax.grid(True, alpha=0.3)
     ax.legend(loc='upper left')
@@ -240,7 +286,6 @@ def create_single_equity_plot(result_entry, plot_index):
 def start_web_server(all_results):
     app = Flask(__name__)
     
-    # --- Generate Stats Table ---
     stats_rows = ""
     for i, res in enumerate(all_results):
         sharpe_color = "green" if res['sharpe'] > 0 else "red"
@@ -248,6 +293,7 @@ def start_web_server(all_results):
         stats_rows += f"""
         <tr>
             <td>{res['name']}</td>
+            <td><strong>{res['horizon']} days</strong></td>
             <td style='color: {sharpe_color}; font-weight: bold;'>{res['sharpe']:.2f}</td>
             <td style='color: {ret_color}; font-weight: bold;'>{res['return']*100:.2f}%</td>
             <td><img src="/plot/{i}" width="100%"></td>
@@ -257,10 +303,9 @@ def start_web_server(all_results):
     @app.route('/')
     def index():
         ts = int(time.time())
-        
         return f'''
         <html>
-        <head><title>Individual Signal Backtests</title>
+        <head><title>Optimized Signal Backtests</title>
         <style>
             body {{ font-family: sans-serif; text-align: center; margin: 40px; color: #333; }}
             h1 {{ margin-bottom: 30px; }}
@@ -271,16 +316,17 @@ def start_web_server(all_results):
         </style>
         </head>
         <body>
-            <h1>Independent Single-Signal Performance</h1>
-            <p>Each signal is tested individually with Bi-Directional Trading (Long/Short) and 1x Exposure.</p>
+            <h1>Optimized Single-Signal Performance</h1>
+            <p>Grid Search performed for Decay Horizon (5 to 400 days). Bi-Directional Trading, 1x Leverage.</p>
             
             <table class="stats-table summary-table">
                 <thead>
                     <tr>
-                        <th style="width: 20%;">Signal</th>
+                        <th style="width: 15%;">Signal</th>
+                        <th style="width: 10%;">Optimal Horizon</th>
                         <th style="width: 10%;">Sharpe Ratio</th>
-                        <th style="width: 15%;">Total Return</th>
-                        <th style="width: 55%;">Equity Curve (Pink Background = Short Position)</th>
+                        <th style="width: 10%;">Total Return</th>
+                        <th style="width: 55%;">Equity Curve (Pink = Short)</th>
                     </tr>
                 </thead>
                 <tbody>
@@ -311,10 +357,9 @@ if __name__ == '__main__':
     
     all_results = []
     
-    print("\n--- Running Independent Backtests ---")
+    print(f"\n--- Running Grid Search ({HORIZON_START}-{HORIZON_END}, step {HORIZON_STEP}) ---")
     for i, sig_name in enumerate(SIGNAL_NAMES):
-        print(f"Testing Signal {i+1}/{N_SIGNALS}: {sig_name}...")
-        result = run_single_signal_backtest(df_data, df_signals, i, sig_name)
+        result = optimize_signal_horizon(df_data, df_signals, i, sig_name)
         all_results.append(result)
         
     start_web_server(all_results)
