@@ -47,7 +47,7 @@ def fetch_data():
     print(f"Data fetched: {len(df)} rows.")
     return df
 
-# --- Time-Based Strategy Logic ---
+# --- Time-Based Strategy Logic (Updated for 5 Phases) ---
 def run_strategy(df):
     data = df.copy()
     data['SMA'] = data['close'].rolling(window=SMA_PERIOD).mean()
@@ -56,7 +56,6 @@ def run_strategy(df):
     data['Raw_Trend'] = np.where(data['close'] > data['SMA'], 1, -1)
     data['Position'] = 0
     
-    # We need to iterate to handle the "Days Since Signal" logic with resets
     closes = data['close'].values
     smas = data['SMA'].values
     n = len(data)
@@ -71,27 +70,35 @@ def run_strategy(df):
         # Determine trend at this step
         trend_now = 1 if closes[i] > smas[i] else -1
         
-        # Did the trend FLIP?
+        # Did the trend FLIP? This resets the entire sequence.
         if trend_now != current_trend:
             current_trend = trend_now
             last_signal_idx = i # Reset the clock
             
-        # How long has this trend been active?
+        # How long has this trend been active? (0 = the signal day)
         days_since_signal = i - last_signal_idx
         
-        # --- The Specific Time Logic (7 days ON, 14 days FLAT, 14 days ON) ---
-        # 1. First Week: Days 0 to 6 (7 days total)
+        # --- NEW 5-Phase Logic ---
+        
+        # 1. First Leg: Days 0 to 6 (7 days total) - ON
         if 0 <= days_since_signal < 7:
             position_arr[i] = current_trend
             
-        # 2. Gap: Days 7 to 20 (Flat)
-        # implicitly position_arr[i] remains 0
+        # 2. Gap 1: Days 7 to 20 (14 days total) - FLAT
+        # Handled by the 'else' below
         
-        # 3. Second Leg: Days 21 to 34 (14 days total)
+        # 3. Second Leg: Days 21 to 34 (14 days total) - ON
         elif 21 <= days_since_signal < 35:
             position_arr[i] = current_trend
             
-        # 4. After Day 35: Flat until new signal
+        # 4. Gap 2: Days 35 to 48 (14 days total) - FLAT
+        # Handled by the 'else' below
+            
+        # 5. Continuous Trade: Days 49 onwards - ON TILL FLIP
+        elif days_since_signal >= 49:
+            position_arr[i] = current_trend
+            
+        # Default (Covers Gap 1, Gap 2, and initial period before SMA_PERIOD)
         else:
             position_arr[i] = 0
             
@@ -200,7 +207,7 @@ def dashboard():
     
     # 1. Main Price Chart with Strategy Zones
     ax1 = fig.add_subplot(gs[0:2, :])
-    ax1.set_title(f'{SYMBOL} - SMA 120 with Timed Trend Entries (7d ON, 14d FLAT, 14d ON)', fontsize=14, fontweight='bold')
+    ax1.set_title(f'{SYMBOL} - SMA 120 Multi-Phase Strategy (7d ON, 14d FLAT, 14d ON, 14d FLAT, ON till Flip)', fontsize=14, fontweight='bold')
     ax1.plot(df_strat.index, df_strat['close'], color='black', alpha=0.6, label='Price', linewidth=1)
     ax1.plot(df_strat.index, df_strat['SMA'], color='orange', linestyle='--', label='SMA 120', alpha=0.8)
     
@@ -229,15 +236,17 @@ def dashboard():
         ax3.plot(avg_curve.index, avg_curve.values, color='purple', linewidth=2)
         ax3.axhline(1.0, color='black', linestyle='-')
         
-        # Highlight the active trading windows
+        # Highlight the five strategy phases on the average curve
         ax3.axvspan(0, 7, color='green', alpha=0.1, label='Trade 1 (7d)')
+        ax3.axvspan(7, 21, color='gray', alpha=0.1, label='Flat 1 (14d)')
         ax3.axvspan(21, 35, color='darkgreen', alpha=0.1, label='Trade 2 (14d)')
-        ax3.axvspan(7, 21, color='gray', alpha=0.1, label='Flat (Gap)')
+        ax3.axvspan(35, 49, color='gray', alpha=0.1, label='Flat 2 (14d)') # New flat period
+        ax3.axvspan(49, EVENT_STUDY_WINDOW, color='orange', alpha=0.1, label='Trade 3 (Till Flip)') # New extended trade
         
         ax3.set_title(f'Avg Price Move After SMA Signal ({EVENT_STUDY_WINDOW} Days)')
         ax3.set_xlabel('Days After Signal')
-        ax3.set_xlim(0, EVENT_STUDY_WINDOW) # Ensure X-axis goes up to 120
-        ax3.legend()
+        ax3.set_xlim(0, EVENT_STUDY_WINDOW)
+        ax3.legend(loc='lower right', fontsize=8)
     ax3.grid(True, alpha=0.3)
     
     # 4. Annual Returns Bar Chart
@@ -279,8 +288,8 @@ def dashboard():
     </head>
     <body>
         <div class="container">
-            <h1>SMA 120 Timed Strategy Analysis (7d + Gap + 14d)</h1>
-            <p>Analysis period: 2018-01-01 to present ({TIMEFRAME} data)</p>
+            <h1>SMA 120 Multi-Phase Strategy Analysis</h1>
+            <p>Strategy: 7d ON &rarr; 14d FLAT &rarr; 14d ON &rarr; 14d FLAT &rarr; ON till Signal Flip</p>
             <div class="stats">
                 <div class="card"><div class="val">{win_rate:.2f}%</div><div class="lbl">Win Rate (Per Trade Leg)</div></div>
                 <div class="card"><div class="val">{total_trades}</div><div class="lbl">Total Active Trade Legs</div></div>
