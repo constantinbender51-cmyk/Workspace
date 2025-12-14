@@ -47,7 +47,7 @@ def fetch_data():
     print(f"Data fetched: {len(df)} rows.")
     return df
 
-# --- Time-Based Strategy Logic (Simplified 4-Phase Cycle) ---
+# --- Time-Based Strategy Logic (21d ON, 14d FLAT) ---
 def run_strategy(df):
     data = df.copy()
     data['SMA'] = data['close'].rolling(window=SMA_PERIOD).mean()
@@ -78,21 +78,15 @@ def run_strategy(df):
         # How long has this trend been active? (0 = the signal day)
         days_since_signal = i - last_signal_idx
         
-        # --- NEW 4-Phase Fixed Cycle Logic ---
+        # --- NEW 2-Phase Fixed Cycle Logic (21d ON, 14d FLAT) ---
         
-        # Phase 1 (Trade): Days 0 to 6 (7 days total) - ON
-        if 0 <= days_since_signal < 7:
+        # Phase 1 (Continuous Trade): Days 0 to 20 (21 days total) - ON
+        if 0 <= days_since_signal < 21:
             position_arr[i] = current_trend
             
-        # Phase 2 (Flat): Days 7 to 20 (14 days total) - FLAT (Handled by else)
-        
-        # Phase 3 (Trade): Days 21 to 34 (14 days total) - ON
-        elif 21 <= days_since_signal < 35:
-            position_arr[i] = current_trend
+        # Phase 2 (Flat): Days 21 to 34 (14 days total) - FLAT (Handled by else)
             
-        # Phase 4 (Flat): Days 35 to 48 (14 days total) - FLAT (Handled by else)
-            
-        # After Day 48: Always FLAT until new signal is triggered
+        # After Day 34: Always FLAT until new signal is triggered
         else:
             position_arr[i] = 0
             
@@ -201,7 +195,7 @@ def dashboard():
     
     # 1. Main Price Chart with Strategy Zones
     ax1 = fig.add_subplot(gs[0:2, :])
-    ax1.set_title(f'{SYMBOL} - SMA 120 Fixed 49-Day Cycle Strategy', fontsize=14, fontweight='bold')
+    ax1.set_title(f'{SYMBOL} - SMA 120 Fixed (21d ON, 14d FLAT) Cycle Strategy', fontsize=14, fontweight='bold')
     ax1.plot(df_strat.index, df_strat['close'], color='black', alpha=0.6, label='Price', linewidth=1)
     ax1.plot(df_strat.index, df_strat['SMA'], color='orange', linestyle='--', label='SMA 120', alpha=0.8)
     
@@ -230,11 +224,9 @@ def dashboard():
         ax3.plot(avg_curve.index, avg_curve.values, color='purple', linewidth=2)
         ax3.axhline(1.0, color='black', linestyle='-')
         
-        # Highlight the four strategy phases on the average curve
-        ax3.axvspan(0, 7, color='green', alpha=0.1, label='Trade 1 (7d)')
-        ax3.axvspan(7, 21, color='gray', alpha=0.1, label='Flat 1 (14d)')
-        ax3.axvspan(21, 35, color='darkgreen', alpha=0.1, label='Trade 2 (14d)')
-        ax3.axvspan(35, 49, color='gray', alpha=0.1, label='Flat 2 (14d)')
+        # Highlight the two primary phases on the average curve
+        ax3.axvspan(0, 21, color='green', alpha=0.1, label='Trade (21d)')
+        ax3.axvspan(21, 35, color='gray', alpha=0.1, label='Flat (14d)')
         
         ax3.set_title(f'Avg Price Move After SMA Signal ({EVENT_STUDY_WINDOW} Days)')
         ax3.set_xlabel('Days After Signal')
@@ -281,8 +273,8 @@ def dashboard():
     </head>
     <body>
         <div class="container">
-            <h1>SMA 120 Fixed 49-Day Cycle Strategy Analysis</h1>
-            <p>Strategy: 7d ON &rarr; 14d FLAT &rarr; 14d ON &rarr; 14d FLAT (Cycle repeats only on new SMA flip)</p>
+            <h1>SMA 120 Fixed (21d ON, 14d FLAT) Cycle Strategy Analysis</h1>
+            <p>Strategy: 21d ON &rarr; 14d FLAT (Cycle repeats only on new SMA flip)</p>
             <div class="stats">
                 <div class="card"><div class="val">{win_rate:.2f}%</div><div class="lbl">Win Rate (Per Trade Leg)</div></div>
                 <div class="card"><div class="val">{total_trades}</div><div class="lbl">Total Active Trade Legs</div></div>
