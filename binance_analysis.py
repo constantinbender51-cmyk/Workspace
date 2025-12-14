@@ -2,224 +2,262 @@ import ccxt
 import pandas as pd
 import numpy as np
 import matplotlib
-matplotlib.use('Agg')  # Use non-interactive backend for server
+matplotlib.use('Agg')  # Non-interactive backend for server usage
 import matplotlib.pyplot as plt
-from flask import Flask, render_template_string
 import io
 import base64
+from flask import Flask, render_template_string
 from datetime import datetime
-
-app = Flask(__name__)
+import time
 
 # --- Configuration ---
 SYMBOL = 'BTC/USDT'
 TIMEFRAME = '1d'
-START_DATE = '2018-01-01 00:00:00'
-RSI_PERIOD = 14
-RSI_EMA_PERIOD = 21  # Standard smoothing for the signal line
+START_YEAR = 2018
+SMA_PERIOD = 120
+PORT = 8080
 
-def fetch_data(symbol, timeframe, start_date_str):
-    """
-    Fetches historical OHLCV data from Binance via CCXT.
-    Handles pagination to get data from 2018 to present.
-    """
-    print(f"Fetching data for {symbol} since {start_date_str}...")
+app = Flask(__name__)
+
+# --- Data Fetching ---
+def fetch_data():
+    print(f"Fetching {SYMBOL} data from Binance starting {START_YEAR}...")
     exchange = ccxt.binance()
-    
-    # Convert start date to timestamp ms
-    since = exchange.parse8601(start_date_str)
+    since = exchange.parse8601(f'{START_YEAR}-01-01T00:00:00Z')
     all_ohlcv = []
     
+    # Fetch in loops to get full history
     while True:
         try:
-            ohlcv = exchange.fetch_ohlcv(symbol, timeframe, since=since, limit=1000)
+            ohlcv = exchange.fetch_ohlcv(SYMBOL, TIMEFRAME, since=since)
             if not ohlcv:
                 break
+            all_ohlcv.extend(ohlcv)
+            since = ohlcv[-1][0] + 1  # Move pointer forward
             
-            last_timestamp = ohlcv[-1][0]
-            if since == last_timestamp: # Prevent infinite loop if no new data
+            # Break if we reached current time
+            if since > exchange.milliseconds():
                 break
-                
-            since = last_timestamp + 1
-            all_ohlcv += ohlcv
             
-            # Rate limit protection (rudimentary)
-            # time.sleep(exchange.rateLimit / 1000)
+            # Rate limit sleep
+            time.sleep(exchange.rateLimit / 1000)
             
-            # Break if we reached current time (roughly)
-            if last_timestamp >= exchange.milliseconds() - 60000:
-                break
-                
         except Exception as e:
             print(f"Error fetching data: {e}")
             break
 
     df = pd.DataFrame(all_ohlcv, columns=['timestamp', 'open', 'high', 'low', 'close', 'volume'])
-    df['timestamp'] = pd.to_datetime(df['timestamp'], unit='ms')
-    df.set_index('timestamp', inplace=True)
-    print(f"Fetched {len(df)} candles.")
+    df['date'] = pd.to_datetime(df['timestamp'], unit='ms')
+    df.set_index('date', inplace=True)
+    # Remove potential duplicates
+    df = df[~df.index.duplicated(keep='first')]
+    print(f"Data fetched: {len(df)} rows.")
     return df
 
-def calculate_indicators(df):
-    """
-    Calculates RSI and the EMA of the RSI manually using Pandas.
-    """
-    delta = df['close'].diff()
-    gain = (delta.where(delta > 0, 0)).rolling(window=RSI_PERIOD).mean()
-    loss = (-delta.where(delta < 0, 0)).rolling(window=RSI_PERIOD).mean()
-
-    rs = gain / loss
-    df['rsi'] = 100 - (100 / (1 + rs))
+# --- Analysis & Strategy ---
+def run_strategy(df):
+    data = df.copy()
+    data['SMA'] = data['close'].rolling(window=SMA_PERIOD).mean()
     
-    # Calculate EMA of the RSI (Optional now, but kept for reference)
-    df['rsi_ema'] = df['rsi'].ewm(span=RSI_EMA_PERIOD, adjust=False).mean()
-    
-    return df
-
-def run_backtest(df):
-    """
-    Applies the Decaying Long/Short logic.
-    Long if RSI < 30.
-    Short if RSI > 70.
-    Exposure decays over 30 days using formula: 1 - (x/30)^2
-    """
-    df = df.copy()
-    
-    positions = []
-    
-    # State variables
-    current_dir = 0 # 1 for Long, -1 for Short, 0 for Neutral
-    days_since = 31 # Start > 30 so we don't trade immediately
-    
-    # Iterate to handle the stateful 'days_since' logic
-    for i in range(len(df)):
-        rsi = df['rsi'].iloc[i]
-        
-        # Check for Signal Triggers
-        if rsi > 70:
-            current_dir = -1 # Go Short
-            days_since = 0
-        elif rsi < 30:
-            current_dir = 1  # Go Long
-            days_since = 0
-        else:
-            days_since += 1
-            
-        # Calculate Weight/Exposure
-        if days_since < 30:
-            # Formula: 1 - (x/30)^2
-            weight = 1 - (days_since / 30) ** 2
-            pos = current_dir * weight
-        else:
-            pos = 0.0
-            
-        positions.append(pos)
-    
-    df['target_position'] = positions
-    
-    # Shift position by 1 to simulate trading on the next open based on today's close signal
-    df['position'] = df['target_position'].shift(1)
+    # 1 = Long (Price > SMA), -1 = Short (Price < SMA)
+    # Using shift(1) to avoid lookahead bias (trading on close of same day)
+    data['Signal'] = np.where(data['close'] > data['SMA'], 1, -1)
+    data['Position'] = data['Signal'].shift(1) # We enter on the next open/close based on prev signal
     
     # Calculate returns
-    df['market_returns'] = df['close'].pct_change()
+    data['Log_Ret'] = np.log(data['close'] / data['close'].shift(1))
+    data['Strat_Ret'] = data['Position'] * data['Log_Ret']
     
-    # Strategy return: Position * Market Return
-    df['strategy_returns'] = df['position'] * df['market_returns']
-    
-    # Cumulative returns for plotting
-    df['cumulative_market'] = (1 + df['market_returns']).cumprod()
-    df['cumulative_strategy'] = (1 + df['strategy_returns']).cumprod()
-    
-    return df
+    return data.dropna()
 
-def create_plot(df):
-    """
-    Generates a Matplotlib figure and returns it as a base64 string.
-    """
-    fig, (ax1, ax2) = plt.subplots(2, 1, figsize=(12, 8), gridspec_kw={'height_ratios': [2, 1]})
+def analyze_trades(df):
+    # Identify trade starts: where position changes
+    df['Trade_ID'] = (df['Position'] != df['Position'].shift(1)).cumsum()
     
-    # Plot 1: Cumulative Returns
-    ax1.plot(df.index, df['cumulative_market'], label='Buy & Hold (BTC)', color='gray', alpha=0.5)
-    ax1.plot(df.index, df['cumulative_strategy'], label='RSI Decay Strategy', color='blue')
-    ax1.set_title(f'Backtest Results: {SYMBOL} ({START_DATE} - Present)')
-    ax1.set_ylabel('Cumulative Return (Multiplier)')
-    ax1.legend()
-    ax1.grid(True, which='both', linestyle='--', linewidth=0.5)
-
-    # Plot 2: RSI and EMA
-    # Slice the last 365 days for clearer view of the indicators, or plot all
-    recent_df = df.tail(365) # Just showing last year for clarity on indicators
-    ax2.plot(recent_df.index, recent_df['rsi'], label='RSI', color='purple', linewidth=1)
-    ax2.axhline(70, linestyle='--', color='red', alpha=0.5, label='Overbought (70)')
-    ax2.axhline(30, linestyle='--', color='green', alpha=0.5, label='Oversold (30)')
-    ax2.set_title('Indicator View (Last 365 Days)')
-    ax2.set_ylabel('RSI Value')
-    ax2.legend()
-    ax2.grid(True)
+    trades = []
     
-    plt.tight_layout()
+    # Event Study: Average price curve after signal
+    # We will track price performance for up to 60 days after a signal switch
+    look_forward_window = 60 
+    curves = []
+
+    grouped = df.groupby('Trade_ID')
     
-    # Save to buffer
-    buf = io.BytesIO()
-    plt.savefig(buf, format='png')
-    buf.seek(0)
-    image_base64 = base64.b64encode(buf.getvalue()).decode('utf-8')
-    plt.close(fig)
-    return image_base64
+    for trade_id, trade_data in grouped:
+        if len(trade_data) < 1: continue
+        
+        start_date = trade_data.index[0]
+        end_date = trade_data.index[-1]
+        position = trade_data['Position'].iloc[0] # 1 or -1
+        
+        # Entry price (Close of the first candle of the trade - simplifying assumption)
+        entry_price = trade_data['close'].iloc[0] 
+        exit_price = trade_data['close'].iloc[-1]
+        
+        # Trade duration
+        duration_days = (end_date - start_date).days
+        
+        # Return
+        if position == 1:
+            raw_return = (exit_price - entry_price) / entry_price
+        else:
+            raw_return = (entry_price - exit_price) / entry_price
+            
+        # Success?
+        is_win = raw_return > 0
+        
+        trades.append({
+            'Trade_ID': trade_id,
+            'Position': 'Long' if position == 1 else 'Short',
+            'Start': start_date,
+            'Duration': duration_days,
+            'Return': raw_return,
+            'Win': is_win
+        })
+        
+        # --- Event Study Logic ---
+        # Get price curve normalized to entry
+        # We look at the actual Close prices relative to Entry
+        # If Short, we invert the curve to show "profitability" trajectory
+        
+        # Get next N records from full dataframe starting at trade start
+        subset = df.loc[start_date:].iloc[:look_forward_window].copy()
+        if not subset.empty:
+            normalized_prices = subset['close'] / entry_price
+            if position == -1:
+                # For shorts, if price goes down (0.9), that's a 1.1 gain approx in equity
+                # Simple inversion for visualization: 2 - price_ratio (so 0.9 becomes 1.1)
+                normalized_prices = 2 - normalized_prices
+            
+            # Reindex to 0..N
+            normalized_prices = normalized_prices.reset_index(drop=True)
+            curves.append(normalized_prices)
 
-# --- Flask Routes ---
+    trades_df = pd.DataFrame(trades)
+    
+    # Average Curve Calculation
+    if curves:
+        curve_df = pd.concat(curves, axis=1)
+        avg_curve = curve_df.mean(axis=1)
+    else:
+        avg_curve = pd.Series()
+        
+    return trades_df, avg_curve
 
+# --- Web Server & Plotting ---
 @app.route('/')
 def dashboard():
-    # 1. Fetch
-    df = fetch_data(SYMBOL, TIMEFRAME, START_DATE)
+    # 1. Pipeline
+    df_raw = fetch_data()
+    df_strat = run_strategy(df_raw)
+    trades_df, avg_curve = analyze_trades(df_strat)
     
-    # 2. Calculate
-    df = calculate_indicators(df)
+    # 2. Statistics
+    total_trades = len(trades_df)
+    win_rate = trades_df['Win'].mean() * 100
+    avg_duration = trades_df['Duration'].mean()
+    expectancy = trades_df['Return'].mean() * 100
     
-    # 3. Backtest
-    df = run_backtest(df)
+    # 3. Meticulous Plotting
+    fig = plt.figure(figsize=(16, 12), constrained_layout=True)
+    gs = fig.add_gridspec(3, 2)
     
-    # 4. Plot
-    plot_url = create_plot(df)
+    # Ax1: Price & SMA & Backgrounds
+    ax1 = fig.add_subplot(gs[0, :])
+    ax1.set_title(f'{SYMBOL} Price vs SMA {SMA_PERIOD} (Red=Long, Blue=Short)', fontsize=14, fontweight='bold')
+    ax1.plot(df_strat.index, df_strat['close'], color='black', label='Price', linewidth=1)
+    ax1.plot(df_strat.index, df_strat['SMA'], color='orange', label=f'SMA {SMA_PERIOD}', linewidth=1.5)
     
-    # 5. Stats
-    total_return = df['cumulative_strategy'].iloc[-1]
-    market_return = df['cumulative_market'].iloc[-1]
+    # Background Logic
+    # We find segments where Position is 1 or -1
+    # Resample slightly to reduce fill operations or just iterate changes
+    # Vectorized fill_between approach
+    ax1.fill_between(df_strat.index, df_strat['close'].min(), df_strat['close'].max(), 
+                     where=(df_strat['Position'] == 1), color='red', alpha=0.15, label='Long Zone')
+    ax1.fill_between(df_strat.index, df_strat['close'].min(), df_strat['close'].max(), 
+                     where=(df_strat['Position'] == -1), color='blue', alpha=0.15, label='Short Zone')
     
-    # Current pos logic slightly different now since it's a float
-    curr_pos_val = df['position'].iloc[-1]
-    if curr_pos_val > 0:
-        pos_str = f"LONG ({curr_pos_val:.2f}x exposure)"
-    elif curr_pos_val < 0:
-        pos_str = f"SHORT ({abs(curr_pos_val):.2f}x exposure)"
-    else:
-        pos_str = "NEUTRAL"
+    ax1.legend()
+    ax1.grid(True, alpha=0.3)
+    ax1.set_ylabel('Price (USDT)')
 
+    # Ax2: Cumulative Returns
+    ax2 = fig.add_subplot(gs[1, 0])
+    df_strat['Cum_Ret'] = df_strat['Strat_Ret'].cumsum()
+    ax2.set_title('Cumulative Strategy Log Returns', fontsize=12)
+    ax2.plot(df_strat.index, df_strat['Cum_Ret'], color='green')
+    ax2.fill_between(df_strat.index, df_strat['Cum_Ret'], 0, alpha=0.1, color='green')
+    ax2.grid(True, alpha=0.3)
+
+    # Ax3: Event Study (Avg Price Curve)
+    ax3 = fig.add_subplot(gs[1, 1])
+    ax3.set_title(f'Avg Performance After Signal (First {len(avg_curve)} Days)', fontsize=12)
+    ax3.plot(avg_curve.index, avg_curve.values, color='purple', linewidth=2)
+    ax3.axhline(1.0, color='gray', linestyle='--')
+    ax3.set_xlabel('Days after Signal')
+    ax3.set_ylabel('Normalized Value (1.0 = Entry)')
+    ax3.grid(True, alpha=0.3)
+    
+    # Ax4: Trade Duration Distribution
+    ax4 = fig.add_subplot(gs[2, 0])
+    ax4.hist(trades_df['Duration'], bins=20, color='gray', edgecolor='black', alpha=0.7)
+    ax4.set_title('Trade Duration Distribution (Days)', fontsize=12)
+    ax4.set_xlabel('Days')
+    
+    # Ax5: Returns Distribution
+    ax5 = fig.add_subplot(gs[2, 1])
+    ax5.hist(trades_df['Return'] * 100, bins=20, color='teal', edgecolor='black', alpha=0.7)
+    ax5.set_title('Trade Return Distribution (%)', fontsize=12)
+    ax5.axvline(0, color='red', linestyle='--')
+    ax5.set_xlabel('Return %')
+
+    # Save to buffer
+    buf = io.BytesIO()
+    plt.savefig(buf, format='png', dpi=100)
+    plt.close(fig)
+    data = base64.b64encode(buf.getbuffer()).decode("ascii")
+
+    # HTML Template
     html = f"""
     <!DOCTYPE html>
-    <html>
+    <html lang="en">
     <head>
-        <title>Crypto Trading Bot</title>
+        <meta charset="UTF-8">
+        <title>Binance SMA Backtest</title>
         <style>
-            body {{ font-family: sans-serif; margin: 40px; background: #f4f4f4; }}
-            .container {{ background: white; padding: 20px; border-radius: 8px; box-shadow: 0 2px 5px rgba(0,0,0,0.1); }}
-            h1 {{ color: #333; }}
-            .stats {{ display: flex; gap: 20px; margin-bottom: 20px; }}
-            .stat-box {{ background: #eef; padding: 15px; border-radius: 5px; }}
+            body {{ font-family: 'Segoe UI', sans-serif; background: #f4f4f4; text-align: center; padding: 20px; }}
+            .container {{ max-width: 1200px; margin: 0 auto; background: white; padding: 20px; box-shadow: 0 0 10px rgba(0,0,0,0.1); border-radius: 8px; }}
+            .stats-grid {{ display: grid; grid-template-columns: repeat(4, 1fr); gap: 15px; margin-bottom: 20px; }}
+            .stat-card {{ background: #eee; padding: 15px; border-radius: 5px; }}
+            .stat-val {{ font-size: 1.5em; font-weight: bold; color: #333; }}
+            .stat-label {{ font-size: 0.9em; color: #666; }}
+            img {{ max-width: 100%; height: auto; border: 1px solid #ddd; }}
         </style>
     </head>
     <body>
         <div class="container">
-            <h1>Strategy Backtest: RSI Reversion with Decay</h1>
-            <div class="stats">
-                <div class="stat-box"><strong>Strategy Return:</strong> {total_return:.2f}x</div>
-                <div class="stat-box"><strong>Buy & Hold Return:</strong> {market_return:.2f}x</div>
-                <div class="stat-box"><strong>Current Position:</strong> {pos_str}</div>
+            <h1>Binance SMA 120 Strategy Analysis ({SYMBOL})</h1>
+            
+            <div class="stats-grid">
+                <div class="stat-card">
+                    <div class="stat-val">{win_rate:.2f}%</div>
+                    <div class="stat-label">Win Rate (Signal to Desired Outcome)</div>
+                </div>
+                <div class="stat-card">
+                    <div class="stat-val">{avg_duration:.1f} days</div>
+                    <div class="stat-label">Avg Trade Duration</div>
+                </div>
+                <div class="stat-card">
+                    <div class="stat-val">{expectancy:.2f}%</div>
+                    <div class="stat-label">Expectation per Signal</div>
+                </div>
+                <div class="stat-card">
+                    <div class="stat-val">{total_trades}</div>
+                    <div class="stat-label">Total Signals</div>
+                </div>
             </div>
-            <img src="data:image/png;base64,{plot_url}" style="width:100%; height:auto;" />
-            <br><br>
-            <p><em>Data fetched from Binance. Strategy: Long < 30, Short > 70. Weight decays over 30 days.</em></p>
+
+            <img src="data:image/png;base64,{data}" />
         </div>
     </body>
     </html>
@@ -227,5 +265,5 @@ def dashboard():
     return render_template_string(html)
 
 if __name__ == '__main__':
-    print("Starting server on port 8080...")
-    app.run(host='0.0.0.0', port=8080, debug=True)
+    print(f"Starting analysis server on port {PORT}...")
+    app.run(host='0.0.0.0', port=PORT, debug=False)
