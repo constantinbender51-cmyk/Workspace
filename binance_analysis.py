@@ -13,16 +13,17 @@ import time
 SYMBOL = 'BTC/USDT'
 TIMEFRAME = '1d'
 START_YEAR = 2018
-SMA_PERIOD_1 = 120
-SMA_PERIOD_2 = 400
 PORT = 8080
 
-# --- Test Parameters for Strategy 2 (SMA 400) ---
-TEST_PARAMS = [
-    (0.05, 0.27, "S2-A (5% Prox / 27% Stop)"),  # Proximity 5%, Stop 27%
-    (0.05, 0.16, "S2-B (5% Prox / 16% Stop)"),  # Proximity 5%, Stop 16%
-    (0.22, 0.16, "S2-C (22% Prox / 16% Stop)") # Proximity 22%, Stop 16%
-]
+# --- Strategy Constants ---
+# Strategy 1 (The Challenger)
+S1_SMA = 120
+S1_DECAY_DAYS = 40
+
+# Strategy 2 (The Winner)
+S2_SMA = 400
+S2_PROX_PCT = 0.05   # 5% Proximity
+S2_STOP_PCT = 0.27   # 27% Trailing Stop
 
 app = Flask(__name__)
 
@@ -52,21 +53,21 @@ def fetch_data():
     df.set_index('date', inplace=True)
     df = df[~df.index.duplicated(keep='first')]
     
-    # Pre-calculate base returns and SMAs
+    # Pre-calc Indicators
     df['Asset_Ret'] = df['close'].pct_change().fillna(0.0)
-    df['SMA_120'] = df['close'].rolling(window=SMA_PERIOD_1).mean()
-    df['SMA_400'] = df['close'].rolling(window=SMA_PERIOD_2).mean()
-    df['Trend_Base_400'] = np.where(df['close'] > df['SMA_400'], 1, -1)
+    df['SMA_120'] = df['close'].rolling(window=S1_SMA).mean()
+    df['SMA_400'] = df['close'].rolling(window=S2_SMA).mean()
+    
+    # Pre-calc Distance for S2 speed
     df['Dist_Pct_400'] = (df['close'] - df['SMA_400']).abs() / df['SMA_400']
-
+    
     df.dropna(inplace=True)
     print(f"Data ready: {len(df)} rows.")
     return df
 
-# --- Strategy 1: SMA 120 Weighted Decay (Returns DataFrame) ---
+# --- Strategy 1: SMA 120 Weighted Decay ---
 def run_strategy_1(df):
     data = df.copy()
-    
     closes = data['close'].values
     smas = data['SMA_120'].values
     n = len(data)
@@ -75,7 +76,7 @@ def run_strategy_1(df):
     current_trend = 0
     last_signal_idx = -9999
     
-    for i in range(SMA_PERIOD_1, n):
+    for i in range(n):
         trend_now = 1 if closes[i] > smas[i] else -1
         
         if trend_now != current_trend:
@@ -84,181 +85,223 @@ def run_strategy_1(df):
             
         d_trade = i - last_signal_idx
         
-        if 1 <= d_trade <= 40:
-            weight = 1 - (d_trade / 40.0)**2
+        if 1 <= d_trade <= S1_DECAY_DAYS:
+            weight = 1 - (d_trade / float(S1_DECAY_DAYS))**2
             position_arr[i] = current_trend * weight
         else:
             position_arr[i] = 0.0
             
-    data['Active_Pos'] = pd.Series(position_arr, index=data.index).shift(1).fillna(0.0)
-    data['Strat_Daily_Ret'] = data['Active_Pos'] * data['Asset_Ret']
-    data['Equity'] = (1 + data['Strat_Daily_Ret']).cumprod()
-    
-    return data['Equity']
+    data['Pos_1'] = position_arr
+    data['Active_Pos_1'] = data['Pos_1'].shift(1).fillna(0.0)
+    data['Strat_1_Ret'] = data['Active_Pos_1'] * data['Asset_Ret']
+    data['Equity_1'] = (1 + data['Strat_1_Ret']).cumprod()
+    return data
 
-# --- Strategy 2: SMA 400 Proximity + Trailing Stop (Returns Series) ---
-def run_strategy_2_test(df, prox_threshold, stop_threshold_pct):
-    """Calculates Equity Curve for S2 with given parameters."""
+# --- Strategy 2: SMA 400 (5% Prox, 27% Stop) ---
+def run_strategy_2(df):
+    data = df.copy()
+    closes = data['close'].values
+    smas = data['SMA_400'].values
+    dists = data['Dist_Pct_400'].values
+    asset_rets = data['Asset_Ret'].values
+    n = len(data)
     
-    trends = df['Trend_Base_400'].values
-    dists = df['Dist_Pct_400'].values
-    asset_rets = df['Asset_Ret'].values
-    n = len(df)
+    position_arr = np.zeros(n)
+    strat_daily_ret = np.zeros(n)
     
-    strat_daily_rets = np.zeros(n)
-    
-    # State
     current_trend = 0
     trade_equity = 1.0
     max_trade_equity = 1.0
     is_stopped_out = False
     
-    stop_mult = 1.0 - stop_threshold_pct
-    current_pos = 0.0 
+    stop_threshold = 1.0 - S2_STOP_PCT
     
     for i in range(n):
-        # 1. Calculate PnL for today based on YESTERDAY's decision
-        todays_pnl = current_pos * asset_rets[i]
-        strat_daily_rets[i] = todays_pnl
-        
-        # Update Trade Internal Equity
-        if current_pos != 0 and np.sign(current_pos) == current_trend:
-             trade_equity *= (1 + todays_pnl)
-             if trade_equity > max_trade_equity:
-                 max_trade_equity = trade_equity
-             
-             # Check Stop
-             if not is_stopped_out and trade_equity < (max_trade_equity * stop_mult):
-                 is_stopped_out = True
-        
-        # 2. Determine Logic for TOMORROW (i+1)
-        trend_now = trends[i]
-        is_proximal = dists[i] < prox_threshold
+        # 1. Trend & Inputs
+        trend_now = 1 if closes[i] > smas[i] else -1
+        is_proximal = dists[i] < S2_PROX_PCT
         target_weight = 0.5 if is_proximal else 1.0
         
-        # New Trend?
+        # 2. Hard Trend Flip (Reset)
         if trend_now != current_trend:
             current_trend = trend_now
             trade_equity = 1.0
             max_trade_equity = 1.0
             is_stopped_out = False
-            current_pos = current_trend * target_weight
+            # Enter immediately at close
+            position_arr[i] = current_trend * target_weight
             
         else:
             # Same Trend
+            
+            # Update PnL/Stops based on YESTERDAY'S position
+            prev_pos = position_arr[i-1] if i > 0 else 0
+            todays_pnl = prev_pos * asset_rets[i]
+            strat_daily_ret[i] = todays_pnl
+            
+            # Track Trade Equity
+            if prev_pos != 0 and np.sign(prev_pos) == current_trend:
+                trade_equity *= (1 + todays_pnl)
+                if trade_equity > max_trade_equity:
+                    max_trade_equity = trade_equity
+                
+                # Check Stop
+                if not is_stopped_out and trade_equity < (max_trade_equity * stop_threshold):
+                    is_stopped_out = True
+            
+            # Position Logic
             if is_stopped_out:
+                # Re-entry check
                 if is_proximal:
-                    # Re-enter
                     is_stopped_out = False
                     trade_equity = 1.0
                     max_trade_equity = 1.0
-                    current_pos = current_trend * target_weight
+                    position_arr[i] = current_trend * target_weight # Re-enter
                 else:
-                    current_pos = 0.0
+                    position_arr[i] = 0.0 # Stay flat
             else:
-                current_pos = current_trend * target_weight
-                
-    # Calculate final equity curve
-    equity_curve = (1 + pd.Series(strat_daily_rets, index=df.index)).cumprod()
-    return equity_curve
+                position_arr[i] = current_trend * target_weight
 
-# --- Helper for Sharpe Ratio Calculation ---
-def calculate_sharpe(equity_series):
-    # Daily returns = (Equity today / Equity yesterday) - 1
-    daily_returns = equity_series.pct_change().dropna()
-    mean_ret = np.mean(daily_returns)
-    std_ret = np.std(daily_returns)
+    data['Pos_2'] = position_arr
+    data['Active_Pos_2'] = data['Pos_2'].shift(1).fillna(0.0) 
+    data['Strat_2_Ret'] = strat_daily_ret
+    data['Equity_2'] = (1 + data['Strat_2_Ret']).cumprod()
+    return data
+
+def calc_stats(equity_series):
+    total_ret = (equity_series.iloc[-1] - 1) * 100
     
-    if std_ret == 0:
-        return 0.0
-        
-    return (mean_ret / std_ret) * np.sqrt(365)
+    daily_rets = equity_series.pct_change().dropna()
+    mean = daily_rets.mean()
+    std = daily_rets.std()
+    
+    sharpe = (mean / std) * np.sqrt(365) if std != 0 else 0
+    
+    # Max Drawdown
+    running_max = equity_series.cummax()
+    drawdown = (equity_series - running_max) / running_max
+    max_dd = drawdown.min() * 100
+    
+    return total_ret, sharpe, max_dd
 
-
-# --- Dashboard ---
 @app.route('/')
 def dashboard():
-    df = fetch_data()
+    df_raw = fetch_data()
+    df_s1 = run_strategy_1(df_raw)
+    df_final = run_strategy_2(df_s1)
     
-    equity_curves = {}
+    # Stats
+    s1_tot, s1_shp, s1_dd = calc_stats(df_final['Equity_1'])
+    s2_tot, s2_shp, s2_dd = calc_stats(df_final['Equity_2'])
     
-    # 1. Run Strategy 1 (SMA 120 Decay)
-    equity_s1 = run_strategy_1(df)
-    equity_curves['S1 (SMA 120 Decay)'] = equity_s1
+    # Plotting
+    fig = plt.figure(figsize=(16, 12), constrained_layout=True)
+    gs = fig.add_gridspec(3, 2)
     
-    # 2. Run Strategy 2 parameter tests
-    for prox_pct, stop_pct, label in TEST_PARAMS:
-        equity_s2 = run_strategy_2_test(df, prox_pct, stop_pct)
-        equity_curves[label] = equity_s2
+    # 1. Main Price & SMAs
+    ax1 = fig.add_subplot(gs[0, :])
+    ax1.set_title(f'Market Context: {SYMBOL} (Log Scale)', fontsize=14, fontweight='bold')
+    ax1.plot(df_final.index, df_final['close'], color='black', alpha=0.4, lw=1, label='Price')
+    ax1.plot(df_final.index, df_final['SMA_120'], color='orange', linestyle='--', lw=1.5, label='SMA 120')
+    ax1.plot(df_final.index, df_final['SMA_400'], color='blue', linestyle='-', lw=1.5, label='SMA 400')
+    ax1.set_yscale('log')
+    ax1.legend(loc='upper left')
+    ax1.grid(True, alpha=0.2)
+    
+    # 2. Head-to-Head Equity Curves
+    ax2 = fig.add_subplot(gs[1, :])
+    ax2.set_title('Head-to-Head Equity Growth (Daily Compounding)', fontsize=14, fontweight='bold')
+    ax2.plot(df_final.index, df_final['Equity_1'], color='orange', lw=2, label=f'S1: SMA 120 (Total: {s1_tot:,.0f}%)')
+    ax2.plot(df_final.index, df_final['Equity_2'], color='blue', lw=2.5, label=f'S2: SMA 400 (Total: {s2_tot:,.0f}%)')
+    ax2.fill_between(df_final.index, df_final['Equity_2'], df_final['Equity_1'], where=(df_final['Equity_2']>df_final['Equity_1']), color='blue', alpha=0.05, interpolate=True)
+    ax2.fill_between(df_final.index, df_final['Equity_2'], df_final['Equity_1'], where=(df_final['Equity_2']<df_final['Equity_1']), color='orange', alpha=0.05, interpolate=True)
+    
+    ax2.axhline(1.0, color='black', linestyle='--')
+    ax2.legend(fontsize=12)
+    ax2.grid(True, alpha=0.3)
+    ax2.set_ylabel('Equity Multiple')
+    
+    # 3. Side-by-Side Annual Returns
+    ax3 = fig.add_subplot(gs[2, :])
+    ann_ret_1 = df_final['Strat_1_Ret'].resample('Y').apply(lambda x: (1 + x).prod() - 1) * 100
+    ann_ret_2 = df_final['Strat_2_Ret'].resample('Y').apply(lambda x: (1 + x).prod() - 1) * 100
+    
+    years = ann_ret_1.index.year
+    x = np.arange(len(years))
+    width = 0.35
+    
+    rects1 = ax3.bar(x - width/2, ann_ret_1, width, label='SMA 120 (S1)', color='orange', alpha=0.85)
+    rects2 = ax3.bar(x + width/2, ann_ret_2, width, label='SMA 400 (S2)', color='blue', alpha=0.85)
+    
+    ax3.set_title('Annual Performance Comparison (%)', fontsize=12)
+    ax3.set_xticks(x)
+    ax3.set_xticklabels(years)
+    ax3.axhline(0, color='black', lw=1)
+    ax3.legend()
+    ax3.grid(Axis='y', alpha=0.2)
+    
+    # Add labels to bars
+    def autolabel(rects):
+        for rect in rects:
+            height = rect.get_height()
+            ax3.annotate(f'{height:.0f}',
+                        xy=(rect.get_x() + rect.get_width() / 2, height),
+                        xytext=(0, 3 if height > 0 else -12),
+                        textcoords="offset points",
+                        ha='center', va='bottom' if height > 0 else 'top', fontsize=9)
+    autolabel(rects1)
+    autolabel(rects2)
 
-    # --- Plotting ---
-    fig = plt.figure(figsize=(16, 10))
-    ax = fig.add_subplot(111)
-    
-    ax.set_title(f'{SYMBOL} Equity Curve Comparison (Daily Compounding)', fontsize=14, fontweight='bold')
-    ax.axhline(1.0, color='gray', linestyle='--')
-    
-    summary_data = []
-
-    # Plot and calculate metrics
-    for label, equity_series in equity_curves.items():
-        total_ret = (equity_series.iloc[-1] - 1) * 100
-        sharpe = calculate_sharpe(equity_series)
-        
-        summary_data.append({
-            'Strategy': label,
-            'Total Return': f"{total_ret:,.0f}%",
-            'Sharpe Ratio': f"{sharpe:.2f}",
-            'Max Equity': f"{equity_series.iloc[-1]:.2f}x"
-        })
-        
-        color = 'orange' if 'S1' in label else ('blue' if '5%' in label else 'red')
-        style = '--' if 'S1' in label else '-'
-        
-        ax.plot(equity_series.index, equity_series.values, 
-                label=f'{label} (Sharpe: {sharpe:.2f} / Ret: {total_ret:.0f}%)', 
-                color=color, linestyle=style, linewidth=2 if 'S1' not in label else 1.5)
-        
-    ax.legend(loc='upper left', fontsize=10)
-    ax.grid(True, alpha=0.3)
-    ax.set_ylabel('Equity Multiple (Starting at 1.0)')
-    
-    # Save Plot
     buf = io.BytesIO()
     plt.savefig(buf, format='png', dpi=100)
     plt.close(fig)
     img_data = base64.b64encode(buf.getbuffer()).decode("ascii")
-    
-    # Convert summary data to HTML table
-    table_html = "<table><thead><tr><th>Strategy</th><th>Total Return</th><th>Sharpe Ratio</th><th>Max Equity</th></tr></thead><tbody>"
-    for row in summary_data:
-        table_html += f"<tr><td>{row['Strategy']}</td><td>{row['Total Return']}</td><td>{row['Sharpe Ratio']}</td><td>{row['Max Equity']}</td></tr>"
-    table_html += "</tbody></table>"
     
     html = f"""
     <!DOCTYPE html>
     <html lang="en">
     <head>
         <meta charset="UTF-8">
-        <title>Strategy Comparison Test</title>
+        <title>Strategy Showdown</title>
         <style>
-            body {{ font-family: 'Segoe UI', sans-serif; background: #f0f2f5; padding: 20px; text-align: center; }}
-            .container {{ max-width: 1200px; margin: 0 auto; background: white; padding: 20px; border-radius: 12px; box-shadow: 0 4px 6px rgba(0,0,0,0.1); }}
-            h1 {{ color: #2c3e50; }}
-            table {{ width: 100%; border-collapse: collapse; margin: 20px 0; font-size: 1em; text-align: left; }}
-            th, td {{ padding: 12px 15px; border: 1px solid #ddd; }}
-            th {{ background-color: #007bff; color: white; }}
-            tr:nth-child(even) {{ background-color: #f2f2f2; }}
+            body {{ font-family: 'Segoe UI', sans-serif; background: #f4f6f9; padding: 20px; text-align: center; }}
+            .container {{ max-width: 1200px; margin: 0 auto; background: white; padding: 30px; border-radius: 15px; box-shadow: 0 10px 20px rgba(0,0,0,0.1); }}
+            .header {{ margin-bottom: 30px; }}
+            .comparison-box {{ display: flex; justify-content: space-around; margin-bottom: 30px; gap: 20px; }}
+            .stat-panel {{ flex: 1; padding: 20px; border-radius: 10px; color: white; box-shadow: 0 4px 6px rgba(0,0,0,0.1); }}
+            .panel-s1 {{ background: linear-gradient(135deg, #f6d365 0%, #fda085 100%); }}
+            .panel-s2 {{ background: linear-gradient(135deg, #667eea 0%, #764ba2 100%); transform: scale(1.05); border: 2px solid gold; }}
+            .stat-row {{ display: flex; justify-content: space-between; margin: 10px 0; border-bottom: 1px solid rgba(255,255,255,0.3); padding-bottom: 5px; }}
+            .stat-val {{ font-weight: bold; font-size: 1.2em; }}
+            h2 {{ margin-top: 0; border-bottom: 2px solid rgba(255,255,255,0.5); padding-bottom: 10px; }}
         </style>
     </head>
     <body>
         <div class="container">
-            <h1>Equity Curve Comparison: Parameter Sensitivity</h1>
-            <p>Comparing SMA 120 Decay vs. SMA 400 (Trailing Stop/Proximity Re-entry) under specific parameters.</p>
+            <div class="header">
+                <h1>🏆 Strategy Showdown 🏆</h1>
+                <p>Comparing the Standard Model vs. The Optimized Challenger</p>
+            </div>
             
-            {table_html}
+            <div class="comparison-box">
+                <div class="stat-panel panel-s1">
+                    <h2>Strategy 1 (SMA 120)</h2>
+                    <div class="stat-row"><span>Total Return:</span> <span class="stat-val">{s1_tot:,.0f}%</span></div>
+                    <div class="stat-row"><span>Sharpe Ratio:</span> <span class="stat-val">{s1_shp:.2f}</span></div>
+                    <div class="stat-row"><span>Max Drawdown:</span> <span class="stat-val">{s1_dd:.1f}%</span></div>
+                    <p style="font-size:0.9em; margin-top:15px;">Logic: 40-Day Decay</p>
+                </div>
+                
+                <div class="stat-panel panel-s2">
+                    <h2>Strategy 2 (SMA 400) 👑</h2>
+                    <div class="stat-row"><span>Total Return:</span> <span class="stat-val">{s2_tot:,.0f}%</span></div>
+                    <div class="stat-row"><span>Sharpe Ratio:</span> <span class="stat-val">{s2_shp:.2f}</span></div>
+                    <div class="stat-row"><span>Max Drawdown:</span> <span class="stat-val">{s2_dd:.1f}%</span></div>
+                    <p style="font-size:0.9em; margin-top:15px;">Logic: 5% Prox, 27% Stop, Re-entry</p>
+                </div>
+            </div>
             
-            <img src="data:image/png;base64,{img_data}" style="max-width:100%; height:auto;" />
+            <img src="data:image/png;base64,{img_data}" style="max-width:100%; height:auto; border-radius: 8px; border: 1px solid #ddd;" />
         </div>
     </body>
     </html>
@@ -266,5 +309,5 @@ def dashboard():
     return render_template_string(html)
 
 if __name__ == '__main__':
-    print(f"Starting comparison server on port {PORT}...")
+    print(f"Starting showdown server on port {PORT}...")
     app.run(host='0.0.0.0', port=PORT, debug=False)
