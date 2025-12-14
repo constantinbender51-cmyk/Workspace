@@ -17,7 +17,7 @@ SMA_PERIOD_1 = 120
 SMA_PERIOD_2 = 400
 PORT = 8080
 TRAILING_STOP_PCT = 0.10  # UPDATED: Max loss from peak set to 10%
-PROXIMITY_PCT = 0.08      # UPDATED: Re-entry/Proximity threshold set to 6%
+PROXIMITY_PCT = 0.010      # UPDATED: Re-entry/Proximity threshold set to 6%
 
 app = Flask(__name__)
 
