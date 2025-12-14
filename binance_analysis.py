@@ -6,6 +6,7 @@ import matplotlib
 matplotlib.use('Agg')  # Non-interactive backend
 import matplotlib.pyplot as plt
 import matplotlib.dates as mdates
+import matplotlib.ticker as mticker # Import ticker for safe formatting
 from flask import Flask, send_file
 import io
 import threading
@@ -189,16 +190,6 @@ def optimize_signal_horizon(df_data, df_signals_all, signal_index, signal_name):
         exposure = np.clip(exposure, -LEVERAGE, LEVERAGE)
         
         # 3. Fast PnL for Optimization (Vectorized Approx)
-        # Shifted PnL: Portfolio[t] approx PnL accumulation
-        # Exact portfolio loop is safer for compound returns
-        
-        portfolio = np.zeros(num_days)
-        portfolio[0] = INITIAL_CAPITAL
-        
-        # We can optimize this loop or use cumprod for speed
-        # Strat Returns = Exposure[t] * Market_Return[t]
-        # Note: 'exposure' at t is determined by signals at t (which are shifted)
-        # So strategy_daily_ret[t] = exposure[t] * returns[t]
         
         # Vectorized simulation for speed
         # Padding first element (t=0) as 0 return
@@ -215,7 +206,6 @@ def optimize_signal_horizon(df_data, df_signals_all, signal_index, signal_name):
         if sharpe > best_sharpe:
             best_sharpe = sharpe
             best_horizon = h
-            # We don't store the full DF yet to save memory, only best param
             
     print(f"Best H={best_horizon}, Sharpe={best_sharpe:.2f}")
 
@@ -269,8 +259,16 @@ def create_single_equity_plot(result_entry, plot_index):
     bh = results_df['close'] / results_df['close'].iloc[0] * INITIAL_CAPITAL
     ax.plot(results_df.index, bh, 'g--', alpha=0.8, linewidth=1, label='Buy & Hold')
     
-    if (results_df['Portfolio_Value'] <= 0).any(): ax.set_yscale('symlog', linthresh=1.0)
-    else: ax.set_yscale('log')
+    if (results_df['Portfolio_Value'] <= 0).any(): 
+        ax.set_yscale('symlog', linthresh=1.0)
+    else: 
+        ax.set_yscale('log')
+        
+    # --- FIX: Safe Ticker Formatting for Log Scale ---
+    # This overrides the default Matplotlib log formatter which uses math text (LaTeX)
+    # and prevents the ParseFatalException seen in some environments.
+    ax.yaxis.set_major_formatter(mticker.StrMethodFormatter('{x:,.0f}'))
+    ax.yaxis.set_minor_formatter(mticker.NullFormatter())
     
     ax.set_title(f'Equity Curve: {result_entry["name"]} (Opt Horizon: {h} days)', fontweight='bold')
     ax.set_ylabel('Portfolio Value (Log Scale)', fontsize=10)
