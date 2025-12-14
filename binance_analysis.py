@@ -238,7 +238,8 @@ def dashboard():
     ax3.set_xticklabels(years)
     ax3.axhline(0, color='black', lw=1)
     ax3.legend()
-    ax3.grid(Axis='y', alpha=0.2)
+    # Fixed: Changed 'Axis' to 'axis'
+    ax3.grid(axis='y', alpha=0.2)
     
     # Add labels to bars
     def autolabel(rects):
