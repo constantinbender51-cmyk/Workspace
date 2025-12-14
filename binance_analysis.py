@@ -16,6 +16,7 @@ START_YEAR = 2018
 SMA_PERIOD_1 = 120
 SMA_PERIOD_2 = 400
 PORT = 8080
+TRAILING_STOP_PCT = 0.15  # Updated to 15% Max Loss from Peak
 
 app = Flask(__name__)
 
@@ -84,7 +85,7 @@ def run_strategy_1(df):
     
     return data
 
-# --- Strategy 2: SMA 400 + Proximity + Re-entry ---
+# --- Strategy 2: SMA 400 + Proximity + Re-entry (15% Stop) ---
 def run_strategy_2(df):
     data = df.copy()
     data['SMA_400'] = data['close'].rolling(window=SMA_PERIOD_2).mean()
@@ -104,6 +105,9 @@ def run_strategy_2(df):
     trade_equity = 1.0      # Current trade's equity
     max_trade_equity = 1.0  # Current trade's High Water Mark
     is_stopped_out = False  # Flag for trailing stop
+    
+    # Threshold for Trailing Stop (0.85 means 15% max loss from peak)
+    STOP_THRESHOLD = 1.0 - TRAILING_STOP_PCT 
     
     for i in range(SMA_PERIOD_2, n):
         # 1. Determine Inputs
@@ -141,9 +145,8 @@ def run_strategy_2(df):
                 if trade_equity > max_trade_equity:
                     max_trade_equity = trade_equity
                 
-                # Check Trailing Stop (10% Drawdown)
-                # Only triggers if not already stopped
-                if not is_stopped_out and trade_equity < (max_trade_equity * 0.90):
+                # Check Trailing Stop (15% Drawdown)
+                if not is_stopped_out and trade_equity < (max_trade_equity * STOP_THRESHOLD):
                     is_stopped_out = True
             
             # --- Position Sizing for Today ---
@@ -197,17 +200,14 @@ def dashboard():
     
     # 1. Price + SMAs + S2 Activity
     ax1 = fig.add_subplot(gs[0:2, :])
-    ax1.set_title(f'{SYMBOL}: S1 (Decay) vs S2 (SMA 400 Proximity + Re-entry)', fontsize=14, fontweight='bold')
+    ax1.set_title(f'{SYMBOL}: S1 (Decay) vs S2 (SMA 400 Proximity + 15% Stop)', fontsize=14, fontweight='bold')
     ax1.plot(df_final.index, df_final['close'], color='black', alpha=0.5, label='Price', linewidth=0.8)
     ax1.plot(df_final.index, df_final['SMA_120'], color='orange', linestyle='--', label='SMA 120', linewidth=1)
     ax1.plot(df_final.index, df_final['SMA_400'], color='blue', linestyle='-', label='SMA 400', linewidth=1.5)
     
     # Highlight S2 Trades (Blue Zones)
-    # Distinguish 0.5 weight vs 1.0 weight visually with alpha
-    # Active S2 Longs
     ax1.fill_between(df_final.index, df_final['close'].min(), df_final['close'].max(), 
                      where=(df_final['Active_Pos_2'] > 0.4), color='blue', alpha=0.1, label='S2 Long')
-    # Active S2 Shorts
     ax1.fill_between(df_final.index, df_final['close'].min(), df_final['close'].max(), 
                      where=(df_final['Active_Pos_2'] < -0.4), color='purple', alpha=0.1, label='S2 Short')
     
@@ -218,9 +218,9 @@ def dashboard():
     
     # 2. Equity Curves
     ax2 = fig.add_subplot(gs[2, :])
-    ax2.set_title(f"Equity Curves (Daily Compounded)", fontsize=12, fontweight='bold')
+    ax2.set_title(f"Equity Curves (Daily Compounding)", fontsize=12, fontweight='bold')
     ax2.plot(df_final.index, df_final['Equity_1'], color='orange', linewidth=2, label=f'S1: SMA 120 (40d Decay) | Total: {stats["S1_Total"]:.0f}%')
-    ax2.plot(df_final.index, df_final['Equity_2'], color='blue', linewidth=2, label=f'S2: SMA 400 (Prox/Re-entry) | Total: {stats["S2_Total"]:.0f}%')
+    ax2.plot(df_final.index, df_final['Equity_2'], color='blue', linewidth=2, label=f'S2: SMA 400 (15% Stop) | Total: {stats["S2_Total"]:.0f}%')
     ax2.axhline(1.0, color='black', linestyle='--')
     ax2.legend()
     ax2.grid(True, alpha=0.3)
@@ -275,7 +275,7 @@ def dashboard():
                     <h3 style="color:#0d47a1">Strategy 2 (SMA 400)</h3>
                     <div class="val">{stats['S2_Total']:.0f}%</div>
                     <div class="lbl">Total Equity Return</div>
-                    <div class="lbl">Proximity Weighting + Stop/Re-entry</div>
+                    <div class="lbl">Proximity Weighting + 15% Trailing Stop/Re-entry</div>
                 </div>
             </div>
             <img src="data:image/png;base64,{img_data}" style="max-width:100%; height:auto;" />
