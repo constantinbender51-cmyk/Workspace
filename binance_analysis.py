@@ -17,7 +17,7 @@ TIMEFRAME = '1d'
 SINCE_STR = '2018-01-01 00:00:00'
 HORIZON = 380  # Decay window (days)
 INITIAL_CAPITAL = 10000.0
-LEVERAGE = 5.0 # Fixed 5x leverage
+LEVERAGE = 1.0 # Fixed 1x leverage (no external multiplier)
 
 # --- Signals (now referred to as ALL_SIGNALS) ---
 ALL_SIGNALS = [
@@ -125,7 +125,7 @@ def generate_signals(df):
 
     return df_signals_shifted 
 
-# --- Backtest Runner for Single Signal ---
+# --- Backtest Runner for Single Signal (Bi-directional, 1x Exposure) ---
 def run_single_signal_backtest(df_data, df_signals_all, signal_index, signal_name):
     """Runs decay and backtest for one signal treated as a standalone system."""
     
@@ -159,16 +159,14 @@ def run_single_signal_backtest(df_data, df_signals_all, signal_index, signal_nam
                 signal_direction = 0
                 signal_start_day = -1
                 
-    # 2. Exposure Logic (Single Signal, Long Only)
+    # 2. Exposure Logic (Bi-directional, 1x Exposure)
     
     raw_conviction = contributions 
     
-    # Apply long-only clamp: Exposure is 0 if conviction is negative
-    long_only_conviction = np.clip(raw_conviction, 0, None)
-    
-    # Calculate Exposure: Long Only Conviction * Fixed Leverage
-    exposure = long_only_conviction * LEVERAGE
-    exposure = np.clip(exposure, 0.0, LEVERAGE) 
+    # Calculate Exposure: Raw Conviction * Fixed 1x Leverage
+    exposure = raw_conviction * LEVERAGE
+    # Clamp exposure to the leverage limits (-1.0x to +1.0x)
+    exposure = np.clip(exposure, -LEVERAGE, LEVERAGE) 
     
     # 3. Run PnL Loop
     portfolio = np.zeros(num_days)
@@ -180,6 +178,7 @@ def run_single_signal_backtest(df_data, df_signals_all, signal_index, signal_nam
         exposure_t = exposure[t]
         
         if not is_bankrupt:
+            # PnL = Previous Equity * Exposure * Return
             pnl = portfolio[t-1] * exposure_t * returns[t]
             portfolio[t] = portfolio[t-1] + pnl
             daily_pnl[t] = pnl
@@ -211,10 +210,10 @@ def create_single_equity_plot(result_entry, plot_index):
     
     results_df = result_entry['df']
     
-    # Highlight flat/cash periods (when Raw_Conviction <= 0)
+    # Highlight Short periods (when Raw_Conviction < 0)
     ax_ymin, ax_ymax = 0.0, 1.0
-    ax.fill_between(results_df.index, ax_ymin, ax_ymax, where=results_df['Raw_Conviction'] <= 0, 
-                     color='#808080', alpha=0.2, transform=ax.get_xaxis_transform())
+    ax.fill_between(results_df.index, ax_ymin, ax_ymax, where=results_df['Raw_Conviction'] < 0, 
+                     color='#FFC0CB', alpha=0.3, transform=ax.get_xaxis_transform(), label='Short Position')
                      
     # Plot Strategy Equity
     ax.plot(results_df.index, results_df['Portfolio_Value'], color=SIGNAL_COLORS[plot_index % len(SIGNAL_COLORS)], 
@@ -227,7 +226,7 @@ def create_single_equity_plot(result_entry, plot_index):
     if (results_df['Portfolio_Value'] <= 0).any(): ax.set_yscale('symlog', linthresh=1.0)
     else: ax.set_yscale('log')
     
-    ax.set_title(f'Equity Curve: {result_entry["name"]} (Long Only {LEVERAGE}x)', fontweight='bold')
+    ax.set_title(f'Equity Curve: {result_entry["name"]} (Bi-Dir {LEVERAGE:.0f}x)', fontweight='bold')
     ax.set_ylabel('Portfolio Value (Log Scale)', fontsize=10)
     ax.grid(True, alpha=0.3)
     ax.legend(loc='upper left')
@@ -244,7 +243,7 @@ def start_web_server(all_results):
     # --- Generate Stats Table ---
     stats_rows = ""
     for i, res in enumerate(all_results):
-        sharpe_color = "green" if res['sharpe'] > 1.0 else ("orange" if res['sharpe'] > 0 else "red")
+        sharpe_color = "green" if res['sharpe'] > 0 else "red"
         ret_color = "green" if res['return'] > 0 else "red"
         stats_rows += f"""
         <tr>
@@ -258,11 +257,7 @@ def start_web_server(all_results):
     @app.route('/')
     def index():
         ts = int(time.time())
-        plot_rows = ""
-        for i, res in enumerate(all_results):
-            # Each individual plot will be loaded from its route
-            plot_rows += f'<img src="/plot/{i}?v={ts}" alt="{res["name"]}" style="max-width: 95%; height: auto; border: 1px solid #ccc; margin: 20px 0;">'
-            
+        
         return f'''
         <html>
         <head><title>Individual Signal Backtests</title>
@@ -277,7 +272,7 @@ def start_web_server(all_results):
         </head>
         <body>
             <h1>Independent Single-Signal Performance</h1>
-            <p>Each signal is tested individually with the Long Only constraint (flat when conviction is negative) and 5x fixed leverage.</p>
+            <p>Each signal is tested individually with Bi-Directional Trading (Long/Short) and 1x Exposure.</p>
             
             <table class="stats-table summary-table">
                 <thead>
@@ -285,7 +280,7 @@ def start_web_server(all_results):
                         <th style="width: 20%;">Signal</th>
                         <th style="width: 10%;">Sharpe Ratio</th>
                         <th style="width: 15%;">Total Return</th>
-                        <th style="width: 55%;">Equity Curve</th>
+                        <th style="width: 55%;">Equity Curve (Pink Background = Short Position)</th>
                     </tr>
                 </thead>
                 <tbody>
