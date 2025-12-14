@@ -21,7 +21,7 @@ LEVERAGE = 1.0 # Fixed 1x leverage
 
 # Grid Search Config
 HORIZON_START = 5
-HORIZON_END = 400
+HORIZON_END = 800
 HORIZON_STEP = 5
 
 # --- Signals (now referred to as ALL_SIGNALS) ---
