@@ -8,16 +8,14 @@ import io
 import base64
 from flask import Flask, render_template_string
 import time
+import seaborn as sns
 
 # --- Configuration ---
 SYMBOL = 'BTC/USDT'
 TIMEFRAME = '1d'
 START_YEAR = 2018
-SMA_PERIOD_1 = 120
-SMA_PERIOD_2 = 400
+SMA_PERIOD = 400
 PORT = 8080
-TRAILING_STOP_PCT = 0.15  # UPDATED: Max loss from peak set to 10%
-PROXIMITY_PCT = 0.15      # UPDATED: Re-entry/Proximity threshold set to 6%
 
 app = Flask(__name__)
 
@@ -46,200 +44,158 @@ def fetch_data():
     df['date'] = pd.to_datetime(df['timestamp'], unit='ms')
     df.set_index('date', inplace=True)
     df = df[~df.index.duplicated(keep='first')]
-    print(f"Data fetched: {len(df)} rows.")
+    
+    # Pre-calculate indicators to speed up the loop
+    df['SMA'] = df['close'].rolling(window=SMA_PERIOD).mean()
+    df['Asset_Ret'] = df['close'].pct_change().fillna(0.0)
+    
+    # Pre-calculate trend and distance to avoid re-computing inside the 900 loops
+    # 1 if Close > SMA, -1 if Close < SMA
+    df['Trend_Base'] = np.where(df['close'] > df['SMA'], 1, -1)
+    
+    # Distance percentage: abs(Price - SMA) / SMA
+    df['Dist_Pct'] = (df['close'] - df['SMA']).abs() / df['SMA']
+    
+    # Drop initial NaN rows
+    df.dropna(inplace=True)
+    
+    print(f"Data ready: {len(df)} rows.")
     return df
 
-# --- Strategy 1: SMA 120 Weighted Decay ---
-# Trade 40 days, Position = 1 - (d/40)^2
-def run_strategy_1(df):
-    data = df.copy()
-    data['SMA_120'] = data['close'].rolling(window=SMA_PERIOD_1).mean()
+# --- Optimized Backtest Function ---
+def backtest_strategy(df, prox_threshold, stop_threshold_pct):
+    """
+    Runs the logic for a single parameter set.
+    Returns: Final Total Return (%)
+    """
+    # Convert dataframe columns to numpy arrays for raw speed (critical for 900 loops)
+    trends = df['Trend_Base'].values
+    dists = df['Dist_Pct'].values
+    asset_rets = df['Asset_Ret'].values
+    n = len(df)
     
-    closes = data['close'].values
-    smas = data['SMA_120'].values
-    n = len(data)
-    position_arr = np.zeros(n)
-    
+    # State
     current_trend = 0
-    last_signal_idx = -9999
+    trade_equity = 1.0
+    max_trade_equity = 1.0
+    is_stopped_out = False
     
-    for i in range(SMA_PERIOD_1, n):
-        trend_now = 1 if closes[i] > smas[i] else -1
+    # Pre-calculate constants
+    stop_mult = 1.0 - stop_threshold_pct
+    
+    # We track equity curve scalar directly instead of full array to save memory/time
+    total_equity = 1.0
+    
+    # Start loop
+    # We assume 'position' is determined at step i and return is realized at i (simplified daily step)
+    # Correct backtest logic: Decision at i-1 determines Position for i. Return at i is Pos[i-1] * Ret[i]
+    
+    current_pos = 0.0 # Position entering today
+    
+    for i in range(n):
+        # 1. Calculate PnL for today based on YESTERDAY's decision
+        todays_pnl = current_pos * asset_rets[i]
+        total_equity *= (1 + todays_pnl)
         
-        if trend_now != current_trend:
-            current_trend = trend_now
-            last_signal_idx = i 
-            
-        d_trade = i - last_signal_idx
+        # Update Trade Internal Equity (for trailing stop logic)
+        if current_pos != 0 and np.sign(current_pos) == current_trend:
+             trade_equity *= (1 + todays_pnl)
+             if trade_equity > max_trade_equity:
+                 max_trade_equity = trade_equity
+             
+             # Check Stop
+             if not is_stopped_out and trade_equity < (max_trade_equity * stop_mult):
+                 is_stopped_out = True
         
-        if 1 <= d_trade <= 40:
-            weight = 1 - (d_trade / 40.0)**2
-            position_arr[i] = current_trend * weight
-        else:
-            position_arr[i] = 0.0
-            
-    data['Pos_1'] = position_arr
-    data['Active_Pos_1'] = data['Pos_1'].shift(1).fillna(0.0)
-    data['Asset_Ret'] = data['close'].pct_change().fillna(0.0)
-    data['Strat_1_Daily_Ret'] = data['Active_Pos_1'] * data['Asset_Ret']
-    data['Equity_1'] = (1 + data['Strat_1_Daily_Ret']).cumprod()
-    
-    return data
-
-# --- Strategy 2: SMA 400 + Proximity + Re-entry (10% Stop, 6% Prox) ---
-def run_strategy_2(df):
-    data = df.copy()
-    data['SMA_400'] = data['close'].rolling(window=SMA_PERIOD_2).mean()
-    
-    closes = data['close'].values
-    smas = data['SMA_400'].values
-    asset_rets = data['Asset_Ret'].values
-    n = len(data)
-    
-    position_arr = np.zeros(n)
-    strat_daily_ret = np.zeros(n)
-    
-    # State Variables
-    current_trend = 0
-    
-    # Trade Management State
-    trade_equity = 1.0      # Current trade's equity
-    max_trade_equity = 1.0  # Current trade's High Water Mark
-    is_stopped_out = False  # Flag for trailing stop
-    
-    # Threshold for Trailing Stop (0.90 means 10% max loss from peak)
-    STOP_THRESHOLD = 1.0 - TRAILING_STOP_PCT 
-    
-    for i in range(SMA_PERIOD_2, n):
-        # 1. Determine Inputs
-        trend_now = 1 if closes[i] > smas[i] else -1
-        
-        # Proximity Check: < 6% distance
-        dist_pct = abs(closes[i] - smas[i]) / smas[i]
-        is_proximal = dist_pct < PROXIMITY_PCT
-        
-        # Target Weight Logic
+        # 2. Determine Logic for TOMORROW (i+1)
+        trend_now = trends[i]
+        is_proximal = dists[i] < prox_threshold
         target_weight = 0.5 if is_proximal else 1.0
         
-        # 2. Check for Signal Flip (Hard Reset)
+        # New Trend?
         if trend_now != current_trend:
             current_trend = trend_now
-            # Reset Trade State for new trend
             trade_equity = 1.0
             max_trade_equity = 1.0
             is_stopped_out = False
+            current_pos = current_trend * target_weight
             
-            # Enter new position immediately (Close of day i)
-            position_arr[i] = current_trend * target_weight
-        
         else:
-            # SAME TREND: Manage Active Trade or Check Re-entry
-            
-            # --- PnL Calculation from Yesterday's Position ---
-            prev_pos = position_arr[i-1] if i > 0 else 0
-            todays_pnl = prev_pos * asset_rets[i]
-            strat_daily_ret[i] = todays_pnl
-            
-            # Update Equity Tracking if we were active
-            if prev_pos != 0 and np.sign(prev_pos) == current_trend:
-                trade_equity *= (1 + todays_pnl)
-                if trade_equity > max_trade_equity:
-                    max_trade_equity = trade_equity
-                
-                # Check Trailing Stop (10% Drawdown)
-                if not is_stopped_out and trade_equity < (max_trade_equity * STOP_THRESHOLD):
-                    is_stopped_out = True
-            
-            # --- Position Sizing for Today ---
-            
+            # Same Trend
             if is_stopped_out:
-                # We are in "Waiting" mode. Check Re-entry condition.
                 if is_proximal:
-                    # RE-ENTER: Reset the stop, reset equity tracker for this new leg
+                    # Re-enter
                     is_stopped_out = False
                     trade_equity = 1.0
                     max_trade_equity = 1.0
-                    position_arr[i] = current_trend * target_weight # (0.5)
+                    current_pos = current_trend * target_weight
                 else:
-                    # Stay Flat
-                    position_arr[i] = 0.0
+                    current_pos = 0.0
             else:
-                # We are Active. Just update weight based on proximity.
-                position_arr[i] = current_trend * target_weight
+                current_pos = current_trend * target_weight
+                
+    return (total_equity - 1) * 100
 
-    data['Pos_2'] = position_arr
-    data['Active_Pos_2'] = data['Pos_2'].shift(1).fillna(0.0) 
-    data['Strat_2_Daily_Ret'] = strat_daily_ret
-    data['Equity_2'] = (1 + data['Strat_2_Daily_Ret']).cumprod()
-    
-    return data
-
-def analyze_stats(df):
-    s1_total_ret = (df['Equity_1'].iloc[-1] - 1) * 100
-    s2_total_ret = (df['Equity_2'].iloc[-1] - 1) * 100
-    
-    ann_1 = df['Strat_1_Daily_Ret'].resample('Y').apply(lambda x: (1 + x).prod() - 1).mean() * 100
-    ann_2 = df['Strat_2_Daily_Ret'].resample('Y').apply(lambda x: (1 + x).prod() - 1).mean() * 100
-    
-    return {
-        'S1_Total': s1_total_ret,
-        'S2_Total': s2_total_ret,
-        'S1_Ann': ann_1,
-        'S2_Ann': ann_2
-    }
-
+# --- Server & Logic ---
 @app.route('/')
-def dashboard():
-    df_raw = fetch_data()
-    df_s1 = run_strategy_1(df_raw)
-    df_final = run_strategy_2(df_s1)
-    stats = analyze_stats(df_final)
+def run_grid_search():
+    df = fetch_data()
     
-    # Plotting
-    fig = plt.figure(figsize=(16, 14), constrained_layout=True)
-    gs = fig.add_gridspec(4, 2)
+    # Ranges: 1% to 30%
+    stop_range = range(1, 31)
+    prox_range = range(1, 31)
     
-    # 1. Price + SMAs + S2 Activity
-    ax1 = fig.add_subplot(gs[0:2, :])
-    ax1.set_title(f'{SYMBOL}: S1 (Decay) vs S2 (SMA 400 Proximity + 10% Stop)', fontsize=14, fontweight='bold')
-    ax1.plot(df_final.index, df_final['close'], color='black', alpha=0.5, label='Price', linewidth=0.8)
-    ax1.plot(df_final.index, df_final['SMA_120'], color='orange', linestyle='--', label='SMA 120', linewidth=1)
-    ax1.plot(df_final.index, df_final['SMA_400'], color='blue', linestyle='-', label='SMA 400', linewidth=1.5)
+    results = []
     
-    # Highlight S2 Trades (Blue Zones)
-    ax1.fill_between(df_final.index, df_final['close'].min(), df_final['close'].max(), 
-                     where=(df_final['Active_Pos_2'] > 0.4), color='blue', alpha=0.1, label='S2 Long (0.5x or 1.0x)')
-    ax1.fill_between(df_final.index, df_final['close'].min(), df_final['close'].max(), 
-                     where=(df_final['Active_Pos_2'] < -0.4), color='purple', alpha=0.1, label='S2 Short (0.5x or 1.0x)')
+    print("Starting Grid Search (900 iterations)...")
+    start_time = time.time()
     
-    ax1.legend(loc='upper left')
-    ax1.grid(True, alpha=0.2)
-    ax1.set_yscale('log')
-    ax1.set_ylabel('Price (Log)')
+    for stop_pct in stop_range:
+        row = []
+        for prox_pct in prox_range:
+            # inputs need to be float (e.g., 5% -> 0.05)
+            s_val = stop_pct / 100.0
+            p_val = prox_pct / 100.0
+            
+            final_ret = backtest_strategy(df, p_val, s_val)
+            row.append(final_ret)
+        results.append(row)
+        
+    print(f"Grid Search Complete in {time.time() - start_time:.2f}s")
     
-    # 2. Equity Curves
-    ax2 = fig.add_subplot(gs[2, :])
-    ax2.set_title(f"Equity Curves (Daily Compounding)", fontsize=12, fontweight='bold')
-    ax2.plot(df_final.index, df_final['Equity_1'], color='orange', linewidth=2, label=f'S1: SMA 120 (40d Decay) | Total: {stats["S1_Total"]:.0f}%')
-    ax2.plot(df_final.index, df_final['Equity_2'], color='blue', linewidth=2, label=f'S2: SMA 400 (10% Stop) | Total: {stats["S2_Total"]:.0f}%')
-    ax2.axhline(1.0, color='black', linestyle='--')
-    ax2.legend()
-    ax2.grid(True, alpha=0.3)
-    ax2.set_ylabel('Equity Multiple')
+    # Convert to DataFrame for Heatmap
+    # Y-Axis: Trailing Stop (rows), X-Axis: Proximity (cols)
+    res_df = pd.DataFrame(results, index=stop_range, columns=prox_range)
     
-    # 3. Position Weights Visualization
-    ax3 = fig.add_subplot(gs[3, 0])
-    ax3.plot(df_final.index, df_final['Pos_1'].abs(), color='orange', label='S1 Weight')
-    ax3.set_title('S1 Weight (Decay)')
-    ax3.set_ylabel('Weight')
-    ax3.grid(True, alpha=0.3)
+    # Find Best Params
+    # Stack to find max index
+    stacked = res_df.stack()
+    best_coords = stacked.idxmax() # (Stop, Prox)
+    best_return = stacked.max()
     
-    ax4 = fig.add_subplot(gs[3, 1])
-    ax4.plot(df_final.index, df_final['Pos_2'].abs(), color='blue', label='S2 Weight')
-    ax4.set_title(f'S2 Weight (Dynamic: 6% Prox)')
-    ax4.set_ylabel('Weight')
-    ax4.grid(True, alpha=0.3)
+    best_stop = best_coords[0]
+    best_prox = best_coords[1]
     
+    # --- Visualization ---
+    fig = plt.figure(figsize=(14, 10))
+    ax = fig.add_subplot(111)
+    
+    # Create Heatmap
+    sns.heatmap(res_df, ax=ax, cmap='viridis', annot=False, fmt=".0f", 
+                cbar_kws={'label': 'Total Equity Return (%)'})
+    
+    # Highlight the Max
+    # X corresponds to Columns (Prox), Y to Rows (Stop)
+    # Indices in heatmap are 0-based, our labels are 1-based
+    ax.add_patch(plt.Rectangle((best_prox - 1, best_stop - 1), 1, 1, fill=False, edgecolor='red', lw=3, clip_on=False))
+    
+    # Labels (Invert Y axis so 1 is at bottom usually, but heatmap standard is top-down. 
+    # Let's keep standard heatmap: 1 at top, 30 at bottom)
+    ax.set_title(f'Grid Search: SMA 400 Strategy Optimization\nBest Return: {best_return:.0f}% @ Stop: {best_stop}%, Proximity: {best_prox}%', fontsize=14, fontweight='bold')
+    ax.set_xlabel('Re-entry Proximity Threshold (%)', fontsize=12)
+    ax.set_ylabel('Trailing Stop Loss (%)', fontsize=12)
+    
+    # Save Plot
     buf = io.BytesIO()
     plt.savefig(buf, format='png', dpi=100)
     plt.close(fig)
@@ -250,36 +206,36 @@ def dashboard():
     <html lang="en">
     <head>
         <meta charset="UTF-8">
-        <title>Strategy Comparison</title>
+        <title>Strategy Grid Search</title>
         <style>
             body {{ font-family: 'Segoe UI', sans-serif; background: #f0f2f5; padding: 20px; text-align: center; }}
-            .container {{ max-width: 1200px; margin: 0 auto; background: white; padding: 20px; border-radius: 12px; box-shadow: 0 4px 6px rgba(0,0,0,0.1); }}
-            .stats {{ display: grid; grid-template-columns: repeat(2, 1fr); gap: 20px; margin-bottom: 20px; }}
-            .card {{ padding: 15px; border-radius: 8px; border: 1px solid #ddd; }}
-            .card.s1 {{ background: #fff8e1; border-left: 5px solid orange; }}
-            .card.s2 {{ background: #e3f2fd; border-left: 5px solid blue; }}
-            .val {{ font-size: 24px; font-weight: bold; color: #333; }}
-            .lbl {{ font-size: 14px; color: #666; }}
+            .container {{ max-width: 1100px; margin: 0 auto; background: white; padding: 20px; border-radius: 12px; box-shadow: 0 4px 6px rgba(0,0,0,0.1); }}
+            .highlight {{ color: #2e7d32; font-weight: bold; font-size: 1.2em; }}
         </style>
     </head>
     <body>
         <div class="container">
-            <h1>Strategy Comparison</h1>
-            <div class="stats">
-                <div class="card s1">
-                    <h3 style="color:#e65100">Strategy 1 (SMA 120)</h3>
-                    <div class="val">{stats['S1_Total']:.0f}%</div>
-                    <div class="lbl">Total Equity Return</div>
-                    <div class="lbl">Decay 40d</div>
-                </div>
-                <div class="card s2">
-                    <h3 style="color:#0d47a1">Strategy 2 (SMA 400)</h3>
-                    <div class="val">{stats['S2_Total']:.0f}%</div>
-                    <div class="lbl">Total Equity Return</div>
-                    <div class="lbl">6% Proximity Weighting + 10% Trailing Stop/Re-entry</div>
-                </div>
+            <h1>Optimization Results: SMA 400 Strategy</h1>
+            <p>Analyzed 900 parameter combinations (1% to 30% for both settings).</p>
+            
+            <div style="background: #e8f5e9; padding: 15px; border-radius: 8px; margin: 20px 0; border: 1px solid #c8e6c9;">
+                <h2>🏆 Optimal Parameters Found</h2>
+                <p>Trailing Stop Loss: <span class="highlight">{best_stop}%</span></p>
+                <p>Re-entry Proximity: <span class="highlight">{best_prox}%</span></p>
+                <p>Total Return: <span class="highlight">{best_return:,.0f}%</span></p>
             </div>
+            
             <img src="data:image/png;base64,{img_data}" style="max-width:100%; height:auto;" />
+            
+            <div style="text-align: left; margin-top: 20px; font-size: 0.9em; color: #555;">
+                <h3>How to read the Heatmap:</h3>
+                <ul>
+                    <li><strong>X-Axis (Bottom):</strong> The Proximity Threshold % (Used for 0.5x weight and Re-entry).</li>
+                    <li><strong>Y-Axis (Left):</strong> The Trailing Stop % (Loss allowed from trade peak before exit).</li>
+                    <li><strong>Colors:</strong> Brighter/Yellow colors indicate higher returns. Dark/Purple colors indicate lower returns.</li>
+                    <li><strong>Red Box:</strong> Marks the single highest performing combination.</li>
+                </ul>
+            </div>
         </div>
     </body>
     </html>
@@ -287,5 +243,5 @@ def dashboard():
     return render_template_string(html)
 
 if __name__ == '__main__':
-    print(f"Starting comparison server on port {PORT}...")
+    print(f"Starting Grid Search server on port {PORT}...")
     app.run(host='0.0.0.0', port=PORT, debug=False)
