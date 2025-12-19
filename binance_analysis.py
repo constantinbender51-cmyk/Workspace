@@ -16,9 +16,9 @@ app = Flask(__name__)
 SYMBOL = 'BTCUSDT'
 START_YEAR = 2018
 
-# --- STRATEGY PARAMETERS (FROM USER INPUT) ---
+# --- STRATEGY PARAMETERS ---
 
-# MACD STRATEGIES (Format: [(Fast, Slow, Sig), ...], Weights)
+# MACD STRATEGIES
 STRAT_MACD_1H = {
     'params': [(97, 366, 47), (15, 40, 11), (16, 55, 13)],
     'weights': [0.45, 0.43, 0.01]
@@ -32,7 +32,7 @@ STRAT_MACD_1D = {
     'weights': [0.87, 0.92, 0.73]
 }
 
-# SMA STRATEGIES (Format: [Period1, Period2, Period3], Weights)
+# SMA STRATEGIES
 STRAT_SMA_1H = {
     'params': [10, 80, 380],
     'weights': [0.0, 1.0, 0.8]
@@ -76,7 +76,6 @@ def fetch_binance_data(symbol, interval, start_year):
 # --- SIGNAL GENERATION LOGIC ---
 
 def calculate_macd_pos(df, strat_config):
-    """Calculates weighted position (-1 to 1) for Triple MACD"""
     prices = df['close']
     params = strat_config['params']
     weights = strat_config['weights']
@@ -89,7 +88,6 @@ def calculate_macd_pos(df, strat_config):
         macd_line = ema_fast - ema_slow
         signal_line = macd_line.ewm(span=sig_p, adjust=False).mean()
         
-        # Signal: 1 if MACD > Sig, -1 if MACD < Sig
         sig = np.where(macd_line > signal_line, 1.0, -1.0)
         composite_signal += (sig * w)
         
@@ -98,7 +96,6 @@ def calculate_macd_pos(df, strat_config):
     return composite_signal / total_w
 
 def calculate_sma_pos(df, strat_config):
-    """Calculates weighted position (-1 to 1) for Triple SMA"""
     prices = df['close']
     periods = strat_config['params']
     weights = strat_config['weights']
@@ -107,9 +104,7 @@ def calculate_sma_pos(df, strat_config):
     
     for p, w in zip(periods, weights):
         sma = prices.rolling(window=p).mean()
-        # Signal: 1 if Price > SMA, -1 if Price < SMA
         sig = np.where(prices > sma, 1.0, -1.0)
-        # Fill NaN (start of data) with 0
         sig = pd.Series(sig, index=df.index).fillna(0)
         composite_signal += (sig * w)
         
@@ -119,14 +114,14 @@ def calculate_sma_pos(df, strat_config):
 
 def calculate_metrics(returns):
     cum_ret = (1 + returns).cumprod()
+    if cum_ret.empty: return {'Total Return': '0%', 'Sharpe Ratio': '0', 'Max Drawdown': '0%'}
+    
     total_ret_pct = (cum_ret.iloc[-1] - 1) * 100
     
-    # Sharpe (Ann. 24*365 for 1H data)
     sharpe = 0
     if returns.std() != 0:
         sharpe = (returns.mean() / returns.std()) * np.sqrt(24 * 365)
         
-    # Max Drawdown
     roll_max = cum_ret.cummax()
     drawdown = (cum_ret - roll_max) / roll_max
     max_dd_pct = drawdown.min() * 100
@@ -140,15 +135,14 @@ def calculate_metrics(returns):
 # --- MAIN ANALYSIS ---
 
 def run_ensemble_analysis():
-    # 1. Fetch Data (1H Base)
     print("Fetching 1H data...")
     df_1h = fetch_binance_data(SYMBOL, '1h', START_YEAR)
     
-    # 2. Resample
+    # Resample (using 'last' to represent closing price of the higher timeframe)
     df_4h = df_1h.resample('4h').last().dropna()
     df_1d = df_1h.resample('1D').last().dropna()
     
-    # 3. Calculate Positions for each strategy on native timeframe
+    # --- STEP 1: Calculate Native Signals ---
     pos_macd_1h = calculate_macd_pos(df_1h, STRAT_MACD_1H)
     pos_macd_4h = calculate_macd_pos(df_4h, STRAT_MACD_4H)
     pos_macd_1d = calculate_macd_pos(df_1d, STRAT_MACD_1D)
@@ -157,9 +151,20 @@ def run_ensemble_analysis():
     pos_sma_4h  = calculate_sma_pos(df_4h, STRAT_SMA_4H)
     pos_sma_1d  = calculate_sma_pos(df_1d, STRAT_SMA_1D)
     
-    # 4. Align all positions to 1H timeframe (Forward Fill)
-    # We reindex 4H and 1D signals to the 1H index, ffilling the signal
-    # This simulates holding the 4H/1D signal constant until the bar closes
+    # --- STEP 2: Strict Index Alignment (Fixing Lookahead Bias) ---
+    # We shift the INDEX of higher timeframes to the moment the bar closes in 1H time.
+    # A 4H bar at 08:00 closes at 12:00. In 1H terms (open time), the last bar is 11:00.
+    # So we map 08:00 -> 11:00 (+3 hours).
+    # A 1D bar at 00:00 closes at 24:00. In 1H terms, the last bar is 23:00.
+    # So we map 00:00 -> 23:00 (+23 hours).
+    
+    pos_macd_4h.index = pos_macd_4h.index + pd.Timedelta(hours=3)
+    pos_sma_4h.index  = pos_sma_4h.index  + pd.Timedelta(hours=3)
+    
+    pos_macd_1d.index = pos_macd_1d.index + pd.Timedelta(hours=23)
+    pos_sma_1d.index  = pos_sma_1d.index  + pd.Timedelta(hours=23)
+    
+    # --- STEP 3: Reindex to 1H Base (Forward Fill) ---
     target_idx = df_1h.index
     
     p1 = pos_macd_1h
@@ -169,53 +174,47 @@ def run_ensemble_analysis():
     p5 = pos_sma_4h.reindex(target_idx, method='ffill').fillna(0)
     p6 = pos_sma_1d.reindex(target_idx, method='ffill').fillna(0)
     
-    # 5. Ensemble Average (Normalized Leverage = 1x)
-    # Divide by 6 strategies to normalize exposure to [-1.0, 1.0]
-    # Shift by 1 to avoid lookahead bias (signal calc at close -> trade at next open)
+    # --- STEP 4: Ensemble & Global Shift ---
+    # Normalized Leverage (Average of 6 strategies -> Max 1.0)
+    # Global shift(1) simulates trading at the OPEN of the NEXT bar based on signals from the CLOSE of the current bar.
+    # Because we aligned HTF indices to the last 1H bar of their block, this shift correctly trades 
+    # the 4H signal starting 1 hour after the 4H bar closes (simulating strictly available data).
     ensemble_pos = ((p1 + p2 + p3 + p4 + p5 + p6) / 6.0).shift(1).fillna(0)
     
-    # 6. Calculate Returns
+    # --- STEP 5: Returns ---
     market_returns = df_1h['close'].pct_change().fillna(0)
     strategy_returns = ensemble_pos * market_returns
     
-    # 7. Metrics
+    # Analysis outputs
     metrics = calculate_metrics(strategy_returns)
     
-    # 8. Correlations
-    # We combine the UN-SHIFTED positions into a DF to see correlation of signals
     signals_df = pd.DataFrame({
         'MACD_1H': p1, 'MACD_4H': p2, 'MACD_1D': p3,
         'SMA_1H': p4, 'SMA_4H': p5, 'SMA_1D': p6,
-        'Ensemble': ensemble_pos.shift(-1) # Unshift for comparison
+        'Ensemble': ensemble_pos.shift(-1) 
     }).dropna()
     corr_matrix = signals_df.corr().round(2)
     
-    # 9. Plotting
+    # Plotting
     fig, (ax1, ax2) = plt.subplots(2, 1, figsize=(12, 10), gridspec_kw={'height_ratios': [2, 1]})
     
-    # Equity Curve
     cum_ret = (1 + strategy_returns).cumprod()
     buy_hold = (1 + market_returns).cumprod()
+    if not buy_hold.empty: buy_hold = buy_hold / buy_hold.iloc[0]
     
-    # Normalize buy hold to match strat start
-    buy_hold = buy_hold / buy_hold.iloc[0]
-    
-    ax1.plot(cum_ret.index, cum_ret, label='Ensemble (Normalized 1x)', color='#00ff88', linewidth=1.5)
+    ax1.plot(cum_ret.index, cum_ret, label='Ensemble (Normalized)', color='#00ff88', linewidth=1.5)
     ax1.plot(buy_hold.index, buy_hold, label='BTC Buy & Hold', color='white', alpha=0.3, linewidth=1)
     ax1.set_yscale('log')
-    ax1.set_title(f"Ensemble Strategy Performance (2018-Present)\nSharpe: {metrics['Sharpe Ratio']} | Return: {metrics['Total Return']}", color='white')
+    ax1.set_title(f"Ensemble Strategy (Zero Lookahead)\nSharpe: {metrics['Sharpe Ratio']} | Return: {metrics['Total Return']}", color='white')
     ax1.grid(True, alpha=0.1)
     ax1.legend()
     
-    # Drawdown & Leverage
-    # We plot the leverage usage (Position Size) over time on ax2
     ax2.plot(ensemble_pos.index, ensemble_pos, color='#00e5ff', linewidth=0.5, alpha=0.8)
     ax2.set_title("Net Exposure / Leverage (-1.0 to +1.0)", color='white')
     ax2.set_ylabel("Leverage", color='white')
     ax2.set_ylim(-1.1, 1.1)
     ax2.grid(True, alpha=0.1)
     
-    # Styling
     for ax in [ax1, ax2]:
         ax.set_facecolor('#1e1e1e')
         ax.tick_params(colors='white')
@@ -236,8 +235,6 @@ def run_ensemble_analysis():
 @app.route('/')
 def index():
     metrics, corr, plot_url = run_ensemble_analysis()
-    
-    # Format correlation matrix as HTML
     corr_html = corr.to_html(classes='table table-dark table-sm table-bordered', border=0)
     
     return render_template_string("""
@@ -257,9 +254,7 @@ def index():
     </head>
     <body>
         <div class="container">
-            <h2 class="text-center mb-4">🧪 6-Strategy Ensemble Analysis (Normalized)</h2>
-            
-            <!-- Metrics Row -->
+            <h2 class="text-center mb-4">🧪 6-Strategy Ensemble (Zero Bias)</h2>
             <div class="row mb-4">
                 <div class="col-md-4">
                     <div class="metric-box">
@@ -280,23 +275,12 @@ def index():
                     </div>
                 </div>
             </div>
-
-            <!-- Plot -->
             <div class="card p-2 mb-4">
                 <img src="data:image/png;base64,{{ plot_url }}" class="img-fluid">
             </div>
-
-            <!-- Correlation Analysis -->
             <div class="card p-4">
                 <h4 class="mb-3">Strategy Correlation Matrix</h4>
-                <p class="text-muted">Shows how similar the signals are between different strategies. Low correlation improves diversification.</p>
-                <div class="table-responsive">
-                    {{ corr_html | safe }}
-                </div>
-            </div>
-            
-            <div class="text-center mt-4 text-muted">
-                <small>Analysis based on BTCUSDT 1H data (2018-Present). Leverage normalized to 1x.</small>
+                <div class="table-responsive">{{ corr_html | safe }}</div>
             </div>
         </div>
     </body>
