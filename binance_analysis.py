@@ -18,12 +18,8 @@ app = Flask(__name__)
 SYMBOL = 'BTCUSDT'
 START_YEAR = 2018
 
-# OPTIMIZATION CONFIG
+# OPTIMIZATION CONFIG (No Stop Loss)
 WEIGHT_STEPS = [0.0, 0.2, 0.4, 0.6, 0.8, 1.0]
-# Stop Loss: 0.1% to 20% (Represented as 0.001 to 0.2)
-SL_MIN, SL_MAX = 0.001, 0.20
-
-# Updated GA Parameters (Doubled)
 POPULATION_SIZE = 100
 GENERATIONS = 30
 
@@ -31,14 +27,14 @@ GENERATIONS = 30
 GLOBAL_STATE = {
     'status': 'Idle',
     'progress': 0,
-    'best_params': {'weights': [1.0]*6, 'sl': 0.05},
+    'best_weights': [1.0] * 6,
     'metrics': {},
     'plot_url': None,
     'corr_html': None,
     'is_optimizing': False
 }
 
-# --- STRATEGY DEFINITIONS ---
+# --- STRATEGY DEFINITIONS (The "Found Specs") ---
 STRAT_MACD_1H = {'params': [(97, 366, 47), (15, 40, 11), (16, 55, 13)], 'weights': [0.45, 0.43, 0.01]}
 STRAT_MACD_4H = {'params': [(6, 8, 4), (84, 324, 96), (22, 86, 14)], 'weights': [0.29, 0.58, 0.64]}
 STRAT_MACD_1D = {'params': [(52, 64, 61), (5, 6, 4), (17, 18, 16)], 'weights': [0.87, 0.92, 0.73]}
@@ -47,7 +43,7 @@ STRAT_SMA_1H = {'params': [10, 80, 380], 'weights': [0.0, 1.0, 0.8]}
 STRAT_SMA_4H = {'params': [20, 120, 260], 'weights': [0.4, 0.4, 1.0]}
 STRAT_SMA_1D = {'params': [40, 120, 390], 'weights': [0.6, 0.8, 0.4]}
 
-# --- DATA FETCHING ---
+# --- DATA FETCHING & PROCESSING ---
 def fetch_binance_data(symbol, interval, start_year):
     base_url = "https://api.binance.com/api/v3/klines"
     start_ts = int(datetime(start_year, 1, 1).timestamp() * 1000)
@@ -70,12 +66,10 @@ def fetch_binance_data(symbol, interval, start_year):
             
     df = pd.DataFrame(all_data, columns=['open_time', 'open', 'high', 'low', 'close', 'v', 'ct', 'qav', 'nt', 'tbv', 'tqv', 'i'])
     df['open_time'] = pd.to_datetime(df['open_time'], unit='ms')
-    for col in ['open', 'high', 'low', 'close']:
-        df[col] = df[col].astype(float)
+    df['close'] = df['close'].astype(float)
     df.set_index('open_time', inplace=True)
-    return df[['open', 'high', 'low', 'close']]
+    return df[['close']]
 
-# --- RAW SIGNAL GENERATION ---
 def calculate_macd_pos(prices, strat_config):
     params = strat_config['params']
     weights = strat_config['weights']
@@ -85,7 +79,6 @@ def calculate_macd_pos(prices, strat_config):
         slow = prices.ewm(span=s, adjust=False).mean()
         macd = fast - slow
         sig_line = macd.ewm(span=sig_p, adjust=False).mean()
-        # Sign: 1 if MACD>Sig, -1 if MACD<Sig
         composite += np.where(macd > sig_line, 1.0, -1.0) * w
     total_w = sum(weights)
     return composite / total_w if total_w > 0 else composite
@@ -98,249 +91,151 @@ def calculate_sma_pos(prices, strat_config):
         sma = prices.rolling(window=p).mean()
         composite += np.where(prices > sma, 1.0, -1.0) * w
     total_w = sum(weights)
-    # Handle NaNs from rolling
     composite = np.nan_to_num(composite)
     return composite / total_w if total_w > 0 else composite
 
 def get_aligned_data():
-    """Returns aligned signals (N x 6) and Price Data"""
-    if hasattr(app, 'cached_data'): 
-        return app.cached_data
+    """Returns signals (N x 6) and returns aligned to 1H"""
+    if hasattr(app, 'cached_data'): return app.cached_data
 
     df_1h = fetch_binance_data(SYMBOL, '1h', START_YEAR)
     df_4h = df_1h.resample('4h').last().dropna()
     df_1d = df_1h.resample('1D').last().dropna()
     
-    c1, c4, cd = df_1h['close'], df_4h['close'], df_1d['close']
+    # Calculate Signals
+    p1 = calculate_macd_pos(df_1h['close'], STRAT_MACD_1H)
+    p2 = calculate_macd_pos(df_4h['close'], STRAT_MACD_4H)
+    p3 = calculate_macd_pos(df_1d['close'], STRAT_MACD_1D)
+    p4 = calculate_sma_pos(df_1h['close'], STRAT_SMA_1H)
+    p5 = calculate_sma_pos(df_4h['close'], STRAT_SMA_4H)
+    p6 = calculate_sma_pos(df_1d['close'], STRAT_SMA_1D)
     
-    # Calc raw positions
-    p1 = calculate_macd_pos(c1, STRAT_MACD_1H); p4 = calculate_sma_pos(c1, STRAT_SMA_1H)
-    p2 = calculate_macd_pos(c4, STRAT_MACD_4H); p5 = calculate_sma_pos(c4, STRAT_SMA_4H)
-    p3 = calculate_macd_pos(cd, STRAT_MACD_1D); p6 = calculate_sma_pos(cd, STRAT_SMA_1D)
-    
-    # Align HTF to 1H (Fix Lookahead: Shift HTF index to bar close time)
-    # 4H closes +3h after open, 1D closes +23h after open
+    # Align HTF to 1H (Fix Lookahead)
     s2 = pd.Series(p2, index=df_4h.index + pd.Timedelta(hours=3)).reindex(df_1h.index, method='ffill').fillna(0)
-    s5 = pd.Series(p5, index=df_4h.index + pd.Timedelta(hours=3)).reindex(df_1h.index, method='ffill').fillna(0)
     s3 = pd.Series(p3, index=df_1d.index + pd.Timedelta(hours=23)).reindex(df_1h.index, method='ffill').fillna(0)
+    s5 = pd.Series(p5, index=df_4h.index + pd.Timedelta(hours=3)).reindex(df_1h.index, method='ffill').fillna(0)
     s6 = pd.Series(p6, index=df_1d.index + pd.Timedelta(hours=23)).reindex(df_1h.index, method='ffill').fillna(0)
     
     signals = np.column_stack([p1, s2.values, s3.values, p4, s5.values, s6.values])
+    returns = df_1h['close'].pct_change().fillna(0).values
     
-    # Cache everything needed for vectorized backtest
-    # We need OHLC for accurate SL checks (Low for Longs, High for Shorts)
-    app.cached_data = {
-        'signals': signals,
-        'open': df_1h['open'].values,
-        'high': df_1h['high'].values,
-        'low': df_1h['low'].values,
-        'close': df_1h['close'].values,
-        'index': df_1h.index
-    }
+    app.cached_data = {'signals': signals, 'returns': returns, 'index': df_1h.index}
     return app.cached_data
 
-# --- VECTORIZED BACKTEST ENGINE ---
+# --- OPTIMIZATION ENGINE (WEIGHTS ONLY) ---
 
-def apply_stop_loss_vectorized(raw_pos, sl_pct, open_p, low_p, high_p, close_p):
-    """
-    Applies Stop Loss logic vectorially based on Trade Regimes.
-    A 'Trade Regime' is defined by the sign of the raw position.
-    If Low < Entry * (1-SL) during a Long regime, kill pos.
-    """
-    # 1. Identify Regimes (Long=1, Short=-1, Neutral=0)
-    # We use sign to group "continuous" trades. 
-    # Even if leverage changes 0.5 -> 0.8, it's one "Long Trade".
-    regime = np.sign(raw_pos)
+def evaluate_ensemble(weights, signals, returns):
+    w_arr = np.array(weights)
+    total_w = np.sum(w_arr)
+    if total_w == 0: return -10.0
     
-    # 2. Create unique IDs for each contiguous regime
-    # diff!=0 marks change points. cumsum gives unique ID.
-    change_pts = (regime != np.roll(regime, 1))
-    change_pts[0] = True
-    trade_ids = np.cumsum(change_pts)
+    # Position = Weighted Average (Normalized -1 to 1)
+    ensemble_pos = np.dot(signals, w_arr) / total_w
     
-    # 3. Calculate 'Entry Price' for each candle (Vectorized)
-    # Entry price is the OPEN price of the FIRST candle in the regime
-    # We broadcast this entry price to all candles in the trade_id
-    # (Simplified: In a continuous scaling strat, 'Avg Entry' is complex. 
-    # We use 'Regime Start Open' as the anchor for the Stop Loss).
+    # Shift for Execution (Close -> Open)
+    ensemble_pos = np.concatenate(([0], ensemble_pos[:-1]))
     
-    # Get the index of the start of each trade
-    _, start_indices = np.unique(trade_ids, return_index=True)
-    entry_prices = open_p[start_indices] # Price at start of each trade
+    strat_rets = ensemble_pos * returns
     
-    # Map back to full array size
-    # This creates an array where every bar has the EntryPrice of its current regime
-    # We use searchsorted to map trade_ids to entry_prices indices efficiently
-    # Since trade_ids is sorted (monotonic), this is valid.
-    # Note: trade_ids starts at 1, so we adjust index
-    current_entry_prices = entry_prices[trade_ids - 1]
-    
-    # 4. Check Stop Conditions
-    # Long Stop: Low < Entry * (1 - SL)
-    # Short Stop: High > Entry * (1 + SL)
-    long_stop_mask = (regime == 1) & (low_p < current_entry_prices * (1 - sl_pct))
-    short_stop_mask = (regime == -1) & (high_p > current_entry_prices * (1 + sl_pct))
-    any_stop_mask = long_stop_mask | short_stop_mask
-    
-    # 5. Propagate Stops
-    # If a stop is hit in a regime, ALL subsequent bars in that regime must be 0.
-    # We use pandas groupby-transform (or numpy equivalent) to propagate "True" forward.
-    # Since we are inside specific trade_ids, max() accumulation works.
-    
-    # For speed in pure numpy:
-    # We need to set 'stopped' to True for the rest of the block if 'any_stop_mask' is True anywhere.
-    # This is tricky in pure numpy without a loop over IDs.
-    # Optimization: Use Pandas groupby (fast enough for 60k rows)
-    
-    df_temp = pd.DataFrame({'id': trade_ids, 'stopped': any_stop_mask})
-    # cumul max propagates the True value down the group
-    df_temp['stopped_prop'] = df_temp.groupby('id')['stopped'].cummax()
-    
-    final_mask = ~df_temp['stopped_prop'].values
-    
-    # Apply mask
-    final_pos = raw_pos * final_mask
-    return final_pos
-
-def evaluate_individual(genome, data_dict):
-    # Genome: [W1..W6, SL]
-    weights = np.array(genome[:6])
-    sl_pct = genome[6]
-    
-    signals = data_dict['signals']
-    total_w = np.sum(weights)
-    if total_w == 0: return -99.0
-    
-    # Raw Ensemble
-    raw_pos = np.dot(signals, weights) / total_w
-    
-    # Apply SL
-    clean_pos = apply_stop_loss_vectorized(
-        raw_pos, sl_pct, 
-        data_dict['open'], data_dict['low'], data_dict['high'], data_dict['close']
-    )
-    
-    # Shift for execution (Signal at Close -> Trade at Open)
-    final_pos = np.concatenate(([0], clean_pos[:-1]))
-    
-    # Returns
-    returns = np.diff(data_dict['close']) / data_dict['close'][:-1]
-    returns = np.concatenate(([0], returns))
-    
-    strat_rets = final_pos * returns
-    
-    # Sharpe
     mean = np.mean(strat_rets)
     std = np.std(strat_rets)
     if std < 1e-9: return -10.0
+    # Annualized Sharpe (1H data)
     return (mean / std) * np.sqrt(8760)
 
-# --- GENETIC ALGORITHM ---
-def create_individual():
-    # 6 Weights (discrete steps) + 1 SL (continuous)
-    weights = [random.choice(WEIGHT_STEPS) for _ in range(6)]
-    sl = random.uniform(SL_MIN, SL_MAX)
-    return weights + [sl]
-
-def run_ga_thread():
+def run_optimization():
     GLOBAL_STATE['is_optimizing'] = True
-    GLOBAL_STATE['status'] = "Preprocessing Data..."
     GLOBAL_STATE['progress'] = 0
     
     data = get_aligned_data()
+    signals = data['signals']
+    returns = data['returns']
     
-    population = [create_individual() for _ in range(POPULATION_SIZE)]
+    population = [[random.choice(WEIGHT_STEPS) for _ in range(6)] for _ in range(POPULATION_SIZE)]
     
-    best_fitness = -999
-    best_ind = None
+    best_sharpe = -999
+    best_weights = [1.0] * 6
     
     for gen in range(GENERATIONS):
-        GLOBAL_STATE['status'] = f"Evolution: Gen {gen+1}/{GENERATIONS}"
         GLOBAL_STATE['progress'] = int((gen / GENERATIONS) * 100)
+        GLOBAL_STATE['status'] = f"Optimizing Weights (Gen {gen+1}/{GENERATIONS})"
         
         scores = []
         for ind in population:
-            f = evaluate_individual(ind, data)
-            scores.append((ind, f))
-            if f > best_fitness:
-                best_fitness = f
-                best_ind = ind[:]
+            s = evaluate_ensemble(ind, signals, returns)
+            scores.append((ind, s))
+            if s > best_sharpe:
+                best_sharpe = s
+                best_weights = ind[:]
         
         scores.sort(key=lambda x: x[1], reverse=True)
-        # Elitism
-        next_gen = [x[0] for x in scores[:4]]
+        next_gen = [x[0] for x in scores[:4]] # Elitism
         
         while len(next_gen) < POPULATION_SIZE:
-            # Tourney
             p1 = max(random.sample(scores, 4), key=lambda x:x[1])[0]
             p2 = max(random.sample(scores, 4), key=lambda x:x[1])[0]
             
             # Crossover
-            pt = random.randint(1, 6)
+            pt = random.randint(1, 5)
             c1 = p1[:pt] + p2[pt:]
             
             # Mutate
-            if random.random() < 0.3:
-                idx = random.randint(0, 6)
-                if idx < 6: # Weight
-                    c1[idx] = random.choice(WEIGHT_STEPS)
-                else: # SL
-                    c1[idx] = random.uniform(SL_MIN, SL_MAX)
-            
+            if random.random() < 0.2:
+                idx = random.randint(0, 5)
+                c1[idx] = random.choice(WEIGHT_STEPS)
             next_gen.append(c1)
+            
         population = next_gen
 
-    # Finalize
-    GLOBAL_STATE['best_params'] = {
-        'weights': best_ind[:6],
-        'sl': best_ind[6]
-    }
-    generate_report(best_ind, data)
-    GLOBAL_STATE['status'] = "Optimization Completed"
-    GLOBAL_STATE['progress'] = 100
+    GLOBAL_STATE['best_weights'] = best_weights
+    generate_final_report(best_weights, data)
     GLOBAL_STATE['is_optimizing'] = False
+    GLOBAL_STATE['progress'] = 100
+    GLOBAL_STATE['status'] = "Done"
 
-def generate_report(genome, data):
-    weights = np.array(genome[:6])
-    sl = genome[6]
+def generate_final_report(weights, data):
+    signals = data['signals']
+    returns = data['returns']
     
-    total_w = np.sum(weights)
-    raw_pos = np.dot(data['signals'], weights) / total_w
-    clean_pos = apply_stop_loss_vectorized(
-        raw_pos, sl, data['open'], data['low'], data['high'], data['close']
-    )
+    w_arr = np.array(weights)
+    total_w = np.sum(w_arr)
+    ensemble_pos = np.dot(signals, w_arr) / total_w
     
-    final_pos = np.concatenate(([0], clean_pos[:-1]))
-    returns = np.diff(data['close']) / data['close'][:-1]
-    returns = np.concatenate(([0], returns))
-    
+    # Execution Shift
+    final_pos = np.concatenate(([0], ensemble_pos[:-1]))
     strat_rets = final_pos * returns
-    cum_ret = np.cumprod(1 + strat_rets)
     
-    # Metrics
+    cum_ret = np.cumprod(1 + strat_rets)
     total_ret = (cum_ret[-1] - 1) * 100
-    sharpe = (np.mean(strat_rets) / np.std(strat_rets)) * np.sqrt(8760)
+    
+    std = np.std(strat_rets)
+    sharpe = (np.mean(strat_rets) / std * np.sqrt(8760)) if std > 0 else 0
+    
     dd = (cum_ret - np.maximum.accumulate(cum_ret)) / np.maximum.accumulate(cum_ret)
     max_dd = np.min(dd) * 100
     
     GLOBAL_STATE['metrics'] = {
         'Total Return': f"{total_ret:,.2f}%",
         'Sharpe Ratio': f"{sharpe:.4f}",
-        'Max Drawdown': f"{max_dd:.2f}%",
-        'Optimal SL': f"{sl*100:.2f}%"
+        'Max Drawdown': f"{max_dd:.2f}%"
     }
     
-    # Plot
+    # Plotting
     fig, (ax1, ax2) = plt.subplots(2, 1, figsize=(10, 8), gridspec_kw={'height_ratios': [2, 1]})
-    idx = data['index']
     
-    ax1.plot(idx, cum_ret, color='#00ff88', label=f'Optimized (SL: {sl*100:.1f}%)')
+    idx = data['index']
+    base_curve = np.cumprod(1 + returns)
+    base_curve = base_curve / base_curve[0]
+    
+    ax1.plot(idx, cum_ret, color='#00ff88', label='Ensemble Strategy')
+    ax1.plot(idx, base_curve, color='white', alpha=0.3, label='BTC Buy & Hold')
     ax1.set_yscale('log')
-    ax1.set_title("Performance with Stop Loss")
+    ax1.set_title("Equity Curve (Log Scale)")
+    ax1.legend()
     ax1.grid(True, alpha=0.1)
     
     ax2.plot(idx, final_pos, color='#00e5ff', linewidth=0.5)
-    ax2.set_title("Position (0 = Stopped/Neutral)")
+    ax2.set_title("Net Leverage (-1.0 to 1.0)")
     ax2.set_ylim(-1.1, 1.1)
     ax2.grid(True, alpha=0.1)
     
@@ -357,95 +252,158 @@ def generate_report(genome, data):
     img.seek(0)
     GLOBAL_STATE['plot_url'] = base64.b64encode(img.getvalue()).decode()
     plt.close()
+    
+    # Correlation
+    labels = ['MACD 1H', 'MACD 4H', 'MACD 1D', 'SMA 1H', 'SMA 4H', 'SMA 1D']
+    sig_df = pd.DataFrame(signals, index=idx, columns=labels)
+    sig_df['Ensemble'] = ensemble_pos
+    GLOBAL_STATE['corr_html'] = sig_df.corr().round(2).to_html(classes='table table-dark table-sm', border=0)
 
-# --- FLASK ---
+# --- FLASK ROUTES ---
 @app.route('/')
 def index():
     if not GLOBAL_STATE['plot_url'] and not GLOBAL_STATE['is_optimizing']:
-        threading.Thread(target=run_ga_thread).start()
+        threading.Thread(target=run_optimization).start()
         
     return render_template_string("""
     <!DOCTYPE html>
-    <html>
+    <html lang="en">
     <head>
-        <title>SL Ensemble Optimizer</title>
+        <meta charset="UTF-8">
+        <title>Ensemble Strategy Final Report</title>
         <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/css/bootstrap.min.css" rel="stylesheet">
-        <meta http-equiv="refresh" content="2">
+        <meta http-equiv="refresh" content="3">
         <style>
-            body { background: #121212; color: #e0e0e0; font-family: 'Segoe UI'; padding: 20px; }
-            .card { background: #1e1e1e; border: 1px solid #333; margin-bottom: 20px; }
-            .live-step { border-left: 2px solid #00ff88; padding-left: 15px; margin-bottom: 20px; }
+            body { background-color: #0f0f0f; color: #e0e0e0; font-family: 'Segoe UI', sans-serif; }
+            .header-section { padding: 40px 0; border-bottom: 1px solid #333; margin-bottom: 30px; }
+            .metric-card { background: #1a1a1a; border: 1px solid #333; padding: 20px; border-radius: 8px; text-align: center; }
+            .metric-val { font-size: 2rem; font-weight: 700; margin-bottom: 5px; }
+            .card { background: #1a1a1a; border: 1px solid #333; margin-bottom: 20px; }
+            .weight-box { background: #252525; border-radius: 6px; padding: 10px; text-align: center; height: 100%; }
+            .guide-step { border-left: 3px solid #00ff88; padding-left: 15px; margin-bottom: 25px; }
+            h2, h4, h5 { color: #f0f0f0; }
+            .text-accent { color: #00ff88; }
+            .text-warn { color: #ffab00; }
         </style>
     </head>
     <body>
         <div class="container">
-            <h2 class="text-center text-success mb-4">🛡️ Ensemble + Stop Loss GA</h2>
-            
+            <div class="header-section text-center">
+                <h1 class="display-5 fw-bold text-accent">Ensemble Strategy Report</h1>
+                <p class="lead text-muted">Multi-Timeframe MACD & SMA • Dynamic Weighting • Risk Normalized</p>
+            </div>
+
             {% if state.is_optimizing %}
-            <div class="alert alert-info text-center">
-                <h4>Evolution in Progress... {{ state.progress }}%</h4>
-                <small>Population: 100 | Generations: 30</small>
-                <div class="progress mt-2" style="height: 5px;">
-                    <div class="progress-bar" style="width: {{ state.progress }}%"></div>
+            <div class="alert alert-dark text-center border-secondary">
+                <h4>Running Final Optimization... {{ state.progress }}%</h4>
+                <div class="progress mt-2" style="height: 6px;">
+                    <div class="progress-bar bg-success" style="width: {{ state.progress }}%"></div>
                 </div>
             </div>
             {% endif %}
 
             {% if state.plot_url %}
-            <div class="row text-center mb-4">
-                <div class="col-3"><h3>{{ state.metrics['Total Return'] }}</h3><small>Return</small></div>
-                <div class="col-3"><h3 class="text-info">{{ state.metrics['Sharpe Ratio'] }}</h3><small>Sharpe</small></div>
-                <div class="col-3"><h3 class="text-danger">{{ state.metrics['Max Drawdown'] }}</h3><small>Drawdown</small></div>
-                <div class="col-3"><h3 class="text-warning">{{ state.metrics['Optimal SL'] }}</h3><small>Stop Loss</small></div>
-            </div>
-
-            <!-- Weights -->
-            <div class="row mb-3">
-                <div class="col-12"><h6 class="text-muted">Optimized Weights</h6></div>
-                {% set labels = ['MACD 1H', 'MACD 4H', 'MACD 1D', 'SMA 1H', 'SMA 4H', 'SMA 1D'] %}
-                {% for i in range(6) %}
-                <div class="col-2">
-                    <div class="card p-2 text-center">
-                        <small>{{ labels[i] }}</small>
-                        <div class="fw-bold" style="color: #00ff88">{{ state.best_params['weights'][i] }}</div>
+            <!-- Executive Summary -->
+            <div class="row mb-5">
+                <div class="col-md-4">
+                    <div class="metric-card">
+                        <div class="metric-val text-accent">{{ state.metrics['Total Return'] }}</div>
+                        <div class="text-muted text-uppercase small">Total Return (2018-Now)</div>
                     </div>
                 </div>
-                {% endfor %}
+                <div class="col-md-4">
+                    <div class="metric-card">
+                        <div class="metric-val text-info">{{ state.metrics['Sharpe Ratio'] }}</div>
+                        <div class="text-muted text-uppercase small">Sharpe Ratio</div>
+                    </div>
+                </div>
+                <div class="col-md-4">
+                    <div class="metric-card">
+                        <div class="metric-val text-danger">{{ state.metrics['Max Drawdown'] }}</div>
+                        <div class="text-muted text-uppercase small">Max Drawdown</div>
+                    </div>
+                </div>
             </div>
 
-            <div class="card p-2">
-                <img src="data:image/png;base64,{{ state.plot_url }}" class="img-fluid">
+            <!-- Optimized Composition -->
+            <div class="card p-4 mb-4">
+                <h4 class="mb-4">Strategy Composition (Optimized Contribution)</h4>
+                <div class="row g-3">
+                    {% set labels = ['MACD 1H', 'MACD 4H', 'MACD 1D', 'SMA 1H', 'SMA 4H', 'SMA 1D'] %}
+                    {% for i in range(6) %}
+                    <div class="col-6 col-md-2">
+                        <div class="weight-box">
+                            <div class="small text-muted mb-1">{{ labels[i] }}</div>
+                            <div class="h3 fw-bold text-white">{{ state.best_weights[i] }}</div>
+                        </div>
+                    </div>
+                    {% endfor %}
+                </div>
+                <div class="mt-3 text-muted small text-center">
+                    Values represent the relative weight (0.0 - 1.0) of each sub-strategy in the final vote.
+                </div>
             </div>
 
-            <div class="card p-4 mt-4">
-                <h3 class="text-white mb-4">🚀 Live Implementation with Stop Loss</h3>
-                
-                <div class="live-step">
-                    <h5 class="text-success">Step 1: Calculate Target Position</h5>
-                    <p>Every hour (e.g., 10:00:05), update signals and calculate the weighted target:</p>
-                    <code class="bg-dark p-2 d-block rounded">
-                        Target = SUM(Weight_i * Signal_i) / SUM(Weights)
-                    </code>
+            <!-- Charts -->
+            <div class="row mb-4">
+                <div class="col-12">
+                    <div class="card p-2">
+                        <img src="data:image/png;base64,{{ state.plot_url }}" class="img-fluid rounded">
+                    </div>
+                </div>
+            </div>
+
+            <!-- Implementation Guide -->
+            <div class="row">
+                <div class="col-lg-7">
+                    <div class="card p-4 h-100">
+                        <h4 class="mb-4 text-accent">🚀 Live Execution Protocol</h4>
+                        
+                        <div class="guide-step">
+                            <h5>1. Trading Schedule</h5>
+                            <p class="mb-0 text-muted">Execute logic <strong>hourly</strong>, immediately after the candle close (e.g., HH:00:05). This ensures signals align with the backtest.</p>
+                        </div>
+
+                        <div class="guide-step">
+                            <h5>2. Data Gathering</h5>
+                            <p class="mb-0 text-muted">
+                                - <strong>1H:</strong> Update every hour.<br>
+                                - <strong>4H:</strong> Update only on 4H closes (00, 04, 08...).<br>
+                                - <strong>1D:</strong> Update only on Daily close (00:00 UTC).
+                            </p>
+                        </div>
+
+                        <div class="guide-step">
+                            <h5>3. Position Calculation</h5>
+                            <code class="d-block bg-black p-3 rounded mb-2 text-warning">
+                                Net_Signal = (W1*S1 + W2*S2 + ... + W6*S6) / Sum(Weights)
+                            </code>
+                            <p class="mb-0 text-muted">Result is a value between -1.0 (Short) and 1.0 (Long).</p>
+                        </div>
+
+                        <div class="guide-step">
+                            <h5>4. Execution</h5>
+                            <p class="mb-0 text-muted">Adjust exchange position to match <code>Net_Signal</code>. <br>Example: If Net_Signal is <strong>0.65</strong>, ensure your Net Long exposure equals 65% of your trading capital.</p>
+                        </div>
+                    </div>
                 </div>
 
-                <div class="live-step">
-                    <h5 class="text-success">Step 2: Monitor Stop Loss (Continuous)</h5>
-                    <p>Unlike the hourly signal, the Stop Loss must be monitored <strong>continuously</strong> or at least every minute.</p>
-                    <p><strong>Logic:</strong></p>
-                    <ul>
-                        <li>Track the <strong>Regime Entry Price</strong>. This is the Open price of the hour when your position flipped from Short/Neutral to Long (or vice versa).</li>
-                        <li><strong>Long Position:</strong> If <code>Current Price &lt; Entry * (1 - {{ state.metrics['Optimal SL'] }})</code> -> <strong>Close Position Immediately</strong>.</li>
-                        <li><strong>Short Position:</strong> If <code>Current Price &gt; Entry * (1 + {{ state.metrics['Optimal SL'] }})</code> -> <strong>Close Position Immediately</strong>.</li>
-                    </ul>
-                </div>
-
-                <div class="live-step">
-                    <h5 class="text-success">Step 3: Re-Entry Logic</h5>
-                    <p>If stopped out, your target override becomes <strong>0 (Flat)</strong>.</p>
-                    <p>You remain flat until the <code>Target</code> calculated in Step 1 <strong>flips sign</strong> (e.g., goes from Long to Short) or crosses zero. This resets the "Regime" and allows a new entry.</p>
+                <!-- Correlations -->
+                <div class="col-lg-5">
+                    <div class="card p-4 h-100">
+                        <h5 class="mb-3">Signal Correlation</h5>
+                        <p class="small text-muted">Low correlation between sub-strategies improves diversification and reduces drawdown.</p>
+                        <div class="table-responsive">
+                            {{ state.corr_html | safe }}
+                        </div>
+                    </div>
                 </div>
             </div>
             {% endif %}
+            
+            <footer class="text-center py-4 text-muted small">
+                Generated by Ensemble Strategy Optimizer • No Financial Advice
+            </footer>
         </div>
     </body>
     </html>
