@@ -169,9 +169,10 @@ def run_ensemble_analysis():
     p5 = pos_sma_4h.reindex(target_idx, method='ffill').fillna(0)
     p6 = pos_sma_1d.reindex(target_idx, method='ffill').fillna(0)
     
-    # 5. Ensemble Sum (Max Leverage = 6x if all align)
+    # 5. Ensemble Average (Normalized Leverage = 1x)
+    # Divide by 6 strategies to normalize exposure to [-1.0, 1.0]
     # Shift by 1 to avoid lookahead bias (signal calc at close -> trade at next open)
-    ensemble_pos = (p1 + p2 + p3 + p4 + p5 + p6).shift(1).fillna(0)
+    ensemble_pos = ((p1 + p2 + p3 + p4 + p5 + p6) / 6.0).shift(1).fillna(0)
     
     # 6. Calculate Returns
     market_returns = df_1h['close'].pct_change().fillna(0)
@@ -199,7 +200,7 @@ def run_ensemble_analysis():
     # Normalize buy hold to match strat start
     buy_hold = buy_hold / buy_hold.iloc[0]
     
-    ax1.plot(cum_ret.index, cum_ret, label='Ensemble (Max 6x)', color='#00ff88', linewidth=1.5)
+    ax1.plot(cum_ret.index, cum_ret, label='Ensemble (Normalized 1x)', color='#00ff88', linewidth=1.5)
     ax1.plot(buy_hold.index, buy_hold, label='BTC Buy & Hold', color='white', alpha=0.3, linewidth=1)
     ax1.set_yscale('log')
     ax1.set_title(f"Ensemble Strategy Performance (2018-Present)\nSharpe: {metrics['Sharpe Ratio']} | Return: {metrics['Total Return']}", color='white')
@@ -209,8 +210,9 @@ def run_ensemble_analysis():
     # Drawdown & Leverage
     # We plot the leverage usage (Position Size) over time on ax2
     ax2.plot(ensemble_pos.index, ensemble_pos, color='#00e5ff', linewidth=0.5, alpha=0.8)
-    ax2.set_title("Net Exposure / Leverage (-6.0 to +6.0)", color='white')
+    ax2.set_title("Net Exposure / Leverage (-1.0 to +1.0)", color='white')
     ax2.set_ylabel("Leverage", color='white')
+    ax2.set_ylim(-1.1, 1.1)
     ax2.grid(True, alpha=0.1)
     
     # Styling
@@ -255,7 +257,7 @@ def index():
     </head>
     <body>
         <div class="container">
-            <h2 class="text-center mb-4">🧪 6-Strategy Ensemble Analysis</h2>
+            <h2 class="text-center mb-4">🧪 6-Strategy Ensemble Analysis (Normalized)</h2>
             
             <!-- Metrics Row -->
             <div class="row mb-4">
@@ -294,7 +296,7 @@ def index():
             </div>
             
             <div class="text-center mt-4 text-muted">
-                <small>Analysis based on BTCUSDT 1H data (2018-Present). Leverage dynamic up to 6x.</small>
+                <small>Analysis based on BTCUSDT 1H data (2018-Present). Leverage normalized to 1x.</small>
             </div>
         </div>
     </body>
