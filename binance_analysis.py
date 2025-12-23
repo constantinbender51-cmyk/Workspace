@@ -1,353 +1,350 @@
+import os
+import io
+import base64
+import logging
 import requests
+import json
+import time
+from datetime import datetime, timedelta
 import pandas as pd
 import numpy as np
 import matplotlib
 matplotlib.use('Agg')
 import matplotlib.pyplot as plt
-import io
-import base64
-from flask import Flask, render_template_string
-from datetime import datetime
-import time
+import matplotlib.dates as mdates
+from flask import Flask, render_template
+
+# --- Configuration ---
+SYMBOL = "BTCUSDT"
+LOOKBACK_DAYS = 365
+# Strategy Constants from your file
+CAP_SPLIT = 0.333
+PLANNER_PARAMS = {"S1_SMA": 120, "S1_DECAY": 40, "S1_STOP": 0.13, "S2_SMA": 400}
+TUMBLER_PARAMS = {"SMA1": 32, "SMA2": 114, "STOP": 0.043, "III_WIN": 27, "FLAT_THRESH": 0.356, "BAND": 0.077, "LEVS": [0.079, 4.327, 3.868], "III_TH": [0.058, 0.259]}
+GAINER_PARAMS = {"WEIGHTS": [0.8, 0.4], "MACD_1H": {'params': [(97, 366, 47)]}, "MACD_1D": {'params': [(52, 64, 61)]}}
+TUMBLER_MAX_LEV = 4.327
+TARGET_STRAT_LEV = 2.0
 
 app = Flask(__name__)
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger("Backtester")
 
-# --- CONFIGURATION ---
-SYMBOL = 'BTCUSDT'
-START_YEAR = 2018
-
-# --- "FOUND SPECS" (Hardcoded Strategy Parameters) ---
-# These match the optimized parameters provided in the conversation history.
-
-# MACD: [(Fast, Slow, Sig), (Fast, Slow, Sig), (Fast, Slow, Sig)], [W1, W2, W3]
-STRAT_MACD_1H = {'params': [(97, 366, 47), (15, 40, 11), (16, 55, 13)], 'weights': [0.45, 0.43, 0.01]}
-STRAT_MACD_4H = {'params': [(6, 8, 4), (84, 324, 96), (22, 86, 14)], 'weights': [0.29, 0.58, 0.64]}
-STRAT_MACD_1D = {'params': [(52, 64, 61), (5, 6, 4), (17, 18, 16)], 'weights': [0.87, 0.92, 0.73]}
-
-# SMA: [P1, P2, P3], [W1, W2, W3]
-STRAT_SMA_1H = {'params': [10, 80, 380], 'weights': [0.0, 1.0, 0.8]}
-STRAT_SMA_4H = {'params': [20, 120, 260], 'weights': [0.4, 0.4, 1.0]}
-STRAT_SMA_1D = {'params': [40, 120, 390], 'weights': [0.6, 0.8, 0.4]}
-
-# ENSEMBLE WEIGHTS (Contribution of each strategy to the final vote)
-# Set to Equal Weights (1.0 each) as specific GA weights were not provided in text.
-# Normalized automatically.
-ENSEMBLE_WEIGHTS = [1.0, 1.0, 1.0, 1.0, 1.0, 1.0] 
-LABELS = ['MACD 1H', 'MACD 4H', 'MACD 1D', 'SMA 1H', 'SMA 4H', 'SMA 1D']
-
-# --- DATA ENGINE ---
-
-def fetch_binance_data(symbol, interval, start_year):
-    """Fetches full history of 1H data to ensure accurate signal generation."""
-    base_url = "https://api.binance.com/api/v3/klines"
-    start_ts = int(datetime(start_year, 1, 1).timestamp() * 1000)
-    end_ts = int(time.time() * 1000)
-    limit = 1000
+# --- Data Fetching ---
+def fetch_binance_klines(symbol, interval, days):
+    """Fetches historical OHLC data from Binance."""
+    url = "https://api.binance.com/api/v3/klines"
+    end_time = int(time.time() * 1000)
+    start_time = int((datetime.now() - timedelta(days=days)).timestamp() * 1000)
+    
     all_data = []
-    current_start = start_ts
+    current_start = start_time
     
-    print(f"Fetching {interval} data from {start_year}...")
+    logger.info(f"Fetching {interval} data for {symbol}...")
     
-    while current_start < end_ts:
-        params = {'symbol': symbol, 'interval': interval, 'startTime': current_start, 'limit': limit}
+    while True:
+        params = {
+            "symbol": symbol,
+            "interval": interval,
+            "startTime": current_start,
+            "endTime": end_time,
+            "limit": 1000
+        }
         try:
-            r = requests.get(base_url, params=params)
-            data = r.json()
-            if not data: break
-            all_data.extend(data)
-            current_start = data[-1][0] + 1
-            if len(data) < limit: break 
-            time.sleep(0.05)
-        except: break
+            resp = requests.get(url, params=params)
+            data = resp.json()
+            if not isinstance(data, list) or len(data) == 0:
+                break
             
-    df = pd.DataFrame(all_data, columns=['open_time', 'open', 'high', 'low', 'close', 'v', 'ct', 'qav', 'nt', 'tbv', 'tqv', 'i'])
-    df['open_time'] = pd.to_datetime(df['open_time'], unit='ms')
+            all_data.extend(data)
+            last_time = data[-1][0]
+            current_start = last_time + 1
+            
+            if len(data) < 1000 or current_start >= end_time:
+                break
+        except Exception as e:
+            logger.error(f"Error fetching data: {e}")
+            break
+            
+    df = pd.DataFrame(all_data, columns=['open_time', 'open', 'high', 'low', 'close', 'vol', 'close_time', 'qav', 'num_trades', 'taker_base_vol', 'taker_quote_vol', 'ignore'])
+    df['timestamp'] = pd.to_datetime(df['open_time'], unit='ms')
+    df.set_index('timestamp', inplace=True)
     df['close'] = df['close'].astype(float)
-    df.set_index('open_time', inplace=True)
     return df[['close']]
 
-def calculate_macd_pos(prices, strat_config):
-    params = strat_config['params']
-    weights = strat_config['weights']
-    composite = np.zeros(len(prices))
-    for (f, s, sig_p), w in zip(params, weights):
-        fast = prices.ewm(span=f, adjust=False).mean()
-        slow = prices.ewm(span=s, adjust=False).mean()
-        macd = fast - slow
-        sig_line = macd.ewm(span=sig_p, adjust=False).mean()
-        composite += np.where(macd > sig_line, 1.0, -1.0) * w
-    total_w = sum(weights)
-    return composite / total_w if total_w > 0 else composite
+# --- Strategy Logic (Re-implementation) ---
+def get_sma(series, window):
+    return series.rolling(window=window).mean()
 
-def calculate_sma_pos(prices, strat_config):
-    params = strat_config['params']
-    weights = strat_config['weights']
-    composite = np.zeros(len(prices))
-    for p, w in zip(params, weights):
-        sma = prices.rolling(window=p).mean()
-        composite += np.where(prices > sma, 1.0, -1.0) * w
-    total_w = sum(weights)
-    composite = np.nan_to_num(composite)
-    return composite / total_w if total_w > 0 else composite
-
-def run_backtest_daily():
-    # 1. Fetch High Res Data (1H)
-    # We need 1H data to accurately calculate the 1H and 4H strategy signals
-    # BEFORE we downsample to Daily.
-    df_1h = fetch_binance_data(SYMBOL, '1h', START_YEAR)
+def calc_planner(df_1d, current_date, price, state, capital=10000):
+    # Slice data up to current_date to avoid lookahead, but 1D data implies yesterday's close usually
+    # For backtest efficiency, we pre-calculate indicators on the full DF and lookup by index
+    # Here we assume df_1d has indicators pre-calculated
     
-    # 2. Generate Derived Timeframes
-    df_4h = df_1h.resample('4h').last().dropna()
-    df_1d = df_1h.resample('1D').last().dropna()
+    # State recovery
+    entry_date = state.get("entry_date")
+    stopped = state.get("stopped", False)
+    peak_equity = state.get("peak_equity", capital)
     
-    # 3. Calculate Raw Signals on Native Timeframes
-    # (These match the "Found Specs" logic exactly)
-    s1 = pd.Series(calculate_macd_pos(df_1h['close'], STRAT_MACD_1H), index=df_1h.index)
-    s2 = pd.Series(calculate_macd_pos(df_4h['close'], STRAT_MACD_4H), index=df_4h.index)
-    s3 = pd.Series(calculate_macd_pos(df_1d['close'], STRAT_MACD_1D), index=df_1d.index)
-    s4 = pd.Series(calculate_sma_pos(df_1h['close'], STRAT_SMA_1H), index=df_1h.index)
-    s5 = pd.Series(calculate_sma_pos(df_4h['close'], STRAT_SMA_4H), index=df_4h.index)
-    s6 = pd.Series(calculate_sma_pos(df_1d['close'], STRAT_SMA_1D), index=df_1d.index)
+    sma120 = df_1d.at[current_date, 'SMA_120']
+    sma400 = df_1d.at[current_date, 'SMA_400']
     
-    # 4. Align HTF Signals to 1H (Fixing Lookahead)
-    # Shift indices to when the bar actually closes
-    s2.index = s2.index + pd.Timedelta(hours=3) # 4H close
-    s5.index = s5.index + pd.Timedelta(hours=3)
-    s3.index = s3.index + pd.Timedelta(hours=23) # 1D close
-    s6.index = s6.index + pd.Timedelta(hours=23)
-    
-    # Reindex to 1H Base to create a continuous signal stream
-    # ffill() propagates the last known signal forward
-    target_idx = df_1h.index
-    s2 = s2.reindex(target_idx, method='ffill').fillna(0)
-    s3 = s3.reindex(target_idx, method='ffill').fillna(0)
-    s5 = s5.reindex(target_idx, method='ffill').fillna(0)
-    s6 = s6.reindex(target_idx, method='ffill').fillna(0)
-    
-    # 5. DOWNSAMPLE TO DAILY (Trading Frequency: Once a Day)
-    # We take the state of the signals at the END of each day (23:00 UTC)
-    # This simulates a trader checking their bot once a day before close.
-    
-    # Combine into DataFrame
-    df_signals_1h = pd.DataFrame({
-        'S1': s1, 'S2': s2, 'S3': s3, 
-        'S4': s4, 'S5': s5, 'S6': s6
-    }, index=target_idx)
-    
-    # Resample to Daily, taking the LAST value of the day
-    df_daily_signals = df_signals_1h.resample('1D').last().dropna()
-    
-    # Get Daily Prices (Close) for return calc
-    df_daily_price = df_1d['close'].reindex(df_daily_signals.index)
-    
-    # 6. Apply Ensemble Weights
-    weights = np.array(ENSEMBLE_WEIGHTS)
-    total_w = np.sum(weights)
-    
-    # Matrix mult: (Days x 6) dot (6,) -> (Days,)
-    raw_ensemble = df_daily_signals.dot(weights) / total_w
-    
-    # 7. Calculate Returns (Shift 1 Day)
-    # We trade at the Open of D+1 based on Signal at Close of D
-    # Or simplified: Return of D+1 * Signal of D
-    final_pos = raw_ensemble.shift(1).fillna(0)
-    
-    daily_returns = df_daily_price.pct_change().fillna(0)
-    strat_returns = final_pos * daily_returns
-    
-    # 8. Metrics
-    cum_ret = (1 + strat_returns).cumprod()
-    
-    total_ret_pct = (cum_ret.iloc[-1] - 1) * 100
-    std = strat_returns.std()
-    sharpe = (strat_returns.mean() / std * np.sqrt(365)) if std > 0 else 0
-    
-    roll_max = cum_ret.cummax()
-    dd = (cum_ret - roll_max) / roll_max
-    max_dd = dd.min() * 100
-    
-    metrics = {
-        'Total Return': f"{total_ret_pct:,.2f}%",
-        'Sharpe Ratio': f"{sharpe:.4f}",
-        'Max Drawdown': f"{max_dd:.2f}%",
-        'Win Rate': f"{len(strat_returns[strat_returns > 0]) / len(strat_returns[strat_returns != 0]) * 100:.1f}%"
-    }
-    
-    # 9. Plotting
-    fig, (ax1, ax2) = plt.subplots(2, 1, figsize=(10, 8), gridspec_kw={'height_ratios': [2, 1]})
-    
-    bh = (1 + daily_returns).cumprod()
-    bh = bh / bh.iloc[0]
-    
-    ax1.plot(cum_ret.index, cum_ret, color='#00ff88', label='Ensemble (Daily Rebalance)')
-    ax1.plot(bh.index, bh, color='white', alpha=0.3, label='BTC Buy & Hold')
-    ax1.set_yscale('log')
-    ax1.set_title("Strategy Performance (Daily Execution)")
-    ax1.grid(True, alpha=0.1)
-    ax1.legend()
-    
-    ax2.plot(final_pos.index, final_pos, color='#00e5ff', linewidth=0.5, drawstyle='steps-post')
-    ax2.set_title("Net Leverage (-1.0 to 1.0)")
-    ax2.set_ylim(-1.1, 1.1)
-    ax2.grid(True, alpha=0.1)
-    
-    for ax in [ax1, ax2]:
-        ax.set_facecolor('#1e1e1e')
-        for s in ax.spines.values(): s.set_color('#444')
-        ax.tick_params(colors='white')
+    if pd.isna(sma120) or pd.isna(sma400):
+        return 0.0, state
         
-    fig.patch.set_facecolor('#121212')
-    plt.tight_layout()
+    if peak_equity < capital: peak_equity = capital
     
-    img = io.BytesIO()
-    plt.savefig(img, format='png')
-    img.seek(0)
-    plot_url = base64.b64encode(img.getvalue()).decode()
+    s1_lev = 0.0
+    if price > sma120:
+        if not stopped:
+            if not entry_date: 
+                entry_date = current_date
+            
+            # Calculate days since entry
+            days = (current_date - entry_date).days
+            s1_lev = 1.0 * max(0.0, 1.0 - (days / PLANNER_PARAMS["S1_DECAY"])**2)
+    else:
+        stopped = False
+        peak_equity = capital
+        entry_date = None # Reset
+        s1_lev = -1.0
+        
+    s2_lev = 1.0 if price > sma400 else 0.0
+    lev = max(-2.0, min(2.0, s1_lev + s2_lev))
+    
+    state["entry_date"] = entry_date
+    state["stopped"] = stopped
+    state["peak_equity"] = peak_equity
+    
+    return lev, state
+
+def calc_tumbler(df_1d, current_date, price, state):
+    flat_regime = state.get("flat_regime", False)
+    
+    # Lookup pre-calc values
+    iii = df_1d.at[current_date, 'III']
+    sma1 = df_1d.at[current_date, 'T_SMA1']
+    sma2 = df_1d.at[current_date, 'T_SMA2']
+    
+    if pd.isna(iii) or pd.isna(sma1): return 0.0, state
+    
+    lev = TUMBLER_PARAMS["LEVS"][2]
+    if iii < TUMBLER_PARAMS["III_TH"][0]: lev = TUMBLER_PARAMS["LEVS"][0]
+    elif iii < TUMBLER_PARAMS["III_TH"][1]: lev = TUMBLER_PARAMS["LEVS"][1]
+    
+    if iii < TUMBLER_PARAMS["FLAT_THRESH"]: flat_regime = True
+    
+    if flat_regime:
+        if abs(price - sma1) <= sma1 * TUMBLER_PARAMS["BAND"]:
+            flat_regime = False
+            
+    if flat_regime:
+        state["flat_regime"] = True
+        return 0.0, state
+        
+    state["flat_regime"] = False
+    
+    if price > sma1 and price > sma2:
+        return lev, state
+    elif price < sma1 and price < sma2:
+        return -lev, state
+    
+    return 0.0, state
+
+def calc_gainer(df_1h, df_1d, idx_1h, idx_1d):
+    # MACD logic
+    # Pre-calc MACD signals in dataframe preparation to speed up
+    sig_1h = df_1h.at[idx_1h, 'MACD_SIG']
+    sig_1d = df_1d.at[idx_1d, 'MACD_SIG']
+    
+    if pd.isna(sig_1h) or pd.isna(sig_1d): return 0.0
+    
+    w = GAINER_PARAMS["WEIGHTS"]
+    return (sig_1h * w[0] + sig_1d * w[1]) / sum(w)
+
+def prepare_data():
+    df_1h = fetch_binance_klines(SYMBOL, "1h", LOOKBACK_DAYS + 60) # Buffer for MA
+    df_1d = fetch_binance_klines(SYMBOL, "1d", LOOKBACK_DAYS + 60)
+    
+    # --- Pre-calculate Indicators for 1D (Planner & Tumbler) ---
+    df_1d['SMA_120'] = get_sma(df_1d['close'], PLANNER_PARAMS["S1_SMA"])
+    df_1d['SMA_400'] = get_sma(df_1d['close'], PLANNER_PARAMS["S2_SMA"])
+    
+    # Tumbler Indicators
+    df_1d['T_SMA1'] = get_sma(df_1d['close'], TUMBLER_PARAMS["SMA1"])
+    df_1d['T_SMA2'] = get_sma(df_1d['close'], TUMBLER_PARAMS["SMA2"])
+    
+    # Tumbler III
+    w = TUMBLER_PARAMS["III_WIN"]
+    log_ret = np.log(df_1d['close'] / df_1d['close'].shift(1))
+    df_1d['III'] = (log_ret.rolling(w).sum().abs() / log_ret.abs().rolling(w).sum()).fillna(0)
+    
+    # Gainer MACD 1D
+    f, s, sig = GAINER_PARAMS["MACD_1D"]['params'][0]
+    fast = df_1d['close'].ewm(span=f).mean()
+    slow = df_1d['close'].ewm(span=s).mean()
+    macd = fast - slow
+    signal = macd.ewm(span=sig).mean()
+    df_1d['MACD_SIG'] = np.where(macd > signal, 1.0, -1.0)
+    
+    # --- Pre-calculate Indicators for 1H (Gainer) ---
+    f, s, sig = GAINER_PARAMS["MACD_1H"]['params'][0]
+    fast = df_1h['close'].ewm(span=f).mean()
+    slow = df_1h['close'].ewm(span=s).mean()
+    macd = fast - slow
+    signal = macd.ewm(span=sig).mean()
+    df_1h['MACD_SIG'] = np.where(macd > signal, 1.0, -1.0)
+    
+    # Trim to analysis period (last 365 days)
+    cutoff = pd.Timestamp.now() - pd.Timedelta(days=LOOKBACK_DAYS)
+    df_1h = df_1h[df_1h.index > cutoff]
+    
+    # Resample 1D to match 1H index for easy lookup (ffill)
+    # This aligns the daily indicators to the hourly timestamps
+    df_1d_aligned = df_1d.reindex(df_1h.index, method='ffill')
+    
+    return df_1h, df_1d_aligned
+
+def run_backtest():
+    df_1h, df_1d = prepare_data()
+    
+    planner_state = {"entry_date": None, "stopped": False, "peak_equity": 0.0}
+    tumbler_state = {"flat_regime": False}
+    
+    results = []
+    
+    # Initial Equity
+    equity = 10000.0
+    
+    for i in range(len(df_1h)):
+        idx = df_1h.index[i]
+        price = df_1h['close'].iloc[i]
+        
+        # Run Strategies
+        # Note: We pass the *aligned* daily data row corresponding to this hour
+        lev_p, planner_state = calc_planner(df_1d, idx, price, planner_state)
+        lev_t, tumbler_state = calc_tumbler(df_1d, idx, price, tumbler_state)
+        lev_g = calc_gainer(df_1h, df_1d, idx, idx)
+        
+        # Normalize
+        n_p = lev_p
+        n_t = lev_t * (TARGET_STRAT_LEV / TUMBLER_MAX_LEV)
+        n_g = lev_g * TARGET_STRAT_LEV
+        
+        total_lev = n_p + n_t + n_g
+        
+        # Simple Return Calculation (Next Hour Return)
+        if i < len(df_1h) - 1:
+            next_price = df_1h['close'].iloc[i+1]
+            ret = (next_price - price) / price
+            # Apply Leverage
+            pnl = equity * total_lev * ret
+            equity += pnl
+        
+        results.append({
+            "timestamp": idx,
+            "equity": equity,
+            "price": price,
+            "lev_total": total_lev,
+            "lev_p": n_p,
+            "lev_t": n_t,
+            "lev_g": n_g
+        })
+        
+    return pd.DataFrame(results).set_index("timestamp")
+
+def generate_plots(df):
+    # Equity Curve
+    fig, ax1 = plt.subplots(figsize=(10, 6))
+    
+    # Benchmark (Buy and Hold)
+    initial_price = df['price'].iloc[0]
+    initial_equity = df['equity'].iloc[0]
+    df['benchmark'] = (df['price'] / initial_price) * initial_equity
+    
+    ax1.plot(df.index, df['equity'], label='Strategy Equity', color='#00ff00', linewidth=1.5)
+    ax1.plot(df.index, df['benchmark'], label='Buy & Hold (BTC)', color='gray', alpha=0.5, linestyle='--')
+    
+    ax1.set_title(f"Strategy Performance ({LOOKBACK_DAYS} Days)", fontsize=14, color='white')
+    ax1.set_ylabel("Equity ($)", color='white')
+    ax1.set_facecolor('#1e1e1e')
+    fig.patch.set_facecolor('#121212')
+    ax1.tick_params(axis='x', colors='white')
+    ax1.tick_params(axis='y', colors='white')
+    
+    legend = ax1.legend(facecolor='#333333', edgecolor='none')
+    plt.setp(legend.get_texts(), color='white')
+    
+    # Format Date
+    ax1.xaxis.set_major_formatter(mdates.DateFormatter('%b %Y'))
+    plt.grid(True, color='#333333', linestyle=':')
+    
+    # Save to base64
+    buf = io.BytesIO()
+    plt.savefig(buf, format='png', bbox_inches='tight')
+    buf.seek(0)
+    plot_equity = base64.b64encode(buf.getvalue()).decode('utf-8')
     plt.close()
     
-    # Correlation
-    corr = df_daily_signals.corr().round(2)
-    corr_html = corr.to_html(classes='table table-dark table-sm', border=0)
+    # Drawdown Plot
+    df['peak'] = df['equity'].cummax()
+    df['drawdown'] = (df['equity'] - df['peak']) / df['peak']
     
-    return metrics, plot_url, corr_html
+    fig2, ax2 = plt.subplots(figsize=(10, 4))
+    ax2.fill_between(df.index, df['drawdown'], 0, color='red', alpha=0.3)
+    ax2.plot(df.index, df['drawdown'], color='red', linewidth=1)
+    ax2.set_title("Drawdown", fontsize=12, color='white')
+    ax2.set_facecolor('#1e1e1e')
+    fig2.patch.set_facecolor('#121212')
+    ax2.tick_params(colors='white')
+    ax2.xaxis.set_major_formatter(mdates.DateFormatter('%b %Y'))
+    plt.grid(True, color='#333333', linestyle=':')
+    
+    buf2 = io.BytesIO()
+    plt.savefig(buf2, format='png', bbox_inches='tight')
+    buf2.seek(0)
+    plot_drawdown = base64.b64encode(buf2.getvalue()).decode('utf-8')
+    plt.close()
 
+    return plot_equity, plot_drawdown
+
+# --- Routes ---
 @app.route('/')
-def index():
-    metrics, plot_url, corr_html = run_backtest_daily()
-    
-    return render_template_string("""
-    <!DOCTYPE html>
-    <html lang="en">
-    <head>
-        <meta charset="UTF-8">
-        <title>Daily Ensemble Strategy</title>
-        <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/css/bootstrap.min.css" rel="stylesheet">
-        <style>
-            body { background-color: #0f0f0f; color: #e0e0e0; font-family: 'Segoe UI', sans-serif; }
-            .header-section { padding: 40px 0; border-bottom: 1px solid #333; margin-bottom: 30px; }
-            .metric-card { background: #1a1a1a; border: 1px solid #333; padding: 20px; border-radius: 8px; text-align: center; }
-            .metric-val { font-size: 2rem; font-weight: 700; margin-bottom: 5px; }
-            .card { background: #1a1a1a; border: 1px solid #333; margin-bottom: 20px; }
-            .guide-step { border-left: 3px solid #00ff88; padding-left: 15px; margin-bottom: 25px; }
-            h2, h4, h5 { color: #f0f0f0; }
-            .text-accent { color: #00ff88; }
-        </style>
-    </head>
-    <body>
-        <div class="container">
-            <div class="header-section text-center">
-                <h1 class="display-5 fw-bold text-accent">Final Strategy Report</h1>
-                <p class="lead text-muted">Daily Execution • 6-Model Ensemble • Optimized Specs</p>
-            </div>
+def dashboard():
+    # Cache checking could go here, running fresh for now
+    try:
+        results = run_backtest()
+        
+        # Metrics
+        initial = results['equity'].iloc[0]
+        final = results['equity'].iloc[-1]
+        total_return = (final - initial) / initial * 100
+        
+        # Annualized Volatility (Hourly to Yearly)
+        hourly_returns = results['equity'].pct_change().dropna()
+        volatility = hourly_returns.std() * np.sqrt(365 * 24) * 100
+        
+        # Sharpe (assuming 0 risk free)
+        sharpe = (hourly_returns.mean() * 24 * 365) / (hourly_returns.std() * np.sqrt(24 * 365))
+        
+        # Max Drawdown
+        max_dd = results['drawdown'].min() * 100
+        
+        plot_eq, plot_dd = generate_plots(results)
+        
+        stats = {
+            "return": f"{total_return:.2f}%",
+            "equity": f"${final:,.2f}",
+            "sharpe": f"{sharpe:.2f}",
+            "volatility": f"{volatility:.2f}%",
+            "max_dd": f"{max_dd:.2f}%"
+        }
+        
+        return render_template('index.html', stats=stats, plot_equity=plot_eq, plot_drawdown=plot_dd)
+        
+    except Exception as e:
+        logger.error(f"Failed to generate dashboard: {e}")
+        return f"Error generating analytics: {e}", 500
 
-            <!-- Executive Summary -->
-            <div class="row mb-5">
-                <div class="col-md-3">
-                    <div class="metric-card">
-                        <div class="metric-val text-accent">{{ metrics['Total Return'] }}</div>
-                        <div class="text-muted text-uppercase small">Total Return</div>
-                    </div>
-                </div>
-                <div class="col-md-3">
-                    <div class="metric-card">
-                        <div class="metric-val text-info">{{ metrics['Sharpe Ratio'] }}</div>
-                        <div class="text-muted text-uppercase small">Sharpe Ratio</div>
-                    </div>
-                </div>
-                <div class="col-md-3">
-                    <div class="metric-card">
-                        <div class="metric-val text-danger">{{ metrics['Max Drawdown'] }}</div>
-                        <div class="text-muted text-uppercase small">Max Drawdown</div>
-                    </div>
-                </div>
-                <div class="col-md-3">
-                    <div class="metric-card">
-                        <div class="metric-val text-warning">{{ metrics['Win Rate'] }}</div>
-                        <div class="text-muted text-uppercase small">Win Rate</div>
-                    </div>
-                </div>
-            </div>
-
-            <!-- Charts -->
-            <div class="row mb-4">
-                <div class="col-12">
-                    <div class="card p-2">
-                        <img src="data:image/png;base64,{{ plot_url }}" class="img-fluid rounded">
-                    </div>
-                </div>
-            </div>
-
-            <div class="row">
-                <!-- Implementation Guide -->
-                <div class="col-lg-7">
-                    <div class="card p-4 h-100">
-                        <h4 class="mb-4 text-accent">🚀 Daily Execution Protocol</h4>
-                        
-                        <div class="guide-step">
-                            <h5>1. Frequency: Once a Day</h5>
-                            <p class="mb-0 text-muted">Execute logic daily at <strong>00:00 UTC</strong> (Daily Close).</p>
-                        </div>
-
-                        <div class="guide-step">
-                            <h5>2. Data Requirement</h5>
-                            <p class="mb-0 text-muted">
-                                While trading is daily, the strategy logic requires intra-day data:
-                                <br>- Fetch the last 24 1H candles.
-                                <br>- Fetch the last 6 4H candles.
-                                <br>- Fetch the last Daily candle.
-                            </p>
-                        </div>
-
-                        <div class="guide-step">
-                            <h5>3. Calculation Logic</h5>
-                            <p class="text-muted">Compute the 6 signals using the specific parameters below. Average them:</p>
-                            <code class="d-block bg-black p-3 rounded mb-2 text-warning">
-                                Target_Leverage = (S1 + S2 + S3 + S4 + S5 + S6) / 6.0
-                            </code>
-                            <p class="mb-0 text-muted">This results in a target between -1.0 (Full Short) and 1.0 (Full Long).</p>
-                        </div>
-                    </div>
-                </div>
-
-                <!-- Specs -->
-                <div class="col-lg-5">
-                    <div class="card p-4 h-100">
-                        <h5 class="mb-3">Found Specifications</h5>
-                        <ul class="list-group list-group-flush bg-transparent">
-                            <li class="list-group-item bg-transparent text-white border-secondary">
-                                <strong>MACD 1H:</strong> 97/366/47, 15/40/11, 16/55/13
-                            </li>
-                            <li class="list-group-item bg-transparent text-white border-secondary">
-                                <strong>MACD 4H:</strong> 6/8/4, 84/324/96, 22/86/14
-                            </li>
-                            <li class="list-group-item bg-transparent text-white border-secondary">
-                                <strong>MACD 1D:</strong> 52/64/61, 5/6/4, 17/18/16
-                            </li>
-                            <li class="list-group-item bg-transparent text-white border-secondary">
-                                <strong>SMA 1H:</strong> 10, 80, 380
-                            </li>
-                            <li class="list-group-item bg-transparent text-white border-secondary">
-                                <strong>SMA 4H:</strong> 20, 120, 260
-                            </li>
-                            <li class="list-group-item bg-transparent text-white border-secondary">
-                                <strong>SMA 1D:</strong> 40, 120, 390
-                            </li>
-                        </ul>
-                        <div class="mt-3">
-                            <small class="text-muted">Correlation Matrix:</small>
-                            {{ corr_html | safe }}
-                        </div>
-                    </div>
-                </div>
-            </div>
-            
-            <footer class="text-center py-4 text-muted small">
-                Generated by Daily Ensemble Strategy Engine • No Financial Advice
-            </footer>
-        </div>
-    </body>
-    </html>
-    """, metrics=metrics, plot_url=plot_url, corr_html=corr_html)
-
-if __name__ == '__main__':
-    app.run(host='0.0.0.0', port=8080)
+if __name__ == "__main__":
+    port = int(os.environ.get("PORT", 8080))
+    app.run(host='0.0.0.0', port=port)
