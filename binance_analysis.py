@@ -174,6 +174,9 @@ def run_backtest_pipeline():
     planner_state = {"entry_date": None, "stopped": False, "peak_equity": 0.0}
     tumbler_state = {"flat_regime": False}
     equity = 10000.0
+    eq_p = 10000.0
+    eq_t = 10000.0
+    eq_g = 10000.0
     results = []
     
     for i in range(len(df_1h)):
@@ -184,12 +187,28 @@ def run_backtest_pipeline():
         lev_t, tumbler_state = calc_tumbler(df_1d, idx, price, tumbler_state)
         lev_g = calc_gainer(df_1h, df_1d, idx, idx)
         
-        total_lev = lev_p + (lev_t * (TARGET_STRAT_LEV / TUMBLER_MAX_LEV)) + (lev_g * TARGET_STRAT_LEV)
+        # Normalize
+        n_p = lev_p
+        n_t = lev_t * (TARGET_STRAT_LEV / TUMBLER_MAX_LEV)
+        n_g = lev_g * TARGET_STRAT_LEV
+        
+        total_lev = n_p + n_t + n_g
         
         if i < len(df_1h) - 1:
-            equity += equity * total_lev * ((df_1h['close'].iloc[i+1] - price) / price)
+            ret = (df_1h['close'].iloc[i+1] - price) / price
+            equity += equity * total_lev * ret
+            eq_p += eq_p * n_p * ret
+            eq_t += eq_t * n_t * ret
+            eq_g += eq_g * n_g * ret
         
-        results.append({"timestamp": idx, "equity": equity, "price": price})
+        results.append({
+            "timestamp": idx, 
+            "equity": equity, 
+            "price": price,
+            "eq_p": eq_p,
+            "eq_t": eq_t,
+            "eq_g": eq_g
+        })
         
     df = pd.DataFrame(results).set_index("timestamp")
     
@@ -259,9 +278,29 @@ def generate_analytics():
         buf2.seek(0)
         plot_dd = base64.b64encode(buf2.getvalue()).decode('utf-8')
         plt.close(fig2)
+
+        # Strategy Breakdown Plot
+        fig3, ax3 = plt.subplots(figsize=(10, 6))
+        ax3.plot(df.index, df['eq_p'], label='Planner', color='#2196F3', linewidth=1)
+        ax3.plot(df.index, df['eq_t'], label='Tumbler', color='#9C27B0', linewidth=1)
+        ax3.plot(df.index, df['eq_g'], label='Gainer', color='#FF9800', linewidth=1)
+        
+        ax3.set_facecolor('#1e1e1e')
+        fig3.patch.set_facecolor('#121212')
+        ax3.tick_params(colors='white')
+        ax3.xaxis.set_major_formatter(mdates.DateFormatter('%b %Y'))
+        ax3.set_title("Individual Strategy Performance", fontsize=12, color='white')
+        plt.grid(True, color='#333333', linestyle=':')
+        plt.legend(facecolor='#333333', labelcolor='white')
+        
+        buf3 = io.BytesIO()
+        plt.savefig(buf3, format='png', bbox_inches='tight')
+        buf3.seek(0)
+        plot_strat = base64.b64encode(buf3.getvalue()).decode('utf-8')
+        plt.close(fig3)
         
         GLOBAL_CACHE['stats'] = stats
-        GLOBAL_CACHE['plots'] = {'equity': plot_eq, 'drawdown': plot_dd}
+        GLOBAL_CACHE['plots'] = {'equity': plot_eq, 'drawdown': plot_dd, 'strategies': plot_strat}
         GLOBAL_CACHE['last_updated'] = datetime.now()
         logger.info("Analytics updated successfully.")
         
@@ -288,7 +327,8 @@ def dashboard():
         """
     return render_template('index.html', stats=GLOBAL_CACHE['stats'], 
                            plot_equity=GLOBAL_CACHE['plots']['equity'], 
-                           plot_drawdown=GLOBAL_CACHE['plots']['drawdown'])
+                           plot_drawdown=GLOBAL_CACHE['plots']['drawdown'],
+                           plot_strategies=GLOBAL_CACHE['plots']['strategies'])
 
 # --- Startup ---
 # Run once synchronously on start so data is ready immediately
