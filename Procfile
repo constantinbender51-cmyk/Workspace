@@ -1,1 +1,1 @@
-web: python binance_analysis.py
+web: gunicorn binance_analysis:app 
