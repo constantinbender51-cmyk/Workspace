@@ -1,5 +1,6 @@
-requests
-pandas 
+flask
+pandas
 numpy
 matplotlib
-flask
+requests
+gunicorn
