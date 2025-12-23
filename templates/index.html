@@ -107,6 +107,12 @@
         </div>
 
         <div class="chart-container">
+            <h3>Strategy Breakdown</h3>
+            <p style="color: #888; font-size: 0.9em;">Performance of individual sub-strategies if traded with equal initial capital.</p>
+            <img src="data:image/png;base64,{{ plot_strategies }}" class="chart-img" alt="Strategy Breakdown">
+        </div>
+
+        <div class="chart-container">
             <h3>Drawdown Analysis</h3>
             <img src="data:image/png;base64,{{ plot_drawdown }}" class="chart-img" alt="Drawdown Chart">
         </div>
@@ -117,4 +123,5 @@
     </div>
 </body>
 </html>
+
 
