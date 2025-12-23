@@ -73,7 +73,7 @@
     <div class="container">
         <header>
             <h1>Master Trader Analytics <span class="badge">LIVE BACKTEST</span></h1>
-            <p style="color: #888;">Simulated performance on BTC/USDT (Binance) - Last 365 Days</p>
+            <p style="color: #888;">Simulated performance on BTC/USDT (Binance) • {{ stats.period }}</p>
         </header>
 
         <div class="metrics-grid">
@@ -84,8 +84,8 @@
                 </div>
             </div>
             <div class="metric-card">
-                <div class="metric-label">Current Equity</div>
-                <div class="metric-value">{{ stats.equity }}</div>
+                <div class="metric-label">CAGR</div>
+                <div class="metric-value">{{ stats.cagr }}</div>
             </div>
             <div class="metric-card">
                 <div class="metric-label">Sharpe Ratio</div>
@@ -95,20 +95,20 @@
                 <div class="metric-label">Max Drawdown</div>
                 <div class="metric-value negative">{{ stats.max_dd }}</div>
             </div>
-            <div class="metric-card">
-                <div class="metric-label">Volatility (Ann.)</div>
-                <div class="metric-value">{{ stats.volatility }}</div>
+             <div class="metric-card">
+                <div class="metric-label">Final Equity</div>
+                <div class="metric-value">{{ stats.equity }}</div>
             </div>
         </div>
 
         <div class="chart-container">
-            <h3>Equity Curve vs Benchmark (Buy & Hold)</h3>
+            <h3>Combined Portfolio vs Benchmark (Log Scale)</h3>
             <img src="data:image/png;base64,{{ plot_equity }}" class="chart-img" alt="Equity Curve">
         </div>
 
         <div class="chart-container">
-            <h3>Strategy Breakdown</h3>
-            <p style="color: #888; font-size: 0.9em;">Performance of individual sub-strategies if traded with equal initial capital.</p>
+            <h3>Strategy Breakdown (Normalized 2.0x)</h3>
+            <p style="color: #888; font-size: 0.9em;">Individual performance of components if run independently with equal leverage.</p>
             <img src="data:image/png;base64,{{ plot_strategies }}" class="chart-img" alt="Strategy Breakdown">
         </div>
 
