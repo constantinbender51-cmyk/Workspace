@@ -24,8 +24,7 @@ SYMBOL = "BTCUSDT"
 START_YEAR = 2018
 CAP_SPLIT = 0.333
 
-# --- STRATEGY PARAMETERS (Matches main (24).py) ---
-
+# --- STRATEGY PARAMETERS (Matching main (24).py) ---
 PLANNER_PARAMS = {
     "S1_SMA": 120, "S1_DECAY": 40, "S1_STOP": 0.13, 
     "S2_SMA": 400, "S2_STOP": 0.27, "S2_PROX": 0.05
@@ -38,7 +37,6 @@ TUMBLER_PARAMS = {
     "LEVS": [0.079, 4.327, 3.868], "III_TH": [0.058, 0.259]
 }
 
-# Gainer matches the "Ensemble Lite" from main (24).py
 GAINER_PARAMS = {
     "GA_WEIGHTS": {"MACD_1H": 0.8, "MACD_1D": 0.4, "SMA_1D": 0.4},
     "MACD_1H": {
@@ -55,7 +53,6 @@ GAINER_PARAMS = {
     }
 }
 
-# Normalization
 TUMBLER_MAX_LEV = 4.327
 TARGET_STRAT_LEV = 2.0
 
@@ -94,203 +91,299 @@ def fetch_binance_data(symbol, interval, start_year):
     
     df = pd.DataFrame(all_data, columns=['open_time', 'open', 'high', 'low', 'close', 'v', 'ct', 'qav', 'nt', 'tbv', 'tqv', 'i'])
     df['open_time'] = pd.to_datetime(df['open_time'], unit='ms')
-    df['close'] = df['close'].astype(float)
+    for col in ['open', 'high', 'low', 'close']:
+        df[col] = df[col].astype(float)
     df.set_index('open_time', inplace=True)
-    return df[['close']]
+    return df[['open', 'high', 'low', 'close']]
 
 def get_sma(series, window):
     return series.rolling(window=window).mean()
 
-# --- Sub-Strategy Logic ---
+# --- Simulation Logic ---
 
-def calc_planner_signal(df_1d):
-    """
-    Vectorized Planner Logic approximation.
-    Full virtual equity loop is hard to vectorize perfectly, so we use an iterative approach
-    on the daily dataframe which is fast enough.
-    """
-    closes = df_1d['close'].values
-    times = df_1d.index
-    n = len(df_1d)
+def calc_indicators(df_1h, df_1d):
+    # Pre-calculate Indicators to speed up the loop
+    # 1. Daily Indicators
+    d = df_1d.copy()
+    d['P_SMA120'] = get_sma(d['close'], PLANNER_PARAMS["S1_SMA"])
+    d['P_SMA400'] = get_sma(d['close'], PLANNER_PARAMS["S2_SMA"])
     
-    sma120 = get_sma(df_1d['close'], PLANNER_PARAMS["S1_SMA"]).values
-    sma400 = get_sma(df_1d['close'], PLANNER_PARAMS["S2_SMA"]).values
+    d['T_SMA1'] = get_sma(d['close'], TUMBLER_PARAMS["SMA1"])
+    d['T_SMA2'] = get_sma(d['close'], TUMBLER_PARAMS["SMA2"])
     
-    levs = np.zeros(n)
-    
-    # State
-    virtual_equity = 10000.0
-    s1_peak = 10000.0
-    s2_peak = 10000.0
-    s1_stopped = False
-    s2_stopped = False
-    s1_entry_idx = -1
-    
-    last_lev = 0.0
-    
-    for i in range(1, n):
-        price = closes[i]
-        
-        # 1. Update Virtual Equity
-        # Using yesterday's leverage * today's return
-        ret = (price - closes[i-1]) / closes[i-1]
-        virtual_equity *= (1.0 + last_lev * ret)
-        
-        # 2. Stops
-        if virtual_equity > s1_peak: s1_peak = virtual_equity
-        if virtual_equity > s2_peak: s2_peak = virtual_equity
-        
-        # S1 Stop
-        if s1_peak > 0:
-            dd1 = (s1_peak - virtual_equity) / s1_peak
-            if dd1 > PLANNER_PARAMS["S1_STOP"]:
-                s1_stopped = True
-                s1_entry_idx = -1
-        
-        # S2 Stop
-        if s2_peak > 0:
-            dd2 = (s2_peak - virtual_equity) / s2_peak
-            if dd2 > PLANNER_PARAMS["S2_STOP"]:
-                s2_stopped = True
-                
-        # 3. Logic
-        # S1
-        s1_lev = 0.0
-        if price > sma120[i]:
-            if not s1_stopped:
-                if s1_entry_idx == -1: s1_entry_idx = i
-                
-                # Decay
-                days = (times[i] - times[s1_entry_idx]).days
-                decay = PLANNER_PARAMS["S1_DECAY"]
-                weight = 0.0
-                if days < decay:
-                    weight = 1.0 * (1.0 - (days / decay)**2)
-                s1_lev = max(0.0, weight)
-        else:
-            s1_stopped = False # Reset on cross under
-            s1_peak = virtual_equity
-            s1_entry_idx = -1
-            s1_lev = -1.0
-            
-        # S2
-        s2_lev = 0.0
-        if price > sma400[i]:
-            if not s2_stopped:
-                s2_lev = 1.0
-            else:
-                # Re-entry check (Proximity)
-                prox = (price - sma400[i]) / sma400[i]
-                if prox < PLANNER_PARAMS["S2_PROX"]:
-                    s2_stopped = False
-                    s2_peak = virtual_equity
-                    s2_lev = 0.5
-        else:
-            if s2_stopped: s2_stopped = False
-            s2_lev = 0.0
-            
-        # Net
-        net = max(-2.0, min(2.0, s1_lev + s2_lev))
-        levs[i] = net
-        last_lev = net
-        
-    return pd.Series(levs, index=df_1d.index)
-
-def calc_tumbler_signal(df_1d):
-    # Vectorized Tumbler
-    close = df_1d['close']
     w = TUMBLER_PARAMS["III_WIN"]
+    log_ret = np.log(d['close'] / d['close'].shift(1))
+    d['III'] = (log_ret.rolling(w).sum().abs() / log_ret.abs().rolling(w).sum()).fillna(0)
     
-    # III
-    log_ret = np.log(close / close.shift(1))
-    iii = (log_ret.rolling(w).sum().abs() / log_ret.abs().rolling(w).sum()).fillna(0)
-    
-    sma1 = get_sma(close, TUMBLER_PARAMS["SMA1"])
-    sma2 = get_sma(close, TUMBLER_PARAMS["SMA2"])
-    
-    # Base Lev
-    levs = np.full(len(close), TUMBLER_PARAMS["LEVS"][2])
-    levs = np.where(iii < TUMBLER_PARAMS["III_TH"][1], TUMBLER_PARAMS["LEVS"][1], levs)
-    levs = np.where(iii < TUMBLER_PARAMS["III_TH"][0], TUMBLER_PARAMS["LEVS"][0], levs)
-    
-    # Flat Regime (Iterative due to state)
-    final_lev = np.zeros(len(close))
-    flat_regime = False
-    
-    band = TUMBLER_PARAMS["BAND"]
-    flat_th = TUMBLER_PARAMS["FLAT_THRESH"]
-    
-    p_arr = close.values
-    s1_arr = sma1.values
-    s2_arr = sma2.values
-    iii_arr = iii.values
-    lev_arr = levs
-    
-    for i in range(len(close)):
-        if iii_arr[i] < flat_th:
-            flat_regime = True
-            
-        if flat_regime:
-            # Check exit
-            d1 = abs(p_arr[i] - s1_arr[i])
-            d2 = abs(p_arr[i] - s2_arr[i])
-            if d1 <= s1_arr[i]*band or d2 <= s2_arr[i]*band:
-                flat_regime = False
-        
-        if flat_regime:
-            final_lev[i] = 0.0
-        else:
-            if p_arr[i] > s1_arr[i] and p_arr[i] > s2_arr[i]:
-                final_lev[i] = lev_arr[i]
-            elif p_arr[i] < s1_arr[i] and p_arr[i] < s2_arr[i]:
-                final_lev[i] = -lev_arr[i]
-            else:
-                final_lev[i] = 0.0
-                
-    return pd.Series(final_lev, index=df_1d.index)
-
-def calc_gainer_signal(df_1h, df_1d):
-    # Helper for composite MACD/SMA
-    def get_composite(prices, config, kind='macd'):
-        composite = pd.Series(0.0, index=prices.index)
+    # Gainer 1D
+    def calc_composite(df, config, kind):
+        comp = pd.Series(0.0, index=df.index)
         params, weights = config['params'], config['weights']
-        
         for p, w in zip(params, weights):
-            sig = None
             if kind == 'macd':
                 f, s, sig_p = p
-                fast = prices.ewm(span=f, adjust=False).mean()
-                slow = prices.ewm(span=s, adjust=False).mean()
+                fast = df['close'].ewm(span=f, adjust=False).mean()
+                slow = df['close'].ewm(span=s, adjust=False).mean()
                 macd = fast - slow
                 sl = macd.ewm(span=sig_p, adjust=False).mean()
-                sig = np.where(macd > sl, 1.0, -1.0)
-            else: # SMA
-                ma = prices.rolling(window=p).mean()
-                sig = np.where(prices > ma, 1.0, -1.0)
-            
-            composite += sig * w
-        
-        total = sum(weights)
-        return composite / total if total > 0 else composite
+                comp += np.where(macd > sl, 1.0, -1.0) * w
+            else:
+                sma = df['close'].rolling(window=p).mean()
+                comp += np.where(df['close'] > sma, 1.0, -1.0) * w
+        return comp / sum(weights)
 
-    # 1H Signal
-    m1h = get_composite(df_1h['close'], GAINER_PARAMS["MACD_1H"], 'macd')
+    d['G_MACD'] = calc_composite(d, GAINER_PARAMS["MACD_1D"], 'macd')
+    d['G_SMA'] = calc_composite(d, GAINER_PARAMS["SMA_1D"], 'sma')
     
-    # 1D Signals
-    m1d = get_composite(df_1d['close'], GAINER_PARAMS["MACD_1D"], 'macd')
-    s1d = get_composite(df_1d['close'], GAINER_PARAMS["SMA_1D"], 'sma')
+    # Shift Daily data by 1 (Yesterday's close available at Today 00:00)
+    d_shifted = d.shift(1)
     
-    # Combine (Align 1D to 1H)
-    # Reindex 1D signals to 1H, shift by 1 day (trade 1H using yesterday's 1D signal)
-    # The 'shift' logic in live trading matches 'yesterday close'.
-    m1d_aligned = m1d.shift(1).reindex(df_1h.index).ffill().fillna(0)
-    s1d_aligned = s1d.shift(1).reindex(df_1h.index).ffill().fillna(0)
+    # Align to 1H
+    aligned = d_shifted.reindex(df_1h.index).ffill()
     
-    gw = GAINER_PARAMS["GA_WEIGHTS"]
-    final = (m1h * gw["MACD_1H"] + m1d_aligned * gw["MACD_1D"] + s1d_aligned * gw["SMA_1D"])
-    total_w = sum(gw.values())
+    # 2. Hourly Indicators (Gainer)
+    h = df_1h.copy()
+    h['G_MACD_1H'] = calc_composite(h, GAINER_PARAMS["MACD_1H"], 'macd')
     
-    return final / total_w
+    # Merge
+    full_df = h.join(aligned, rsuffix='_D')
+    return full_df.dropna()
+
+def run_event_loop(df):
+    """
+    Detailed Event-Driven Loop matching main (24).py logic
+    """
+    # Converting columns to arrays for speed
+    n = len(df)
+    times = df.index
+    closes = df['close'].values
+    highs = df['high'].values
+    lows = df['low'].values
+    
+    # Indicator Arrays
+    p_sma120 = df['P_SMA120'].values
+    p_sma400 = df['P_SMA400'].values
+    t_sma1 = df['T_SMA1'].values
+    t_sma2 = df['T_SMA2'].values
+    iii = df['III'].values
+    
+    g_macd_1h = df['G_MACD_1H'].values
+    g_macd_1d = df['G_MACD'].values
+    g_sma_1d = df['G_SMA'].values
+    
+    # State Initialization
+    # Planner
+    p_virt_eq = 10000.0
+    p_s1_peak = 10000.0
+    p_s2_peak = 10000.0
+    p_s1_stopped = False
+    p_s2_stopped = False
+    p_s1_entry_idx = -1
+    p_last_lev = 0.0
+    
+    # Tumbler
+    t_flat_regime = False
+    t_entry_price = 0.0 # For TP/SL logic
+    t_in_trade = False
+    t_trade_dir = 0 # 1 or -1
+    
+    # Equity Curves (Component based)
+    eq_p = np.full(n, 10000.0)
+    eq_t = np.full(n, 10000.0)
+    eq_g = np.full(n, 10000.0)
+    eq_total = np.full(n, 10000.0)
+    
+    lev_p_hist = np.zeros(n)
+    lev_t_hist = np.zeros(n)
+    lev_g_hist = np.zeros(n)
+    
+    # Params
+    T_LEVS = TUMBLER_PARAMS["LEVS"]
+    T_TH = TUMBLER_PARAMS["III_TH"]
+    T_FLAT = TUMBLER_PARAMS["FLAT_THRESH"]
+    T_BAND = TUMBLER_PARAMS["BAND"]
+    T_TP = TUMBLER_PARAMS["TAKE_PROFIT"]
+    T_STOP = TUMBLER_PARAMS["STOP"]
+    
+    P_DECAY = PLANNER_PARAMS["S1_DECAY"]
+    
+    for i in range(1, n):
+        # 1. Market Data
+        price_open = closes[i-1] # Using prev close as Open approximation or actual open
+        price_curr = closes[i]   # Close of current bar
+        price_high = highs[i]
+        price_low = lows[i]
+        
+        # --- PLANNER LOGIC ---
+        # Update Virtual Equity (using prev bar's leverage * return)
+        # Note: Planner stops are based on Virtual Equity drawdowns, checked at cycle start
+        r_step = (price_curr - price_open) / price_open
+        p_virt_eq *= (1.0 + p_last_lev * r_step)
+        
+        # Update Peaks
+        p_s1_peak = max(p_s1_peak, p_virt_eq)
+        p_s2_peak = max(p_s2_peak, p_virt_eq)
+        
+        # Check Planner Stops (Daily check essentially, but we do it hourly here for safety)
+        if p_s1_peak > 0:
+            if (p_s1_peak - p_virt_eq)/p_s1_peak > PLANNER_PARAMS["S1_STOP"]:
+                p_s1_stopped = True
+                p_s1_entry_idx = -1
+        
+        if p_s2_peak > 0:
+            if (p_s2_peak - p_virt_eq)/p_s2_peak > PLANNER_PARAMS["S2_STOP"]:
+                p_s2_stopped = True
+                
+        # Planner Signals (S1)
+        lev_s1 = 0.0
+        # Check against PREV day's SMA (Already aligned in df)
+        if price_curr > p_sma120[i]:
+            if not p_s1_stopped:
+                if p_s1_entry_idx == -1: p_s1_entry_idx = i
+                # Decay (approx days using index / 24)
+                days = (i - p_s1_entry_idx) / 24.0
+                if days < P_DECAY:
+                    lev_s1 = 1.0 * (1.0 - (days/P_DECAY)**2)
+        else:
+            p_s1_stopped = False
+            p_s1_peak = p_virt_eq
+            p_s1_entry_idx = -1
+            lev_s1 = -1.0
+            
+        # Planner Signals (S2)
+        lev_s2 = 0.0
+        if price_curr > p_sma400[i]:
+            if not p_s2_stopped: lev_s2 = 1.0
+            else:
+                if (price_curr - p_sma400[i])/p_sma400[i] < PLANNER_PARAMS["S2_PROX"]:
+                    p_s2_stopped = False
+                    p_s2_peak = p_virt_eq
+                    lev_s2 = 0.5
+        else:
+            p_s2_stopped = False
+            lev_s2 = 0.0
+            
+        final_lev_p = max(-2.0, min(2.0, lev_s1 + lev_s2))
+        p_last_lev = final_lev_p
+        
+        # --- TUMBLER LOGIC (With TP/SL) ---
+        # 1. Regime Detection
+        if iii[i] < T_FLAT: t_flat_regime = True
+        
+        if t_flat_regime:
+            # Release check (Inside bands)
+            d1 = abs(price_curr - t_sma1[i])
+            d2 = abs(price_curr - t_sma2[i])
+            if d1 <= t_sma1[i]*T_BAND or d2 <= t_sma2[i]*T_BAND:
+                t_flat_regime = False
+        
+        target_lev_t = 0.0
+        if not t_flat_regime:
+            # Lev Selection
+            base_lev = T_LEVS[2]
+            if iii[i] < T_TH[0]: base_lev = T_LEVS[0]
+            elif iii[i] < T_TH[1]: base_lev = T_LEVS[1]
+            
+            if price_curr > t_sma1[i] and price_curr > t_sma2[i]:
+                target_lev_t = base_lev
+            elif price_curr < t_sma1[i] and price_curr < t_sma2[i]:
+                target_lev_t = -base_lev
+                
+        # Normalization for Tumbler
+        norm_lev_t = target_lev_t * (TARGET_STRAT_LEV / TUMBLER_MAX_LEV)
+        
+        # Tumbler Trade Management (TP/SL Check on CURRENT bar High/Low)
+        # Assuming we entered at Open (or held from prev)
+        # If we have a position...
+        realized_ret_t = 0.0
+        
+        if abs(norm_lev_t) > 0.001:
+            if not t_in_trade:
+                # New Entry
+                t_in_trade = True
+                t_entry_price = price_open
+                t_trade_dir = 1 if norm_lev_t > 0 else -1
+            
+            # Check TP/SL
+            # We assume stops are placed based on entry price
+            # TP: Entry * (1 + 0.126 * dir)
+            # SL: Entry * (1 - 0.043 * dir)
+            
+            tp_price = t_entry_price * (1.0 + T_TP * t_trade_dir)
+            sl_price = t_entry_price * (1.0 - T_STOP * t_trade_dir)
+            
+            hit_tp = False
+            hit_sl = False
+            
+            if t_trade_dir == 1: # Long
+                if price_high >= tp_price: hit_tp = True
+                if price_low <= sl_price: hit_sl = True
+            else: # Short
+                if price_low <= tp_price: hit_tp = True
+                if price_high >= sl_price: hit_sl = True
+            
+            # Outcome
+            if hit_sl:
+                # Stopped out. Loss = STOP %
+                # We assume we exit at SL price
+                step_ret = -T_STOP * abs(norm_lev_t) # Leveraged loss
+                realized_ret_t = step_ret
+                t_in_trade = False # Exit
+                # In main.py, it might re-enter next hour. We simulate that by clearing in_trade.
+            elif hit_tp:
+                # TP Hit. Gain = TP %
+                step_ret = T_TP * abs(norm_lev_t)
+                realized_ret_t = step_ret
+                t_in_trade = False
+            else:
+                # No event, standard return
+                step_ret = r_step * norm_lev_t
+                realized_ret_t = step_ret
+        else:
+            t_in_trade = False
+            realized_ret_t = 0.0
+            
+        # --- GAINER LOGIC ---
+        gw = GAINER_PARAMS["GA_WEIGHTS"]
+        raw_g = (g_macd_1h[i]*gw["MACD_1H"] + g_macd_1d[i]*gw["MACD_1D"] + g_sma_1d[i]*gw["SMA_1D"]) / sum(gw.values())
+        norm_lev_g = raw_g * TARGET_STRAT_LEV
+        
+        realized_ret_g = r_step * norm_lev_g
+        
+        # --- UPDATE EQUITIES ---
+        # Planner return calculated at top of loop
+        eq_p[i] = eq_p[i-1] * (1.0 + p_last_lev * r_step)
+        eq_t[i] = eq_t[i-1] * (1.0 + realized_ret_t)
+        eq_g[i] = eq_g[i-1] * (1.0 + realized_ret_g)
+        
+        # Total Portfolio (Sum of components logic, assuming annual rebalance or continuous)
+        # For simplicity in this view, we average the returns of the components 
+        # (Assuming 1/3 capital split per main (24).py)
+        
+        # Note: In main.py, Cap Split is applied. Here we simulate the 100% equity curve of the *system*.
+        # System Ret = (RetP + RetT + RetG) / 3 ? No, capital split is 0.333 each.
+        # So total return contribution is sum of weighted returns.
+        
+        # However, Planner is 2.0x, Tumbler is 2.0x(norm), Gainer is 2.0x
+        # If we split capital 1/3 each, total leverage is 2.0x system wide.
+        
+        total_ret = ( (p_last_lev * r_step) + realized_ret_t + realized_ret_g ) / 3.0
+        eq_total[i] = eq_total[i-1] * (1.0 + total_ret)
+        
+        lev_p_hist[i] = final_lev_p
+        lev_t_hist[i] = norm_lev_t
+        lev_g_hist[i] = norm_lev_g
+        
+    return pd.DataFrame({
+        'price': closes,
+        'equity': eq_total,
+        'eq_p': eq_p,
+        'eq_t': eq_t,
+        'eq_g': eq_g,
+        'lev_p': lev_p_hist,
+        'lev_t': lev_t_hist,
+        'lev_g': lev_g_hist
+    }, index=times)
 
 def run_backtest():
     global GLOBAL_CACHE
@@ -299,68 +392,20 @@ def run_backtest():
     df_1h = fetch_binance_data(SYMBOL, '1h', START_YEAR)
     if df_1h.empty: return None
     
-    # Resample 1D
+    # Create Daily Resample
     df_1d = df_1h.resample('1D').last().dropna()
     
-    GLOBAL_CACHE['progress'] = "Running Planner..."
-    # 1. Planner (Daily -> Aligned)
-    raw_p = calc_planner_signal(df_1d)
-    # Shift Planner by 1 day (trade today using yesterday's signal)
-    p_aligned = raw_p.shift(1).reindex(df_1h.index).ffill().fillna(0)
+    GLOBAL_CACHE['progress'] = "Calc Indicators..."
+    full_df = calc_indicators(df_1h, df_1d)
     
-    GLOBAL_CACHE['progress'] = "Running Tumbler..."
-    # 2. Tumbler (Daily -> Aligned)
-    raw_t = calc_tumbler_signal(df_1d)
-    t_aligned = raw_t.shift(1).reindex(df_1h.index).ffill().fillna(0)
+    GLOBAL_CACHE['progress'] = "Running Event Loop..."
+    res = run_event_loop(full_df)
     
-    GLOBAL_CACHE['progress'] = "Running Gainer..."
-    # 3. Gainer (Mixed)
-    g_aligned = calc_gainer_signal(df_1h, df_1d)
+    # Drawdown
+    res['peak'] = res['equity'].cummax()
+    res['dd'] = (res['equity'] - res['peak']) / res['peak']
     
-    # --- COMBINE ---
-    GLOBAL_CACHE['progress'] = "Simulating Portfolio..."
-    
-    # Normalize
-    # Planner is already -2 to 2
-    # Tumbler needs scaling to Portfolio contribution
-    # Gainer is -1 to 1, target 2.0
-    
-    w_p = p_aligned
-    w_t = t_aligned * (TARGET_STRAT_LEV / TUMBLER_MAX_LEV)
-    w_g = g_aligned * TARGET_STRAT_LEV
-    
-    total_lev = w_p + w_t + w_g
-    
-    # Returns
-    # Open positions at start of hour i, based on signal at end of i-1
-    # Return is (Close_i - Close_i-1)/Close_i-1
-    # We effectively trade the 'next' bar. 
-    pos = total_lev.shift(1).fillna(0)
-    ret = df_1h['close'].pct_change().fillna(0)
-    
-    strat_ret = pos * ret
-    
-    # Compile
-    df_res = pd.DataFrame({
-        'price': df_1h['close'],
-        'pos': pos,
-        'ret': strat_ret
-    })
-    
-    df_res['cum_ret'] = (1 + df_res['ret']).cumprod()
-    df_res['peak'] = df_res['cum_ret'].cummax()
-    df_res['dd'] = (df_res['cum_ret'] - df_res['peak']) / df_res['peak']
-    
-    # Component Breakdown (Normalized to 100% cap for visualization)
-    df_res['ret_p'] = (p_aligned.shift(1) * ret)
-    df_res['ret_t'] = (t_aligned.shift(1) * ret) # Raw Tumbler
-    df_res['ret_g'] = (g_aligned.shift(1) * ret) # Raw Gainer
-    
-    df_res['eq_p'] = (1 + df_res['ret_p']).cumprod()
-    df_res['eq_t'] = (1 + df_res['ret_t']).cumprod()
-    df_res['eq_g'] = (1 + df_res['ret_g']).cumprod()
-
-    return df_res
+    return res
 
 def generate_analytics():
     global GLOBAL_CACHE
@@ -372,13 +417,13 @@ def generate_analytics():
         if df is None: raise Exception("No Data")
         
         # Stats
-        initial = 10000
-        final = initial * df['cum_ret'].iloc[-1]
+        initial = df['equity'].iloc[0]
+        final = df['equity'].iloc[-1]
         years = (df.index[-1] - df.index[0]).days / 365.25
         cagr = (final / initial) ** (1/years) - 1
         
-        hourly_std = df['ret'].std()
-        sharpe = (df['ret'].mean() / hourly_std * np.sqrt(365*24)) if hourly_std > 0 else 0
+        hourly_ret = df['equity'].pct_change().dropna()
+        sharpe = (hourly_ret.mean() * 8760) / (hourly_ret.std() * np.sqrt(8760))
         max_dd = df['dd'].min()
         
         stats = {
@@ -390,36 +435,33 @@ def generate_analytics():
             "period": f"{df.index[0].year}-{df.index[-1].year}"
         }
         
-        # Plots
-        # 1. Main Equity
+        # Plotting
         fig, ax = plt.subplots(figsize=(10, 5))
-        ax.plot(df.index, df['cum_ret'] * initial, label='Combined Strategy', color='#00ff88')
-        ax.plot(df.index, (df['price'] / df['price'].iloc[0]) * initial, label='BTC Hold', color='gray', alpha=0.3)
+        ax.plot(df.index, df['equity'], label='Master Trader (Total)', color='#00ff88')
+        ax.plot(df.index, df['price']/df['price'].iloc[0]*10000, label='BTC', color='gray', alpha=0.3)
         ax.set_yscale('log')
-        ax.set_title("Master Trader Performance", color='white')
         ax.set_facecolor('#1e1e1e')
         fig.patch.set_facecolor('#121212')
         ax.tick_params(colors='white')
-        ax.legend(facecolor='#333', labelcolor='white')
         ax.grid(True, color='#333', linestyle=':')
+        ax.legend(facecolor='#333', labelcolor='white')
         
         buf = io.BytesIO()
         plt.savefig(buf, format='png', bbox_inches='tight')
         plot_eq = base64.b64encode(buf.getvalue()).decode()
         plt.close(fig)
         
-        # 2. Components
+        # Component Plot
         fig2, ax2 = plt.subplots(figsize=(10, 5))
         ax2.plot(df.index, df['eq_p'], label='Planner', color='#2196F3', linewidth=1)
-        ax2.plot(df.index, df['eq_t'], label='Tumbler', color='#9C27B0', linewidth=1)
+        ax2.plot(df.index, df['eq_t'], label='Tumbler (w/ TP/SL)', color='#9C27B0', linewidth=1)
         ax2.plot(df.index, df['eq_g'], label='Gainer', color='#FF9800', linewidth=1)
         ax2.set_yscale('log')
-        ax2.set_title("Component Performance (Raw Signals)", color='white')
         ax2.set_facecolor('#1e1e1e')
         fig2.patch.set_facecolor('#121212')
         ax2.tick_params(colors='white')
-        ax2.legend(facecolor='#333', labelcolor='white')
         ax2.grid(True, color='#333', linestyle=':')
+        ax2.legend(facecolor='#333', labelcolor='white')
         
         buf2 = io.BytesIO()
         plt.savefig(buf2, format='png', bbox_inches='tight')
@@ -446,7 +488,7 @@ def index():
     if not GLOBAL_CACHE['stats']:
         return f"""
         <div style="background:#121212; color:white; height:100vh; display:flex; flex-direction:column; justify-content:center; align-items:center;">
-            <h1>Running Master Trader Backtest...</h1>
+            <h1>Running Event-Driven Backtest...</h1>
             <p>{GLOBAL_CACHE['progress']}</p>
             <script>setTimeout(() => location.reload(), 5000)</script>
         </div>
