@@ -25,7 +25,7 @@ SYMBOL = "BTCUSDT"
 START_YEAR = 2018
 CAP_SPLIT = 0.333
 
-# --- STRATEGY PARAMETERS (Matching main (24).py) ---
+# --- STRATEGY PARAMETERS (EXACT COPY FROM main (24).py) ---
 PLANNER_PARAMS = {
     "S1_SMA": 120, "S1_DECAY": 40, "S1_STOP": 0.13, 
     "S2_SMA": 400, "S2_STOP": 0.27, "S2_PROX": 0.05
@@ -54,6 +54,7 @@ GAINER_PARAMS = {
     }
 }
 
+# Normalization Constants
 TUMBLER_MAX_LEV = 4.327
 TARGET_STRAT_LEV = 2.0
 
@@ -104,8 +105,7 @@ def get_sma(series, window):
 # --- Simulation Logic ---
 
 def calc_indicators(df_1h, df_1d):
-    # Pre-calculate Indicators to speed up the loop
-    # 1. Daily Indicators
+    # Pre-calculate Indicators
     d = df_1d.copy()
     d['P_SMA120'] = get_sma(d['close'], PLANNER_PARAMS["S1_SMA"])
     d['P_SMA400'] = get_sma(d['close'], PLANNER_PARAMS["S2_SMA"])
@@ -137,32 +137,23 @@ def calc_indicators(df_1h, df_1d):
     d['G_MACD'] = calc_composite(d, GAINER_PARAMS["MACD_1D"], 'macd')
     d['G_SMA'] = calc_composite(d, GAINER_PARAMS["SMA_1D"], 'sma')
     
-    # Shift Daily data by 1 (Yesterday's close available at Today 00:00)
+    # Align 1D to 1H (Shift by 1 day)
     d_shifted = d.shift(1)
-    
-    # Align to 1H
     aligned = d_shifted.reindex(df_1h.index).ffill()
     
-    # 2. Hourly Indicators (Gainer)
     h = df_1h.copy()
     h['G_MACD_1H'] = calc_composite(h, GAINER_PARAMS["MACD_1H"], 'macd')
     
-    # Merge
-    full_df = h.join(aligned, rsuffix='_D')
-    return full_df.dropna()
+    return h.join(aligned, rsuffix='_D').dropna()
 
 def run_event_loop(df):
-    """
-    Detailed Event-Driven Loop matching main (24).py logic
-    """
-    # Converting columns to arrays for speed
+    """Event-Driven Loop replicating main (24).py"""
     n = len(df)
     times = df.index
     closes = df['close'].values
     highs = df['high'].values
     lows = df['low'].values
     
-    # Indicator Arrays
     p_sma120 = df['P_SMA120'].values
     p_sma400 = df['P_SMA400'].values
     t_sma1 = df['T_SMA1'].values
@@ -173,8 +164,7 @@ def run_event_loop(df):
     g_macd_1d = df['G_MACD'].values
     g_sma_1d = df['G_SMA'].values
     
-    # State Initialization
-    # Planner
+    # State
     p_virt_eq = 10000.0
     p_s1_peak = 10000.0
     p_s2_peak = 10000.0
@@ -183,13 +173,12 @@ def run_event_loop(df):
     p_s1_entry_idx = -1
     p_last_lev = 0.0
     
-    # Tumbler
     t_flat_regime = False
-    t_entry_price = 0.0 # For TP/SL logic
     t_in_trade = False
-    t_trade_dir = 0 # 1 or -1
+    t_entry_price = 0.0
+    t_trade_dir = 0
     
-    # Equity Curves (Component based)
+    # Equities
     eq_p = np.full(n, 10000.0)
     eq_t = np.full(n, 10000.0)
     eq_g = np.full(n, 10000.0)
@@ -199,50 +188,38 @@ def run_event_loop(df):
     lev_t_hist = np.zeros(n)
     lev_g_hist = np.zeros(n)
     
-    # Params
+    P_DECAY = PLANNER_PARAMS["S1_DECAY"]
     T_LEVS = TUMBLER_PARAMS["LEVS"]
     T_TH = TUMBLER_PARAMS["III_TH"]
     T_FLAT = TUMBLER_PARAMS["FLAT_THRESH"]
     T_BAND = TUMBLER_PARAMS["BAND"]
     T_TP = TUMBLER_PARAMS["TAKE_PROFIT"]
     T_STOP = TUMBLER_PARAMS["STOP"]
-    
-    P_DECAY = PLANNER_PARAMS["S1_DECAY"]
-    
+
     for i in range(1, n):
-        # 1. Market Data
-        price_open = closes[i-1] # Using prev close as Open approximation or actual open
-        price_curr = closes[i]   # Close of current bar
+        price_open = closes[i-1]
+        price_curr = closes[i]
         price_high = highs[i]
         price_low = lows[i]
         
-        # --- PLANNER LOGIC ---
-        # Update Virtual Equity (using prev bar's leverage * return)
-        # Note: Planner stops are based on Virtual Equity drawdowns, checked at cycle start
+        # --- PLANNER ---
         r_step = (price_curr - price_open) / price_open
         p_virt_eq *= (1.0 + p_last_lev * r_step)
         
-        # Update Peaks
         p_s1_peak = max(p_s1_peak, p_virt_eq)
         p_s2_peak = max(p_s2_peak, p_virt_eq)
         
-        # Check Planner Stops (Daily check essentially, but we do it hourly here for safety)
-        if p_s1_peak > 0:
-            if (p_s1_peak - p_virt_eq)/p_s1_peak > PLANNER_PARAMS["S1_STOP"]:
-                p_s1_stopped = True
-                p_s1_entry_idx = -1
+        if p_s1_peak > 0 and (p_s1_peak - p_virt_eq)/p_s1_peak > PLANNER_PARAMS["S1_STOP"]:
+            p_s1_stopped = True
+            p_s1_entry_idx = -1
         
-        if p_s2_peak > 0:
-            if (p_s2_peak - p_virt_eq)/p_s2_peak > PLANNER_PARAMS["S2_STOP"]:
-                p_s2_stopped = True
+        if p_s2_peak > 0 and (p_s2_peak - p_virt_eq)/p_s2_peak > PLANNER_PARAMS["S2_STOP"]:
+            p_s2_stopped = True
                 
-        # Planner Signals (S1)
         lev_s1 = 0.0
-        # Check against PREV day's SMA (Already aligned in df)
         if price_curr > p_sma120[i]:
             if not p_s1_stopped:
                 if p_s1_entry_idx == -1: p_s1_entry_idx = i
-                # Decay (approx days using index / 24)
                 days = (i - p_s1_entry_idx) / 24.0
                 if days < P_DECAY:
                     lev_s1 = 1.0 * (1.0 - (days/P_DECAY)**2)
@@ -252,7 +229,6 @@ def run_event_loop(df):
             p_s1_entry_idx = -1
             lev_s1 = -1.0
             
-        # Planner Signals (S2)
         lev_s2 = 0.0
         if price_curr > p_sma400[i]:
             if not p_s2_stopped: lev_s2 = 1.0
@@ -265,17 +241,13 @@ def run_event_loop(df):
             p_s2_stopped = False
             lev_s2 = 0.0
             
-        # Planner: Native Logic is naturally bounded -2.0 to 2.0 mostly, but S1+S2 can sum to 2.0.
-        # We don't need artificial clamping beyond the logic itself.
         final_lev_p = max(-2.0, min(2.0, lev_s1 + lev_s2))
         p_last_lev = final_lev_p
         
-        # --- TUMBLER LOGIC (With TP/SL) ---
-        # 1. Regime Detection
+        # --- TUMBLER ---
         if iii[i] < T_FLAT: t_flat_regime = True
         
         if t_flat_regime:
-            # Release check (Inside bands)
             d1 = abs(price_curr - t_sma1[i])
             d2 = abs(price_curr - t_sma2[i])
             if d1 <= t_sma1[i]*T_BAND or d2 <= t_sma2[i]*T_BAND:
@@ -283,7 +255,6 @@ def run_event_loop(df):
         
         target_lev_t = 0.0
         if not t_flat_regime:
-            # Lev Selection
             base_lev = T_LEVS[2]
             if iii[i] < T_TH[0]: base_lev = T_LEVS[0]
             elif iii[i] < T_TH[1]: base_lev = T_LEVS[1]
@@ -293,25 +264,16 @@ def run_event_loop(df):
             elif price_curr < t_sma1[i] and price_curr < t_sma2[i]:
                 target_lev_t = -base_lev
                 
-        # Normalization for Tumbler (Scaling to Target 2.0x)
+        # Normalization
         norm_lev_t = target_lev_t * (TARGET_STRAT_LEV / TUMBLER_MAX_LEV)
         
-        # Tumbler Trade Management (TP/SL Check on CURRENT bar High/Low)
-        # Assuming we entered at Open (or held from prev)
-        # If we have a position...
+        # TP/SL Logic
         realized_ret_t = 0.0
-        
         if abs(norm_lev_t) > 0.001:
             if not t_in_trade:
-                # New Entry
                 t_in_trade = True
                 t_entry_price = price_open
                 t_trade_dir = 1 if norm_lev_t > 0 else -1
-            
-            # Check TP/SL
-            # We assume stops are placed based on entry price
-            # TP: Entry * (1 + 0.126 * dir)
-            # SL: Entry * (1 - 0.043 * dir)
             
             tp_price = t_entry_price * (1.0 + T_TP * t_trade_dir)
             sl_price = t_entry_price * (1.0 - T_STOP * t_trade_dir)
@@ -319,49 +281,41 @@ def run_event_loop(df):
             hit_tp = False
             hit_sl = False
             
-            if t_trade_dir == 1: # Long
+            if t_trade_dir == 1:
                 if price_high >= tp_price: hit_tp = True
                 if price_low <= sl_price: hit_sl = True
-            else: # Short
+            else:
                 if price_low <= tp_price: hit_tp = True
                 if price_high >= sl_price: hit_sl = True
             
-            # Outcome
             if hit_sl:
-                # Stopped out. Loss = STOP %
-                # We assume we exit at SL price
-                step_ret = -T_STOP * abs(norm_lev_t) # Leveraged loss
+                step_ret = -T_STOP * abs(norm_lev_t)
                 realized_ret_t = step_ret
-                t_in_trade = False # Exit
-                # In main.py, it might re-enter next hour. We simulate that by clearing in_trade.
+                t_in_trade = False
             elif hit_tp:
-                # TP Hit. Gain = TP %
                 step_ret = T_TP * abs(norm_lev_t)
                 realized_ret_t = step_ret
                 t_in_trade = False
             else:
-                # No event, standard return
                 step_ret = r_step * norm_lev_t
                 realized_ret_t = step_ret
         else:
             t_in_trade = False
             realized_ret_t = 0.0
             
-        # --- GAINER LOGIC ---
+        # --- GAINER ---
         gw = GAINER_PARAMS["GA_WEIGHTS"]
         raw_g = (g_macd_1h[i]*gw["MACD_1H"] + g_macd_1d[i]*gw["MACD_1D"] + g_sma_1d[i]*gw["SMA_1D"]) / sum(gw.values())
         norm_lev_g = raw_g * TARGET_STRAT_LEV
         
         realized_ret_g = r_step * norm_lev_g
         
-        # --- UPDATE EQUITIES (NORMALIZED, NOT CLAMPED) ---
-        # We use the Normalized values calculated above which target 2.0x
-        
+        # --- EQUITIES ---
         eq_p[i] = eq_p[i-1] * (1.0 + final_lev_p * r_step)
         eq_t[i] = eq_t[i-1] * (1.0 + realized_ret_t)
         eq_g[i] = eq_g[i-1] * (1.0 + realized_ret_g)
         
-        # Total Portfolio (Split 1/3 each)
+        # Combined Portfolio
         total_ret = ( (final_lev_p * r_step) + realized_ret_t + realized_ret_g ) / 3.0
         eq_total[i] = eq_total[i-1] * (1.0 + total_ret)
         
@@ -374,82 +328,55 @@ def run_event_loop(df):
         'equity': eq_total,
         'eq_p': eq_p,
         'eq_t': eq_t,
-        'eq_g': eq_g,
-        'lev_p': lev_p_hist,
-        'lev_t': lev_t_hist,
-        'lev_g': lev_g_hist
+        'eq_g': eq_g
     }, index=times)
 
 def generate_heatmap(df):
-    """Generates a Monthly Return Heatmap"""
     monthly_ret = df['equity'].resample('ME').last().pct_change().fillna(0) * 100
-    
-    # Create Matrix: Year x Month
     years = monthly_ret.index.year.unique()
     months = range(1, 13)
     matrix = pd.DataFrame(index=years, columns=months)
-    
     for date, ret in monthly_ret.items():
         matrix.at[date.year, date.month] = ret
-        
     matrix = matrix.fillna(0.0)
     
-    # Generate HTML Table with Color Coding
     html = '<table style="width:100%; border-collapse: collapse; font-family: monospace; font-size: 0.9em;">'
-    
-    # Header
     html += '<thead><tr style="color: #888;"><th>Year</th>'
     for m in ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"]:
         html += f'<th>{m}</th>'
     html += '<th style="color:#fff;">Total</th></tr></thead><tbody>'
     
-    # Rows
     for year, row in matrix.iterrows():
         html += f'<tr><td style="color:#fff; font-weight:bold;">{year}</td>'
         year_tot = 0.0
-        
         for m in months:
             val = row[m]
             year_tot += val
             color = "#00ff88" if val > 0 else "#ff5252" if val < 0 else "#444"
-            opacity = min(abs(val) / 20.0, 1.0) * 0.8 + 0.2  # Dynamic Opacity
-            
-            # Cell Style
+            opacity = min(abs(val) / 20.0, 1.0) * 0.8 + 0.2
             bg = f"rgba({0 if val > 0 else 255}, {255 if val > 0 else 82}, {136 if val > 0 else 82}, {opacity * 0.3})"
-            text_col = color
-            
-            if val == 0:
-                html += '<td style="color:#333;">-</td>'
-            else:
-                html += f'<td style="background:{bg}; color:{text_col}; padding:6px;">{val:+.1f}%</td>'
-        
-        # Year Total
+            if val == 0: html += '<td style="color:#333;">-</td>'
+            else: html += f'<td style="background:{bg}; color:{color}; padding:6px;">{val:+.1f}%</td>'
         tot_col = "#00ff88" if year_tot > 0 else "#ff5252"
         html += f'<td style="color:{tot_col}; font-weight:bold; border-left:1px solid #333;">{year_tot:+.1f}%</td></tr>'
-        
     html += '</tbody></table>'
     return html
 
 def run_backtest():
     global GLOBAL_CACHE
     GLOBAL_CACHE['progress'] = "Fetching Data..."
-    
     df_1h = fetch_binance_data(SYMBOL, '1h', START_YEAR)
     if df_1h.empty: return None
     
-    # Create Daily Resample
     df_1d = df_1h.resample('1D').last().dropna()
-    
     GLOBAL_CACHE['progress'] = "Calc Indicators..."
     full_df = calc_indicators(df_1h, df_1d)
     
     GLOBAL_CACHE['progress'] = "Running Event Loop..."
     res = run_event_loop(full_df)
     
-    # Drawdown
     res['peak'] = res['equity'].cummax()
     res['dd'] = (res['equity'] - res['peak']) / res['peak']
-    
     return res
 
 def generate_analytics():
@@ -461,12 +388,10 @@ def generate_analytics():
         df = run_backtest()
         if df is None: raise Exception("No Data")
         
-        # Stats
         initial = df['equity'].iloc[0]
         final = df['equity'].iloc[-1]
         years = (df.index[-1] - df.index[0]).days / 365.25
         cagr = (final / initial) ** (1/years) - 1
-        
         hourly_ret = df['equity'].pct_change().dropna()
         sharpe = (hourly_ret.mean() * 8760) / (hourly_ret.std() * np.sqrt(8760))
         max_dd = df['dd'].min()
@@ -480,9 +405,8 @@ def generate_analytics():
             "period": f"{df.index[0].year}-{df.index[-1].year}"
         }
         
-        # Plotting
         fig, ax = plt.subplots(figsize=(10, 5))
-        ax.plot(df.index, df['equity'], label='Master Trader (Total)', color='#00ff88')
+        ax.plot(df.index, df['equity'], label='Master Trader', color='#00ff88')
         ax.plot(df.index, df['price']/df['price'].iloc[0]*10000, label='BTC', color='gray', alpha=0.3)
         ax.set_yscale('log')
         ax.set_facecolor('#1e1e1e')
@@ -496,11 +420,10 @@ def generate_analytics():
         plot_eq = base64.b64encode(buf.getvalue()).decode()
         plt.close(fig)
         
-        # Component Plot
         fig2, ax2 = plt.subplots(figsize=(10, 5))
-        ax2.plot(df.index, df['eq_p'], label='Planner (Norm 2x)', color='#2196F3', linewidth=1)
-        ax2.plot(df.index, df['eq_t'], label='Tumbler (Norm 2x)', color='#9C27B0', linewidth=1)
-        ax2.plot(df.index, df['eq_g'], label='Gainer (Norm 2x)', color='#FF9800', linewidth=1)
+        ax2.plot(df.index, df['eq_p'], label='Planner', color='#2196F3', linewidth=1)
+        ax2.plot(df.index, df['eq_t'], label='Tumbler', color='#9C27B0', linewidth=1)
+        ax2.plot(df.index, df['eq_g'], label='Gainer', color='#FF9800', linewidth=1)
         ax2.set_yscale('log')
         ax2.set_facecolor('#1e1e1e')
         fig2.patch.set_facecolor('#121212')
@@ -513,7 +436,6 @@ def generate_analytics():
         plot_comp = base64.b64encode(buf2.getvalue()).decode()
         plt.close(fig2)
         
-        # Generate Heatmap
         heatmap_html = generate_heatmap(df)
         
         GLOBAL_CACHE['stats'] = stats
