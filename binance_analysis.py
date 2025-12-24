@@ -21,7 +21,7 @@ logger = logging.getLogger("MasterTraderBacktest")
 
 # --- Configuration ---
 SYMBOL = "BTCUSDT"
-START_YEAR = 2021
+START_YEAR = 2022
 CAP_SPLIT = 0.333
 
 # --- STRATEGY PARAMETERS (Matches main (24).py) ---
