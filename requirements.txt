@@ -1,7 +1,6 @@
-flask
 pandas
 numpy
+ccxt
+flask
 matplotlib
-seaborn
-requests
 gunicorn
