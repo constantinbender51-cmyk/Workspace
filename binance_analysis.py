@@ -25,7 +25,7 @@ SYMBOL = "BTCUSDT"
 START_YEAR = 2018
 CAP_SPLIT = 0.333
 
-# --- STRATEGY PARAMETERS (EXACT COPY FROM main (24).py) ---
+# --- STRATEGY PARAMETERS ---
 PLANNER_PARAMS = {
     "S1_SMA": 120, "S1_DECAY": 40, "S1_STOP": 0.13, 
     "S2_SMA": 400, "S2_STOP": 0.27, "S2_PROX": 0.05
@@ -110,6 +110,12 @@ def calc_indicators(df_1h, df_1d):
     d['P_SMA120'] = get_sma(d['close'], PLANNER_PARAMS["S1_SMA"])
     d['P_SMA400'] = get_sma(d['close'], PLANNER_PARAMS["S2_SMA"])
     
+    # --- Tumbler Indicators (Daily Logic applied to Daily DF) ---
+    # NOTE: Tumbler logic in main.py runs on Daily data, but in backtest loop we access it per hour.
+    # To be strictly safe, we compute on daily and align, OR compute on hourly if that was the intent.
+    # Given main.py signature: run_tumbler(df_1d...), Tumbler is a DAILY strategy.
+    # Therefore, we calculate on D and shift/align like Planner.
+    
     d['T_SMA1'] = get_sma(d['close'], TUMBLER_PARAMS["SMA1"])
     d['T_SMA2'] = get_sma(d['close'], TUMBLER_PARAMS["SMA2"])
     
@@ -137,13 +143,19 @@ def calc_indicators(df_1h, df_1d):
     d['G_MACD'] = calc_composite(d, GAINER_PARAMS["MACD_1D"], 'macd')
     d['G_SMA'] = calc_composite(d, GAINER_PARAMS["SMA_1D"], 'sma')
     
-    # Align 1D to 1H (Shift by 1 day)
+    # --- ALIGNMENT & SHIFT (CRITICAL FIX PART 1) ---
+    # We shift Daily data by 1 so that at any hour of Day T, we see Day T-1's data.
     d_shifted = d.shift(1)
     aligned = d_shifted.reindex(df_1h.index).ffill()
     
     h = df_1h.copy()
-    h['G_MACD_1H'] = calc_composite(h, GAINER_PARAMS["MACD_1H"], 'macd')
     
+    # --- GAINER 1H & SHIFT (CRITICAL FIX PART 2) ---
+    # Calculate on current data, THEN shift by 1 hour to simulate trade at Open.
+    gainer_1h_raw = calc_composite(h, GAINER_PARAMS["MACD_1H"], 'macd')
+    h['G_MACD_1H'] = gainer_1h_raw.shift(1)
+    
+    # Join aligned Daily data (Planner, Tumbler, Gainer 1D) with Hourly data
     return h.join(aligned, rsuffix='_D').dropna()
 
 def run_event_loop(df):
@@ -154,8 +166,11 @@ def run_event_loop(df):
     highs = df['high'].values
     lows = df['low'].values
     
+    # Planner & Tumbler indicators come from the ALIGNED (Daily) columns now
     p_sma120 = df['P_SMA120'].values
     p_sma400 = df['P_SMA400'].values
+    
+    # Tumbler inputs are now Daily inputs (shifted), matching main.py logic
     t_sma1 = df['T_SMA1'].values
     t_sma2 = df['T_SMA2'].values
     iii = df['III'].values
@@ -184,10 +199,7 @@ def run_event_loop(df):
     eq_g = np.full(n, 10000.0)
     eq_total = np.full(n, 10000.0)
     
-    lev_p_hist = np.zeros(n)
-    lev_t_hist = np.zeros(n)
-    lev_g_hist = np.zeros(n)
-    
+    # Params
     P_DECAY = PLANNER_PARAMS["S1_DECAY"]
     T_LEVS = TUMBLER_PARAMS["LEVS"]
     T_TH = TUMBLER_PARAMS["III_TH"]
@@ -197,10 +209,13 @@ def run_event_loop(df):
     T_STOP = TUMBLER_PARAMS["STOP"]
 
     for i in range(1, n):
-        price_open = closes[i-1]
-        price_curr = closes[i]
+        price_open = closes[i-1] # Entry price for this step is prev close (current open)
+        price_curr = closes[i]   # Current close (for updating equity)
         price_high = highs[i]
         price_low = lows[i]
+        
+        # NOTE: logic decisions use Daily Shifted Data (p_sma120[i]) 
+        # because [i] in aligned columns corresponds to Yesterday's Close.
         
         # --- PLANNER ---
         r_step = (price_curr - price_open) / price_open
@@ -217,7 +232,8 @@ def run_event_loop(df):
             p_s2_stopped = True
                 
         lev_s1 = 0.0
-        if price_curr > p_sma120[i]:
+        # Decision uses price_open (Open of current candle) vs Indicator (Yesterday/PrevHour)
+        if price_open > p_sma120[i]:
             if not p_s1_stopped:
                 if p_s1_entry_idx == -1: p_s1_entry_idx = i
                 days = (i - p_s1_entry_idx) / 24.0
@@ -230,10 +246,10 @@ def run_event_loop(df):
             lev_s1 = -1.0
             
         lev_s2 = 0.0
-        if price_curr > p_sma400[i]:
+        if price_open > p_sma400[i]:
             if not p_s2_stopped: lev_s2 = 1.0
             else:
-                if (price_curr - p_sma400[i])/p_sma400[i] < PLANNER_PARAMS["S2_PROX"]:
+                if (price_open - p_sma400[i])/p_sma400[i] < PLANNER_PARAMS["S2_PROX"]:
                     p_s2_stopped = False
                     p_s2_peak = p_virt_eq
                     lev_s2 = 0.5
@@ -248,8 +264,8 @@ def run_event_loop(df):
         if iii[i] < T_FLAT: t_flat_regime = True
         
         if t_flat_regime:
-            d1 = abs(price_curr - t_sma1[i])
-            d2 = abs(price_curr - t_sma2[i])
+            d1 = abs(price_open - t_sma1[i])
+            d2 = abs(price_open - t_sma2[i])
             if d1 <= t_sma1[i]*T_BAND or d2 <= t_sma2[i]*T_BAND:
                 t_flat_regime = False
         
@@ -259,9 +275,9 @@ def run_event_loop(df):
             if iii[i] < T_TH[0]: base_lev = T_LEVS[0]
             elif iii[i] < T_TH[1]: base_lev = T_LEVS[1]
             
-            if price_curr > t_sma1[i] and price_curr > t_sma2[i]:
+            if price_open > t_sma1[i] and price_open > t_sma2[i]:
                 target_lev_t = base_lev
-            elif price_curr < t_sma1[i] and price_curr < t_sma2[i]:
+            elif price_open < t_sma1[i] and price_open < t_sma2[i]:
                 target_lev_t = -base_lev
                 
         # Normalization
@@ -288,6 +304,7 @@ def run_event_loop(df):
                 if price_low <= tp_price: hit_tp = True
                 if price_high >= sl_price: hit_sl = True
             
+            # Conservative Backtest: If both hit in same candle, assume Stop Hit first (worst case)
             if hit_sl:
                 step_ret = -T_STOP * abs(norm_lev_t)
                 realized_ret_t = step_ret
@@ -318,10 +335,6 @@ def run_event_loop(df):
         # Combined Portfolio
         total_ret = ( (final_lev_p * r_step) + realized_ret_t + realized_ret_g ) / 3.0
         eq_total[i] = eq_total[i-1] * (1.0 + total_ret)
-        
-        lev_p_hist[i] = final_lev_p
-        lev_t_hist[i] = norm_lev_t
-        lev_g_hist[i] = norm_lev_g
         
     return pd.DataFrame({
         'price': closes,
