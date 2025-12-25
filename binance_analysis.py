@@ -15,14 +15,13 @@ app = Flask(__name__)
 # --- Configuration ---
 BASE_URL = "https://api.blockchain.info/charts/{slug}"
 
-# We define metrics to fetch. 
-# Note: "Volume/Transactions" is calculated, so it's not in this fetch list.
 METRICS_TO_FETCH = [
     {"slug": "market-price", "title": "Market Price (USD)", "color": "#f7931a", "key": "price"},
     {"slug": "hash-rate", "title": "Hash Rate (TH/s)", "color": "#007bff", "key": "hash"},
     {"slug": "n-transactions", "title": "Daily Transactions", "color": "#28a745", "key": "tx_count"},
     {"slug": "miners-revenue", "title": "Miners Revenue (USD)", "color": "#dc3545", "key": "revenue"},
-    {"slug": "estimated-transaction-volume-usd", "title": "Est. Tx Volume (USD)", "color": "#6f42c1", "key": "volume"}
+    # CHANGED: 'estimated-transaction-volume-usd' (On-Chain) -> 'trade-volume' (Exchange Trading Volume)
+    {"slug": "trade-volume", "title": "Exchange Volume (USD)", "color": "#6f42c1", "key": "volume"}
 ]
 
 def fetch_metric_data(slug, timespan="1year"):
@@ -83,7 +82,9 @@ def home():
             "info": item
         }
 
-    # 2. Calculate "Volume / Transactions" (Avg Transaction Value)
+    # 2. Calculate "Volume / Transactions" 
+    # Logic: Exchange Trading Volume / Daily Confirmed Transactions
+    # This represents the dollar amount traded on exchanges per single on-chain transaction.
     avg_tx_val_series = None
     if data_store['volume']['series'] is not None and data_store['tx_count']['series'] is not None:
         # Pandas aligns indices (dates) automatically during division
@@ -98,7 +99,7 @@ def home():
         data_store['volume'],
         {
             "series": avg_tx_val_series,
-            "info": {"title": "Avg Tx Value (Vol/Tx)", "color": "#20c997"} 
+            "info": {"title": "Exchange Vol / Tx (Ratio)", "color": "#20c997"} 
         }
     ]
 
@@ -118,7 +119,7 @@ def home():
             ax.grid(True, linestyle='--', alpha=0.6)
             
             # Smart Y-Axis Formatting
-            if "USD" in info["title"] or "Value" in info["title"]:
+            if "USD" in info["title"] or "Vol" in info["title"]:
                 ax.yaxis.set_major_formatter(FuncFormatter(format_currency))
             else:
                 ax.yaxis.set_major_formatter(FuncFormatter(format_number))
@@ -129,7 +130,7 @@ def home():
             ax.text(0.5, 0.5, 'Data Unavailable', ha='center', va='center', transform=ax.transAxes)
             ax.set_title(info["title"])
 
-    fig.suptitle(f"Bitcoin On-Chain Metrics (Last 1 Year) - {datetime.now().strftime('%Y-%m-%d')}", fontsize=16)
+    fig.suptitle(f"Bitcoin Metrics (Exchange & On-Chain) - {datetime.now().strftime('%Y-%m-%d')}", fontsize=16)
     plt.tight_layout(rect=[0, 0.03, 1, 0.98]) # Adjust for suptitle
 
     # Save to memory buffer
