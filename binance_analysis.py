@@ -119,13 +119,22 @@ def fetch_blockchain_charts():
         print("Error: One of the Blockchain.com charts returned empty.")
         return pd.DataFrame()
 
-    # Merge and Calculate
+    # Merge
     df_final = pd.merge(df_vol, df_count, on="Date", how="inner")
     
-    # Manual Calculation of Average Transaction Value
-    # Avoid division by zero with regex replacement or simple logic
+    # Clean Data: Remove rows with 0 volume or 0 transactions to avoid skewed averages or div/0
     df_final = df_final[df_final["tx_count"] > 0]
+    df_final = df_final[df_final["total_volume_usd"] > 0]
+
+    # Calculate Average
     df_final["avg-transaction-value"] = df_final["total_volume_usd"] / df_final["tx_count"]
+
+    # Re-index to ensure continuous timeline (Fills missing dates with NaN so they show as gaps)
+    # This prevents the chart from looking "gappy" due to missing index rows
+    if not df_final.empty:
+        df_final.set_index("Date", inplace=True)
+        df_final = df_final.resample('D').mean() # Resample to Daily frequency
+        df_final.reset_index(inplace=True)
     
     print(f"[Init] Successfully calculated Avg Tx Value for {len(df_final)} days.")
     return df_final.sort_values("Date")
