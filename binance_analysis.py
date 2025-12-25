@@ -1,157 +1,123 @@
-import io
-import os
 import requests
 import pandas as pd
-import matplotlib
-# Set backend to Agg (Anti-Grain Geometry) for non-interactive server environments
-matplotlib.use('Agg') 
-import matplotlib.pyplot as plt
-from matplotlib.ticker import FuncFormatter
-from flask import Flask, send_file
+import json
 from datetime import datetime
 
-app = Flask(__name__)
+# ==========================================
+# CONFIGURATION
+# ==========================================
+# 1. Get your free API key at: https://fredaccount.stlouisfed.org/apikeys
+# 2. Paste it inside the quotes below.
+API_KEY = "8005f92c424c0503df32084af3e66daf" 
 
-# --- Configuration ---
-BASE_URL = "https://api.blockchain.info/charts/{slug}"
+# Series IDs
+# FEDFUNDS: Effective Federal Funds Rate (Monthly)
+# WALCL: Assets: Total Assets: Total Assets (Less Eliminations from Consolidation): Wednesday Level
+SERIES_IDS = {
+    "Interest Rate (Fed Funds)": "FEDFUNDS",
+    "Fed Balance Sheet (Total Assets)": "WALCL"
+}
 
-METRICS_TO_FETCH = [
-    {"slug": "market-price", "title": "Market Price (USD)", "color": "#f7931a", "key": "price"},
-    {"slug": "hash-rate", "title": "Hash Rate (TH/s)", "color": "#007bff", "key": "hash"},
-    {"slug": "n-transactions", "title": "Daily Transactions", "color": "#28a745", "key": "tx_count"},
-    {"slug": "miners-revenue", "title": "Miners Revenue (USD)", "color": "#dc3545", "key": "revenue"},
-    {"slug": "trade-volume", "title": "Exchange Volume (USD)", "color": "#6f42c1", "key": "volume"}
-]
+BASE_URL = "https://api.stlouisfed.org/fred/series/observations"
 
-def fetch_metric_data(slug):
+def fetch_series_data(series_id, api_key):
     """
-    Fetches ALL chart data from Blockchain.com API and filters for 2018+.
-    Returns a pandas Series or None.
+    Fetches observations for a specific FRED series ID.
     """
-    url = BASE_URL.format(slug=slug)
-    
-    # FIX: Use timespan="all" to get full history, then filter in Pandas.
-    # The API often defaults to 1year if timespan is missing, ignoring 'start'.
     params = {
-        "timespan": "all",
-        "format": "json", 
-        "sampled": "false" # Request full daily resolution
+        "series_id": series_id,
+        "api_key": api_key,
+        "file_type": "json",
+        "sort_order": "asc" # Oldest to newest
     }
-    
-    headers = {"User-Agent": "Mozilla/5.0 (Cloud Deployment)"}
-    
+
     try:
-        response = requests.get(url, params=params, headers=headers, timeout=15)
+        response = requests.get(BASE_URL, params=params)
         response.raise_for_status()
         data = response.json()
         
-        if 'values' in data:
-            df = pd.DataFrame(data['values'])
-            df['date'] = pd.to_datetime(df['x'], unit='s')
-            df.set_index('date', inplace=True)
-            
-            # --- FILTERING ---
-            # Explicitly slice data from 2018-01-01 to Present
-            df = df[df.index >= '2018-01-01']
-            
-            return df['y']
+        # FRED returns data in a 'observations' list
+        # Fields: realtime_start, realtime_end, date, value
+        observations = data.get("observations", [])
+        
+        # Convert to DataFrame
+        df = pd.DataFrame(observations)
+        
+        # Clean data
+        # 'value' comes as string and can contain '.' for missing data
+        df = df[df['value'] != '.'] 
+        df['value'] = pd.to_numeric(df['value'])
+        df['date'] = pd.to_datetime(df['date'])
+        
+        return df[['date', 'value']]
+
+    except requests.exceptions.HTTPError as err:
+        print(f"Error fetching {series_id}: {err}")
+        return None
     except Exception as e:
-        print(f"Error fetching {slug}: {e}")
+        print(f"An unexpected error occurred: {e}")
         return None
 
-def format_currency(x, pos):
-    """Format large numbers with K, M, B suffixes."""
-    if x >= 1e9:
-        return f'${x*1e-9:.1f}B'
-    elif x >= 1e6:
-        return f'${x*1e-6:.1f}M'
-    elif x >= 1e3:
-        return f'${x*1e-3:.0f}K'
-    return f'${x:.0f}'
-
-def format_number(x, pos):
-    """Format large numbers with K, M, B suffixes (No dollar sign)."""
-    if x >= 1e9:
-        return f'{x*1e-9:.1f}B'
-    elif x >= 1e6:
-        return f'{x*1e-6:.1f}M'
-    elif x >= 1e3:
-        return f'{x*1e-3:.0f}K'
-    return f'{x:.0f}'
-
-@app.route('/')
-def home():
+def calculate_metrics(name, df):
     """
-    Main route: Fetches data, calculates derived metrics, and generates a 3x2 grid.
+    Calculates key metrics from the series DataFrame.
     """
-    data_store = {}
+    if df is None or df.empty:
+        return f"No data available for {name}"
+
+    latest_date = df['date'].iloc[-1].strftime('%Y-%m-%d')
+    start_date = df['date'].iloc[0].strftime('%Y-%m-%d')
     
-    # 1. Fetch all base metrics
-    for item in METRICS_TO_FETCH:
-        data_store[item['key']] = {
-            "series": fetch_metric_data(item['slug']),
-            "info": item
-        }
+    metrics = {
+        "Series Name": name,
+        "Start Date": start_date,
+        "End Date": latest_date,
+        "Total Observations": len(df),
+        "Latest Value": f"{df['value'].iloc[-1]:,.2f}",
+        "Min Value": f"{df['value'].min():,.2f}",
+        "Max Value": f"{df['value'].max():,.2f}",
+        "Average Value": f"{df['value'].mean():,.2f}"
+    }
+    return metrics
 
-    # 2. Calculate "Exchange Volume / Transactions"
-    avg_tx_val_series = None
-    if data_store['volume']['series'] is not None and data_store['tx_count']['series'] is not None:
-        # Pandas aligns indices automatically
-        raw_ratio = data_store['volume']['series'] / data_store['tx_count']['series']
+def main():
+    if not API_KEY:
+        print("❌ ERROR: API Key is missing.")
+        print("Please open the script and paste your FRED API key into the 'API_KEY' variable.")
+        return
+
+    print(f"Fetching data from FRED API...\n")
+    
+    all_metrics = []
+
+    for name, series_id in SERIES_IDS.items():
+        print(f"Processing: {name} ({series_id})...")
+        df = fetch_series_data(series_id, API_KEY)
         
-        # Resample to weekly frequency ('W') and calculate the mean
-        avg_tx_val_series = raw_ratio.resample('W').mean()
+        if df is not None:
+            metric = calculate_metrics(name, df)
+            all_metrics.append(metric)
 
-    # 3. Define the Plotting Order (6 Plots)
-    plots_config = [
-        data_store['price'],
-        data_store['hash'],
-        data_store['tx_count'],
-        data_store['revenue'],
-        data_store['volume'],
-        {
-            "series": avg_tx_val_series,
-            "info": {"title": "Exchange Vol / Tx (Weekly Avg)", "color": "#20c997"} 
-        }
-    ]
+    # Display Results
+    print("\n" + "="*80)
+    print(f"{'FRED DATA METRICS REPORT':^80}")
+    print("="*80 + "\n")
 
-    # 4. Create Figure (3 Rows x 2 Columns)
-    fig, axes = plt.subplots(nrows=3, ncols=2, figsize=(16, 14))
-    axes = axes.flatten()
-    plt.style.use('ggplot')
-
-    for i, plot_obj in enumerate(plots_config):
-        ax = axes[i]
-        series = plot_obj.get("series")
-        info = plot_obj.get("info")
+    # Create a summary DataFrame for pretty printing
+    if all_metrics:
+        results_df = pd.DataFrame(all_metrics)
         
-        if series is not None and not series.empty:
-            # Thinner line width (1.0) for long timeframe data to avoid clutter
-            ax.plot(series.index, series.values, color=info["color"], linewidth=1.0)
-            ax.set_title(info["title"], fontsize=11, fontweight='bold')
-            ax.grid(True, linestyle='--', alpha=0.6)
-            
-            # Smart Y-Axis Formatting
-            if "USD" in info["title"] or "Vol" in info["title"]:
-                ax.yaxis.set_major_formatter(FuncFormatter(format_currency))
-            else:
-                ax.yaxis.set_major_formatter(FuncFormatter(format_number))
-                
-            plt.setp(ax.get_xticklabels(), rotation=30, ha='right', fontsize=9)
-        else:
-            ax.text(0.5, 0.5, 'Data Unavailable', ha='center', va='center', transform=ax.transAxes)
-            ax.set_title(info["title"])
-
-    fig.suptitle(f"Bitcoin Metrics (2018 - Present) - Generated {datetime.now().strftime('%Y-%m-%d')}", fontsize=16)
-    plt.tight_layout(rect=[0, 0.03, 1, 0.98])
-
-    img_buffer = io.BytesIO()
-    plt.savefig(img_buffer, format='png', dpi=100)
-    img_buffer.seek(0)
-    plt.close(fig)
-
-    return send_file(img_buffer, mimetype='image/png')
+        # Transpose for a card-like view per series or just print the table
+        # Here we iterate to print a readable list
+        for item in all_metrics:
+            print(f"🔹 {item['Series Name']}")
+            print("-" * 40)
+            for key, value in item.items():
+                if key != "Series Name":
+                    print(f"{key:<20}: {value}")
+            print("\n")
+    else:
+        print("No metrics could be generated.")
 
 if __name__ == "__main__":
-    port = int(os.environ.get("PORT", 5000))
-    app.run(host="0.0.0.0", port=port)
+    main()
