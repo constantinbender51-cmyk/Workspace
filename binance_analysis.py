@@ -7,46 +7,38 @@ import pandas as pd
 import requests
 import datetime
 import threading
-import json
 import time
-import websocket
+import os
 import ssl
 
 # =============================================================================
-# GLOBAL STATE
+# GLOBAL STATE & CONFIG
 # =============================================================================
-
-LIVE_WHALES = []
-DATA_LOCK = threading.Lock()
-WS_CONNECTED = False
-
-WHALE_THRESHOLD_USD = 100000 
-CURRENT_BTC_PRICE = 96000.0
 
 GLOBAL_DF = pd.DataFrame()
 DATA_STATUS = "Initializing..."
-
 HEADERS = {
     'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36'
 }
 
 # =============================================================================
-# 1. ROBUST DATA FETCHING
+# DATA FETCHING (HISTORICAL ONLY)
 # =============================================================================
 
 def fetch_binance_data():
-    print("[Fetcher] Getting Binance Prices...")
+    """Fetches daily BTCUSDT close prices since 2018."""
     try:
         url = "https://api.binance.com/api/v3/klines"
-        start_ts = int((datetime.datetime.now() - datetime.timedelta(days=365*5)).timestamp() * 1000)
+        start_ts = int(datetime.datetime(2018, 1, 1).timestamp() * 1000)
         params = {"symbol": "BTCUSDT", "interval": "1d", "startTime": start_ts, "limit": 1000}
         
         all_data = []
         while True:
-            r = requests.get(url, params=params, headers=HEADERS)
+            r = requests.get(url, params=params, headers=HEADERS, timeout=15)
             data = r.json()
             if not data or not isinstance(data, list): break
             all_data.extend(data)
+            # Stop if we are within the last 24 hours
             if data[-1][6] > (datetime.datetime.now().timestamp() * 1000) - 86400000: break
             params['startTime'] = data[-1][6] + 1
             time.sleep(0.1)
@@ -59,229 +51,139 @@ def fetch_binance_data():
         df["Close"] = df["Close"].astype(float)
         return df[["Date", "Close"]]
     except Exception as e:
-        print(f"[Fetcher] Binance Error: {e}")
+        print(f"Binance Fetch Error: {e}")
         return pd.DataFrame()
 
 def fetch_blockchain_data():
-    print("[Fetcher] Getting Blockchain.com Volume...")
-    
-    # 1. Get Volume
-    df_vol = pd.DataFrame()
+    """Fetches and calculates Average Transaction Value (Volume / Tx Count)."""
     try:
-        url = "https://api.blockchain.info/charts/estimated-transaction-volume-usd?timespan=5years&format=json"
-        r = requests.get(url, headers=HEADERS)
-        if r.status_code == 200:
-            data = r.json()
-            if 'values' in data:
-                df_vol = pd.DataFrame(data['values'])
-                df_vol['Date'] = pd.to_datetime(df_vol['x'], unit='s').dt.normalize()
-                df_vol['Volume'] = df_vol['y'].astype(float) # Force Float
-    except Exception as e:
-        print(f"[Fetcher] Volume Error: {e}")
+        # Fetch Total Estimated Volume (USD)
+        url_v = "https://api.blockchain.info/charts/estimated-transaction-volume-usd?timespan=8years&format=json"
+        r_v = requests.get(url_v, headers=HEADERS, timeout=15)
+        df_vol = pd.DataFrame(r_v.json()['values'])
+        df_vol['Date'] = pd.to_datetime(df_vol['x'], unit='s').dt.normalize()
+        df_vol['Volume'] = df_vol['y'].astype(float)
 
-    # 2. Get Count
-    df_count = pd.DataFrame()
-    try:
-        url = "https://api.blockchain.info/charts/n-transactions?timespan=5years&format=json"
-        r = requests.get(url, headers=HEADERS)
-        if r.status_code == 200:
-            data = r.json()
-            if 'values' in data:
-                df_count = pd.DataFrame(data['values'])
-                df_count['Date'] = pd.to_datetime(df_count['x'], unit='s').dt.normalize()
-                df_count['Count'] = df_count['y'].astype(float) # Force Float
-    except Exception as e:
-        print(f"[Fetcher] Count Error: {e}")
+        # Fetch Transaction Count
+        url_c = "https://api.blockchain.info/charts/n-transactions?timespan=8years&format=json"
+        r_c = requests.get(url_c, headers=HEADERS, timeout=15)
+        df_count = pd.DataFrame(r_c.json()['values'])
+        df_count['Date'] = pd.to_datetime(df_count['x'], unit='s').dt.normalize()
+        df_count['Count'] = df_count['y'].astype(float)
 
-    if df_vol.empty or df_count.empty:
-        print("[Fetcher] One or both Blockchain datasets failed.")
+        # Merge and Calculate
+        df_final = pd.merge(df_vol, df_count, on="Date", how="inner")
+        df_final = df_final[df_final['Count'] > 0]
+        df_final['AvgTxValue'] = df_final['Volume'] / df_final['Count']
+        
+        return df_final[['Date', 'AvgTxValue']]
+    except Exception as e:
+        print(f"Blockchain Fetch Error: {e}")
         return pd.DataFrame()
 
-    # Merge
-    df_final = pd.merge(df_vol, df_count, on="Date", how="inner")
-    
-    # Calculate Average
-    df_final = df_final[df_final['Count'] > 0]
-    df_final['AvgTxValue'] = df_final['Volume'] / df_final['Count']
-    
-    # Debug Print
-    print(f"[Fetcher] Calculated {len(df_final)} rows. Max Avg: ${df_final['AvgTxValue'].max():.2f}")
-    
-    return df_final[['Date', 'AvgTxValue']]
-
 def update_data_thread():
+    """Background loop to keep the dataset updated every hour."""
     global GLOBAL_DF, DATA_STATUS
     while True:
-        DATA_STATUS = "Fetching Data..."
+        DATA_STATUS = "Updating historical data..."
+        df_p = fetch_binance_data()
+        df_c = fetch_blockchain_data()
         
-        df_price = fetch_binance_data()
-        df_chain = fetch_blockchain_data()
-        
-        if not df_price.empty:
-            if not df_chain.empty:
-                # Left merge ensures we keep all price dates. Fill missing chain data with NaN.
-                GLOBAL_DF = pd.merge(df_price, df_chain, on="Date", how="left")
-                DATA_STATUS = f"Active. Price: {len(df_price)} rows. Chain: {len(df_chain)} rows."
-            else:
-                GLOBAL_DF = df_price
-                GLOBAL_DF['AvgTxValue'] = 0
-                DATA_STATUS = "Partial. Showing Price Only (Blockchain API failed)."
+        if not df_p.empty and not df_c.empty:
+            # Join datasets on Date
+            merged = pd.merge(df_p, df_c, on="Date", how="left")
+            # Fill gaps for a clean area chart
+            merged = merged.sort_values("Date").reset_index(drop=True)
+            GLOBAL_DF = merged
+            DATA_STATUS = f"Data Synced: {len(GLOBAL_DF)} days of history."
         else:
-            DATA_STATUS = "Error. Could not fetch Price data."
+            DATA_STATUS = "Sync failed. Retrying in 1 minute..."
+            time.sleep(60)
+            continue
             
         time.sleep(3600)
 
-t_data = threading.Thread(target=update_data_thread)
-t_data.daemon = True
-t_data.start()
+# Start background sync
+threading.Thread(target=update_data_thread, daemon=True).start()
 
 # =============================================================================
-# 2. WEBSOCKET LISTENER
+# DASH APP
 # =============================================================================
 
-def start_socket():
-    def on_message(ws, message):
-        try:
-            data = json.loads(message)
-            if data.get("op") == "utx":
-                x = data["x"]
-                total_satoshi = sum([out.get("value", 0) for out in x.get("out", [])])
-                usd_val = (total_satoshi / 100_000_000) * CURRENT_BTC_PRICE
-                
-                if usd_val > WHALE_THRESHOLD_USD:
-                    t_str = datetime.datetime.fromtimestamp(x["time"]).strftime('%H:%M:%S')
-                    
-                    if usd_val > 1_000_000:
-                        icon, color = "🐋 WHALE", "#ff4d4d"
-                    elif usd_val > 500_000:
-                        icon, color = "🦈 Shark", "#ffa600"
-                    else:
-                        icon, color = "🐟 Large", "#00cc96"
+app = dash.Dash(__name__, title="BTC Historical Whale Dashboard")
+server = app.server # For Gunicorn/Railway
 
-                    entry = {
-                        "Time": t_str,
-                        "Hash": x["hash"][:8],
-                        "Value": f"${usd_val:,.0f}",
-                        "Type": icon,
-                        "Color": color
-                    }
-                    with DATA_LOCK:
-                        LIVE_WHALES.insert(0, entry)
-                        if len(LIVE_WHALES) > 50: LIVE_WHALES.pop()
-        except: pass
-
-    def on_open(ws):
-        global WS_CONNECTED
-        WS_CONNECTED = True
-        ws.send(json.dumps({"op": "unconfirmed_sub"}))
-
-    def on_error(ws, err):
-        global WS_CONNECTED
-        WS_CONNECTED = False
-
-    while True:
-        ws = websocket.WebSocketApp("wss://ws.blockchain.info/inv", 
-                                  on_open=on_open, on_message=on_message, on_error=on_error)
-        ws.run_forever(sslopt={"cert_reqs": ssl.CERT_NONE})
-        time.sleep(5)
-
-t_ws = threading.Thread(target=start_socket)
-t_ws.daemon = True
-t_ws.start()
-
-# =============================================================================
-# 3. DASH APP
-# =============================================================================
-
-app = dash.Dash(__name__, title="Whale Dashboard Visible")
-server = app.server
-
-app.layout = html.Div(style={'backgroundColor': '#111', 'minHeight': '100vh', 'color': '#ccc', 'fontFamily': 'sans-serif', 'padding': '20px'}, children=[
+app.layout = html.Div(style={'backgroundColor': '#0b0c10', 'minHeight': '100vh', 'color': '#c5c6c7', 'fontFamily': 'sans-serif', 'padding': '40px'}, children=[
     
-    html.Div([
-        html.H2("Whale & Market Monitor", style={'color': '#fff', 'margin': 0}),
-        html.Div(id='system-status', style={'color': '#888', 'fontSize': '12px', 'marginTop': '5px'})
-    ], style={'borderBottom': '1px solid #333', 'paddingBottom': '15px'}),
+    html.Div(style={'marginBottom': '30px', 'borderBottom': '1px solid #1f2833', 'paddingBottom': '20px'}, children=[
+        html.H1("Bitcoin Historical Whale Analysis", style={'color': '#66fcf1', 'margin': '0'}),
+        html.P(id='status-text', style={'fontSize': '14px', 'color': '#45a29e', 'marginTop': '10px'})
+    ]),
 
-    html.Div(style={'display': 'flex', 'gap': '20px', 'marginTop': '20px'}, children=[
-        html.Div(style={'flex': '2', 'backgroundColor': '#1e1e1e', 'borderRadius': '8px', 'padding': '15px'}, children=[
-            dcc.Graph(id='main-chart', style={'height': '600px'})
-        ]),
-        html.Div(style={'flex': '1', 'backgroundColor': '#1e1e1e', 'borderRadius': '8px', 'padding': '15px', 'height': '600px', 'display': 'flex', 'flexDirection': 'column'}, children=[
-            html.H3("Live Whales (>$100k)", style={'color': '#00cc96', 'margin': '0 0 15px 0'}),
-            html.Div(id='live-feed', style={'flex': '1', 'overflowY': 'auto'})
-        ])
+    html.Div(style={'backgroundColor': '#1f2833', 'padding': '20px', 'borderRadius': '10px', 'boxShadow': '0 10px 30px rgba(0,0,0,0.5)'}, children=[
+        html.H3("Average Transaction Value vs. Market Price (Since 2018)", style={'color': '#fff', 'marginTop': '0'}),
+        html.P("Spikes in Average Transaction Value indicate periods of high whale movement.", style={'fontSize': '12px', 'color': '#888'}),
+        dcc.Graph(id='main-chart', style={'height': '70vh'})
     ]),
     
-    dcc.Interval(id='timer', interval=2000)
+    dcc.Interval(id='ui-refresh', interval=5000)
 ])
 
 @app.callback(
-    [Output('main-chart', 'figure'), Output('live-feed', 'children'), Output('system-status', 'children')],
-    Input('timer', 'n_intervals')
+    [Output('main-chart', 'figure'), Output('status-text', 'children')],
+    Input('ui-refresh', 'n_intervals')
 )
 def update_ui(n):
-    # 1. Update Chart
     if GLOBAL_DF.empty:
         fig = go.Figure()
-        fig.update_layout(title="Loading Data...", template="plotly_dark")
-    else:
-        fig = make_subplots(specs=[[{"secondary_y": True}]])
-        
-        # Trace 1: Calculated Average Value (FILLED AREA)
-        # Using Scatter with fill='tozeroy' ensures it's visible even if lines are thin
-        fig.add_trace(go.Scatter(
+        fig.update_layout(template="plotly_dark", title="Fetching history from APIs...")
+        return fig, DATA_STATUS
+
+    fig = make_subplots(specs=[[{"secondary_y": True}]])
+
+    # 1. Historical Whale Proxy: Avg Transaction Value (Area Chart)
+    fig.add_trace(
+        go.Scatter(
             x=GLOBAL_DF['Date'], 
             y=GLOBAL_DF['AvgTxValue'],
-            name="Avg Tx Size ($)",
+            name="Avg Tx Size (USD)",
             mode='lines',
-            line=dict(width=0), # Hide line, show fill
+            line=dict(width=0),
             fill='tozeroy',
-            fillcolor='rgba(0, 204, 150, 0.4)', # Green with opacity
-            connectgaps=True # Connect across missing dates
-        ), secondary_y=False)
-        
-        # Trace 2: Price (Line)
-        fig.add_trace(go.Scatter(
+            fillcolor='rgba(102, 252, 241, 0.2)', # Cyan area
+            connectgaps=True
+        ),
+        secondary_y=False,
+    )
+
+    # 2. Market Price: BTCUSDT (Line Chart)
+    fig.add_trace(
+        go.Scatter(
             x=GLOBAL_DF['Date'], 
             y=GLOBAL_DF['Close'],
-            name="BTC Price",
+            name="BTC Price (Binance)",
             mode='lines',
             line=dict(color='#ff4d4d', width=2)
-        ), secondary_y=True)
-        
-        fig.update_layout(
-            template="plotly_dark",
-            paper_bgcolor='rgba(0,0,0,0)',
-            plot_bgcolor='rgba(0,0,0,0)',
-            margin=dict(l=40, r=40, t=40, b=40),
-            legend=dict(orientation="h", y=1.02, x=0),
-            hovermode="x unified"
-        )
-        fig.update_yaxes(title_text="Avg Transaction Value ($)", secondary_y=False, showgrid=False)
-        fig.update_yaxes(title_text="Price ($)", secondary_y=True, showgrid=True, gridcolor='#333')
+        ),
+        secondary_y=True,
+    )
 
-    # 2. Update Feed
-    with DATA_LOCK:
-        feed_data = list(LIVE_WHALES)
-        
-    feed_items = []
-    if not feed_data:
-        feed_items.append(html.Div("Waiting for transactions...", style={'textAlign': 'center', 'marginTop': '20px'}))
-    else:
-        for x in feed_data:
-            feed_items.append(html.Div(style={'borderBottom': '1px solid #333', 'padding': '10px 0', 'display': 'flex', 'justifyContent': 'space-between'}, children=[
-                html.Div([
-                    html.Div(x['Type'], style={'color': x['Color'], 'fontWeight': 'bold', 'fontSize': '14px'}),
-                    html.Div(x['Time'], style={'fontSize': '12px', 'color': '#666'})
-                ]),
-                html.Div([
-                    html.Div(x['Value'], style={'color': '#fff', 'fontWeight': 'bold'}),
-                    html.Div(x['Hash'], style={'fontSize': '11px', 'color': '#444', 'fontFamily': 'monospace'})
-                ], style={'textAlign': 'right'})
-            ]))
+    fig.update_layout(
+        template="plotly_dark",
+        paper_bgcolor='rgba(0,0,0,0)',
+        plot_bgcolor='rgba(0,0,0,0)',
+        margin=dict(l=20, r=20, t=20, b=20),
+        legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1),
+        hovermode="x unified",
+        xaxis=dict(showgrid=False)
+    )
 
-    return fig, feed_items, f"System Status: {DATA_STATUS} | WebSocket: {'Connected' if WS_CONNECTED else 'Disconnected'}"
+    fig.update_yaxes(title_text="Avg Transaction Value ($)", secondary_y=False, showgrid=False)
+    fig.update_yaxes(title_text="Price ($)", secondary_y=True, showgrid=True, gridcolor='#333')
+
+    return fig, DATA_STATUS
 
 if __name__ == '__main__':
-    app.run_server(debug=True, port=8050)
+    # Railway Environment Port Binding
+    port = int(os.environ.get("PORT", 8080))
+    app.run_server(host='0.0.0.0', port=port)
