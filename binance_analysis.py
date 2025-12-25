@@ -23,7 +23,6 @@ WS_CONNECTED = False
 WHALE_THRESHOLD_USD = 100000 
 CURRENT_BTC_PRICE = 96000.0
 
-# Store data globally to avoid re-fetching on every refresh
 GLOBAL_DF = pd.DataFrame()
 DATA_STATUS = "Initializing..."
 
@@ -39,7 +38,6 @@ def fetch_binance_data():
     print("[Fetcher] Getting Binance Prices...")
     try:
         url = "https://api.binance.com/api/v3/klines"
-        # Get last 5 years
         start_ts = int((datetime.datetime.now() - datetime.timedelta(days=365*5)).timestamp() * 1000)
         params = {"symbol": "BTCUSDT", "interval": "1d", "startTime": start_ts, "limit": 1000}
         
@@ -49,7 +47,6 @@ def fetch_binance_data():
             data = r.json()
             if not data or not isinstance(data, list): break
             all_data.extend(data)
-            # Check if we reached now
             if data[-1][6] > (datetime.datetime.now().timestamp() * 1000) - 86400000: break
             params['startTime'] = data[-1][6] + 1
             time.sleep(0.1)
@@ -68,59 +65,51 @@ def fetch_binance_data():
 def fetch_blockchain_data():
     print("[Fetcher] Getting Blockchain.com Volume...")
     
-    # Try primary then backup endpoints
-    endpoints = [
-        ("estimated-transaction-volume-usd", "vol_usd"), # Best
-        ("trade-volume", "vol_usd"),                     # Backup 1
-        ("output-volume", "vol_btc")                     # Backup 2 (BTC only)
-    ]
-    
+    # 1. Get Volume
     df_vol = pd.DataFrame()
-    
-    for endpoint, col_type in endpoints:
-        try:
-            print(f"[Fetcher] Trying endpoint: {endpoint}")
-            url = f"https://api.blockchain.info/charts/{endpoint}?timespan=5years&format=json"
-            r = requests.get(url, headers=HEADERS)
-            if r.status_code == 200:
-                data = r.json()
-                if 'values' in data and len(data['values']) > 0:
-                    df_vol = pd.DataFrame(data['values'])
-                    df_vol['Date'] = pd.to_datetime(df_vol['x'], unit='s').dt.normalize()
-                    df_vol['Volume'] = df_vol['y']
-                    # If this is BTC volume, we need price to convert (simplified: just use as relative metric)
-                    print(f"[Fetcher] Success with {endpoint}!")
-                    break
-        except Exception as e:
-            print(f"[Fetcher] Failed {endpoint}: {e}")
-    
-    if df_vol.empty:
-        print("[Fetcher] All Blockchain endpoints failed.")
-        return pd.DataFrame()
-        
-    # Also get Tx Count to calculate average
     try:
-        r_count = requests.get("https://api.blockchain.info/charts/n-transactions?timespan=5years&format=json", headers=HEADERS)
-        df_count = pd.DataFrame(r_count.json()['values'])
-        df_count['Date'] = pd.to_datetime(df_count['x'], unit='s').dt.normalize()
-        df_count['TxCount'] = df_count['y']
-        
-        # Merge Volume and Count
-        df_final = pd.merge(df_vol, df_count, on="Date", how="inner")
-        
-        # Calculate Average Transaction Value
-        # Handle div by zero
-        df_final = df_final[df_final['TxCount'] > 0]
-        df_final['AvgTxValue'] = df_final['Volume'] / df_final['TxCount']
-        
-        return df_final[['Date', 'AvgTxValue']]
-        
+        url = "https://api.blockchain.info/charts/estimated-transaction-volume-usd?timespan=5years&format=json"
+        r = requests.get(url, headers=HEADERS)
+        if r.status_code == 200:
+            data = r.json()
+            if 'values' in data:
+                df_vol = pd.DataFrame(data['values'])
+                df_vol['Date'] = pd.to_datetime(df_vol['x'], unit='s').dt.normalize()
+                df_vol['Volume'] = df_vol['y'].astype(float) # Force Float
     except Exception as e:
-        print(f"[Fetcher] Tx Count Error: {e}. Using raw volume instead.")
-        return df_vol[['Date', 'Volume']].rename(columns={'Volume': 'AvgTxValue'})
+        print(f"[Fetcher] Volume Error: {e}")
+
+    # 2. Get Count
+    df_count = pd.DataFrame()
+    try:
+        url = "https://api.blockchain.info/charts/n-transactions?timespan=5years&format=json"
+        r = requests.get(url, headers=HEADERS)
+        if r.status_code == 200:
+            data = r.json()
+            if 'values' in data:
+                df_count = pd.DataFrame(data['values'])
+                df_count['Date'] = pd.to_datetime(df_count['x'], unit='s').dt.normalize()
+                df_count['Count'] = df_count['y'].astype(float) # Force Float
+    except Exception as e:
+        print(f"[Fetcher] Count Error: {e}")
+
+    if df_vol.empty or df_count.empty:
+        print("[Fetcher] One or both Blockchain datasets failed.")
+        return pd.DataFrame()
+
+    # Merge
+    df_final = pd.merge(df_vol, df_count, on="Date", how="inner")
+    
+    # Calculate Average
+    df_final = df_final[df_final['Count'] > 0]
+    df_final['AvgTxValue'] = df_final['Volume'] / df_final['Count']
+    
+    # Debug Print
+    print(f"[Fetcher] Calculated {len(df_final)} rows. Max Avg: ${df_final['AvgTxValue'].max():.2f}")
+    
+    return df_final[['Date', 'AvgTxValue']]
 
 def update_data_thread():
-    """Runs in background to fetch data without blocking UI"""
     global GLOBAL_DF, DATA_STATUS
     while True:
         DATA_STATUS = "Fetching Data..."
@@ -130,20 +119,18 @@ def update_data_thread():
         
         if not df_price.empty:
             if not df_chain.empty:
-                # Merge Left: Keep all Price dates, fill missing Chain data with 0/NaN
+                # Left merge ensures we keep all price dates. Fill missing chain data with NaN.
                 GLOBAL_DF = pd.merge(df_price, df_chain, on="Date", how="left")
                 DATA_STATUS = f"Active. Price: {len(df_price)} rows. Chain: {len(df_chain)} rows."
             else:
                 GLOBAL_DF = df_price
-                GLOBAL_DF['AvgTxValue'] = 0 # Fill with 0 so chart works but is flat
-                DATA_STATUS = "Partial. Blockchain API blocked/failed. Showing Price only."
+                GLOBAL_DF['AvgTxValue'] = 0
+                DATA_STATUS = "Partial. Showing Price Only (Blockchain API failed)."
         else:
             DATA_STATUS = "Error. Could not fetch Price data."
             
-        # Refresh every hour
         time.sleep(3600)
 
-# Start data fetcher immediately
 t_data = threading.Thread(target=update_data_thread)
 t_data.daemon = True
 t_data.start()
@@ -178,7 +165,6 @@ def start_socket():
                         "Type": icon,
                         "Color": color
                     }
-                    
                     with DATA_LOCK:
                         LIVE_WHALES.insert(0, entry)
                         if len(LIVE_WHALES) > 50: LIVE_WHALES.pop()
@@ -207,7 +193,7 @@ t_ws.start()
 # 3. DASH APP
 # =============================================================================
 
-app = dash.Dash(__name__, title="Whale Dashboard Robust")
+app = dash.Dash(__name__, title="Whale Dashboard Visible")
 server = app.server
 
 app.layout = html.Div(style={'backgroundColor': '#111', 'minHeight': '100vh', 'color': '#ccc', 'fontFamily': 'sans-serif', 'padding': '20px'}, children=[
@@ -242,13 +228,17 @@ def update_ui(n):
     else:
         fig = make_subplots(specs=[[{"secondary_y": True}]])
         
-        # Trace 1: Calculated Average Value (Bars)
-        fig.add_trace(go.Bar(
+        # Trace 1: Calculated Average Value (FILLED AREA)
+        # Using Scatter with fill='tozeroy' ensures it's visible even if lines are thin
+        fig.add_trace(go.Scatter(
             x=GLOBAL_DF['Date'], 
             y=GLOBAL_DF['AvgTxValue'],
             name="Avg Tx Size ($)",
-            marker_color='#00cc96',
-            opacity=0.3
+            mode='lines',
+            line=dict(width=0), # Hide line, show fill
+            fill='tozeroy',
+            fillcolor='rgba(0, 204, 150, 0.4)', # Green with opacity
+            connectgaps=True # Connect across missing dates
         ), secondary_y=False)
         
         # Trace 2: Price (Line)
@@ -256,6 +246,7 @@ def update_ui(n):
             x=GLOBAL_DF['Date'], 
             y=GLOBAL_DF['Close'],
             name="BTC Price",
+            mode='lines',
             line=dict(color='#ff4d4d', width=2)
         ), secondary_y=True)
         
@@ -264,7 +255,8 @@ def update_ui(n):
             paper_bgcolor='rgba(0,0,0,0)',
             plot_bgcolor='rgba(0,0,0,0)',
             margin=dict(l=40, r=40, t=40, b=40),
-            legend=dict(orientation="h", y=1.02, x=0)
+            legend=dict(orientation="h", y=1.02, x=0),
+            hovermode="x unified"
         )
         fig.update_yaxes(title_text="Avg Transaction Value ($)", secondary_y=False, showgrid=False)
         fig.update_yaxes(title_text="Price ($)", secondary_y=True, showgrid=True, gridcolor='#333')
