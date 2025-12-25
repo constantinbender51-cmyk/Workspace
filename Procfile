@@ -1,1 +1,1 @@
-web: python binance_analysism.py
+web: python binance_analysis.py
