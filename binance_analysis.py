@@ -1,151 +1,95 @@
-import dash
-from dash import dcc, html
-from dash.dependencies import Input, Output
-import plotly.graph_objects as go
-import pandas as pd
-import requests
-import threading
-import time
+import io
 import os
+import requests
+import pandas as pd
+import matplotlib
+# Set backend to Agg (Anti-Grain Geometry) for non-interactive server environments
+matplotlib.use('Agg') 
+import matplotlib.pyplot as plt
+from flask import Flask, send_file, make_response
+from datetime import datetime
 
-# =============================================================================
-# CONFIG
-# =============================================================================
+app = Flask(__name__)
 
-GLOBAL_DF = pd.DataFrame()
-DATA_STATUS = "Initializing..."
-HEADERS = {
-    'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36',
-    'Accept': 'application/json'
-}
+# --- Configuration ---
+METRICS_TO_FETCH = [
+    {"slug": "market-price", "title": "Bitcoin Market Price (USD)", "color": "#f7931a"},
+    {"slug": "hash-rate", "title": "Hash Rate (TH/s)", "color": "#007bff"},
+    {"slug": "n-transactions", "title": "Daily Transactions", "color": "#28a745"},
+    {"slug": "miners-revenue", "title": "Miners Revenue (USD)", "color": "#dc3545"}
+]
 
-# =============================================================================
-# DATA FETCHING (BLOCKCHAIN.COM ONLY)
-# =============================================================================
+BASE_URL = "https://api.blockchain.info/charts/{slug}"
 
-def fetch_blockchain_data():
+def fetch_metric_data(slug, timespan="1year"):
     """
-    Fetches raw volume and transaction count to calculate average value.
-    Returns: DataFrame, ErrorMessage (str)
+    Fetches chart data from Blockchain.com API.
+    Returns a pandas Series or None.
     """
-    status_log = []
+    url = BASE_URL.format(slug=slug)
+    params = {"timespan": timespan, "format": "json", "sampled": "true"}
+    headers = {"User-Agent": "Mozilla/5.0 (Cloud Deployment)"}
+    
     try:
-        # 1. Fetch Volume (USD)
-        url_vol = "https://api.blockchain.info/charts/estimated-transaction-volume-usd?timespan=8years&format=json"
-        r_vol = requests.get(url_vol, headers=HEADERS, timeout=15)
+        response = requests.get(url, params=params, headers=headers, timeout=5)
+        response.raise_for_status()
+        data = response.json()
         
-        if r_vol.status_code != 200:
-            return pd.DataFrame(), f"Volume API Failed: Status {r_vol.status_code}"
-            
-        data_vol = r_vol.json()
-        if 'values' not in data_vol:
-            return pd.DataFrame(), "Volume API returned no 'values' key."
-            
-        df_vol = pd.DataFrame(data_vol['values'])
-        df_vol['Date'] = pd.to_datetime(df_vol['x'], unit='s').dt.normalize()
-        df_vol['Volume'] = df_vol['y'].astype(float)
-        status_log.append(f"Volume fetched ({len(df_vol)} rows)")
-
-        # 2. Fetch Tx Count
-        url_count = "https://api.blockchain.info/charts/n-transactions?timespan=8years&format=json"
-        r_count = requests.get(url_count, headers=HEADERS, timeout=15)
-        
-        if r_count.status_code != 200:
-            return pd.DataFrame(), f"Count API Failed: Status {r_count.status_code}"
-            
-        data_count = r_count.json()
-        df_count = pd.DataFrame(data_count['values'])
-        df_count['Date'] = pd.to_datetime(df_count['x'], unit='s').dt.normalize()
-        df_count['Count'] = df_count['y'].astype(float)
-        status_log.append(f"Count fetched ({len(df_count)} rows)")
-
-        # 3. Merge & Calculate
-        df = pd.merge(df_vol, df_count, on="Date", how="inner")
-        
-        # Filter out zero counts to avoid division by zero
-        df = df[df['Count'] > 0]
-        df['AvgTxValue'] = df['Volume'] / df['Count']
-        
-        status_msg = f"Success! {len(df)} days of data loaded. (Last Date: {df['Date'].max().date()})"
-        return df[['Date', 'AvgTxValue']], status_msg
-
+        if 'values' in data:
+            df = pd.DataFrame(data['values'])
+            df['date'] = pd.to_datetime(df['x'], unit='s')
+            df.set_index('date', inplace=True)
+            return df['y']
     except Exception as e:
-        return pd.DataFrame(), f"Python Exception: {str(e)}"
+        print(f"Error fetching {slug}: {e}")
+        return None
 
-def update_data_thread():
-    global GLOBAL_DF, DATA_STATUS
-    while True:
-        DATA_STATUS = "Fetching from Blockchain.com..."
-        df, msg = fetch_blockchain_data()
+@app.route('/')
+def home():
+    """
+    Main route: Fetches data, generates plot, and returns it as an image.
+    """
+    # Create the plot figure
+    fig, axes = plt.subplots(nrows=2, ncols=2, figsize=(15, 10))
+    axes = axes.flatten()
+    plt.style.use('ggplot')
+
+    # Fetch and plot each metric
+    for i, metric in enumerate(METRICS_TO_FETCH):
+        ax = axes[i]
+        slug = metric["slug"]
         
-        if not df.empty:
-            GLOBAL_DF = df.sort_values("Date")
+        # Fetch data
+        series = fetch_metric_data(slug)
         
-        DATA_STATUS = msg
-        time.sleep(3600) # Refresh hourly
+        if series is not None and not series.empty:
+            ax.plot(series.index, series.values, color=metric["color"], linewidth=2)
+            ax.set_title(metric["title"], fontsize=12, fontweight='bold')
+            ax.grid(True, linestyle='--', alpha=0.6)
+            
+            # Format Y-axis with commas
+            ax.yaxis.set_major_formatter(plt.FuncFormatter(lambda x, p: format(int(x), ',')))
+            
+            # Rotate dates
+            plt.setp(ax.get_xticklabels(), rotation=30, ha='right')
+        else:
+            ax.text(0.5, 0.5, 'Data Unavailable', ha='center', va='center', transform=ax.transAxes)
+            ax.set_title(metric["title"])
 
-# Start background sync
-threading.Thread(target=update_data_thread, daemon=True).start()
+    fig.suptitle(f"Bitcoin On-Chain Metrics (Generated: {datetime.now().strftime('%Y-%m-%d %H:%M')})", fontsize=16)
+    plt.tight_layout()
 
-# =============================================================================
-# DASH APP
-# =============================================================================
+    # Save plot to an in-memory buffer (no disk file needed)
+    img_buffer = io.BytesIO()
+    plt.savefig(img_buffer, format='png', dpi=100)
+    img_buffer.seek(0)
+    plt.close(fig)
 
-app = dash.Dash(__name__, title="Blockchain.com Debugger")
-server = app.server
+    # Return the image directly to the browser
+    return send_file(img_buffer, mimetype='image/png')
 
-app.layout = html.Div(style={'backgroundColor': '#111', 'minHeight': '100vh', 'color': '#ccc', 'fontFamily': 'monospace', 'padding': '20px'}, children=[
-    
-    html.H2("Blockchain.com Data Debugger"),
-    html.Div(id='status-display', style={'border': '1px solid #333', 'padding': '10px', 'marginBottom': '20px', 'color': '#00ff00'}),
-    
-    dcc.Graph(id='main-chart', style={'height': '70vh'}),
-    
-    dcc.Interval(id='timer', interval=5000) # Check status every 5s
-])
-
-@app.callback(
-    [Output('main-chart', 'figure'), Output('status-display', 'children')],
-    Input('timer', 'n_intervals')
-)
-def update_view(n):
-    # Style the status message based on success/failure
-    status_style = {'color': '#ff4d4d'} if "Failed" in DATA_STATUS or "Exception" in DATA_STATUS else {'color': '#00ff00'}
-    
-    status_component = html.Span(DATA_STATUS, style=status_style)
-
-    if GLOBAL_DF.empty:
-        fig = go.Figure()
-        fig.update_layout(
-            template="plotly_dark", 
-            title="No Data Available",
-            xaxis=dict(showgrid=False),
-            yaxis=dict(showgrid=False)
-        )
-        return fig, status_component
-
-    # Plot the data
-    fig = go.Figure()
-    fig.add_trace(go.Scatter(
-        x=GLOBAL_DF['Date'],
-        y=GLOBAL_DF['AvgTxValue'],
-        name="Avg Tx Value",
-        mode='lines',
-        fill='tozeroy',
-        line=dict(color='#00cc96')
-    ))
-
-    fig.update_layout(
-        template="plotly_dark",
-        title="Average Transaction Value (USD)",
-        paper_bgcolor='rgba(0,0,0,0)',
-        plot_bgcolor='rgba(0,0,0,0)',
-        hovermode="x unified",
-        uirevision='constant' # Keeps zoom level
-    )
-
-    return fig, status_component
-
-if __name__ == '__main__':
-    port = int(os.environ.get("PORT", 8080))
-    app.run_server(host='0.0.0.0', port=port)
+if __name__ == "__main__":
+    # Get PORT from environment for Railway compatibility (default to 5000)
+    port = int(os.environ.get("PORT", 5000))
+    # Host must be 0.0.0.0 to be accessible externally
+    app.run(host="0.0.0.0", port=port)
