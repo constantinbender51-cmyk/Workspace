@@ -18,17 +18,16 @@ import ssl
 
 # Data Store for Live Transactions
 LIVE_WHALES = []
-# Shared lock to prevent reading/writing at same time
 DATA_LOCK = threading.Lock()
 
 # Connection Status
 WS_CONNECTED = False
 
 # Thresholds
-WHALE_THRESHOLD_USD = 100000  # Set back to $100,000
+WHALE_THRESHOLD_USD = 100000  # $100k Limit
 CURRENT_BTC_PRICE = 95000.0   # Default fallback
 
-# Headers to bypass 403 Forbidden errors on Blockchain.com API
+# Headers to bypass 403 Forbidden errors
 HEADERS = {
     'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36'
 }
@@ -39,7 +38,7 @@ HEADERS = {
 
 def fetch_binance_ohlcv(symbol="BTCUSDT", interval="1d", start_year=2018):
     """
-    Fetches daily OHLCV data from Binance since start_year.
+    Fetches daily OHLCV data from Binance.
     """
     print(f"[Init] Fetching Binance data for {symbol}...")
     base_url = "https://api.binance.com/api/v3/klines"
@@ -83,11 +82,14 @@ def fetch_binance_ohlcv(symbol="BTCUSDT", interval="1d", start_year=2018):
 
 def fetch_blockchain_charts():
     """
-    Fetches historical proxy metrics from Blockchain.com using proper User-Agent.
+    Fetches historical proxy metrics. 
+    Since 'avg-transaction-value' is 404, we calculate it manually:
+    Avg = Total USD Volume / Number of Transactions
     """
     print("[Init] Fetching Blockchain.com data...")
     
-    def get_chart(chart_name):
+    def get_chart(chart_name, col_name):
+        # Using 3years to ensure stability, or 8years if available
         url = f"https://api.blockchain.info/charts/{chart_name}?timespan=8years&format=json"
         try:
             r = requests.get(url, headers=HEADERS)
@@ -96,29 +98,36 @@ def fetch_blockchain_charts():
                 return pd.DataFrame()
                 
             data = r.json()
+            if 'values' not in data:
+                return pd.DataFrame()
+
             df = pd.DataFrame(data['values'])
             df['Date'] = pd.to_datetime(df['x'], unit='s')
-            df = df.rename(columns={'y': chart_name})
-            return df[['Date', chart_name]]
+            df = df.rename(columns={'y': col_name})
+            return df[['Date', col_name]]
         except Exception as e:
             print(f"Error fetching {chart_name}: {e}")
             return pd.DataFrame()
 
-    # 1. Average Transaction Value (Size Proxy)
-    df_avg = get_chart("avg-transaction-value")
+    # 1. Total Estimated Volume (The numerator)
+    df_vol = get_chart("estimated-transaction-volume-usd", "total_volume_usd")
     
-    # 2. Total Estimated Volume (Volume Proxy)
-    # We fetch this to ensure we have data, even if we only plot one
-    df_vol = get_chart("estimated-transaction-volume-usd")
+    # 2. Number of Transactions (The denominator)
+    df_count = get_chart("n-transactions", "tx_count")
 
-    if df_avg.empty:
+    if df_vol.empty or df_count.empty:
+        print("Error: One of the Blockchain.com charts returned empty.")
         return pd.DataFrame()
 
-    if not df_vol.empty:
-        df_final = pd.merge(df_avg, df_vol, on="Date", how="outer")
-    else:
-        df_final = df_avg
-
+    # Merge and Calculate
+    df_final = pd.merge(df_vol, df_count, on="Date", how="inner")
+    
+    # Manual Calculation of Average Transaction Value
+    # Avoid division by zero with regex replacement or simple logic
+    df_final = df_final[df_final["tx_count"] > 0]
+    df_final["avg-transaction-value"] = df_final["total_volume_usd"] / df_final["tx_count"]
+    
+    print(f"[Init] Successfully calculated Avg Tx Value for {len(df_final)} days.")
     return df_final.sort_values("Date")
 
 # =============================================================================
@@ -130,7 +139,7 @@ def on_message(ws, message):
         data = json.loads(message)
         if data.get("op") == "utx":
             x = data["x"]
-            # Sum all output values to get total transaction size
+            # Sum all output values
             total_satoshi = sum([out.get("value", 0) for out in x.get("out", [])])
             btc_amount = total_satoshi / 100_000_000
             usd_value = btc_amount * CURRENT_BTC_PRICE
@@ -195,7 +204,6 @@ def start_socket():
         print("[Init] Could not fetch price, using default.")
 
     while True:
-        # Use websocket-client App
         ws = websocket.WebSocketApp(
             "wss://ws.blockchain.info/inv",
             on_open=on_open,
@@ -203,9 +211,8 @@ def start_socket():
             on_error=on_error,
             on_close=on_close
         )
-        # Run forever with blocking loop
         ws.run_forever(sslopt={"cert_reqs": ssl.CERT_NONE})
-        time.sleep(5) # Wait before reconnecting
+        time.sleep(5) 
 
 # Start WebSocket in Background Thread
 t = threading.Thread(target=start_socket)
@@ -224,14 +231,14 @@ if not df_binance.empty and not df_chain.empty:
     df_chain['Date'] = df_chain['Date'].dt.normalize()
     df_main = pd.merge(df_binance, df_chain, on="Date", how="inner").sort_values("Date")
 else:
-    print("Warning: Charts may be empty due to API errors or empty response.")
+    print("Warning: Historical charts may be empty.")
     df_main = pd.DataFrame()
 
 # =============================================================================
 # 4. DASHBOARD LAYOUT
 # =============================================================================
 
-app = dash.Dash(__name__, title="Whale Monitor 100k")
+app = dash.Dash(__name__, title="Whale Monitor Final")
 server = app.server
 
 app.layout = html.Div(style={'backgroundColor': '#111', 'minHeight': '100vh', 'color': '#eee', 'fontFamily': 'sans-serif', 'padding': '20px'}, children=[
@@ -246,7 +253,8 @@ app.layout = html.Div(style={'backgroundColor': '#111', 'minHeight': '100vh', 'c
         # LEFT: Historical Charts
         html.Div(style={'flex': '2'}, children=[
             html.Div(style={'backgroundColor': '#222', 'padding': '15px', 'borderRadius': '8px'}, children=[
-                html.H3("Historical: Avg Transaction Value vs Price", style={'marginTop': 0}),
+                html.H3("Avg Transaction Value (Calculated)", style={'marginTop': 0}),
+                html.P("Derived from Total On-Chain Volume / Transaction Count", style={'color': '#888', 'fontSize': '12px'}),
                 dcc.Graph(id='main-chart', style={'height': '500px'}),
             ])
         ]),
@@ -281,7 +289,7 @@ def update_chart(n):
         
         fig = make_subplots(specs=[[{"secondary_y": True}]])
         
-        # Bar: Avg Transaction Value
+        # Bar: Avg Transaction Value (Calculated)
         fig.add_trace(go.Bar(
             x=df_main['Date'], 
             y=df_main['avg-transaction-value'], 
@@ -312,11 +320,9 @@ def update_chart(n):
     Input('update-interval', 'n_intervals')
 )
 def update_feed(n):
-    # Update Connection Status UI
     status_text = "🟢 Connected to Blockchain.com" if WS_CONNECTED else "🔴 Connecting..."
     status_style = {'color': '#00cc96' if WS_CONNECTED else '#ff4d4d', 'paddingTop': '5px'}
 
-    # Build List
     children = []
     with DATA_LOCK:
         current_data = list(LIVE_WHALES)
