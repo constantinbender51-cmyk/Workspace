@@ -85,14 +85,11 @@ def home():
     avg_tx_val_series = None
     if data_store['volume']['series'] is not None and data_store['tx_count']['series'] is not None:
         # Pandas aligns indices (dates) automatically during division
-        avg_tx_val_series = data_store['volume']['series'] / data_store['tx_count']['series']
+        raw_ratio = data_store['volume']['series'] / data_store['tx_count']['series']
         
-        # --- NEW: Filter out Sundays to create gaps ---
-        # dayofweek: Monday=0, Sunday=6
-        # We replace Sunday values with NaN (Not a Number). 
-        # Matplotlib will not plot NaNs, causing a visual gap in the line.
-        is_sunday = avg_tx_val_series.index.dayofweek == 6
-        avg_tx_val_series.loc[is_sunday] = float('nan')
+        # --- NEW: Weekly Averages ---
+        # Resample to weekly frequency ('W') and calculate the mean
+        avg_tx_val_series = raw_ratio.resample('W').mean()
 
     # 3. Define the Plotting Order (6 Plots)
     plots_config = [
@@ -103,7 +100,7 @@ def home():
         data_store['volume'],
         {
             "series": avg_tx_val_series,
-            "info": {"title": "Exchange Vol / Tx (Sundays Removed)", "color": "#20c997"} 
+            "info": {"title": "Exchange Vol / Tx (Weekly Avg)", "color": "#20c997"} 
         }
     ]
 
