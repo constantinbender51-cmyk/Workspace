@@ -25,16 +25,16 @@ DATA_LOCK = threading.Lock()
 WS_CONNECTED = False
 
 # Thresholds
-WHALE_THRESHOLD_USD = 50000  # Lowered to $50k so you see data faster
-CURRENT_BTC_PRICE = 95000.0  # Default fallback
+WHALE_THRESHOLD_USD = 100000  # Set back to $100,000
+CURRENT_BTC_PRICE = 95000.0   # Default fallback
 
-# Headers to bypass 403 Forbidden errors
+# Headers to bypass 403 Forbidden errors on Blockchain.com API
 HEADERS = {
     'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36'
 }
 
 # =============================================================================
-# 1. HISTORICAL DATA FETCHING (Fixed with Headers)
+# 1. HISTORICAL DATA FETCHING
 # =============================================================================
 
 def fetch_binance_ohlcv(symbol="BTCUSDT", interval="1d", start_year=2018):
@@ -53,7 +53,6 @@ def fetch_binance_ohlcv(symbol="BTCUSDT", interval="1d", start_year=2018):
     while start_ts < end_ts:
         params = {"symbol": symbol, "interval": interval, "startTime": start_ts, "limit": limit}
         try:
-            # Binance doesn't strictly need headers, but good practice
             r = requests.get(base_url, params=params, headers=HEADERS)
             data = r.json()
             
@@ -86,7 +85,7 @@ def fetch_blockchain_charts():
     """
     Fetches historical proxy metrics from Blockchain.com using proper User-Agent.
     """
-    print("[Init] Fetching Blockchain.com data (this may take a few seconds)...")
+    print("[Init] Fetching Blockchain.com data...")
     
     def get_chart(chart_name):
         url = f"https://api.blockchain.info/charts/{chart_name}?timespan=8years&format=json"
@@ -107,17 +106,23 @@ def fetch_blockchain_charts():
 
     # 1. Average Transaction Value (Size Proxy)
     df_avg = get_chart("avg-transaction-value")
+    
     # 2. Total Estimated Volume (Volume Proxy)
+    # We fetch this to ensure we have data, even if we only plot one
     df_vol = get_chart("estimated-transaction-volume-usd")
 
-    if df_avg.empty or df_vol.empty:
+    if df_avg.empty:
         return pd.DataFrame()
 
-    df_final = pd.merge(df_avg, df_vol, on="Date", how="outer")
+    if not df_vol.empty:
+        df_final = pd.merge(df_avg, df_vol, on="Date", how="outer")
+    else:
+        df_final = df_avg
+
     return df_final.sort_values("Date")
 
 # =============================================================================
-# 2. LIVE WEBSOCKET LISTENER (Robust & Auto-Reconnecting)
+# 2. LIVE WEBSOCKET LISTENER
 # =============================================================================
 
 def on_message(ws, message):
@@ -152,7 +157,7 @@ def on_message(ws, message):
                     "Value": f"${usd_value:,.0f}",
                     "Type": icon,
                     "Color": color,
-                    "id": x["hash"] # Unique ID for React key equivalent
+                    "id": x["hash"]
                 }
                 
                 with DATA_LOCK:
@@ -190,6 +195,7 @@ def start_socket():
         print("[Init] Could not fetch price, using default.")
 
     while True:
+        # Use websocket-client App
         ws = websocket.WebSocketApp(
             "wss://ws.blockchain.info/inv",
             on_open=on_open,
@@ -197,11 +203,11 @@ def start_socket():
             on_error=on_error,
             on_close=on_close
         )
-        # Run forever with blocking loop, but in a thread
+        # Run forever with blocking loop
         ws.run_forever(sslopt={"cert_reqs": ssl.CERT_NONE})
         time.sleep(5) # Wait before reconnecting
 
-# Start WebSocket in Background
+# Start WebSocket in Background Thread
 t = threading.Thread(target=start_socket)
 t.daemon = True
 t.start()
@@ -218,14 +224,14 @@ if not df_binance.empty and not df_chain.empty:
     df_chain['Date'] = df_chain['Date'].dt.normalize()
     df_main = pd.merge(df_binance, df_chain, on="Date", how="inner").sort_values("Date")
 else:
-    print("Warning: Charts may be empty due to API errors.")
+    print("Warning: Charts may be empty due to API errors or empty response.")
     df_main = pd.DataFrame()
 
 # =============================================================================
 # 4. DASHBOARD LAYOUT
 # =============================================================================
 
-app = dash.Dash(__name__, title="Whale Monitor V2")
+app = dash.Dash(__name__, title="Whale Monitor 100k")
 server = app.server
 
 app.layout = html.Div(style={'backgroundColor': '#111', 'minHeight': '100vh', 'color': '#eee', 'fontFamily': 'sans-serif', 'padding': '20px'}, children=[
@@ -240,7 +246,7 @@ app.layout = html.Div(style={'backgroundColor': '#111', 'minHeight': '100vh', 'c
         # LEFT: Historical Charts
         html.Div(style={'flex': '2'}, children=[
             html.Div(style={'backgroundColor': '#222', 'padding': '15px', 'borderRadius': '8px'}, children=[
-                html.H3("Avg Transaction Value vs Price", style={'marginTop': 0}),
+                html.H3("Historical: Avg Transaction Value vs Price", style={'marginTop': 0}),
                 dcc.Graph(id='main-chart', style={'height': '500px'}),
             ])
         ]),
@@ -267,11 +273,10 @@ app.layout = html.Div(style={'backgroundColor': '#111', 'minHeight': '100vh', 'c
 
 @app.callback(
     Output('main-chart', 'figure'),
-    Input('update-interval', 'n_intervals') # Trigger once
+    Input('update-interval', 'n_intervals') 
 )
 def update_chart(n):
     if n > 0 or df_main.empty: 
-        # Only build chart once or if empty return empty
         if df_main.empty: return go.Figure()
         
         fig = make_subplots(specs=[[{"secondary_y": True}]])
@@ -307,17 +312,17 @@ def update_chart(n):
     Input('update-interval', 'n_intervals')
 )
 def update_feed(n):
-    # Update Connection Status
+    # Update Connection Status UI
     status_text = "🟢 Connected to Blockchain.com" if WS_CONNECTED else "🔴 Connecting..."
     status_style = {'color': '#00cc96' if WS_CONNECTED else '#ff4d4d', 'paddingTop': '5px'}
 
     # Build List
     children = []
     with DATA_LOCK:
-        current_data = list(LIVE_WHALES) # Copy
+        current_data = list(LIVE_WHALES)
     
     if not current_data:
-        children.append(html.Div("Waiting for large transactions...", style={'textAlign': 'center', 'color': '#666', 'marginTop': '20px'}))
+        children.append(html.Div(f"Waiting for >${WHALE_THRESHOLD_USD/1000:,.0f}k transactions...", style={'textAlign': 'center', 'color': '#666', 'marginTop': '20px'}))
     else:
         for item in current_data:
             row = html.Div(style={'display': 'flex', 'padding': '8px 0', 'borderBottom': '1px solid #333', 'alignItems': 'center', 'animation': 'fadeIn 0.5s'}, children=[
