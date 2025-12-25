@@ -5,3 +5,4 @@ dash>=2.14.0
 plotly>=5.17.0
 flask>=2.3.0
 gunicorn>=21.0.0
+websocket-client>=1.6.0
