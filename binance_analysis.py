@@ -25,24 +25,23 @@ METRICS_TO_FETCH = [
 
 def fetch_metric_data(slug):
     """
-    Fetches chart data from Blockchain.com API starting from 2018.
+    Fetches ALL chart data from Blockchain.com API and filters for 2018+.
     Returns a pandas Series or None.
     """
     url = BASE_URL.format(slug=slug)
     
-    # CHANGED: Use 'start' parameter for 2018-01-01
-    # 'sampled': 'false' ensures we get daily resolution (approx 2500+ points)
-    # instead of the API's default ~1000 point limit.
+    # FIX: Use timespan="all" to get full history, then filter in Pandas.
+    # The API often defaults to 1year if timespan is missing, ignoring 'start'.
     params = {
-        "start": "2018-01-01", 
+        "timespan": "all",
         "format": "json", 
-        "sampled": "false"
+        "sampled": "false" # Request full daily resolution
     }
     
     headers = {"User-Agent": "Mozilla/5.0 (Cloud Deployment)"}
     
     try:
-        response = requests.get(url, params=params, headers=headers, timeout=10)
+        response = requests.get(url, params=params, headers=headers, timeout=15)
         response.raise_for_status()
         data = response.json()
         
@@ -50,6 +49,11 @@ def fetch_metric_data(slug):
             df = pd.DataFrame(data['values'])
             df['date'] = pd.to_datetime(df['x'], unit='s')
             df.set_index('date', inplace=True)
+            
+            # --- FILTERING ---
+            # Explicitly slice data from 2018-01-01 to Present
+            df = df[df.index >= '2018-01-01']
+            
             return df['y']
     except Exception as e:
         print(f"Error fetching {slug}: {e}")
@@ -80,7 +84,6 @@ def home():
     """
     Main route: Fetches data, calculates derived metrics, and generates a 3x2 grid.
     """
-    # Dictionary to store fetched series for calculation
     data_store = {}
     
     # 1. Fetch all base metrics
@@ -90,10 +93,10 @@ def home():
             "info": item
         }
 
-    # 2. Calculate "Volume / Transactions" 
+    # 2. Calculate "Exchange Volume / Transactions"
     avg_tx_val_series = None
     if data_store['volume']['series'] is not None and data_store['tx_count']['series'] is not None:
-        # Pandas aligns indices (dates) automatically during division
+        # Pandas aligns indices automatically
         raw_ratio = data_store['volume']['series'] / data_store['tx_count']['series']
         
         # Resample to weekly frequency ('W') and calculate the mean
@@ -123,7 +126,8 @@ def home():
         info = plot_obj.get("info")
         
         if series is not None and not series.empty:
-            ax.plot(series.index, series.values, color=info["color"], linewidth=1.5) # Thinner line for more data
+            # Thinner line width (1.0) for long timeframe data to avoid clutter
+            ax.plot(series.index, series.values, color=info["color"], linewidth=1.0)
             ax.set_title(info["title"], fontsize=11, fontweight='bold')
             ax.grid(True, linestyle='--', alpha=0.6)
             
@@ -133,16 +137,14 @@ def home():
             else:
                 ax.yaxis.set_major_formatter(FuncFormatter(format_number))
                 
-            # Rotate dates
             plt.setp(ax.get_xticklabels(), rotation=30, ha='right', fontsize=9)
         else:
             ax.text(0.5, 0.5, 'Data Unavailable', ha='center', va='center', transform=ax.transAxes)
             ax.set_title(info["title"])
 
     fig.suptitle(f"Bitcoin Metrics (2018 - Present) - Generated {datetime.now().strftime('%Y-%m-%d')}", fontsize=16)
-    plt.tight_layout(rect=[0, 0.03, 1, 0.98]) # Adjust for suptitle
+    plt.tight_layout(rect=[0, 0.03, 1, 0.98])
 
-    # Save to memory buffer
     img_buffer = io.BytesIO()
     plt.savefig(img_buffer, format='png', dpi=100)
     img_buffer.seek(0)
