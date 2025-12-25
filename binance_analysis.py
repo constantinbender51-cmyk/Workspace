@@ -20,7 +20,6 @@ METRICS_TO_FETCH = [
     {"slug": "hash-rate", "title": "Hash Rate (TH/s)", "color": "#007bff", "key": "hash"},
     {"slug": "n-transactions", "title": "Daily Transactions", "color": "#28a745", "key": "tx_count"},
     {"slug": "miners-revenue", "title": "Miners Revenue (USD)", "color": "#dc3545", "key": "revenue"},
-    # CHANGED: 'estimated-transaction-volume-usd' (On-Chain) -> 'trade-volume' (Exchange Trading Volume)
     {"slug": "trade-volume", "title": "Exchange Volume (USD)", "color": "#6f42c1", "key": "volume"}
 ]
 
@@ -83,12 +82,17 @@ def home():
         }
 
     # 2. Calculate "Volume / Transactions" 
-    # Logic: Exchange Trading Volume / Daily Confirmed Transactions
-    # This represents the dollar amount traded on exchanges per single on-chain transaction.
     avg_tx_val_series = None
     if data_store['volume']['series'] is not None and data_store['tx_count']['series'] is not None:
         # Pandas aligns indices (dates) automatically during division
         avg_tx_val_series = data_store['volume']['series'] / data_store['tx_count']['series']
+        
+        # --- NEW: Filter out Sundays to create gaps ---
+        # dayofweek: Monday=0, Sunday=6
+        # We replace Sunday values with NaN (Not a Number). 
+        # Matplotlib will not plot NaNs, causing a visual gap in the line.
+        is_sunday = avg_tx_val_series.index.dayofweek == 6
+        avg_tx_val_series.loc[is_sunday] = float('nan')
 
     # 3. Define the Plotting Order (6 Plots)
     plots_config = [
@@ -99,7 +103,7 @@ def home():
         data_store['volume'],
         {
             "series": avg_tx_val_series,
-            "info": {"title": "Exchange Vol / Tx (Ratio)", "color": "#20c997"} 
+            "info": {"title": "Exchange Vol / Tx (Sundays Removed)", "color": "#20c997"} 
         }
     ]
 
