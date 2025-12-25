@@ -23,17 +23,26 @@ METRICS_TO_FETCH = [
     {"slug": "trade-volume", "title": "Exchange Volume (USD)", "color": "#6f42c1", "key": "volume"}
 ]
 
-def fetch_metric_data(slug, timespan="1year"):
+def fetch_metric_data(slug):
     """
-    Fetches chart data from Blockchain.com API.
+    Fetches chart data from Blockchain.com API starting from 2018.
     Returns a pandas Series or None.
     """
     url = BASE_URL.format(slug=slug)
-    params = {"timespan": timespan, "format": "json", "sampled": "true"}
+    
+    # CHANGED: Use 'start' parameter for 2018-01-01
+    # 'sampled': 'false' ensures we get daily resolution (approx 2500+ points)
+    # instead of the API's default ~1000 point limit.
+    params = {
+        "start": "2018-01-01", 
+        "format": "json", 
+        "sampled": "false"
+    }
+    
     headers = {"User-Agent": "Mozilla/5.0 (Cloud Deployment)"}
     
     try:
-        response = requests.get(url, params=params, headers=headers, timeout=5)
+        response = requests.get(url, params=params, headers=headers, timeout=10)
         response.raise_for_status()
         data = response.json()
         
@@ -87,7 +96,6 @@ def home():
         # Pandas aligns indices (dates) automatically during division
         raw_ratio = data_store['volume']['series'] / data_store['tx_count']['series']
         
-        # --- NEW: Weekly Averages ---
         # Resample to weekly frequency ('W') and calculate the mean
         avg_tx_val_series = raw_ratio.resample('W').mean()
 
@@ -115,7 +123,7 @@ def home():
         info = plot_obj.get("info")
         
         if series is not None and not series.empty:
-            ax.plot(series.index, series.values, color=info["color"], linewidth=2)
+            ax.plot(series.index, series.values, color=info["color"], linewidth=1.5) # Thinner line for more data
             ax.set_title(info["title"], fontsize=11, fontweight='bold')
             ax.grid(True, linestyle='--', alpha=0.6)
             
@@ -131,7 +139,7 @@ def home():
             ax.text(0.5, 0.5, 'Data Unavailable', ha='center', va='center', transform=ax.transAxes)
             ax.set_title(info["title"])
 
-    fig.suptitle(f"Bitcoin Metrics (Exchange & On-Chain) - {datetime.now().strftime('%Y-%m-%d')}", fontsize=16)
+    fig.suptitle(f"Bitcoin Metrics (2018 - Present) - Generated {datetime.now().strftime('%Y-%m-%d')}", fontsize=16)
     plt.tight_layout(rect=[0, 0.03, 1, 0.98]) # Adjust for suptitle
 
     # Save to memory buffer
