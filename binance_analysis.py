@@ -2,194 +2,149 @@ import dash
 from dash import dcc, html
 from dash.dependencies import Input, Output
 import plotly.graph_objects as go
-from plotly.subplots import make_subplots
 import pandas as pd
 import requests
-import datetime
 import threading
 import time
 import os
-import ssl
 
 # =============================================================================
-# GLOBAL STATE & CONFIG
+# CONFIG
 # =============================================================================
 
 GLOBAL_DF = pd.DataFrame()
 DATA_STATUS = "Initializing..."
 HEADERS = {
-    'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36'
+    'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36',
+    'Accept': 'application/json'
 }
 
 # =============================================================================
-# DATA FETCHING (HISTORICAL ONLY)
+# DATA FETCHING (BLOCKCHAIN.COM ONLY)
 # =============================================================================
 
-def fetch_binance_data():
-    """Fetches daily BTCUSDT close prices since 2018."""
-    try:
-        url = "https://api.binance.com/api/v3/klines"
-        start_ts = int(datetime.datetime(2018, 1, 1).timestamp() * 1000)
-        params = {"symbol": "BTCUSDT", "interval": "1d", "startTime": start_ts, "limit": 1000}
-        
-        all_data = []
-        while True:
-            r = requests.get(url, params=params, headers=HEADERS, timeout=15)
-            data = r.json()
-            if not data or not isinstance(data, list): break
-            all_data.extend(data)
-            if data[-1][6] > (datetime.datetime.now().timestamp() * 1000) - 86400000: break
-            params['startTime'] = data[-1][6] + 1
-            time.sleep(0.1)
-
-        df = pd.DataFrame(all_data, columns=[
-            "Open Time", "Open", "High", "Low", "Close", "Volume", 
-            "Close Time", "Quote Asset Vol", "Num Trades", "Taker Base", "Taker Quote", "Ignore"
-        ])
-        df["Date"] = pd.to_datetime(df["Open Time"], unit='ms').dt.normalize()
-        df["Close"] = df["Close"].astype(float)
-        return df[["Date", "Close"]]
-    except Exception as e:
-        print(f"Binance Fetch Error: {e}")
-        return pd.DataFrame()
-
 def fetch_blockchain_data():
-    """Fetches and calculates Average Transaction Value."""
+    """
+    Fetches raw volume and transaction count to calculate average value.
+    Returns: DataFrame, ErrorMessage (str)
+    """
+    status_log = []
     try:
-        url_v = "https://api.blockchain.info/charts/estimated-transaction-volume-usd?timespan=8years&format=json"
-        r_v = requests.get(url_v, headers=HEADERS, timeout=15)
-        df_vol = pd.DataFrame(r_v.json()['values'])
+        # 1. Fetch Volume (USD)
+        url_vol = "https://api.blockchain.info/charts/estimated-transaction-volume-usd?timespan=8years&format=json"
+        r_vol = requests.get(url_vol, headers=HEADERS, timeout=15)
+        
+        if r_vol.status_code != 200:
+            return pd.DataFrame(), f"Volume API Failed: Status {r_vol.status_code}"
+            
+        data_vol = r_vol.json()
+        if 'values' not in data_vol:
+            return pd.DataFrame(), "Volume API returned no 'values' key."
+            
+        df_vol = pd.DataFrame(data_vol['values'])
         df_vol['Date'] = pd.to_datetime(df_vol['x'], unit='s').dt.normalize()
         df_vol['Volume'] = df_vol['y'].astype(float)
+        status_log.append(f"Volume fetched ({len(df_vol)} rows)")
 
-        url_c = "https://api.blockchain.info/charts/n-transactions?timespan=8years&format=json"
-        r_c = requests.get(url_c, headers=HEADERS, timeout=15)
-        df_count = pd.DataFrame(r_c.json()['values'])
+        # 2. Fetch Tx Count
+        url_count = "https://api.blockchain.info/charts/n-transactions?timespan=8years&format=json"
+        r_count = requests.get(url_count, headers=HEADERS, timeout=15)
+        
+        if r_count.status_code != 200:
+            return pd.DataFrame(), f"Count API Failed: Status {r_count.status_code}"
+            
+        data_count = r_count.json()
+        df_count = pd.DataFrame(data_count['values'])
         df_count['Date'] = pd.to_datetime(df_count['x'], unit='s').dt.normalize()
         df_count['Count'] = df_count['y'].astype(float)
+        status_log.append(f"Count fetched ({len(df_count)} rows)")
 
-        df_final = pd.merge(df_vol, df_count, on="Date", how="inner")
-        df_final = df_final[df_final['Count'] > 0]
-        df_final['AvgTxValue'] = df_final['Volume'] / df_final['Count']
+        # 3. Merge & Calculate
+        df = pd.merge(df_vol, df_count, on="Date", how="inner")
         
-        return df_final[['Date', 'AvgTxValue']]
+        # Filter out zero counts to avoid division by zero
+        df = df[df['Count'] > 0]
+        df['AvgTxValue'] = df['Volume'] / df['Count']
+        
+        status_msg = f"Success! {len(df)} days of data loaded. (Last Date: {df['Date'].max().date()})"
+        return df[['Date', 'AvgTxValue']], status_msg
+
     except Exception as e:
-        print(f"Blockchain Fetch Error: {e}")
-        return pd.DataFrame()
+        return pd.DataFrame(), f"Python Exception: {str(e)}"
 
 def update_data_thread():
-    """Background loop with improved gap handling via resampling."""
     global GLOBAL_DF, DATA_STATUS
     while True:
-        DATA_STATUS = "Updating historical data..."
-        df_p = fetch_binance_data()
-        df_c = fetch_blockchain_data()
+        DATA_STATUS = "Fetching from Blockchain.com..."
+        df, msg = fetch_blockchain_data()
         
-        if not df_p.empty and not df_c.empty:
-            # Join datasets
-            merged = pd.merge(df_p, df_c, on="Date", how="outer")
-            
-            # GAP HANDLING: 
-            # 1. Set Date as index
-            # 2. Resample to 'D' (Daily) to ensure every day exists
-            # 3. This inserts NaN for missing days instead of skipping them
-            merged = merged.set_index("Date").resample('D').asfreq().reset_index()
-            
-            merged = merged.sort_values("Date")
-            GLOBAL_DF = merged
-            DATA_STATUS = f"Data Synced: {len(GLOBAL_DF)} days. Gaps are now preserved as breaks."
-        else:
-            DATA_STATUS = "Sync failed. Retrying in 1 minute..."
-            time.sleep(60)
-            continue
-            
-        time.sleep(3600)
+        if not df.empty:
+            GLOBAL_DF = df.sort_values("Date")
+        
+        DATA_STATUS = msg
+        time.sleep(3600) # Refresh hourly
 
+# Start background sync
 threading.Thread(target=update_data_thread, daemon=True).start()
 
 # =============================================================================
 # DASH APP
 # =============================================================================
 
-app = dash.Dash(__name__, title="BTC Historical Whale Dashboard")
+app = dash.Dash(__name__, title="Blockchain.com Debugger")
 server = app.server
 
-app.layout = html.Div(style={'backgroundColor': '#0b0c10', 'minHeight': '100vh', 'color': '#c5c6c7', 'fontFamily': 'sans-serif', 'padding': '40px'}, children=[
+app.layout = html.Div(style={'backgroundColor': '#111', 'minHeight': '100vh', 'color': '#ccc', 'fontFamily': 'monospace', 'padding': '20px'}, children=[
     
-    html.Div(style={'marginBottom': '30px', 'borderBottom': '1px solid #1f2833', 'paddingBottom': '20px'}, children=[
-        html.H1("Bitcoin Historical Whale Analysis", style={'color': '#66fcf1', 'margin': '0'}),
-        html.P(id='status-text', style={'fontSize': '14px', 'color': '#45a29e', 'marginTop': '10px'})
-    ]),
-
-    html.Div(style={'backgroundColor': '#1f2833', 'padding': '20px', 'borderRadius': '10px', 'boxShadow': '0 10px 30px rgba(0,0,0,0.5)'}, children=[
-        html.H3("Average Transaction Value vs. Market Price", style={'color': '#fff', 'marginTop': '0'}),
-        dcc.Graph(
-            id='main-chart', 
-            style={'height': '70vh'},
-            config={'scrollZoom': True, 'displayModeBar': True}
-        )
-    ]),
+    html.H2("Blockchain.com Data Debugger"),
+    html.Div(id='status-display', style={'border': '1px solid #333', 'padding': '10px', 'marginBottom': '20px', 'color': '#00ff00'}),
     
-    # Increased interval to 60s to prevent constant jumping
-    dcc.Interval(id='ui-refresh', interval=60000)
+    dcc.Graph(id='main-chart', style={'height': '70vh'}),
+    
+    dcc.Interval(id='timer', interval=5000) # Check status every 5s
 ])
 
 @app.callback(
-    [Output('main-chart', 'figure'), Output('status-text', 'children')],
-    Input('ui-refresh', 'n_intervals')
+    [Output('main-chart', 'figure'), Output('status-display', 'children')],
+    Input('timer', 'n_intervals')
 )
-def update_ui(n):
+def update_view(n):
+    # Style the status message based on success/failure
+    status_style = {'color': '#ff4d4d'} if "Failed" in DATA_STATUS or "Exception" in DATA_STATUS else {'color': '#00ff00'}
+    
+    status_component = html.Span(DATA_STATUS, style=status_style)
+
     if GLOBAL_DF.empty:
         fig = go.Figure()
-        fig.update_layout(template="plotly_dark", title="Fetching history from APIs...")
-        return fig, DATA_STATUS
+        fig.update_layout(
+            template="plotly_dark", 
+            title="No Data Available",
+            xaxis=dict(showgrid=False),
+            yaxis=dict(showgrid=False)
+        )
+        return fig, status_component
 
-    fig = make_subplots(specs=[[{"secondary_y": True}]])
-
-    # 1. Avg Transaction Value
-    fig.add_trace(
-        go.Scatter(
-            x=GLOBAL_DF['Date'], 
-            y=GLOBAL_DF['AvgTxValue'],
-            name="Avg Tx Size (USD)",
-            mode='lines',
-            line=dict(width=0),
-            fill='tozeroy',
-            fillcolor='rgba(102, 252, 241, 0.2)',
-            connectgaps=False # DO NOT connect lines over missing data
-        ),
-        secondary_y=False,
-    )
-
-    # 2. Market Price
-    fig.add_trace(
-        go.Scatter(
-            x=GLOBAL_DF['Date'], 
-            y=GLOBAL_DF['Close'],
-            name="BTC Price (Binance)",
-            mode='lines',
-            line=dict(color='#ff4d4d', width=2),
-            connectgaps=False # DO NOT connect lines over missing data
-        ),
-        secondary_y=True,
-    )
+    # Plot the data
+    fig = go.Figure()
+    fig.add_trace(go.Scatter(
+        x=GLOBAL_DF['Date'],
+        y=GLOBAL_DF['AvgTxValue'],
+        name="Avg Tx Value",
+        mode='lines',
+        fill='tozeroy',
+        line=dict(color='#00cc96')
+    ))
 
     fig.update_layout(
         template="plotly_dark",
+        title="Average Transaction Value (USD)",
         paper_bgcolor='rgba(0,0,0,0)',
         plot_bgcolor='rgba(0,0,0,0)',
-        margin=dict(l=20, r=20, t=20, b=20),
-        legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1),
         hovermode="x unified",
-        # uirevision preserves zoom/pan state when the figure updates
-        uirevision='constant',
-        xaxis=dict(showgrid=False, rangeslider=dict(visible=False))
+        uirevision='constant' # Keeps zoom level
     )
 
-    fig.update_yaxes(title_text="Avg Transaction Value ($)", secondary_y=False, showgrid=False)
-    fig.update_yaxes(title_text="Price ($)", secondary_y=True, showgrid=True, gridcolor='#333')
-
-    return fig, DATA_STATUS
+    return fig, status_component
 
 if __name__ == '__main__':
     port = int(os.environ.get("PORT", 8080))
