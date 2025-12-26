@@ -1,123 +1,112 @@
 import requests
 import pandas as pd
-import json
-from datetime import datetime
+from datetime import timedelta
 
 # ==========================================
 # CONFIGURATION
 # ==========================================
-# 1. Get your free API key at: https://fredaccount.stlouisfed.org/apikeys
-# 2. Paste it inside the quotes below.
 API_KEY = "8005f92c424c0503df32084af3e66daf" 
-
-# Series IDs
-# FEDFUNDS: Effective Federal Funds Rate (Monthly)
-# WALCL: Assets: Total Assets: Total Assets (Less Eliminations from Consolidation): Wednesday Level
-SERIES_IDS = {
-    "Interest Rate (Fed Funds)": "FEDFUNDS",
-    "Fed Balance Sheet (Total Assets)": "WALCL"
-}
-
 BASE_URL = "https://api.stlouisfed.org/fred/series/observations"
 
-def fetch_series_data(series_id, api_key):
-    """
-    Fetches observations for a specific FRED series ID.
-    """
+def fetch_data(series_id, api_key):
+    """Fetches data from FRED and returns a clean DataFrame."""
     params = {
         "series_id": series_id,
         "api_key": api_key,
         "file_type": "json",
-        "sort_order": "asc" # Oldest to newest
+        "sort_order": "asc"
     }
-
     try:
         response = requests.get(BASE_URL, params=params)
         response.raise_for_status()
-        data = response.json()
+        data = response.json().get("observations", [])
         
-        # FRED returns data in a 'observations' list
-        # Fields: realtime_start, realtime_end, date, value
-        observations = data.get("observations", [])
-        
-        # Convert to DataFrame
-        df = pd.DataFrame(observations)
-        
-        # Clean data
-        # 'value' comes as string and can contain '.' for missing data
+        df = pd.DataFrame(data)
+        if df.empty: return pd.DataFrame()
+
         df = df[df['value'] != '.'] 
-        df['value'] = pd.to_numeric(df['value'])
         df['date'] = pd.to_datetime(df['date'])
-        
-        return df[['date', 'value']]
-
-    except requests.exceptions.HTTPError as err:
-        print(f"Error fetching {series_id}: {err}")
-        return None
+        df['value'] = pd.to_numeric(df['value'])
+        return df[['date', 'value']].sort_values('date')
     except Exception as e:
-        print(f"An unexpected error occurred: {e}")
-        return None
-
-def calculate_metrics(name, df):
-    """
-    Calculates key metrics from the series DataFrame.
-    """
-    if df is None or df.empty:
-        return f"No data available for {name}"
-
-    latest_date = df['date'].iloc[-1].strftime('%Y-%m-%d')
-    start_date = df['date'].iloc[0].strftime('%Y-%m-%d')
-    
-    metrics = {
-        "Series Name": name,
-        "Start Date": start_date,
-        "End Date": latest_date,
-        "Total Observations": len(df),
-        "Latest Value": f"{df['value'].iloc[-1]:,.2f}",
-        "Min Value": f"{df['value'].min():,.2f}",
-        "Max Value": f"{df['value'].max():,.2f}",
-        "Average Value": f"{df['value'].mean():,.2f}"
-    }
-    return metrics
+        print(f"Error fetching {series_id}: {e}")
+        return pd.DataFrame()
 
 def main():
     if not API_KEY:
-        print("❌ ERROR: API Key is missing.")
-        print("Please open the script and paste your FRED API key into the 'API_KEY' variable.")
+        print("Please insert your API Key in the script.")
         return
 
-    print(f"Fetching data from FRED API...\n")
+    print("Fetching data...")
+    # 1. Fetch Data
+    df_rate = fetch_data("FEDFUNDS", API_KEY)
+    df_rate.rename(columns={'value': 'interest_rate'}, inplace=True)
     
-    all_metrics = []
+    df_bs = fetch_data("WALCL", API_KEY) 
+    df_bs.rename(columns={'value': 'balance_sheet'}, inplace=True)
 
-    for name, series_id in SERIES_IDS.items():
-        print(f"Processing: {name} ({series_id})...")
-        df = fetch_series_data(series_id, API_KEY)
+    if df_rate.empty or df_bs.empty:
+        print("Failed to fetch data.")
+        return
+
+    # 2. Merge Monthly Rate into Weekly Balance Sheet
+    print("Processing data...")
+    df_merged = pd.merge_asof(
+        df_bs, 
+        df_rate, 
+        on='date', 
+        direction='backward'
+    )
+
+    # 3. Calculate Weekly Balance Sheet Change
+    df_merged['bs_change'] = df_merged['balance_sheet'].diff()
+    
+    # 4. Filter for Last 10 Years ONLY
+    # We find the latest date in the dataset and subtract 365*10 days
+    latest_date = df_merged['date'].max()
+    cutoff_date = latest_date - timedelta(days=365 * 10)
+    
+    df_10y = df_merged[df_merged['date'] >= cutoff_date].dropna().copy()
+
+    # 5. Calculate Average Rate (Based on this 10-year window)
+    avg_rate_10y = df_10y['interest_rate'].mean()
+
+    # 6. Categorize
+    def get_category(row):
+        high_rate = row['interest_rate'] > avg_rate_10y
+        growing_bs = row['bs_change'] >= 0
         
-        if df is not None:
-            metric = calculate_metrics(name, df)
-            all_metrics.append(metric)
+        if high_rate and growing_bs:
+            return "1. High Rate / Growing BS"
+        elif high_rate and not growing_bs:
+            return "2. High Rate / Shrinking BS"
+        elif not high_rate and growing_bs:
+            return "3. Low Rate / Growing BS"
+        elif not high_rate and not growing_bs:
+            return "4. Low Rate / Shrinking BS"
 
-    # Display Results
-    print("\n" + "="*80)
-    print(f"{'FRED DATA METRICS REPORT':^80}")
-    print("="*80 + "\n")
+    df_10y['category'] = df_10y.apply(get_category, axis=1)
 
-    # Create a summary DataFrame for pretty printing
-    if all_metrics:
-        results_df = pd.DataFrame(all_metrics)
-        
-        # Transpose for a card-like view per series or just print the table
-        # Here we iterate to print a readable list
-        for item in all_metrics:
-            print(f"🔹 {item['Series Name']}")
-            print("-" * 40)
-            for key, value in item.items():
-                if key != "Series Name":
-                    print(f"{key:<20}: {value}")
-            print("\n")
-    else:
-        print("No metrics could be generated.")
+    # ==========================================
+    # OUTPUT REPORT
+    # ==========================================
+    print("\n" + "="*60)
+    print(f"FRED ANALYSIS: LAST 10 YEARS")
+    print("="*60)
+    print(f"Date Range: {df_10y['date'].iloc[0].date()} to {df_10y['date'].iloc[-1].date()}")
+    print(f"Total Weeks: {len(df_10y)}")
+    print(f"10-Year Avg Interest Rate Threshold: {avg_rate_10y:.2f}%")
+    print("-" * 60)
+    
+    summary = df_10y['category'].value_counts().reset_index()
+    summary.columns = ['Category', 'Weeks']
+    summary['Percentage'] = (summary['Weeks'] / len(df_10y) * 100).round(1)
+    
+    # Sort by Category Name for consistent display
+    summary = summary.sort_values('Category')
+    
+    print(summary.to_string(index=False))
+    print("-" * 60)
 
 if __name__ == "__main__":
     main()
