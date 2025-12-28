@@ -217,12 +217,17 @@ def run_simulation(df_1h, df_1d):
         curr_price = df_1h['open'].iloc[i] # Exec at Open
         prev_close_1h = df_1h['close'].iloc[i-1] # Data for 1H indicators
         
-        # Get Daily Data (Yesterday)
-        yesterday = (ts - timedelta(days=1)).date()
+        # Get Daily Data (Yesterday) - FIX: Use Timestamp for lookup match
+        yesterday_date = (ts - timedelta(days=1)).date()
+        yesterday = pd.Timestamp(yesterday_date)
         
         # Check if we have daily data for yesterday
         if yesterday not in df_1d_plan.index:
-            equity_curve.append({'date': ts, 'equity': cash, 'net_lev': 0})
+            # FIX: Add default keys to avoid KeyError later
+            equity_curve.append({
+                'date': ts, 'equity': cash, 'net_lev': 0,
+                'lev_p': 0, 'lev_t': 0, 'lev_g': 0
+            })
             continue
             
         # Extract Row Data
