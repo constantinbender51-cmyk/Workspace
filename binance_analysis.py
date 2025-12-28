@@ -6,6 +6,7 @@ from datetime import datetime, timedelta
 import matplotlib.pyplot as plt
 import os
 import json
+from http.server import HTTPServer, BaseHTTPRequestHandler
 
 # ==========================================
 # CONFIGURATION (MATCHING MAIN (27).PY)
@@ -78,7 +79,6 @@ def fetch_binance_klines(symbol, interval, start_date_str):
     return final
 
 def resample_1h_to_1d(df_1h):
-    # Resample to Daily (Midnight UTC close)
     df_1d = df_1h.resample('1D').agg({
         'open': 'first',
         'high': 'max',
@@ -87,18 +87,11 @@ def resample_1h_to_1d(df_1h):
     }).dropna()
     return df_1d
 
-# ==========================================
-# STRATEGY LOGIC
-# ==========================================
-
-# --- HELPER ---
 def get_sma(series, window):
     return series.rolling(window=window).mean()
 
 def get_ewm(series, span):
     return series.ewm(span=span, adjust=False).mean()
-
-# --- PRE-CALCULATION FUNCTIONS (Vectorized for Speed) ---
 
 def precalc_planner(df_1d):
     df = df_1d.copy()
@@ -110,8 +103,6 @@ def precalc_tumbler(df_1d):
     df = df_1d.copy()
     df['sma1'] = get_sma(df['close'], TUMBLER_PARAMS["SMA1"])
     df['sma2'] = get_sma(df['close'], TUMBLER_PARAMS["SMA2"])
-    
-    # III
     df['log_ret'] = np.log(df['close'] / df['close'].shift(1))
     w = TUMBLER_PARAMS["III_WIN"]
     num = df['log_ret'].rolling(w).sum().abs()
@@ -120,7 +111,6 @@ def precalc_tumbler(df_1d):
     return df
 
 def precalc_gainer(df_1h, df_1d):
-    # 1H MACDs
     g_1h = df_1h.copy()
     g_1d = df_1d.copy()
     
@@ -132,7 +122,6 @@ def precalc_gainer(df_1h, df_1d):
         slow = get_ewm(g_1h['close'], s)
         macd = fast - slow
         signal = get_ewm(macd, sig)
-        # Store signal (+1/-1) directly
         col = f'macd_1h_{i}'
         g_1h[col] = np.where(macd > signal, 1.0, -1.0) * w
         col_names.append(col)
@@ -163,144 +152,68 @@ def precalc_gainer(df_1h, df_1d):
     
     return g_1h, g_1d
 
-# ==========================================
-# MAIN SIMULATION
-# ==========================================
 def run_simulation(df_1h, df_1d):
     print("Pre-calculating Indicators...")
     df_1d_plan = precalc_planner(df_1d)
     df_1d_tumb = precalc_tumbler(df_1d)
     df_1h_gain, df_1d_gain = precalc_gainer(df_1h, df_1d)
     
-    # Align Data:
-    # 1. We iterate through df_1h (Hourly execution).
-    # 2. For Daily data, we must access the row corresponding to "Yesterday" (Closed candle).
-    #    e.g., if current time is 2023-01-05 14:00, latest daily candle is 2023-01-04.
-    
-    # Map 1H timestamps to previous date
-    df_1h_dates = df_1h.index.date
-    # Shift dates back by 1 day to find the relevant "closed" daily candle
-    target_dates = df_1h_dates - timedelta(days=1)
-    
     print("Running Loop...")
-    
-    # State Initialization
     cash = INITIAL_CAPITAL
     equity_curve = []
     
-    # Planner State
-    p_s1_equity = 0.0 # Will init to cap
-    p_s2_equity = 0.0
-    p_last_price = 0.0
-    p_last_lev_s1 = 0.0
-    p_last_lev_s2 = 0.0
-    
-    p_s1_entry = None
-    p_s1_peak = 0.0
-    p_s1_stopped = False
-    p_s1_trend = 0
-    
-    p_s2_peak = 0.0
-    p_s2_stopped = False
-    p_s2_trend = 0
-    
-    # Tumbler State
+    p_s1_equity, p_s2_equity = 0.0, 0.0
+    p_last_price, p_last_lev_s1, p_last_lev_s2 = 0.0, 0.0, 0.0
+    p_s1_entry, p_s1_peak, p_s1_stopped, p_s1_trend = None, 0.0, False, 0
+    p_s2_peak, p_s2_stopped, p_s2_trend = 0.0, False, 0
     t_flat_regime = False
     
-    # Start Loop
-    # Need enough warmup for SMAs (400 days)
     start_idx = 400 * 24 
     if start_idx >= len(df_1h): start_idx = 0
     
     for i in range(start_idx, len(df_1h)):
         ts = df_1h.index[i]
-        curr_price = df_1h['open'].iloc[i] # Exec at Open
-        prev_close_1h = df_1h['close'].iloc[i-1] # Data for 1H indicators
+        curr_price = df_1h['open'].iloc[i]
         
-        # Get Daily Data (Yesterday) - FIX: Use Timestamp for lookup match
         yesterday_date = (ts - timedelta(days=1)).date()
         yesterday = pd.Timestamp(yesterday_date)
         
-        # Check if we have daily data for yesterday
         if yesterday not in df_1d_plan.index:
-            # FIX: Add default keys to avoid KeyError later
-            equity_curve.append({
-                'date': ts, 'equity': cash, 'net_lev': 0,
-                'lev_p': 0, 'lev_t': 0, 'lev_g': 0
-            })
+            equity_curve.append({'date': ts, 'equity': cash, 'net_lev': 0, 'lev_p': 0, 'lev_t': 0, 'lev_g': 0})
             continue
             
-        # Extract Row Data
-        row_d_p = df_1d_plan.loc[yesterday]
-        row_d_t = df_1d_tumb.loc[yesterday]
-        row_d_g = df_1d_gain.loc[yesterday]
-        row_h_g = df_1h_gain.iloc[i-1] # Previous hour closed
-        
+        row_d_p, row_d_t, row_d_g = df_1d_plan.loc[yesterday], df_1d_tumb.loc[yesterday], df_1d_gain.loc[yesterday]
+        row_h_g = df_1h_gain.iloc[i-1]
         daily_close = row_d_p['close']
         
-        # --- PLANNER LOGIC ---
-        # Initialize virtual equity
-        strat_cap = cash * CAP_SPLIT # Simplified: Assume strategy owns 33% of total
-        # Actually master_trader logic: strat_cap = portfolio * 0.333.
-        # But here we simulate the *whole* portfolio.
-        # So effective capital for calculation is Total * 0.333
-        
+        # Planner
         effective_cap = cash * CAP_SPLIT 
-        
         if p_s1_equity <= 0: p_s1_equity = effective_cap
         if p_s2_equity <= 0: p_s2_equity = effective_cap
         if p_last_price <= 0: p_last_price = daily_close
         
-        # Update Virtual Equity (Daily Step Logic - approximated hourly)
-        # Note: In main.py, this updates every cycle.
-        # It uses (curr_price - last_price).
-        # We need to simulate the state persisting.
-        
-        # Update based on price move from LAST EXECUTION (Hour i-1)
-        # Last execution price was df_1h['open'].iloc[i-1]
         last_exec_price = df_1h['open'].iloc[i-1]
-        
         pct_change = (curr_price - last_exec_price) / last_exec_price
-        
         p_s1_equity *= (1.0 + pct_change * p_last_lev_s1)
         p_s2_equity *= (1.0 + pct_change * p_last_lev_s2)
         
-        # S1 Logic
         s1_trend_new = 1 if daily_close > row_d_p['sma_s1'] else -1
         if p_s1_trend != s1_trend_new:
-            p_s1_trend = s1_trend_new
-            p_s1_entry = ts
-            p_s1_stopped = False
-            p_s1_peak = p_s1_equity
-            
+            p_s1_trend, p_s1_entry, p_s1_stopped, p_s1_peak = s1_trend_new, ts, False, p_s1_equity
         if p_s1_equity > p_s1_peak: p_s1_peak = p_s1_equity
-        dd_s1 = (p_s1_peak - p_s1_equity) / p_s1_peak if p_s1_peak > 0 else 0
-        if dd_s1 > PLANNER_PARAMS["S1_STOP"]: p_s1_stopped = True
+        if (p_s1_peak - p_s1_equity) / p_s1_peak > PLANNER_PARAMS["S1_STOP"]: p_s1_stopped = True
         
         lev_s1 = 0.0
         if not p_s1_stopped:
-            # Decay
-            days_since = 0
-            if p_s1_entry:
-                days_since = (ts - p_s1_entry).total_seconds() / 86400
-            
-            decay = 1.0
-            if days_since < PLANNER_PARAMS["S1_DECAY"]:
-                decay = 1.0 - (days_since / PLANNER_PARAMS["S1_DECAY"])**2
-            else:
-                decay = 0.0
+            days_since = (ts - p_s1_entry).total_seconds() / 86400 if p_s1_entry else 0
+            decay = max(0.0, 1.0 - (days_since / PLANNER_PARAMS["S1_DECAY"])**2) if days_since < PLANNER_PARAMS["S1_DECAY"] else 0.0
             lev_s1 = float(p_s1_trend) * decay
             
-        # S2 Logic
         s2_trend_new = 1 if daily_close > row_d_p['sma_s2'] else -1
         if p_s2_trend != s2_trend_new:
-            p_s2_trend = s2_trend_new
-            p_s2_stopped = False
-            p_s2_peak = p_s2_equity
-            
+            p_s2_trend, p_s2_stopped, p_s2_peak = s2_trend_new, False, p_s2_equity
         if p_s2_equity > p_s2_peak: p_s2_peak = p_s2_equity
-        dd_s2 = (p_s2_peak - p_s2_equity) / p_s2_peak if p_s2_peak > 0 else 0
-        if dd_s2 > PLANNER_PARAMS["S2_STOP"]: p_s2_stopped = True
+        if (p_s2_peak - p_s2_equity) / p_s2_peak > PLANNER_PARAMS["S2_STOP"]: p_s2_stopped = True
         
         dist_pct = abs(daily_close - row_d_p['sma_s2']) / row_d_p['sma_s2']
         is_prox = dist_pct < PLANNER_PARAMS["S2_PROX"]
@@ -309,133 +222,89 @@ def run_simulation(df_1h, df_1d):
         lev_s2 = 0.0
         if p_s2_stopped:
             if is_prox:
-                p_s2_stopped = False
-                p_s2_peak = p_s2_equity
+                p_s2_stopped, p_s2_peak = False, p_s2_equity
                 lev_s2 = float(s2_trend_new) * tgt_size
         else:
             lev_s2 = float(s2_trend_new) * tgt_size
             
         lev_planner = max(-2.0, min(2.0, lev_s1 + lev_s2))
+        p_last_lev_s1, p_last_lev_s2 = lev_s1, lev_s2
         
-        # Save state for next iter
-        p_last_lev_s1 = lev_s1
-        p_last_lev_s2 = lev_s2
-        
-        # --- TUMBLER LOGIC ---
+        # Tumbler
         iii = row_d_t['iii']
         raw_lev_t = TUMBLER_PARAMS['LEVS'][2]
         if iii < TUMBLER_PARAMS['III_TH'][0]: raw_lev_t = TUMBLER_PARAMS['LEVS'][0]
         elif iii < TUMBLER_PARAMS['III_TH'][1]: raw_lev_t = TUMBLER_PARAMS['LEVS'][1]
-        
         if iii < TUMBLER_PARAMS['FLAT_THRESH']: t_flat_regime = True
-        
         if t_flat_regime:
             sma1, sma2 = row_d_t['sma1'], row_d_t['sma2']
-            band = TUMBLER_PARAMS['BAND']
-            if abs(daily_close - sma1) <= sma1*band or abs(daily_close - sma2) <= sma2*band:
+            if abs(daily_close - sma1) <= sma1*TUMBLER_PARAMS['BAND'] or abs(daily_close - sma2) <= sma2*TUMBLER_PARAMS['BAND']:
                 t_flat_regime = False
-        
         lev_tumbler = 0.0
         if not t_flat_regime:
-            if daily_close > row_d_t['sma1'] and daily_close > row_d_t['sma2']:
-                lev_tumbler = raw_lev_t
-            elif daily_close < row_d_t['sma1'] and daily_close < row_d_t['sma2']:
-                lev_tumbler = -raw_lev_t
+            if daily_close > row_d_t['sma1'] and daily_close > row_d_t['sma2']: lev_tumbler = raw_lev_t
+            elif daily_close < row_d_t['sma1'] and daily_close < row_d_t['sma2']: lev_tumbler = -raw_lev_t
                 
-        # --- GAINER LOGIC ---
-        # 1H Signal
-        # score_macd_1h was calc based on close[i-1] (Previous Hour)
-        s_m1h = row_h_g['score_macd_1h']
-        s_m1d = row_d_g['score_macd_1d']
-        s_s1d = row_d_g['score_sma_1d']
-        
+        # Gainer
         ws = GAINER_PARAMS["GA_WEIGHTS"]
-        lev_gainer = (s_m1h * ws["MACD_1H"] + s_m1d * ws["MACD_1D"] + s_s1d * ws["SMA_1D"]) / sum(ws.values())
+        lev_gainer = (row_h_g['score_macd_1h'] * ws["MACD_1H"] + row_d_g['score_macd_1d'] * ws["MACD_1D"] + row_d_g['score_sma_1d'] * ws["SMA_1D"]) / sum(ws.values())
         
-        # --- COMBINATION ---
-        # Normalization
-        n_p = lev_planner
-        n_t = lev_tumbler * (TARGET_STRAT_LEV / TUMBLER_MAX_LEV)
-        n_g = lev_gainer * TARGET_STRAT_LEV
-        
-        # Combined Leverage on Total Capital
-        # Each strat gets CAP_SPLIT (33%)
+        # Combination
+        n_p, n_t, n_g = lev_planner, lev_tumbler * (TARGET_STRAT_LEV / TUMBLER_MAX_LEV), lev_gainer * TARGET_STRAT_LEV
         net_lev = (n_p + n_t + n_g) * CAP_SPLIT
         
-        # --- EXECUTION & PNL ---
-        # We hold position for 1 hour
-        # PnL = Leverage * %Change
-        # Price Change: Open[i] to Open[i+1]? 
-        # Backtest loop structure: We are at [i]. We decide `net_lev`.
-        # We hold this until [i+1].
-        # In this loop structure, we calculate PnL of PREVIOUS position first, then set NEW position.
-        
-        # Wait, simple way:
-        # At index i, we set position.
-        # At index i+1, we realize PnL.
-        # So we need to store `net_lev` for next iteration.
-        
-        # Better: Calculate PnL from [i] to [i+1] using Close[i] / Open[i]?
-        # Let's use Open[i] to Close[i] (Intraday hourly PnL)
-        # Then next hour Open[i+1] ~ Close[i].
-        
+        # Execution
         hourly_ret = (df_1h['close'].iloc[i] - curr_price) / curr_price
+        friction = abs(net_lev) * (0.0001 / 24) 
+        cash *= (1.0 + net_lev * hourly_ret - friction)
         
-        # Apply fees if leverage changed significantly?
-        # Simplified: Just apply spread/fee proxy on hourly rebalance volume?
-        # Main.py uses limit chaser, very efficient.
-        # Let's subtract a tiny friction cost based on total leverage magnitude
-        friction = abs(net_lev) * (0.0001 / 24) # Small drag for funding/slippage
-        
-        step_pnl = net_lev * hourly_ret
-        cash *= (1.0 + step_pnl - friction)
-        
-        equity_curve.append({
-            'date': ts, 
-            'equity': cash, 
-            'net_lev': net_lev,
-            'lev_p': n_p,
-            'lev_t': n_t,
-            'lev_g': n_g
-        })
+        equity_curve.append({'date': ts, 'equity': cash, 'net_lev': net_lev, 'lev_p': n_p, 'lev_t': n_t, 'lev_g': n_g})
         
     return pd.DataFrame(equity_curve).set_index('date')
 
-# ==========================================
-# MAIN EXECUTION
-# ==========================================
+# --- WEB SERVER ---
+class DownloadHandler(BaseHTTPRequestHandler):
+    def do_GET(self):
+        filename = "master_system_backtest.png"
+        if os.path.exists(filename):
+            self.send_response(200)
+            self.send_header('Content-type', 'image/png')
+            self.send_header('Content-Disposition', f'attachment; filename="{filename}"')
+            self.end_headers()
+            with open(filename, 'rb') as f:
+                self.wfile.write(f.read())
+        else:
+            self.send_error(404, "File not found")
+
+def start_web_server():
+    port = 8080
+    server = HTTPServer(('0.0.0.0', port), DownloadHandler)
+    print(f"\nWeb server running at http://localhost:{port}")
+    print("Download the backtest result by visiting this address.")
+    try:
+        server.serve_forever()
+    except KeyboardInterrupt:
+        print("\nStopping web server...")
+        server.server_close()
+
 if __name__ == "__main__":
     print("Fetching Data...")
     df_1h = fetch_binance_klines(SYMBOL, '1h', START_DATE)
     df_1d = resample_1h_to_1d(df_1h)
     
-    print(f"Data range: {df_1h.index[0]} to {df_1h.index[-1]}")
-    
     res = run_simulation(df_1h, df_1d)
     
-    # Metrics
     final_eq = res['equity'].iloc[-1]
     ret = (final_eq / INITIAL_CAPITAL) - 1
-    
-    # BH
     bh = (df_1h['close'] / df_1h['close'].iloc[0]) * INITIAL_CAPITAL
     bh_ret = (bh.iloc[-1] / INITIAL_CAPITAL) - 1
-    
-    # Drawdown
-    dd = (res['equity'] - res['equity'].cummax()) / res['equity'].cummax()
-    max_dd = dd.min()
+    max_dd = ((res['equity'] - res['equity'].cummax()) / res['equity'].cummax()).min()
     
     print("\n" + "="*50)
     print("MASTER TRADER SYSTEM BACKTEST")
-    print("="*50)
-    print(f"Initial Cap:   ${INITIAL_CAPITAL:,.0f}")
-    print(f"Final Equity:  ${final_eq:,.0f}")
-    print(f"Total Return:  {ret*100:.2f}%")
-    print(f"BH Return:     {bh_ret*100:.2f}%")
-    print(f"Max Drawdown:  {max_dd*100:.2f}%")
+    print(f"Final Equity:  ${final_eq:,.0f} | Return: {ret*100:.2f}% | MaxDD: {max_dd*100:.2f}%")
     print("="*50)
     
-    # Plot
     plt.figure(figsize=(12, 8))
     plt.subplot(2, 1, 1)
     plt.plot(res.index, res['equity'], label='Master System')
@@ -456,4 +325,7 @@ if __name__ == "__main__":
     
     plt.tight_layout()
     plt.savefig("master_system_backtest.png")
-    print("Saved plot to master_system_backtest.png")
+    print("Plot saved to master_system_backtest.png")
+    
+    # Start server to share the result
+    start_web_server()
