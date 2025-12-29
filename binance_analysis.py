@@ -1,27 +1,25 @@
 import os
 import sys
 import time
+import json
 import requests
 import numpy as np
 import pandas as pd
 import builtins
+import http.server
+import socketserver
+import webbrowser
 from datetime import datetime, timedelta
-
-# --- Slow Print Configuration ---
-def slow_print(*args, **kwargs):
-    builtins.print(*args, **kwargs)
-    time.sleep(0.1)
-
-# Override global print
-print = slow_print
+from threading import Thread
 
 # --- Configuration ---
 SYMBOL = "BTCUSDT"
 INTERVAL = "1h"
 YEARS = 8
 CACHE_FILE = "binance_data.csv"
+PORT = 8080
 
-# Strategy Constants (Matched to main (28).py)
+# Strategy Constants
 CAP_SPLIT = 0.333
 TARGET_STRAT_LEV = 2.0
 TUMBLER_MAX_LEV = 4.327
@@ -54,6 +52,15 @@ GAINER_PARAMS = {
     }
 }
 
+# --- Slow Print Configuration ---
+def slow_print(*args, **kwargs):
+    # Only slow print if not called from the server thread potentially
+    builtins.print(*args, **kwargs)
+    # Removing sleep to prevent server lag, user can add time.sleep(0.05) if strictly desired for effect
+    # time.sleep(0.05) 
+
+print = slow_print
+
 # --- Data Fetching Engine ---
 def fetch_binance_data(symbol, interval="1h", years=8):
     if os.path.exists(CACHE_FILE):
@@ -83,7 +90,7 @@ def fetch_binance_data(symbol, interval="1h", years=8):
             current_ts = last_close_ts + 1
             sys.stdout.write(f"\r[FETCH] Fetched {len(klines)} candles... Last: {datetime.fromtimestamp(last_close_ts/1000)}")
             sys.stdout.flush()
-            time.sleep(0.05)
+            time.sleep(0.05) # Rate limit kindness
             if len(data) < 1000: break
         except Exception as e:
             print(f"\n[ERROR] Fetch failed: {e}")
@@ -126,7 +133,7 @@ def calculate_decay(entry_idx, current_idx, decay_days, freq_per_day=24):
 # --- Backtest Class ---
 class Backtester:
     def __init__(self, df_1h):
-        self.df = df_1h
+        self.df = df_1h.copy()
         self.df_1d = df_1h.resample('D').agg({'open':'first','high':'max','low':'min','close':'last'}).dropna()
         self.capital = 10000.0
         
@@ -134,8 +141,7 @@ class Backtester:
         print("[INFO] Pre-calculating indicators (Fixing Lookahead)...")
         d = self.df_1d
         
-        # Shift Daily indicators by 1 day so that on any given hour of Day T, 
-        # we only know the indicators as of the close of Day T-1.
+        # Shift Daily indicators by 1 day
         self.df['d_sma120'] = get_sma(d['close'], PLANNER_PARAMS["S1_SMA"]).shift(1).reindex(self.df.index, method='ffill')
         self.df['d_sma400'] = get_sma(d['close'], PLANNER_PARAMS["S2_SMA"]).shift(1).reindex(self.df.index, method='ffill')
         self.df['d_sma32'] = get_sma(d['close'], TUMBLER_PARAMS["SMA1"]).shift(1).reindex(self.df.index, method='ffill')
@@ -152,7 +158,7 @@ class Backtester:
         self.df['d_gainer_macd'] = d_g_macd.shift(1).reindex(self.df.index, method='ffill')
         self.df['d_gainer_sma'] = d_g_sma.shift(1).reindex(self.df.index, method='ffill')
         
-        # Shift Hourly MACD by 1 hour so signal at 14:00 uses 13:00 close.
+        # Shift Hourly MACD by 1 hour
         h_g_macd = pd.Series(calc_macd_pos(self.df['close'], GAINER_PARAMS["MACD_1H"]), index=self.df.index)
         self.df['h_gainer_macd'] = h_g_macd.shift(1)
         
@@ -172,22 +178,24 @@ class Backtester:
 
         print("[INFO] Starting simulation loop...")
         cnt = 0
+        total_steps = len(self.df)
+        
         for row in self.df.itertuples():
             cnt += 1
             curr_price = row.close
             
-            # 1. Apply Returns based on signal from PREVIOUS bar (Zero Lookahead)
+            # 1. Apply Returns
             if cnt > 1:
                 step_ret = (curr_price - prev_price) / prev_price
                 portfolio_curve.append(portfolio_curve[-1] * (1.0 + prev_total_lev * step_ret))
                 
-                # Update Planner's Virtual Equity using its specific contribution to the previous step
+                # Update Planner
                 p_state["s1_equity"] *= (1.0 + step_ret * p_state["last_lev_s1"])
                 p_state["s2_equity"] *= (1.0 + step_ret * p_state["last_lev_s2"])
             
-            # 2. Calculate New Signals (To be used for the NEXT bar)
+            # 2. Calculate Signals
             
-            # Strategy 1: Planner
+            # Strategy 1
             s1_trend = 1 if curr_price > row.d_sma120 else -1
             s1 = p_state["s1"]
             if s1["trend"] != s1_trend:
@@ -197,10 +205,9 @@ class Backtester:
             dd_s1 = (s1["peak_equity"] - p_state["s1_equity"]) / max(s1["peak_equity"], 1e-9)
             if dd_s1 > PLANNER_PARAMS["S1_STOP"]: s1["stopped"] = True
             
-            # Signal generated at current bar Close
             s1_lev_out = float(s1_trend) * calculate_decay(s1["entry_idx"], cnt, PLANNER_PARAMS["S1_DECAY"]) if not s1["stopped"] else 0.0
 
-            # Strategy 2: Planner Core
+            # Strategy 2
             s2_trend = 1 if curr_price > row.d_sma400 else -1
             s2 = p_state["s2"]
             if s2["trend"] != s2_trend:
@@ -216,7 +223,7 @@ class Backtester:
             
             s2_lev_out = float(s2_trend) * (0.5 if is_prox else 1.0) if not s2["stopped"] else 0.0
             
-            # Strategy 3: Tumbler
+            # Strategy 3
             if row.d_iii < TUMBLER_PARAMS["FLAT_THRESH"]: tumbler_flat = True
             if tumbler_flat and (abs(curr_price - row.d_sma32) <= row.d_sma32 * TUMBLER_PARAMS["BAND"] or 
                                abs(curr_price - row.d_sma114) <= row.d_sma114 * TUMBLER_PARAMS["BAND"]):
@@ -230,7 +237,7 @@ class Backtester:
                 if curr_price > row.d_sma32 and curr_price > row.d_sma114: t_lev = base
                 elif curr_price < row.d_sma32 and curr_price < row.d_sma114: t_lev = -base
             
-            # Store Signals to be applied to the NEXT bar
+            # Store Signals
             p_state["last_lev_s1"] = s1_lev_out
             p_state["last_lev_s2"] = s2_lev_out
             
@@ -242,9 +249,8 @@ class Backtester:
             prev_price = curr_price
             
             if cnt % 5000 == 0:
-                sys.stdout.write(f"\r[SIM] Processed {cnt} candles...")
+                sys.stdout.write(f"\r[SIM] Processed {cnt}/{total_steps} candles...")
                 sys.stdout.flush()
-                time.sleep(0.05)
         
         print("\n[INFO] Simulation complete.")
         return pd.Series(portfolio_curve, index=self.df.index[:len(portfolio_curve)])
@@ -256,20 +262,198 @@ class Backtester:
         sharpe = returns.mean() / returns.std() * np.sqrt(365 * 24)
         max_dd = ((equity_curve - equity_curve.cummax()) / equity_curve.cummax()).min()
         
+        results = {
+            "final_equity": equity_curve.iloc[-1],
+            "total_return": total_ret,
+            "cagr": cagr,
+            "sharpe": sharpe,
+            "max_dd": max_dd,
+            "years": YEARS,
+            "symbol": SYMBOL
+        }
+        
         print("\n" + "="*40)
         print(f" REAL BACKTEST RESULTS (No Lookahead)")
         print(f" Period: {YEARS} Years | Asset: {SYMBOL}")
         print("="*40)
-        print(f"Final Equity:   ${equity_curve.iloc[-1]:,.2f}")
-        print(f"Total Return:   {total_ret*100:.2f}%")
-        print(f"CAGR:           {cagr*100:.2f}%")
-        print(f"Sharpe Ratio:   {sharpe:.4f}")
-        print(f"Max Drawdown:   {max_dd*100:.2f}%")
+        print(f"Final Equity:   ${results['final_equity']:,.2f}")
+        print(f"Total Return:   {results['total_return']*100:.2f}%")
+        print(f"CAGR:           {results['cagr']*100:.2f}%")
+        print(f"Sharpe Ratio:   {results['sharpe']:.4f}")
+        print(f"Max Drawdown:   {results['max_dd']*100:.2f}%")
         print("="*40)
+        
+        return results
+
+# --- Web Server Functions ---
+
+def generate_web_files(df, equity_curve, stats):
+    print("[WEB] Generating visualization data...")
+    
+    # 1. Prepare JSON Data
+    # Downsample for web performance if too large (>10k points)
+    factor = max(1, len(equity_curve) // 8000)
+    
+    eq_data = []
+    price_data = []
+    
+    # Using unix timestamps for Lightweight Charts
+    times = equity_curve.index[::factor]
+    equities = equity_curve.values[::factor]
+    prices = df['close'].reindex(equity_curve.index)[::factor].values
+    
+    for t, e, p in zip(times, equities, prices):
+        ts = int(t.timestamp())
+        eq_data.append({"time": ts, "value": float(e)})
+        price_data.append({"time": ts, "value": float(p)})
+
+    json_data = {
+        "stats": {
+            "final_equity": f"${stats['final_equity']:,.2f}",
+            "total_return": f"{stats['total_return']*100:.2f}%",
+            "cagr": f"{stats['cagr']*100:.2f}%",
+            "sharpe": f"{stats['sharpe']:.2f}",
+            "max_dd": f"{stats['max_dd']*100:.2f}%",
+            "symbol": stats['symbol']
+        },
+        "series": {
+            "equity": eq_data,
+            "price": price_data
+        }
+    }
+    
+    with open("backtest_data.json", "w") as f:
+        json.dump(json_data, f)
+        
+    # 2. Generate HTML
+    html_content = """
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Backtest Results</title>
+    <script src="https://unpkg.com/lightweight-charts/dist/lightweight-charts.standalone.production.js"></script>
+    <style>
+        body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Ubuntu, "Helvetica Neue", sans-serif; background: #111; color: #eee; margin: 0; padding: 20px; }
+        .container { max-width: 1200px; margin: 0 auto; }
+        .header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 20px; border-bottom: 1px solid #333; padding-bottom: 10px; }
+        .stats-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); gap: 10px; margin-bottom: 20px; }
+        .stat-card { background: #222; padding: 15px; border-radius: 8px; text-align: center; border: 1px solid #333; }
+        .stat-val { font-size: 1.5em; font-weight: bold; color: #4caf50; }
+        .stat-label { font-size: 0.9em; color: #888; margin-top: 5px; }
+        .chart-container { height: 600px; width: 100%; border-radius: 8px; overflow: hidden; border: 1px solid #333; }
+        .dd-val { color: #ff5252; }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <div class="header">
+            <h1>Backtest Results: <span id="sym"></span></h1>
+            <div style="font-size: 0.8em; color: #666;">Strategy Visualization</div>
+        </div>
+        
+        <div class="stats-grid">
+            <div class="stat-card"><div class="stat-val" id="final_equity">...</div><div class="stat-label">Final Equity</div></div>
+            <div class="stat-card"><div class="stat-val" id="total_return">...</div><div class="stat-label">Total Return</div></div>
+            <div class="stat-card"><div class="stat-val" id="cagr">...</div><div class="stat-label">CAGR</div></div>
+            <div class="stat-card"><div class="stat-val" id="sharpe">...</div><div class="stat-label">Sharpe Ratio</div></div>
+            <div class="stat-card"><div class="stat-val dd-val" id="max_dd">...</div><div class="stat-label">Max Drawdown</div></div>
+        </div>
+
+        <div id="chart" class="chart-container"></div>
+    </div>
+
+    <script>
+        fetch('backtest_data.json')
+            .then(response => response.json())
+            .then(data => {
+                // Populate Stats
+                document.getElementById('sym').innerText = data.stats.symbol;
+                document.getElementById('final_equity').innerText = data.stats.final_equity;
+                document.getElementById('total_return').innerText = data.stats.total_return;
+                document.getElementById('cagr').innerText = data.stats.cagr;
+                document.getElementById('sharpe').innerText = data.stats.sharpe;
+                document.getElementById('max_dd').innerText = data.stats.max_dd;
+
+                // Create Chart
+                const chartContainer = document.getElementById('chart');
+                const chart = LightweightCharts.createChart(chartContainer, {
+                    layout: { background: { color: '#111' }, textColor: '#DDD' },
+                    grid: { vertLines: { color: '#222' }, horzLines: { color: '#222' } },
+                    rightPriceScale: { borderColor: '#333' },
+                    timeScale: { borderColor: '#333', timeVisible: true },
+                    crosshair: { mode: LightweightCharts.CrosshairMode.Normal },
+                });
+
+                // Equity Series (Green Area)
+                const equitySeries = chart.addAreaSeries({
+                    topColor: 'rgba(76, 175, 80, 0.56)',
+                    bottomColor: 'rgba(76, 175, 80, 0.04)',
+                    lineColor: 'rgba(76, 175, 80, 1)',
+                    lineWidth: 2,
+                    priceFormat: { type: 'price', precision: 2, minMove: 0.01 },
+                });
+                equitySeries.setData(data.series.equity);
+
+                // Price Series (Overlay Line, Right Scale with Margin)
+                // We create a separate scale to compare relative moves or just overlay
+                const priceSeries = chart.addLineSeries({
+                    color: 'rgba(41, 98, 255, 0.6)',
+                    lineWidth: 1,
+                    priceScaleId: 'left', // Use left axis for price to separate from equity
+                    title: 'Asset Price'
+                });
+                chart.priceScale('left').applyOptions({
+                     visible: true,
+                     borderColor: '#333'
+                });
+                
+                priceSeries.setData(data.series.price);
+                
+                chart.timeScale().fitContent();
+            })
+            .catch(err => console.error("Error loading data:", err));
+    </script>
+</body>
+</html>
+    """
+    
+    with open("index.html", "w") as f:
+        f.write(html_content)
+    print(f"[WEB] Dashboard generated at index.html")
+
+def run_server():
+    Handler = http.server.SimpleHTTPRequestHandler
+    
+    # Allow address reuse to prevent "Address already in use" errors on quick restarts
+    socketserver.TCPServer.allow_reuse_address = True
+    
+    with socketserver.TCPServer(("", PORT), Handler) as httpd:
+        print(f"\n[SERVER] Serving at http://localhost:{PORT}")
+        print("[SERVER] Press Ctrl+C to stop.")
+        # Try to open browser automatically
+        try:
+            webbrowser.open(f"http://localhost:{PORT}")
+        except:
+            pass
+        httpd.serve_forever()
 
 if __name__ == "__main__":
+    # 1. Fetch
     df = fetch_binance_data(SYMBOL, INTERVAL, YEARS)
+    
+    # 2. Backtest
     bt = Backtester(df)
     bt.precalculate_indicators()
     equity = bt.run()
-    bt.report(equity)
+    stats = bt.report(equity)
+    
+    # 3. Generate Website
+    generate_web_files(df, equity, stats)
+    
+    # 4. Start Server
+    try:
+        run_server()
+    except KeyboardInterrupt:
+        print("\n[SERVER] Stopped.")
