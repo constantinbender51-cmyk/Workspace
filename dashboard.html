@@ -3,10 +3,10 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Returns Curve Quantizer & Leverage Optimizer</title>
+    <title>Returns Curve Quantizer</title>
     <script src="https://cdn.tailwindcss.com"></script>
     <script src="https://cdnjs.cloudflare.com/ajax/libs/Chart.js/3.9.1/chart.min.js"></script>
-    <script src="backtest_data.js"></script> <!-- Loads window.BACKTEST_DATA -->
+    <script src="backtest_data.js"></script>
 </head>
 <body class="bg-gray-900 text-gray-100 font-sans min-h-screen p-6">
 
@@ -19,7 +19,7 @@
                 <p class="text-gray-400 text-sm">Optimize leverage allocations and visualize return behavior.</p>
             </div>
             <div class="text-right">
-                <div class="text-xs text-gray-500">OPTIMIZED FOR</div>
+                <div class="text-xs text-gray-500">LIVE DEMO</div>
                 <div class="font-mono text-xl">BTC/USDT</div>
             </div>
         </div>
@@ -71,11 +71,10 @@
                         </div>
                         <input type="range" id="input-global" min="0.1" max="3" step="0.1" value="1.0" 
                             class="w-full h-2 bg-gray-700 rounded-lg appearance-none cursor-pointer accent-white">
-                        <p class="text-xs text-gray-500 mt-2">Scales the final net leverage.</p>
                     </div>
 
                     <button onclick="resetDefaults()" class="w-full py-2 bg-gray-700 hover:bg-gray-600 rounded text-sm transition-colors">
-                        Reset Defaults (1/3 Split)
+                        Reset Defaults
                     </button>
                     <button onclick="applyOptimized()" class="w-full py-2 bg-blue-900/50 text-blue-300 hover:bg-blue-900/80 border border-blue-800 rounded text-sm transition-colors mt-2">
                         Apply AI Optimization
@@ -113,7 +112,7 @@
 
                 <!-- Quantization Table -->
                 <div class="bg-gray-800 p-6 rounded-lg border border-gray-700">
-                    <h3 class="text-md font-semibold mb-4 text-gray-300">Quarterly Quantization (Last 8 Quarters)</h3>
+                    <h3 class="text-md font-semibold mb-4 text-gray-300">Quarterly Quantization</h3>
                     <div class="overflow-x-auto">
                         <table class="w-full text-sm text-left text-gray-400">
                             <thead class="text-xs text-gray-500 uppercase bg-gray-700/50">
@@ -140,13 +139,7 @@
         let data = window.BACKTEST_DATA || [];
         let chartInstance = null;
 
-        // Default: 1/3 split
-        const state = {
-            w_p: 0.33,
-            w_t: 0.33,
-            w_g: 0.33,
-            scale: 1.0
-        };
+        const state = { w_p: 0.33, w_t: 0.33, w_g: 0.33, scale: 1.0 };
 
         // === LOGIC ===
         function calculateCurve() {
@@ -157,10 +150,7 @@
             let cash = 10000;
             let peak = 10000;
             let maxDD = 0;
-
             let prevPrice = data[0].price;
-            
-            // For stats
             const returns = [];
 
             data.forEach((day, i) => {
@@ -170,20 +160,14 @@
                     return;
                 }
 
-                // Calc Strategy Return
                 const assetRet = (day.price - prevPrice) / prevPrice;
                 prevPrice = day.price;
 
-                // Net Leverage
                 const netLev = (day.lev_p * state.w_p + day.lev_t * state.w_t + day.lev_g * state.w_g) * state.scale;
-                
-                // Friction (approx)
                 const friction = Math.abs(netLev) * 0.0006 * 0.1;
-
                 const stratRet = (netLev * assetRet) - friction;
-                cash *= (1 + stratRet);
                 
-                // Track DD
+                cash *= (1 + stratRet);
                 if (cash > peak) peak = cash;
                 const dd = (peak - cash) / peak;
                 if (dd > maxDD) maxDD = dd;
@@ -193,31 +177,21 @@
                 returns.push(stratRet);
             });
 
-            // Calculate Metrics
             const totalRet = (cash / 10000) - 1;
             const avgDailyRet = returns.reduce((a,b)=>a+b,0) / returns.length;
             const stdDailyRet = Math.sqrt(returns.map(x => Math.pow(x - avgDailyRet, 2)).reduce((a,b)=>a+b,0) / returns.length);
-            
-            const cagr = (Math.pow(cash/10000, 365/data.length) - 1);
-            const sharpe = (avgDailyRet / stdDailyRet) * Math.sqrt(365);
+            const sharpe = stdDailyRet > 0 ? (avgDailyRet / stdDailyRet) * Math.sqrt(365) : 0;
+            const cagr = Math.pow(cash/10000, 365/data.length) - 1;
 
             return {
                 equity: equityCurve,
                 dates: dates,
-                stats: {
-                    finalEq: cash,
-                    cagr: cagr,
-                    sharpe: sharpe,
-                    maxDD: maxDD,
-                    dailyRets: returns
-                }
+                stats: { finalEq: cash, cagr: cagr, sharpe: sharpe, maxDD: maxDD, dailyRets: returns }
             };
         }
 
         function updateQuantTable(dailyRets, dates) {
-            // Group by Quarter (Quick & Dirty JS grouping)
             const quarters = {};
-            
             dates.slice(1).forEach((dateStr, i) => {
                 const d = new Date(dateStr);
                 const qKey = `${d.getFullYear()}-Q${Math.floor(d.getMonth()/3) + 1}`;
@@ -227,8 +201,6 @@
 
             const tbody = document.getElementById('table-body');
             tbody.innerHTML = '';
-
-            // Get last 8 quarters
             const qKeys = Object.keys(quarters).sort().reverse().slice(0, 8);
 
             qKeys.forEach(q => {
@@ -236,15 +208,12 @@
                 const qRet = rets.reduce((acc, r) => acc * (1+r), 1) - 1;
                 const mean = rets.reduce((a,b)=>a+b,0)/rets.length;
                 const std = Math.sqrt(rets.map(x=>Math.pow(x-mean, 2)).reduce((a,b)=>a+b)/rets.length);
-                const sharpe = (mean/std) * Math.sqrt(252); // annualized sharpe for that quarter
-
+                const sharpe = std > 0 ? (mean/std) * Math.sqrt(252) : 0;
+                
                 const tr = document.createElement('tr');
                 tr.className = "border-b border-gray-700 hover:bg-gray-800/50";
-                
-                // Color for return
                 const retColor = qRet >= 0 ? 'text-green-400' : 'text-red-400';
-                // Bar for performance visual
-                const barWidth = Math.min(Math.abs(qRet * 500), 100); // Scale factor
+                const barWidth = Math.min(Math.abs(qRet * 500), 100);
                 const barColor = qRet >= 0 ? 'bg-green-500' : 'bg-red-500';
 
                 tr.innerHTML = `
@@ -252,9 +221,7 @@
                     <td class="px-4 py-3 ${retColor} font-mono">${(qRet*100).toFixed(2)}%</td>
                     <td class="px-4 py-3 font-mono">${(std*Math.sqrt(252)*100).toFixed(2)}%</td>
                     <td class="px-4 py-3 font-mono text-blue-300">${sharpe.toFixed(2)}</td>
-                    <td class="px-4 py-3 text-right">
-                        <div class="h-1.5 rounded-full ${barColor} ml-auto" style="width: ${barWidth}px"></div>
-                    </td>
+                    <td class="px-4 py-3 text-right"><div class="h-1.5 rounded-full ${barColor} ml-auto" style="width: ${barWidth}px"></div></td>
                 `;
                 tbody.appendChild(tr);
             });
@@ -262,76 +229,50 @@
 
         function updateUI() {
             const res = calculateCurve();
-            
-            // Update Stats
             document.getElementById('stat-equity').innerText = '$' + res.stats.finalEq.toLocaleString(undefined, {maximumFractionDigits:0});
             document.getElementById('stat-cagr').innerText = (res.stats.cagr * 100).toFixed(2) + '%';
             document.getElementById('stat-sharpe').innerText = res.stats.sharpe.toFixed(2);
             document.getElementById('stat-dd').innerText = (res.stats.maxDD * 100).toFixed(2) + '%';
-
-            // Update Labels
+            
             document.getElementById('val-planner').innerText = state.w_p.toFixed(2);
             document.getElementById('val-tumbler').innerText = state.w_t.toFixed(2);
             document.getElementById('val-gainer').innerText = state.w_g.toFixed(2);
             document.getElementById('val-global').innerText = state.scale.toFixed(1) + 'x';
 
-            // Update Chart
             updateChart(res.dates, res.equity);
-
-            // Update Table
             updateQuantTable(res.stats.dailyRets, res.dates);
         }
 
         function updateChart(labels, dataPoints) {
             const ctx = document.getElementById('equityChart').getContext('2d');
-            
             if (chartInstance) {
                 chartInstance.data.labels = labels;
                 chartInstance.data.datasets[0].data = dataPoints;
-                chartInstance.update('none'); // 'none' mode for performance
+                chartInstance.update('none');
                 return;
             }
-
             chartInstance = new Chart(ctx, {
                 type: 'line',
                 data: {
                     labels: labels,
                     datasets: [{
-                        label: 'Equity Curve',
-                        data: dataPoints,
-                        borderColor: '#60a5fa',
-                        backgroundColor: 'rgba(96, 165, 250, 0.1)',
-                        borderWidth: 2,
-                        pointRadius: 0,
-                        fill: true,
-                        tension: 0.1
+                        label: 'Equity Curve', data: dataPoints,
+                        borderColor: '#60a5fa', backgroundColor: 'rgba(96, 165, 250, 0.1)',
+                        borderWidth: 2, pointRadius: 0, fill: true, tension: 0.1
                     }]
                 },
                 options: {
-                    responsive: true,
-                    maintainAspectRatio: false,
+                    responsive: true, maintainAspectRatio: false,
                     interaction: { intersect: false, mode: 'index' },
                     scales: {
                         x: { display: false },
-                        y: { 
-                            type: 'logarithmic',
-                            grid: { color: '#374151' },
-                            ticks: { color: '#9ca3af' }
-                        }
+                        y: { type: 'logarithmic', grid: { color: '#374151' }, ticks: { color: '#9ca3af' } }
                     },
-                    plugins: {
-                        legend: { display: false },
-                        tooltip: {
-                            callbacks: {
-                                label: (ctx) => `$${ctx.raw.toLocaleString()}`
-                            }
-                        }
-                    }
+                    plugins: { legend: { display: false } }
                 }
             });
         }
 
-        // === EVENTS ===
         document.getElementById('input-planner').addEventListener('input', (e) => { state.w_p = parseFloat(e.target.value); updateUI(); });
         document.getElementById('input-tumbler').addEventListener('input', (e) => { state.w_t = parseFloat(e.target.value); updateUI(); });
         document.getElementById('input-gainer').addEventListener('input', (e) => { state.w_g = parseFloat(e.target.value); updateUI(); });
@@ -339,22 +280,12 @@
 
         function resetDefaults() {
             state.w_p = 0.33; state.w_t = 0.33; state.w_g = 0.33; state.scale = 1.0;
-            updateInputs();
-            updateUI();
+            updateInputs(); updateUI();
         }
-
         function applyOptimized() {
-            // These are hypothetical optimized values found via Python
-            // Since we can't pass them dynamically without reloading, 
-            // I'll set them to a robust preset often found in these strategies:
-            state.w_p = 0.60; 
-            state.w_t = 0.85; 
-            state.w_g = 0.45;
-            state.scale = 1.0;
-            updateInputs();
-            updateUI();
+            state.w_p = 0.60; state.w_t = 0.85; state.w_g = 0.45; state.scale = 1.0;
+            updateInputs(); updateUI();
         }
-
         function updateInputs() {
             document.getElementById('input-planner').value = state.w_p;
             document.getElementById('input-tumbler').value = state.w_t;
@@ -362,14 +293,13 @@
             document.getElementById('input-global').value = state.scale;
         }
 
-        // Init
         if (!data.length) {
-            alert("No data found! Please run the Python script first to generate backtest_data.js");
+            console.log("Waiting for data...");
+            // Poll for data if script is still running setup
+            setTimeout(() => window.location.reload(), 3000);
         } else {
             updateUI();
         }
-
     </script>
 </body>
 </html>
-
