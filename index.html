@@ -3,7 +3,7 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Returns Curve Quantizer</title>
+    <title>Returns Curve - Capital Allocation</title>
     <script src="https://cdn.tailwindcss.com"></script>
     <script src="https://cdnjs.cloudflare.com/ajax/libs/Chart.js/3.9.1/chart.min.js"></script>
     <script src="backtest_data.js"></script>
@@ -15,8 +15,8 @@
         <!-- Header -->
         <div class="flex justify-between items-center border-b border-gray-700 pb-4">
             <div>
-                <h1 class="text-3xl font-bold text-blue-400">Strategy Quantizer</h1>
-                <p class="text-gray-400 text-sm">Optimize leverage allocations and visualize return behavior.</p>
+                <h1 class="text-2xl font-bold text-blue-400">Capital Allocation Playground</h1>
+                <p class="text-gray-400 text-sm">Adjust the capital available to each strategy logic.</p>
             </div>
             <div class="text-right">
                 <div class="text-xs text-gray-500">LIVE DEMO</div>
@@ -24,68 +24,65 @@
             </div>
         </div>
 
-        <!-- Main Grid -->
         <div class="grid grid-cols-1 lg:grid-cols-4 gap-6">
             
             <!-- Controls Panel -->
             <div class="lg:col-span-1 bg-gray-800 rounded-lg p-6 shadow-lg border border-gray-700 h-fit">
-                <h2 class="text-lg font-semibold mb-6 flex items-center">
-                    <span class="w-2 h-2 bg-green-500 rounded-full mr-2"></span> Leverage Controls
-                </h2>
+                
+                <!-- Presets -->
+                <div class="grid grid-cols-2 gap-2 mb-6">
+                    <button onclick="setAll(0.33)" class="py-2 px-1 bg-gray-700 hover:bg-gray-600 rounded text-xs font-mono transition-colors">1/3 (Default)</button>
+                    <button onclick="setAll(0.66)" class="py-2 px-1 bg-gray-700 hover:bg-gray-600 rounded text-xs font-mono transition-colors">2/3 (Heavy)</button>
+                    <button onclick="setAll(1.00)" class="py-2 px-1 bg-gray-700 hover:bg-gray-600 rounded text-xs font-mono transition-colors">3/3 (Full)</button>
+                    <button onclick="setAll(1.33)" class="py-2 px-1 bg-purple-900/50 hover:bg-purple-900/80 border border-purple-800 rounded text-xs font-mono transition-colors text-purple-200">4/3 (Overdrive)</button>
+                </div>
 
-                <div class="space-y-8">
+                <div class="space-y-6">
                     <!-- Planner Control -->
                     <div>
                         <div class="flex justify-between mb-2">
-                            <label class="text-sm font-medium text-purple-400">Planner Weight</label>
-                            <span id="val-planner" class="font-mono text-sm">0.33</span>
+                            <label class="text-sm font-medium text-purple-400">Planner Capital</label>
+                            <span id="val-planner" class="font-mono text-sm">33%</span>
                         </div>
-                        <input type="range" id="input-planner" min="0" max="2" step="0.05" value="0.33" 
+                        <input type="range" id="input-planner" min="0" max="1.5" step="0.01" value="0.33" 
                             class="w-full h-2 bg-gray-700 rounded-lg appearance-none cursor-pointer accent-purple-500">
                     </div>
 
                     <!-- Tumbler Control -->
                     <div>
                         <div class="flex justify-between mb-2">
-                            <label class="text-sm font-medium text-yellow-400">Tumbler Weight</label>
-                            <span id="val-tumbler" class="font-mono text-sm">0.33</span>
+                            <label class="text-sm font-medium text-yellow-400">Tumbler Capital</label>
+                            <span id="val-tumbler" class="font-mono text-sm">33%</span>
                         </div>
-                        <input type="range" id="input-tumbler" min="0" max="2" step="0.05" value="0.33" 
+                        <input type="range" id="input-tumbler" min="0" max="1.5" step="0.01" value="0.33" 
                             class="w-full h-2 bg-gray-700 rounded-lg appearance-none cursor-pointer accent-yellow-500">
                     </div>
 
                     <!-- Gainer Control -->
                     <div>
                         <div class="flex justify-between mb-2">
-                            <label class="text-sm font-medium text-cyan-400">Gainer Weight</label>
-                            <span id="val-gainer" class="font-mono text-sm">0.33</span>
+                            <label class="text-sm font-medium text-cyan-400">Gainer Capital</label>
+                            <span id="val-gainer" class="font-mono text-sm">33%</span>
                         </div>
-                        <input type="range" id="input-gainer" min="0" max="2" step="0.05" value="0.33" 
+                        <input type="range" id="input-gainer" min="0" max="1.5" step="0.01" value="0.33" 
                             class="w-full h-2 bg-gray-700 rounded-lg appearance-none cursor-pointer accent-cyan-500">
                     </div>
+                </div>
 
-                    <div class="border-t border-gray-700 pt-6">
-                        <div class="flex justify-between mb-2">
-                            <label class="text-sm font-medium text-gray-300">Global Scale</label>
-                            <span id="val-global" class="font-mono text-sm">1.0x</span>
-                        </div>
-                        <input type="range" id="input-global" min="0.1" max="3" step="0.1" value="1.0" 
-                            class="w-full h-2 bg-gray-700 rounded-lg appearance-none cursor-pointer accent-white">
+                <div class="mt-8 pt-4 border-t border-gray-700">
+                    <div class="flex justify-between text-xs text-gray-400 mb-2">
+                        <span>Total Allocation:</span>
+                        <span id="total-alloc" class="font-mono text-white">100%</span>
                     </div>
-
-                    <button onclick="resetDefaults()" class="w-full py-2 bg-gray-700 hover:bg-gray-600 rounded text-sm transition-colors">
-                        Reset Defaults
-                    </button>
-                    <button onclick="applyOptimized()" class="w-full py-2 bg-blue-900/50 text-blue-300 hover:bg-blue-900/80 border border-blue-800 rounded text-sm transition-colors mt-2">
-                        Apply AI Optimization
-                    </button>
+                    <div class="w-full bg-gray-700 h-2 rounded-full overflow-hidden">
+                        <div id="bar-total" class="bg-blue-500 h-full transition-all duration-300" style="width: 33%"></div>
+                    </div>
                 </div>
             </div>
 
             <!-- Chart & Stats Panel -->
             <div class="lg:col-span-3 space-y-6">
-                
-                <!-- Stats Cards -->
+                <!-- Stats -->
                 <div class="grid grid-cols-2 md:grid-cols-4 gap-4">
                     <div class="bg-gray-800 p-4 rounded-lg border border-gray-700">
                         <div class="text-gray-500 text-xs uppercase tracking-wider">Final Equity</div>
@@ -124,9 +121,7 @@
                                     <th class="px-4 py-3 text-right">Performance</th>
                                 </tr>
                             </thead>
-                            <tbody id="table-body">
-                                <!-- Populated by JS -->
-                            </tbody>
+                            <tbody id="table-body"></tbody>
                         </table>
                     </div>
                 </div>
@@ -135,13 +130,10 @@
     </div>
 
     <script>
-        // === STATE & DATA ===
         let data = window.BACKTEST_DATA || [];
         let chartInstance = null;
+        const state = { w_p: 0.33, w_t: 0.33, w_g: 0.33 };
 
-        const state = { w_p: 0.33, w_t: 0.33, w_g: 0.33, scale: 1.0 };
-
-        // === LOGIC ===
         function calculateCurve() {
             if (!data.length) return { equity: [], stats: {} };
 
@@ -163,8 +155,11 @@
                 const assetRet = (day.price - prevPrice) / prevPrice;
                 prevPrice = day.price;
 
-                const netLev = (day.lev_p * state.w_p + day.lev_t * state.w_t + day.lev_g * state.w_g) * state.scale;
-                const friction = Math.abs(netLev) * 0.0006 * 0.1;
+                // Net Leverage = Sum of (Signal * Capital Allocation)
+                const netLev = (day.lev_p * state.w_p) + (day.lev_t * state.w_t) + (day.lev_g * state.w_g);
+                
+                // Friction
+                const friction = Math.abs(netLev) * 0.0006 * 0.1; 
                 const stratRet = (netLev * assetRet) - friction;
                 
                 cash *= (1 + stratRet);
@@ -227,22 +222,6 @@
             });
         }
 
-        function updateUI() {
-            const res = calculateCurve();
-            document.getElementById('stat-equity').innerText = '$' + res.stats.finalEq.toLocaleString(undefined, {maximumFractionDigits:0});
-            document.getElementById('stat-cagr').innerText = (res.stats.cagr * 100).toFixed(2) + '%';
-            document.getElementById('stat-sharpe').innerText = res.stats.sharpe.toFixed(2);
-            document.getElementById('stat-dd').innerText = (res.stats.maxDD * 100).toFixed(2) + '%';
-            
-            document.getElementById('val-planner').innerText = state.w_p.toFixed(2);
-            document.getElementById('val-tumbler').innerText = state.w_t.toFixed(2);
-            document.getElementById('val-gainer').innerText = state.w_g.toFixed(2);
-            document.getElementById('val-global').innerText = state.scale.toFixed(1) + 'x';
-
-            updateChart(res.dates, res.equity);
-            updateQuantTable(res.stats.dailyRets, res.dates);
-        }
-
         function updateChart(labels, dataPoints) {
             const ctx = document.getElementById('equityChart').getContext('2d');
             if (chartInstance) {
@@ -273,33 +252,49 @@
             });
         }
 
-        document.getElementById('input-planner').addEventListener('input', (e) => { state.w_p = parseFloat(e.target.value); updateUI(); });
-        document.getElementById('input-tumbler').addEventListener('input', (e) => { state.w_t = parseFloat(e.target.value); updateUI(); });
-        document.getElementById('input-gainer').addEventListener('input', (e) => { state.w_g = parseFloat(e.target.value); updateUI(); });
-        document.getElementById('input-global').addEventListener('input', (e) => { state.scale = parseFloat(e.target.value); updateUI(); });
+        function setAll(val) {
+            state.w_p = val; state.w_t = val; state.w_g = val;
+            updateInputs();
+            updateUI();
+        }
 
-        function resetDefaults() {
-            state.w_p = 0.33; state.w_t = 0.33; state.w_g = 0.33; state.scale = 1.0;
-            updateInputs(); updateUI();
-        }
-        function applyOptimized() {
-            state.w_p = 0.60; state.w_t = 0.85; state.w_g = 0.45; state.scale = 1.0;
-            updateInputs(); updateUI();
-        }
         function updateInputs() {
             document.getElementById('input-planner').value = state.w_p;
             document.getElementById('input-tumbler').value = state.w_t;
             document.getElementById('input-gainer').value = state.w_g;
-            document.getElementById('input-global').value = state.scale;
         }
 
-        if (!data.length) {
-            console.log("Waiting for data...");
-            // Poll for data if script is still running setup
-            setTimeout(() => window.location.reload(), 3000);
-        } else {
-            updateUI();
+        function updateUI() {
+            const res = calculateCurve();
+            
+            // Labels
+            document.getElementById('val-planner').innerText = (state.w_p * 100).toFixed(0) + '%';
+            document.getElementById('val-tumbler').innerText = (state.w_t * 100).toFixed(0) + '%';
+            document.getElementById('val-gainer').innerText = (state.w_g * 100).toFixed(0) + '%';
+            
+            // Total Bar
+            const total = state.w_p + state.w_t + state.w_g;
+            document.getElementById('total-alloc').innerText = (total * 100).toFixed(0) + '%';
+            const barW = Math.min(total / 3 * 100, 100);
+            document.getElementById('bar-total').style.width = barW + '%';
+            document.getElementById('bar-total').className = `h-full transition-all duration-300 ${total > 1.5 ? 'bg-purple-500' : 'bg-blue-500'}`;
+
+            // Stats
+            document.getElementById('stat-equity').innerText = '$' + res.stats.finalEq.toLocaleString(undefined, {maximumFractionDigits:0});
+            document.getElementById('stat-cagr').innerText = (res.stats.cagr * 100).toFixed(2) + '%';
+            document.getElementById('stat-sharpe').innerText = res.stats.sharpe.toFixed(2);
+            document.getElementById('stat-dd').innerText = (res.stats.maxDD * 100).toFixed(2) + '%';
+
+            updateChart(res.dates, res.equity);
+            updateQuantTable(res.stats.dailyRets, res.dates);
         }
+
+        document.getElementById('input-planner').addEventListener('input', (e) => { state.w_p = parseFloat(e.target.value); updateUI(); });
+        document.getElementById('input-tumbler').addEventListener('input', (e) => { state.w_t = parseFloat(e.target.value); updateUI(); });
+        document.getElementById('input-gainer').addEventListener('input', (e) => { state.w_g = parseFloat(e.target.value); updateUI(); });
+
+        if (!data.length) setTimeout(() => window.location.reload(), 3000);
+        else updateUI();
     </script>
 </body>
 </html>
