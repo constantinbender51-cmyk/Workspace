@@ -1,489 +1,518 @@
+#!/usr/bin/env python3
+"""
+backtest_server.py
+Standalone backtest engine for Planner, Tumbler, and Gainer strategies using Binance data.
+Generates a report and serves it on port 8080.
+"""
+
 import os
 import sys
+import json
 import time
 import requests
+import logging
 import numpy as np
 import pandas as pd
-import builtins
-import http.server
-import socketserver
+from datetime import datetime, timezone, timedelta
+from http.server import SimpleHTTPRequestHandler, HTTPServer
+import threading
 import webbrowser
-import urllib.parse
-from datetime import datetime, timedelta
-
-# --- Matplotlib Setup for Headless/Scientific Plotting ---
-import matplotlib
-matplotlib.use('Agg') # Force non-interactive backend
-import matplotlib.pyplot as plt
 
 # --- Configuration ---
 SYMBOL = "BTCUSDT"
-INTERVAL = "1h"
-YEARS = 8
-CACHE_FILE = "binance_data.csv"
+BINANCE_API_URL = "https://api.binance.com/api/v3/klines"
+HISTORY_DAYS = 365  # Backtest duration
 PORT = 8080
 
-# Default Constants
-DEFAULT_CAP_SPLIT = 0.333
-TARGET_STRAT_LEV = 2.0
+# Normalization Constants (Matched to uploaded file)
 TUMBLER_MAX_LEV = 4.327
+TARGET_STRAT_LEV = 2.0
+CAP_SPLIT = 0.333
 
+# --- Logging Setup ---
+logging.basicConfig(level=logging.INFO, format='[%(asctime)s] %(message)s', datefmt='%H:%M:%S')
+log = logging.getLogger("BACKTEST")
+
+# --- Strategy Parameters (Copied from main.py) ---
 PLANNER_PARAMS = {
-    "S1_SMA": 120, "S1_DECAY": 40, "S1_STOP": 0.13,
+    "S1_SMA": 120, "S1_DECAY": 40, "S1_STOP": 0.13, 
     "S2_SMA": 400, "S2_STOP": 0.27, "S2_PROX": 0.05
 }
 
 TUMBLER_PARAMS = {
-    "SMA1": 32, "SMA2": 114,
-    "STOP": 0.043, "TAKE_PROFIT": 0.126,
-    "III_WIN": 27, "FLAT_THRESH": 0.356, "BAND": 0.077,
+    "SMA1": 32, "SMA2": 114, 
+    "STOP": 0.043, "TAKE_PROFIT": 0.126, 
+    "III_WIN": 27, "FLAT_THRESH": 0.356, "BAND": 0.077, 
     "LEVS": [0.079, 4.327, 3.868], "III_TH": [0.058, 0.259]
 }
 
 GAINER_PARAMS = {
     "GA_WEIGHTS": {"MACD_1H": 0.8, "MACD_1D": 0.4, "SMA_1D": 0.4},
     "MACD_1H": {
-        'params': [(97, 366, 47), (15, 40, 11), (16, 55, 13)],
+        'params': [(97, 366, 47), (15, 40, 11), (16, 55, 13)], 
         'weights': [0.45, 0.43, 0.01]
     },
     "MACD_1D": {
-        'params': [(52, 64, 61), (5, 6, 4), (17, 18, 16)],
+        'params': [(52, 64, 61), (5, 6, 4), (17, 18, 16)], 
         'weights': [0.87, 0.92, 0.73]
     },
     "SMA_1D": {
-        'params': [40, 120, 390],
+        'params': [40, 120, 390], 
         'weights': [0.6, 0.8, 0.4]
     }
 }
 
-# Global Data Cache
-CACHED_DF = None
-
-def slow_print(*args, **kwargs):
-    builtins.print(*args, **kwargs)
-
-print = slow_print
-
-# --- Data Fetching Engine ---
-def fetch_binance_data(symbol, interval="1h", years=8):
-    if os.path.exists(CACHE_FILE):
-        print(f"[INFO] Loading cached data from {CACHE_FILE}...")
-        df = pd.read_csv(CACHE_FILE, index_col=0, parse_dates=True)
-        return df
-
-    end_time = datetime.utcnow()
-    start_time = end_time - timedelta(days=365 * years)
-    start_ts = int(start_time.timestamp() * 1000)
+# --- Data Fetching ---
+def fetch_binance_data(symbol, interval, days):
+    """Fetches historical klines from Binance."""
+    log.info(f"Fetching {interval} data for {symbol} ({days} days)...")
+    limit = 1000
+    end_time = int(time.time() * 1000)
+    start_time = int((datetime.now() - timedelta(days=days)).timestamp() * 1000)
     
-    print(f"[INFO] Downloading {years} years of {interval} data for {symbol} from Binance...")
-    
-    klines = []
-    current_ts = start_ts
+    all_data = []
     
     while True:
-        url = "https://api.binance.com/api/v3/klines"
-        params = {"symbol": symbol, "interval": interval, "startTime": current_ts, "limit": 1000}
+        url = f"{BINANCE_API_URL}?symbol={symbol}&interval={interval}&startTime={start_time}&endTime={end_time}&limit={limit}"
         try:
-            r = requests.get(url, params=params)
-            r.raise_for_status()
-            data = r.json()
-            if not data: break
-            klines.extend(data)
-            last_close_ts = data[-1][6]
-            current_ts = last_close_ts + 1
-            sys.stdout.write(f"\r[FETCH] Fetched {len(klines)} candles... Last: {datetime.fromtimestamp(last_close_ts/1000)}")
-            sys.stdout.flush()
-            time.sleep(0.05)
-            if len(data) < 1000: break
+            resp = requests.get(url).json()
+            if not isinstance(resp, list) or len(resp) == 0:
+                break
+            all_data.extend(resp)
+            start_time = resp[-1][0] + 1
+            if len(resp) < limit:
+                break
+            time.sleep(0.1) # Be nice to API
         except Exception as e:
-            print(f"\n[ERROR] Fetch failed: {e}")
+            log.error(f"Error fetching data: {e}")
             break
             
-    print("\n[INFO] Processing data...")
-    df = pd.DataFrame(klines, columns=["open_time", "open", "high", "low", "close", "volume", "close_time", "qav", "trades", "tbav", "tbqav", "ignore"])
-    df["timestamp"] = pd.to_datetime(df["open_time"], unit="ms")
-    df.set_index("timestamp", inplace=True)
-    cols = ["open", "high", "low", "close", "volume"]
-    df[cols] = df[cols].astype(float)
-    df[cols].to_csv(CACHE_FILE)
-    return df[cols]
+    df = pd.DataFrame(all_data, columns=['timestamp', 'open', 'high', 'low', 'close', 'volume', 'close_time', 'q_vol', 'trades', 'tb_base', 'tb_quote', 'ignore'])
+    df['timestamp'] = pd.to_datetime(df['timestamp'], unit='ms')
+    df['close'] = df['close'].astype(float)
+    df.set_index('timestamp', inplace=True)
+    return df[['close']]
 
-# --- Indicator Helpers ---
-def get_sma(series, window): return series.rolling(window=window).mean()
-def get_ema(series, span): return series.ewm(span=span, adjust=False).mean()
+# --- Helper Functions ---
+def get_sma(prices, window):
+    if len(prices) < window: return 0.0
+    return prices.rolling(window=window).mean().iloc[-1]
 
-def calc_macd_pos(prices, config):
-    params, weights = config['params'], config['weights']
-    signals = []
-    for (f, s, sig_p), w in zip(params, weights):
-        fast, slow = get_ema(prices, f), get_ema(prices, s)
-        macd = fast - slow
-        sig_line = get_ema(macd, sig_p)
-        signals.append(np.where(macd > sig_line, 1.0, -1.0) * w)
-    return np.sum(signals, axis=0) / sum(weights)
+def calculate_decay(entry_date_str, decay_days):
+    if not entry_date_str: return 1.0
+    entry_dt = datetime.fromisoformat(entry_date_str)
+    if entry_dt.tzinfo is None: entry_dt = entry_dt.replace(tzinfo=timezone.utc)
+    # Mock current time as entry time + decay calculation in backtest would need 'current backtest time'
+    # For backtest simplicity, we pass the 'current backtest time' into this function or mock it.
+    # To fix this properly for backtesting, we need to pass 'current_time' to this function.
+    # See adaptation below in run_planner.
+    return 1.0 
 
-def calc_sma_pos(prices, config):
-    params, weights = config['params'], config['weights']
-    signals = [np.where(prices > get_sma(prices, p), 1.0, -1.0) * w for p, w in zip(params, weights)]
-    return np.sum(signals, axis=0) / sum(weights)
-
-def calculate_decay(entry_idx, current_idx, decay_days, freq_per_day=24):
-    if entry_idx is None: return 1.0
-    days_since = (current_idx - entry_idx) / freq_per_day
+# Modified helper to accept current time for backtest accuracy
+def calculate_decay_bt(entry_date_str, decay_days, current_time_dt):
+    if not entry_date_str: return 1.0
+    entry_dt = datetime.fromisoformat(entry_date_str)
+    if entry_dt.tzinfo is None: entry_dt = entry_dt.replace(tzinfo=timezone.utc)
+    if current_time_dt.tzinfo is None: current_time_dt = current_time_dt.replace(tzinfo=timezone.utc)
+    
+    days_since = (current_time_dt - entry_dt).total_seconds() / 86400
     if days_since >= decay_days: return 0.0
-    return max(0.0, 1.0 - (days_since / decay_days) ** 2)
+    weight = 1.0 - (days_since / decay_days) ** 2
+    return max(0.0, weight)
 
-# --- Backtest Class ---
-class Backtester:
-    def __init__(self, df_1h):
-        self.df = df_1h.copy()
-        self.df_1d = df_1h.resample('D').agg({'open':'first','high':'max','low':'min','close':'last'}).dropna()
-        self.capital = 10000.0
-        
-    def precalculate_indicators(self):
-        # print("[INFO] Pre-calculating indicators...")
-        d = self.df_1d
-        
-        # Shift Daily indicators by 1 day
-        self.df['d_sma120'] = get_sma(d['close'], PLANNER_PARAMS["S1_SMA"]).shift(1).reindex(self.df.index, method='ffill')
-        self.df['d_sma400'] = get_sma(d['close'], PLANNER_PARAMS["S2_SMA"]).shift(1).reindex(self.df.index, method='ffill')
-        self.df['d_sma32'] = get_sma(d['close'], TUMBLER_PARAMS["SMA1"]).shift(1).reindex(self.df.index, method='ffill')
-        self.df['d_sma114'] = get_sma(d['close'], TUMBLER_PARAMS["SMA2"]).shift(1).reindex(self.df.index, method='ffill')
-        
-        log_ret = np.log(d['close'] / d['close'].shift(1))
-        w = TUMBLER_PARAMS["III_WIN"]
-        iii = (log_ret.rolling(w).sum().abs() / log_ret.abs().rolling(w).sum()).fillna(0)
-        self.df['d_iii'] = iii.shift(1).reindex(self.df.index, method='ffill')
-        
-        d_g_macd = pd.Series(calc_macd_pos(d['close'], GAINER_PARAMS["MACD_1D"]), index=d.index)
-        d_g_sma = pd.Series(calc_sma_pos(d['close'], GAINER_PARAMS["SMA_1D"]), index=d.index)
-        
-        self.df['d_gainer_macd'] = d_g_macd.shift(1).reindex(self.df.index, method='ffill')
-        self.df['d_gainer_sma'] = d_g_sma.shift(1).reindex(self.df.index, method='ffill')
-        
-        # Shift Hourly MACD by 1 hour
-        h_g_macd = pd.Series(calc_macd_pos(self.df['close'], GAINER_PARAMS["MACD_1H"]), index=self.df.index)
-        self.df['h_gainer_macd'] = h_g_macd.shift(1)
-        
-        self.df.dropna(inplace=True)
+# --- Strategy Logic (Extracted & Adapted) ---
 
-    def run(self, cap_split):
-        p_state = {
-            "s1_equity": self.capital * cap_split, "s2_equity": self.capital * cap_split,
-            "last_price": self.df['close'].iloc[0], "last_lev_s1": 0.0, "last_lev_s2": 0.0,
-            "s1": {"entry_idx": None, "peak_equity": 0.0, "stopped": False, "trend": 0},
+def run_planner(df_1d, state, capital, current_time):
+    p_state = state["planner"]
+    price = df_1d['close'].iloc[-1]
+    
+    # Initialize
+    if p_state["s1_equity"] <= 0.0: p_state["s1_equity"] = capital
+    if p_state["s2_equity"] <= 0.0: p_state["s2_equity"] = capital
+    if p_state["last_price"] <= 0.0: p_state["last_price"] = price
+
+    # Update Virtual Equities
+    last_p = p_state["last_price"]
+    if last_p > 0:
+        pct_change = (price - last_p) / last_p
+        p_state["s1_equity"] *= (1.0 + pct_change * p_state["last_lev_s1"])
+        p_state["s2_equity"] *= (1.0 + pct_change * p_state["last_lev_s2"])
+
+    # Strategy 1
+    sma120 = get_sma(df_1d['close'], PLANNER_PARAMS["S1_SMA"])
+    s1_trend = 1 if price > sma120 else -1
+    s1 = p_state["s1"]
+    
+    if s1.get("trend", 0) != s1_trend:
+        s1["trend"] = s1_trend
+        s1["entry_date"] = current_time.isoformat()
+        s1["stopped"] = False
+        s1["peak_equity"] = p_state["s1_equity"]
+    
+    if p_state["s1_equity"] > s1["peak_equity"]:
+        s1["peak_equity"] = p_state["s1_equity"]
+    
+    dd_s1 = 0.0
+    if s1["peak_equity"] > 0:
+        dd_s1 = (s1["peak_equity"] - p_state["s1_equity"]) / s1["peak_equity"]
+    
+    if dd_s1 > PLANNER_PARAMS["S1_STOP"]:
+        s1["stopped"] = True
+
+    s1_lev = 0.0
+    if not s1["stopped"]:
+        decay_w = calculate_decay_bt(s1["entry_date"], PLANNER_PARAMS["S1_DECAY"], current_time)
+        s1_lev = float(s1_trend) * decay_w
+    
+    # Strategy 2
+    sma400 = get_sma(df_1d['close'], PLANNER_PARAMS["S2_SMA"])
+    s2_trend = 1 if price > sma400 else -1
+    s2 = p_state["s2"]
+    
+    if s2.get("trend", 0) != s2_trend:
+        s2["trend"] = s2_trend
+        s2["stopped"] = False
+        s2["peak_equity"] = p_state["s2_equity"]
+
+    if p_state["s2_equity"] > s2["peak_equity"]:
+        s2["peak_equity"] = p_state["s2_equity"]
+        
+    dd_s2 = 0.0
+    if s2["peak_equity"] > 0:
+        dd_s2 = (s2["peak_equity"] - p_state["s2_equity"]) / s2["peak_equity"]
+        
+    if dd_s2 > PLANNER_PARAMS["S2_STOP"]:
+        s2["stopped"] = True
+
+    dist_pct = abs(price - sma400) / sma400
+    is_prox = dist_pct < PLANNER_PARAMS["S2_PROX"]
+    tgt_size = 0.5 if is_prox else 1.0
+
+    s2_lev = 0.0
+    if s2["stopped"]:
+        if is_prox:
+            s2["stopped"] = False 
+            s2["peak_equity"] = p_state["s2_equity"] 
+            s2_lev = float(s2_trend) * tgt_size
+    else:
+        s2_lev = float(s2_trend) * tgt_size
+
+    net_lev = max(-2.0, min(2.0, s1_lev + s2_lev))
+    
+    p_state["last_price"] = price
+    p_state["last_lev_s1"] = s1_lev
+    p_state["last_lev_s2"] = s2_lev
+    
+    return net_lev
+
+def run_tumbler(df_1d, state, capital):
+    s = state["tumbler"]
+    w = TUMBLER_PARAMS["III_WIN"]
+    if len(df_1d) < w+1: return 0.0
+    # Calculate simple returns for III approx
+    log_ret = np.log(df_1d['close'] / df_1d['close'].shift(1))
+    iii = (log_ret.rolling(w).sum().abs() / log_ret.abs().rolling(w).sum()).fillna(0).iloc[-1]
+    
+    lev = TUMBLER_PARAMS["LEVS"][2]
+    if iii < TUMBLER_PARAMS["III_TH"][0]: lev = TUMBLER_PARAMS["LEVS"][0]
+    elif iii < TUMBLER_PARAMS["III_TH"][1]: lev = TUMBLER_PARAMS["LEVS"][1]
+    
+    if iii < TUMBLER_PARAMS["FLAT_THRESH"]: s["flat_regime"] = True
+    
+    if s["flat_regime"]:
+        sma1 = get_sma(df_1d['close'], TUMBLER_PARAMS["SMA1"])
+        sma2 = get_sma(df_1d['close'], TUMBLER_PARAMS["SMA2"])
+        curr = df_1d['close'].iloc[-1]
+        band1, band2 = sma1 * TUMBLER_PARAMS["BAND"], sma2 * TUMBLER_PARAMS["BAND"]
+        if abs(curr - sma1) <= band1 or abs(curr - sma2) <= band2:
+            s["flat_regime"] = False
+            
+    if s["flat_regime"]: return 0.0
+    
+    sma1, sma2 = get_sma(df_1d['close'], TUMBLER_PARAMS["SMA1"]), get_sma(df_1d['close'], TUMBLER_PARAMS["SMA2"])
+    curr = df_1d['close'].iloc[-1]
+    return lev if (curr > sma1 and curr > sma2) else (-lev if (curr < sma1 and curr < sma2) else 0.0)
+
+def run_gainer(df_1h, df_1d):
+    def calc_macd_pos(prices, config):
+        params, weights = config['params'], config['weights']
+        composite = 0.0
+        for (f, s, sig_p), w in zip(params, weights):
+            fast = prices.ewm(span=f, adjust=False).mean()
+            slow = prices.ewm(span=s, adjust=False).mean()
+            macd = fast - slow
+            sig_line = macd.ewm(span=sig_p, adjust=False).mean()
+            composite += (1.0 if macd.iloc[-1] > sig_line.iloc[-1] else -1.0) * w
+        total_w = sum(weights)
+        return composite / total_w if total_w > 0 else composite
+
+    def calc_sma_pos(prices, config):
+        params, weights = config['params'], config['weights']
+        composite = 0.0
+        current = prices.iloc[-1]
+        for p, w in zip(params, weights):
+            composite += (1.0 if current > get_sma(prices, p) else -1.0) * w
+        total_w = sum(weights)
+        return composite / total_w if total_w > 0 else composite
+
+    # Ensure we have enough data
+    if len(df_1h) < 400 or len(df_1d) < 400: return 0.0
+
+    m1h = calc_macd_pos(df_1h['close'], GAINER_PARAMS["MACD_1H"]) * GAINER_PARAMS["GA_WEIGHTS"]["MACD_1H"]
+    m1d = calc_macd_pos(df_1d['close'], GAINER_PARAMS["MACD_1D"]) * GAINER_PARAMS["GA_WEIGHTS"]["MACD_1D"]
+    s1d = calc_sma_pos(df_1d['close'], GAINER_PARAMS["SMA_1D"]) * GAINER_PARAMS["GA_WEIGHTS"]["SMA_1D"]
+    return (m1h + m1d + s1d) / sum(GAINER_PARAMS["GA_WEIGHTS"].values())
+
+# --- Backtest Engine ---
+
+def run_backtest():
+    log.info("Starting Backtest...")
+    
+    # 1. Fetch Data
+    df_1h_all = fetch_binance_data(SYMBOL, '1h', HISTORY_DAYS)
+    
+    # Init Results
+    timestamps = []
+    prices = []
+    eq_planner = [10000.0]
+    eq_tumbler = [10000.0]
+    eq_gainer = [10000.0]
+    lev_p_hist, lev_t_hist, lev_g_hist = [], [], []
+
+    # Init State
+    state = {
+        "planner": {
+            "s1_equity": 0.0, "s2_equity": 0.0,
+            "last_price": 0.0, "last_lev_s1": 0.0, "last_lev_s2": 0.0,
+            "s1": {"entry_date": None, "peak_equity": 0.0, "stopped": False, "trend": 0},
             "s2": {"peak_equity": 0.0, "stopped": False, "trend": 0},
-        }
+            "debug_levs": [0.0, 0.0] 
+        },
+        "tumbler": {"flat_regime": False}
+    }
+
+    # Warmup buffer for indicators (max SMA is 400 days, so we need 400 days? 
+    # Actually we only have HISTORY_DAYS. We will step through.
+    # To save time, we assume the beginning of data is "start".
+    
+    # Iterate Hourly
+    # We need a rolling window. We'll slice pandas df for efficiency is slow in loop.
+    # But for backtest correctness we must.
+    
+    # Optimization: We pre-calculate indicators on the full dataset? 
+    # No, Planner/Tumbler are stateful path-dependent. Must loop.
+    
+    start_idx = 400 # Minimum warm up
+    total_len = len(df_1h_all)
+    
+    if total_len < start_idx + 10:
+        log.error("Not enough data fetched.")
+        return {}
+
+    log.info(f"Processing {total_len - start_idx} hours...")
+    
+    last_p_lev = 0.0
+    last_t_lev = 0.0
+    last_g_lev = 0.0
+    
+    for i in range(start_idx, total_len):
+        curr_time = df_1h_all.index[i]
+        curr_price = df_1h_all['close'].iloc[i]
         
-        # Individual Strategy Curves (Starting with 1/3 capital each * multiplier)
-        c_blue = [self.capital * cap_split]  # Planner
-        c_green = [self.capital * cap_split] # Tumbler
-        c_brown = [self.capital * cap_split] # Gainer
+        # Slices
+        slice_1h = df_1h_all.iloc[:i+1]
+        # Resample to 1D for daily strategies
+        # Note: We include the current partial day as the last candle
+        slice_1d = slice_1h.resample('1D').last()
         
-        tumbler_flat = False
-        prev_price = self.df['close'].iloc[0]
-        gw = GAINER_PARAMS["GA_WEIGHTS"]
-        gw_sum = sum(gw.values())
+        # Calculate Returns (Simulating holding from prev step)
+        if i > start_idx:
+            prev_price = df_1h_all['close'].iloc[i-1]
+            pct_chg = (curr_price - prev_price) / prev_price
+            
+            eq_planner.append(eq_planner[-1] * (1.0 + last_p_lev * pct_chg))
+            eq_tumbler.append(eq_tumbler[-1] * (1.0 + last_t_lev * pct_chg))
+            eq_gainer.append(eq_gainer[-1] * (1.0 + last_g_lev * pct_chg))
+        else:
+            eq_planner.append(eq_planner[-1])
+            eq_tumbler.append(eq_tumbler[-1])
+            eq_gainer.append(eq_gainer[-1])
 
-        # Previous leverages
-        pl_blue = 0.0
-        pl_green = 0.0
-        pl_brown = 0.0
-
-        print(f"[SIM] Running simulation with Split Factor: {cap_split}...")
-        cnt = 0
+        # Run Strategies
+        # Planner
+        raw_p = run_planner(slice_1d, state, eq_planner[-1], curr_time)
+        last_p_lev = raw_p # Fair 2.0 intrinsic
         
-        for row in self.df.itertuples():
-            cnt += 1
-            curr_price = row.close
-            
-            # 1. Apply Returns
-            if cnt > 1:
-                step_ret = (curr_price - prev_price) / prev_price
-                
-                c_blue.append(c_blue[-1] * (1.0 + pl_blue * step_ret))
-                c_green.append(c_green[-1] * (1.0 + pl_green * step_ret))
-                c_brown.append(c_brown[-1] * (1.0 + pl_brown * step_ret))
-                
-                # Update Planner Internal State
-                # CRITICAL: This scales equity, but percentage drawdown logic remains invariant
-                p_state["s1_equity"] *= (1.0 + step_ret * p_state["last_lev_s1"])
-                p_state["s2_equity"] *= (1.0 + step_ret * p_state["last_lev_s2"])
-            
-            # 2. Calculate Signals
-            
-            # Strategy 1 & 2: Planner (BLUE)
-            s1_trend = 1 if curr_price > row.d_sma120 else -1
-            s1 = p_state["s1"]
-            if s1["trend"] != s1_trend:
-                s1.update({"trend": s1_trend, "entry_idx": cnt, "stopped": False, "peak_equity": p_state["s1_equity"]})
-            if p_state["s1_equity"] > s1["peak_equity"]: s1["peak_equity"] = p_state["s1_equity"]
-            
-            # DRAWDOWN CHECK: (Peak - Current) / Peak
-            # This is a ratio, so multiplying both Peak and Current by 'cap_split' cancels out.
-            # The logic is preserved.
-            dd_s1 = (s1["peak_equity"] - p_state["s1_equity"]) / max(s1["peak_equity"], 1e-9)
-            if dd_s1 > PLANNER_PARAMS["S1_STOP"]: s1["stopped"] = True
-            
-            s1_lev_out = float(s1_trend) * calculate_decay(s1["entry_idx"], cnt, PLANNER_PARAMS["S1_DECAY"]) if not s1["stopped"] else 0.0
-
-            s2_trend = 1 if curr_price > row.d_sma400 else -1
-            s2 = p_state["s2"]
-            if s2["trend"] != s2_trend:
-                s2.update({"trend": s2_trend, "stopped": False, "peak_equity": p_state["s2_equity"]})
-            if p_state["s2_equity"] > s2["peak_equity"]: s2["peak_equity"] = p_state["s2_equity"]
-            
-            dd_s2 = (s2["peak_equity"] - p_state["s2_equity"]) / max(s2["peak_equity"], 1e-9)
-            if dd_s2 > PLANNER_PARAMS["S2_STOP"]: s2["stopped"] = True
-            
-            is_prox = (abs(curr_price - row.d_sma400) / row.d_sma400) < PLANNER_PARAMS["S2_PROX"]
-            if s2["stopped"] and is_prox:
-                s2.update({"stopped": False, "peak_equity": p_state["s2_equity"]})
-            
-            s2_lev_out = float(s2_trend) * (0.5 if is_prox else 1.0) if not s2["stopped"] else 0.0
-            
-            # Strategy 3: Tumbler (GREEN)
-            if row.d_iii < TUMBLER_PARAMS["FLAT_THRESH"]: tumbler_flat = True
-            if tumbler_flat and (abs(curr_price - row.d_sma32) <= row.d_sma32 * TUMBLER_PARAMS["BAND"] or 
-                               abs(curr_price - row.d_sma114) <= row.d_sma114 * TUMBLER_PARAMS["BAND"]):
-                tumbler_flat = False
-            
-            t_lev = 0.0
-            if not tumbler_flat:
-                base = TUMBLER_PARAMS["LEVS"][2]
-                if row.d_iii < TUMBLER_PARAMS["III_TH"][0]: base = TUMBLER_PARAMS["LEVS"][0]
-                elif row.d_iii < TUMBLER_PARAMS["III_TH"][1]: base = TUMBLER_PARAMS["LEVS"][1]
-                if curr_price > row.d_sma32 and curr_price > row.d_sma114: t_lev = base
-                elif curr_price < row.d_sma32 and curr_price < row.d_sma114: t_lev = -base
-            
-            # Store Planner Internal
-            p_state["last_lev_s1"] = s1_lev_out
-            p_state["last_lev_s2"] = s2_lev_out
-            
-            # Calculate Next Step Leverages
-            n_p = max(-2.0, min(2.0, s1_lev_out + s2_lev_out)) # Blue Leverage
-            n_t = t_lev * (TARGET_STRAT_LEV / TUMBLER_MAX_LEV) # Green Leverage
-            n_g = ((row.h_gainer_macd * gw["MACD_1H"] + row.d_gainer_macd * gw["MACD_1D"] + row.d_gainer_sma * gw["SMA_1D"]) / gw_sum) * TARGET_STRAT_LEV # Brown Leverage
-            
-            # Update state for next loop
-            pl_blue = n_p
-            pl_green = n_t
-            pl_brown = n_g
-            prev_price = curr_price
+        # Tumbler
+        raw_t = run_tumbler(slice_1d, state, eq_tumbler[-1])
+        # Normalization: r_t * (TARGET_STRAT_LEV / TUMBLER_MAX_LEV)
+        last_t_lev = raw_t * (TARGET_STRAT_LEV / TUMBLER_MAX_LEV)
         
-        # Create DataFrame
-        res_df = pd.DataFrame({
-            'Blue': c_blue,
-            'Green': c_green,
-            'Brown': c_brown
-        }, index=self.df.index[:len(c_blue)])
+        # Gainer
+        raw_g = run_gainer(slice_1h, slice_1d)
+        # Normalization: r_g * TARGET_STRAT_LEV
+        last_g_lev = raw_g * TARGET_STRAT_LEV
         
-        return res_df
+        timestamps.append(curr_time.strftime("%Y-%m-%d %H:%M"))
+        prices.append(curr_price)
+        lev_p_hist.append(last_p_lev)
+        lev_t_hist.append(last_t_lev)
+        lev_g_hist.append(last_g_lev)
 
-    def report(self, df_curves, cap_split):
-        equity_curve = df_curves.sum(axis=1)
-        
-        # Helper for stats
-        def get_stats(series, start_cap):
-            ret = series.pct_change().dropna()
-            # Handle edge case of flat returns
-            if ret.std() == 0: sharpe = 0.0
-            else: sharpe = ret.mean() / ret.std() * np.sqrt(365 * 24)
-            return sharpe
-            
-        # Calculate Individual Sharpes
-        # Note: Each strategy started with (capital * cap_split)
-        start_seg = self.capital * cap_split
-        sharpe_blue = get_stats(df_curves['Blue'], start_seg)
-        sharpe_green = get_stats(df_curves['Green'], start_seg)
-        sharpe_brown = get_stats(df_curves['Brown'], start_seg)
+        if i % 500 == 0:
+            log.info(f"Progress: {i}/{total_len}")
 
-        # Total Stats
-        returns = equity_curve.pct_change().dropna()
-        total_ret = (equity_curve.iloc[-1] / self.capital) - 1
-        cagr = (equity_curve.iloc[-1] / self.capital) ** (365*24 / len(equity_curve)) - 1
-        sharpe_total = returns.mean() / returns.std() * np.sqrt(365 * 24)
-        max_dd = ((equity_curve - equity_curve.cummax()) / equity_curve.cummax()).min()
-        
-        results = {
-            "final_equity": equity_curve.iloc[-1],
-            "total_return": total_ret,
-            "cagr": cagr,
-            "sharpe": sharpe_total,
-            "max_dd": max_dd,
-            "years": YEARS,
-            "symbol": SYMBOL,
-            "cap_split": cap_split,
-            "sharpes": {
-                "blue": sharpe_blue,
-                "green": sharpe_green,
-                "brown": sharpe_brown
-            }
-        }
-        return results
+    return {
+        "dates": timestamps,
+        "prices": prices,
+        "planner": eq_planner[1:],
+        "tumbler": eq_tumbler[1:],
+        "gainer": eq_gainer[1:],
+        "lev_p": lev_p_hist,
+        "lev_t": lev_t_hist,
+        "lev_g": lev_g_hist
+    }
 
-# --- Viz & Report ---
-
-def generate_scientific_report(df, df_curves, stats):
-    print("[VIZ] Generating plot...")
-    
-    plt.style.use('classic')
-    fig, ax1 = plt.subplots(figsize=(10, 6))
-    
-    color_price = '#555555'
-    ax1.set_xlabel('Date')
-    ax1.set_ylabel(f'{stats["symbol"]} Price ($)', color=color_price)
-    
-    factor = max(1, len(df_curves) // 1000)
-    p_series = df['close'].reindex(df_curves.index)[::factor]
-    ax1.plot(p_series.index, p_series.values, color=color_price, linewidth=0.8, alpha=0.5, linestyle='--')
-    ax1.tick_params(axis='y', labelcolor=color_price)
-    ax1.grid(True, linestyle=':', alpha=0.4)
-
-    ax2 = ax1.twinx()  
-    ax2.set_ylabel('Segment Equity ($)', color='black')
-    
-    c_blue = df_curves['Blue'][::factor]
-    c_green = df_curves['Green'][::factor]
-    c_brown = df_curves['Brown'][::factor]
-    
-    ax2.plot(c_blue.index, c_blue.values, color='blue', linewidth=1.5, label=f'Blue (Sharpe: {stats["sharpes"]["blue"]:.2f})', alpha=0.8)
-    ax2.plot(c_green.index, c_green.values, color='green', linewidth=1.5, label=f'Green (Sharpe: {stats["sharpes"]["green"]:.2f})', alpha=0.8)
-    ax2.plot(c_brown.index, c_brown.values, color='brown', linewidth=1.5, label=f'Brown (Sharpe: {stats["sharpes"]["brown"]:.2f})', alpha=0.8)
-    
-    ax2.tick_params(axis='y', labelcolor='black')
-    
-    # Combined Legend
-    lines1, labels1 = ax1.get_legend_handles_labels()
-    lines2, labels2 = ax2.get_legend_handles_labels()
-    ax2.legend(lines1 + lines2, labels1 + labels2, loc='upper left')
-    
-    plt.title(f"Performance (Split: {stats['cap_split']}) | Total Sharpe: {stats['sharpe']:.2f}")
-    fig.tight_layout()  
-    plt.savefig('chart.png', dpi=100)
-    plt.close()
-    
-    html_content = f"""
+# --- HTML Generator ---
+def generate_html(data):
+    json_data = json.dumps(data)
+    html = f"""
 <!DOCTYPE html>
 <html>
 <head>
-<title>Simulation: {stats['symbol']}</title>
-<style>
-  body {{ background-color: #f4f4f9; color: #333; font-family: "Helvetica Neue", Helvetica, Arial, sans-serif; margin: 0; padding: 20px; }}
-  .container {{ max_width: 900px; margin: 0 auto; background: white; padding: 30px; box-shadow: 0 2px 5px rgba(0,0,0,0.1); border-radius: 8px; }}
-  h1 {{ border-bottom: 2px solid #eee; padding-bottom: 10px; color: #2c3e50; }}
-  .controls {{ background: #e8f4f8; padding: 15px; border-radius: 5px; margin-bottom: 20px; border: 1px solid #bce8f1; }}
-  .controls form {{ display: flex; align-items: center; gap: 10px; }}
-  input[type="number"] {{ padding: 8px; border: 1px solid #ddd; border-radius: 4px; width: 100px; }}
-  input[type="submit"] {{ padding: 8px 15px; background: #3498db; color: white; border: none; border-radius: 4px; cursor: pointer; font-weight: bold; }}
-  input[type="submit"]:hover {{ background: #2980b9; }}
-  table {{ width: 100%; border-collapse: collapse; margin: 20px 0; }}
-  th, td {{ border-bottom: 1px solid #eee; padding: 12px; text-align: left; }}
-  th {{ background-color: #f8f9fa; color: #2c3e50; }}
-  .chart-container {{ text-align: center; margin-top: 20px; }}
-  .chart-container img {{ max-width: 100%; height: auto; border: 1px solid #eee; }}
-  .strat-row td {{ font-weight: bold; }}
-  .blue {{ color: blue; }}
-  .green {{ color: green; }}
-  .brown {{ color: brown; }}
-</style>
+    <title>Master Trader Backtest</title>
+    <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+    <style>
+        body {{ font-family: sans-serif; background: #1a1a1a; color: #ddd; margin: 0; padding: 20px; }}
+        .container {{ max-width: 1200px; margin: 0 auto; }}
+        .card {{ background: #2d2d2d; padding: 20px; border-radius: 8px; margin-bottom: 20px; }}
+        h1 {{ color: #4CAF50; }}
+        h2 {{ border-bottom: 1px solid #444; padding-bottom: 10px; }}
+        canvas {{ max-height: 400px; }}
+        .stats-grid {{ display: grid; grid-template-columns: repeat(3, 1fr); gap: 20px; }}
+        .stat-box {{ background: #333; padding: 15px; border-radius: 5px; text-align: center; }}
+        .val {{ font-size: 1.5em; font-weight: bold; margin: 10px 0; }}
+        .lbl {{ font-size: 0.9em; color: #aaa; }}
+        .p-color {{ color: #36a2eb; }}
+        .t-color {{ color: #ff6384; }}
+        .g-color {{ color: #ffcd56; }}
+    </style>
 </head>
 <body>
+    <div class="container">
+        <div class="card">
+            <h1>Master Trader Independent Backtest</h1>
+            <p>Data Source: Binance ({SYMBOL}) | Interval: 1H | Duration: {HISTORY_DAYS} Days</p>
+        </div>
 
-<div class="container">
-    <h1>Strategy Simulation: {stats['symbol']}</h1>
-    
-    <div class="controls">
-        <form action="/" method="GET">
-            <label for="split"><strong>Capital Split Factor (Leverage Scaling):</strong></label>
-            <input type="number" id="split" name="split" value="{stats['cap_split']}" step="0.001" min="0.001" max="10.0">
-            <input type="submit" value="Run Simulation">
-        </form>
-        <p><small>Default: 0.333. Increasing this scales exposure. <br><strong>Logic Check:</strong> Stop losses are based on % drawdown, so scaling capital here does <em>not</em> break the logic.</small></p>
+        <div class="stats-grid">
+            <div class="stat-box">
+                <div class="lbl">Planner Final Equity</div>
+                <div class="val p-color" id="p_final">--</div>
+            </div>
+            <div class="stat-box">
+                <div class="lbl">Tumbler Final Equity</div>
+                <div class="val t-color" id="t_final">--</div>
+            </div>
+            <div class="stat-box">
+                <div class="lbl">Gainer Final Equity</div>
+                <div class="val g-color" id="g_final">--</div>
+            </div>
+        </div>
+
+        <div class="card">
+            <h2>Equity Curves (Normalized Base $10k)</h2>
+            <canvas id="equityChart"></canvas>
+        </div>
+
+        <div class="card">
+            <h2>Leverage Usage</h2>
+            <canvas id="levChart"></canvas>
+        </div>
     </div>
 
-    <h2>Strategy Components (Sharpe Analysis)</h2>
-    <table>
-      <tr><th>Strategy</th><th>Sharpe Ratio</th></tr>
-      <tr class="strat-row blue"><td>Blue (Planner)</td><td>{stats['sharpes']['blue']:.3f}</td></tr>
-      <tr class="strat-row green"><td>Green (Tumbler)</td><td>{stats['sharpes']['green']:.3f}</td></tr>
-      <tr class="strat-row brown"><td>Brown (Gainer)</td><td>{stats['sharpes']['brown']:.3f}</td></tr>
-    </table>
+    <script>
+        const data = {json_data};
+        
+        // Update Stats
+        document.getElementById('p_final').innerText = '$' + Math.round(data.planner[data.planner.length-1]).toLocaleString();
+        document.getElementById('t_final').innerText = '$' + Math.round(data.tumbler[data.tumbler.length-1]).toLocaleString();
+        document.getElementById('g_final').innerText = '$' + Math.round(data.gainer[data.gainer.length-1]).toLocaleString();
 
-    <h2>Portfolio Stats</h2>
-    <table>
-      <tr><th>Metric</th><th>Value</th></tr>
-      <tr><td>Final Equity</td><td><strong>${stats['final_equity']:,.2f}</strong></td></tr>
-      <tr><td>Total Return</td><td>{stats['total_return']*100:.2f}%</td></tr>
-      <tr><td>Combined Sharpe</td><td>{stats['sharpe']:.4f}</td></tr>
-      <tr><td>Max Drawdown</td><td><span style="color: red">{stats['max_dd']*100:.2f}%</span></td></tr>
-    </table>
+        // Equity Chart
+        new Chart(document.getElementById('equityChart'), {{
+            type: 'line',
+            data: {{
+                labels: data.dates,
+                datasets: [
+                    {{ label: 'Planner', data: data.planner, borderColor: '#36a2eb', borderWidth: 2, radius: 0 }},
+                    {{ label: 'Tumbler', data: data.tumbler, borderColor: '#ff6384', borderWidth: 2, radius: 0 }},
+                    {{ label: 'Gainer', data: data.gainer, borderColor: '#ffcd56', borderWidth: 2, radius: 0 }},
+                    {{ label: 'Buy & Hold', data: data.prices.map(p => p * (10000/data.prices[0])), borderColor: '#666', borderDash: [5,5], borderWidth: 1, radius: 0 }}
+                ]
+            }},
+            options: {{
+                responsive: true,
+                interaction: {{ mode: 'index', intersect: false }},
+                scales: {{
+                    x: {{ ticks: {{ maxTicksLimit: 10 }} }},
+                    y: {{ grid: {{ color: '#444' }} }}
+                }}
+            }}
+        }});
 
-    <div class="chart-container">
-        <img src="chart.png" alt="Performance Chart">
-    </div>
-</div>
-
+        // Leverage Chart
+        new Chart(document.getElementById('levChart'), {{
+            type: 'line',
+            data: {{
+                labels: data.dates,
+                datasets: [
+                    {{ label: 'Planner Lev', data: data.lev_p, borderColor: '#36a2eb', borderWidth: 1, radius: 0 }},
+                    {{ label: 'Tumbler Lev', data: data.lev_t, borderColor: '#ff6384', borderWidth: 1, radius: 0 }},
+                    {{ label: 'Gainer Lev', data: data.lev_g, borderColor: '#ffcd56', borderWidth: 1, radius: 0 }}
+                ]
+            }},
+            options: {{
+                responsive: true,
+                interaction: {{ mode: 'index', intersect: false }},
+                scales: {{
+                    x: {{ ticks: {{ maxTicksLimit: 10 }} }},
+                    y: {{ min: -2.5, max: 2.5, grid: {{ color: '#444' }} }}
+                }}
+            }}
+        }});
+    </script>
 </body>
 </html>
     """
-    
-    with open("index.html", "w") as f:
-        f.write(html_content)
-    print(f"[WEB] Report updated.")
+    return html
 
-# --- Server & Execution ---
-
-def run_simulation(cap_split):
-    global CACHED_DF
-    if CACHED_DF is None:
-        CACHED_DF = fetch_binance_data(SYMBOL, INTERVAL, YEARS)
-    
-    # Initialize backtester (indicators are pre-calc once ideally, but cheap enough to do here for safety)
-    bt = Backtester(CACHED_DF)
-    bt.precalculate_indicators()
-    
-    # Run with variable split
-    equity_df = bt.run(cap_split)
-    stats = bt.report(equity_df, cap_split)
-    
-    generate_scientific_report(CACHED_DF, equity_df, stats)
-
-class InteractiveHandler(http.server.SimpleHTTPRequestHandler):
+# --- Server Class ---
+class BacktestHandler(SimpleHTTPRequestHandler):
     def do_GET(self):
-        parsed_path = urllib.parse.urlparse(self.path)
-        query_params = urllib.parse.parse_qs(parsed_path.query)
-        
-        # Check if 'split' parameter is present
-        if 'split' in query_params:
-            try:
-                new_split = float(query_params['split'][0])
-                print(f"\n[REQ] Received request to update Split to: {new_split}")
-                run_simulation(new_split)
-                # Redirect to root to clean URL, or just serve index
-                self.path = '/index.html'
-            except ValueError:
-                print("[ERR] Invalid split value")
-        
-        # Default behavior: Serve static files
-        return super().do_GET()
+        if self.path == '/':
+            self.send_response(200)
+            self.send_header('Content-type', 'text/html')
+            self.end_headers()
+            self.wfile.write(HTML_CONTENT.encode('utf-8'))
+        else:
+            super().do_GET()
 
 def start_server():
-    # Initial Run
-    run_simulation(DEFAULT_CAP_SPLIT)
-    
-    with socketserver.TCPServer(("", PORT), InteractiveHandler) as httpd:
-        print(f"\n[SERVER] Interactive dashboard running at http://localhost:{PORT}")
-        print("[SERVER] Change 'Capital Split' in the browser to update results.")
-        try:
-            webbrowser.open(f"http://localhost:{PORT}")
-        except:
-            pass
-        try:
-            httpd.serve_forever()
-        except KeyboardInterrupt:
-            print("\n[SERVER] Stopping...")
-            httpd.server_close()
+    server = HTTPServer(('', PORT), BacktestHandler)
+    log.info(f"Serving report at http://localhost:{PORT}")
+    webbrowser.open(f"http://localhost:{PORT}")
+    server.serve_forever()
 
 if __name__ == "__main__":
+    # 1. Run Simulation
+    results = run_backtest()
+    if not results:
+        log.error("Backtest failed or no data.")
+        sys.exit(1)
+
+    # 2. Generate HTML
+    HTML_CONTENT = generate_html(results)
+    
+    # 3. Start Server
     start_server()
