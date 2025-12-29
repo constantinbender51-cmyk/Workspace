@@ -7,8 +7,7 @@ import os
 import json
 import scipy.optimize as optimize
 from http.server import HTTPServer, SimpleHTTPRequestHandler
-import threading
-import webbrowser
+import sys
 
 # ==========================================
 # CONFIGURATION
@@ -16,10 +15,8 @@ import webbrowser
 SYMBOL = "BTCUSDT"
 START_DATE = "2018-01-01"
 INITIAL_CAPITAL = 10000.0
-# Initial default weights (1/3 each)
-DEFAULT_WEIGHTS = [0.333, 0.333, 0.333] 
 
-# Strategy Params (Kept from your original script)
+# Strategy Params
 PLANNER_PARAMS = {
     "S1_SMA": 120, "S1_DECAY": 40, "S1_STOP": 0.13, 
     "S2_SMA": 400, "S2_STOP": 0.27, "S2_PROX": 0.05
@@ -39,7 +36,6 @@ GAINER_PARAMS = {
     "SMA_1D": {'params': [40, 120, 390], 'weights': [0.6, 0.8, 0.4]}
 }
 
-# Normalization constants (used to scale raw signals before weighting)
 TARGET_STRAT_LEV = 2.0
 TUMBLER_MAX_LEV = 4.327
 
@@ -48,14 +44,15 @@ TUMBLER_MAX_LEV = 4.327
 # ==========================================
 def fetch_binance_klines(symbol, interval, start_date_str):
     filename = f"{symbol.lower()}_{interval}_{start_date_str}.csv"
+    # In cloud env, we might want to refetch or cache. For now, fetch if missing.
     if os.path.exists(filename):
-        print(f"Loading {interval} data from {filename}...")
+        print(f"Loading {interval} data from disk...")
         df = pd.read_csv(filename)
         df['timestamp'] = pd.to_datetime(df['timestamp'])
         df.set_index('timestamp', inplace=True)
         return df
         
-    print(f"Fetching {interval} data for {symbol}...")
+    print(f"Fetching {interval} data from Binance...")
     base_url = "https://api.binance.com/api/v3/klines"
     start_ts = int(datetime.strptime(start_date_str, "%Y-%m-%d").timestamp() * 1000)
     end_ts = int(datetime.now().timestamp() * 1000)
@@ -69,8 +66,6 @@ def fetch_binance_klines(symbol, interval, start_date_str):
             if not data: break
             all_data.extend(data)
             start_ts = data[-1][0] + (60000 if interval == '1m' else 3600000 if interval == '1h' else 86400000)
-            print(f"Fetched {len(all_data)} candles...", end='\r')
-            time.sleep(0.05)
         except: break
     
     df = pd.DataFrame(all_data, columns=['ot', 'o', 'h', 'l', 'c', 'v', 'ct', 'qav', 'nt', 'tbv', 'tqv', 'ig'])
@@ -81,10 +76,7 @@ def fetch_binance_klines(symbol, interval, start_date_str):
     return final
 
 def resample_1h_to_1d(df_1h):
-    df_1d = df_1h.resample('1D').agg({
-        'open': 'first', 'high': 'max', 'low': 'min', 'close': 'last'
-    }).dropna()
-    return df_1d
+    return df_1h.resample('1D').agg({'open': 'first', 'high': 'max', 'low': 'min', 'close': 'last'}).dropna()
 
 def get_sma(series, window):
     return series.rolling(window=window).mean()
@@ -93,24 +85,15 @@ def get_ewm(series, span):
     return series.ewm(span=span, adjust=False).mean()
 
 # ==========================================
-# STRATEGY LOGIC (Vectorized/Fast where possible)
+# LOGIC
 # ==========================================
 def precalc_strategies(df_1h, df_1d):
-    """
-    Calculates the raw leverage signals for all 3 strategies.
-    Returns aligned DataFrames.
-    """
     print("Calculating Strategy Signals...")
-    
-    # --- PLANNER (Daily Logic) ---
+    # --- PLANNER ---
     p_df = df_1d.copy()
     p_df['sma_s1'] = get_sma(p_df['close'], PLANNER_PARAMS["S1_SMA"])
     p_df['sma_s2'] = get_sma(p_df['close'], PLANNER_PARAMS["S2_SMA"])
     
-    # NOTE: Planner has complex path-dependent logic (peaks, stops). 
-    # We will approximate or run a fast loop for the signal generation.
-    # For accurate reproduction of your script, we need the loop.
-    # We will do a fast loop generation for Planner signals.
     planner_signals = []
     p_s1_equity, p_s2_equity = 1.0, 1.0
     p_s1_peak, p_s2_peak = 1.0, 1.0
@@ -118,36 +101,26 @@ def precalc_strategies(df_1h, df_1d):
     p_s1_trend, p_s2_trend = 0, 0
     p_s1_entry = None
     
-    # Pre-calculate trends to speed up loop
     s1_trend_raw = np.where(p_df['close'] > p_df['sma_s1'], 1, -1)
     s2_trend_raw = np.where(p_df['close'] > p_df['sma_s2'], 1, -1)
     
     dates = p_df.index
     closes = p_df['close'].values
     sma2s = p_df['sma_s2'].values
-    
     last_lev_s1, last_lev_s2 = 0.0, 0.0
 
     for i in range(len(p_df)):
-        date = dates[i]
         close = closes[i]
-        
-        # Returns for internal equity tracking
         ret = 0.0
         if i > 0: ret = (close - closes[i-1]) / closes[i-1]
         
-        # Update internal equities
         p_s1_equity *= (1.0 + ret * last_lev_s1)
         p_s2_equity *= (1.0 + ret * last_lev_s2)
         
         # S1 Logic
         curr_s1_trend = s1_trend_raw[i]
         if p_s1_trend != curr_s1_trend:
-            p_s1_trend = curr_s1_trend
-            p_s1_entry = i
-            p_s1_stopped = False
-            p_s1_peak = p_s1_equity
-        
+            p_s1_trend, p_s1_entry, p_s1_stopped, p_s1_peak = curr_s1_trend, i, False, p_s1_equity
         if p_s1_equity > p_s1_peak: p_s1_peak = p_s1_equity
         if (p_s1_peak - p_s1_equity) / p_s1_peak > PLANNER_PARAMS["S1_STOP"]: p_s1_stopped = True
         
@@ -160,32 +133,23 @@ def precalc_strategies(df_1h, df_1d):
         # S2 Logic
         curr_s2_trend = s2_trend_raw[i]
         if p_s2_trend != curr_s2_trend:
-            p_s2_trend = curr_s2_trend
-            p_s2_stopped = False
-            p_s2_peak = p_s2_equity
-            
+            p_s2_trend, p_s2_stopped, p_s2_peak = curr_s2_trend, False, p_s2_equity
         if p_s2_equity > p_s2_peak: p_s2_peak = p_s2_equity
         if (p_s2_peak - p_s2_equity) / p_s2_peak > PLANNER_PARAMS["S2_STOP"]: p_s2_stopped = True
         
         dist_pct = abs(close - sma2s[i]) / sma2s[i] if sma2s[i] > 0 else 0
         is_prox = dist_pct < PLANNER_PARAMS["S2_PROX"]
         tgt_size = 0.5 if is_prox else 1.0
+        lev_s2 = float(curr_s2_trend) * tgt_size if not p_s2_stopped else (float(curr_s2_trend) * tgt_size if is_prox else 0.0)
         
-        lev_s2 = 0.0
-        if p_s2_stopped:
-            if is_prox:
-                p_s2_stopped, p_s2_peak = False, p_s2_equity
-                lev_s2 = float(curr_s2_trend) * tgt_size
-        else:
-            lev_s2 = float(curr_s2_trend) * tgt_size
-            
-        final_lev = max(-2.0, min(2.0, lev_s1 + lev_s2))
-        planner_signals.append(final_lev)
+        if p_s2_stopped and is_prox: p_s2_stopped, p_s2_peak = False, p_s2_equity
+
+        planner_signals.append(max(-2.0, min(2.0, lev_s1 + lev_s2)))
         last_lev_s1, last_lev_s2 = lev_s1, lev_s2
         
     p_df['lev_planner'] = planner_signals
 
-    # --- TUMBLER (Daily Logic) ---
+    # --- TUMBLER ---
     t_df = df_1d.copy()
     t_df['sma1'] = get_sma(t_df['close'], TUMBLER_PARAMS["SMA1"])
     t_df['sma2'] = get_sma(t_df['close'], TUMBLER_PARAMS["SMA2"])
@@ -196,193 +160,74 @@ def precalc_strategies(df_1h, df_1d):
     den = t_df['log_ret'].abs().rolling(w).sum()
     t_df['iii'] = (num / den).fillna(0)
     
-    # Vectorized Tumbler Logic
-    conditions = [
-        t_df['iii'] < TUMBLER_PARAMS['III_TH'][0],
-        t_df['iii'] < TUMBLER_PARAMS['III_TH'][1]
-    ]
+    conditions = [t_df['iii'] < TUMBLER_PARAMS['III_TH'][0], t_df['iii'] < TUMBLER_PARAMS['III_TH'][1]]
     choices = [TUMBLER_PARAMS['LEVS'][0], TUMBLER_PARAMS['LEVS'][1]]
     t_df['raw_lev'] = np.select(conditions, choices, default=TUMBLER_PARAMS['LEVS'][2])
     
-    # Flat Regime Logic (Approximation for vectorization - Close enough for optimization)
-    # Ideally needs loop for state maintenance, but we'll use a rolling window check for simplicity in optimization
-    # to keep this fast.
     band_check = (abs(t_df['close'] - t_df['sma1']) <= t_df['sma1']*TUMBLER_PARAMS['BAND']) | \
                  (abs(t_df['close'] - t_df['sma2']) <= t_df['sma2']*TUMBLER_PARAMS['BAND'])
     
-    # If III is low, we enter flat. We exit flat if band_check is True.
-    # This is path dependent. Let's do a quick loop.
-    flat_regime = False
     tumbler_signals = []
-    iii_vals = t_df['iii'].values
-    band_checks = band_check.values
-    raw_levs = t_df['raw_lev'].values
-    close_vals = t_df['close'].values
-    sma1_vals = t_df['sma1'].values
-    sma2_vals = t_df['sma2'].values
-    
+    flat_regime = False
     for i in range(len(t_df)):
-        if iii_vals[i] < TUMBLER_PARAMS['FLAT_THRESH']: flat_regime = True
-        if flat_regime and band_checks[i]: flat_regime = False
+        if t_df['iii'].iloc[i] < TUMBLER_PARAMS['FLAT_THRESH']: flat_regime = True
+        if flat_regime and band_check.iloc[i]: flat_regime = False
         
         lev = 0.0
         if not flat_regime:
-            if close_vals[i] > sma1_vals[i] and close_vals[i] > sma2_vals[i]:
-                lev = raw_levs[i]
-            elif close_vals[i] < sma1_vals[i] and close_vals[i] < sma2_vals[i]:
-                lev = -raw_levs[i]
+            c, s1, s2 = t_df['close'].iloc[i], t_df['sma1'].iloc[i], t_df['sma2'].iloc[i]
+            if c > s1 and c > s2: lev = t_df['raw_lev'].iloc[i]
+            elif c < s1 and c < s2: lev = -t_df['raw_lev'].iloc[i]
         tumbler_signals.append(lev)
-    
-    t_df['lev_tumbler'] = tumbler_signals
-    # Normalize Tumbler
-    t_df['lev_tumbler'] = t_df['lev_tumbler'] * (TARGET_STRAT_LEV / TUMBLER_MAX_LEV)
+    t_df['lev_tumbler'] = np.array(tumbler_signals) * (TARGET_STRAT_LEV / TUMBLER_MAX_LEV)
 
-    # --- GAINER (Hourly & Daily) ---
-    # We will compute Gainer on 1H then resample signal to 1D for the unified optimization
-    g_1h = df_1h.copy()
-    g_1d = df_1d.copy()
+    # --- GAINER ---
+    g_1h, g_1d = df_1h.copy(), df_1d.copy()
     
-    # Gainer Helper
-    def calc_score(df, config, prefix):
+    def calc_score(df, config):
         scores = []
-        total_w = sum(config['weights'])
-        for i, ((f, s, sig), w) in enumerate(zip(config['params'], config['weights'])):
-            fast = get_ewm(df['close'], f)
-            slow = get_ewm(df['close'], s)
-            macd = fast - slow
+        for (f, s, sig), w in zip(config['params'], config['weights']):
+            macd = get_ewm(df['close'], f) - get_ewm(df['close'], s)
             signal = get_ewm(macd, sig)
-            score = np.where(macd > signal, 1.0, -1.0) * w
-            scores.append(score)
-        
-        # Sum columns
-        return np.sum(scores, axis=0) / total_w
+            scores.append(np.where(macd > signal, 1.0, -1.0) * w)
+        return np.sum(scores, axis=0) / sum(config['weights'])
 
-    def calc_sma_score(df, config):
-        scores = []
-        total_w = sum(config['weights'])
-        for i, (p, w) in enumerate(zip(config['params'], config['weights'])):
-            sma = get_sma(df['close'], p)
-            score = np.where(df['close'] > sma, 1.0, -1.0) * w
-            scores.append(score)
-        return np.sum(scores, axis=0) / total_w
-
-    s_macd_1h = calc_score(g_1h, GAINER_PARAMS["MACD_1H"], 'm1h')
-    g_1h['score_macd_1h'] = s_macd_1h
+    g_1h['score_macd_1h'] = calc_score(g_1h, GAINER_PARAMS["MACD_1H"])
+    g_1d['score_macd_1d'] = calc_score(g_1d, GAINER_PARAMS["MACD_1D"])
     
-    s_macd_1d = calc_score(g_1d, GAINER_PARAMS["MACD_1D"], 'm1d')
-    g_1d['score_macd_1d'] = s_macd_1d
+    s_scores = []
+    for p, w in zip(GAINER_PARAMS["SMA_1D"]['params'], GAINER_PARAMS["SMA_1D"]['weights']):
+        s_scores.append(np.where(g_1d['close'] > get_sma(g_1d['close'], p), 1.0, -1.0) * w)
+    g_1d['score_sma_1d'] = np.sum(s_scores, axis=0) / sum(GAINER_PARAMS["SMA_1D"]['weights'])
     
-    s_sma_1d = calc_sma_score(g_1d, GAINER_PARAMS["SMA_1D"])
-    g_1d['score_sma_1d'] = s_sma_1d
-    
-    # Merge 1H score into 1D (take last value of the day)
-    # Resample 1H scores to 1D
-    g_1h_resampled = g_1h[['score_macd_1h']].resample('1D').last().dropna()
-    
-    # Align all dataframes
-    common_idx = p_df.index.intersection(t_df.index).intersection(g_1d.index).intersection(g_1h_resampled.index)
+    g_1h_res = g_1h[['score_macd_1h']].resample('1D').last().dropna()
+    common_idx = p_df.index.intersection(t_df.index).intersection(g_1d.index).intersection(g_1h_res.index)
     
     final_df = pd.DataFrame(index=common_idx)
     final_df['close'] = df_1d.loc[common_idx, 'close']
     final_df['lev_p'] = p_df.loc[common_idx, 'lev_planner']
     final_df['lev_t'] = t_df.loc[common_idx, 'lev_tumbler']
     
-    # Calculate Final Gainer Signal
     ws = GAINER_PARAMS["GA_WEIGHTS"]
     denom = sum(ws.values())
-    
-    score_m1h = g_1h_resampled.loc[common_idx, 'score_macd_1h']
-    score_m1d = g_1d.loc[common_idx, 'score_macd_1d']
-    score_sma = g_1d.loc[common_idx, 'score_sma_1d']
-    
-    final_df['lev_g'] = (score_m1h * ws["MACD_1H"] + score_m1d * ws["MACD_1D"] + score_sma * ws["SMA_1D"]) / denom
-    # Normalize Gainer
-    final_df['lev_g'] = final_df['lev_g'] * TARGET_STRAT_LEV
+    final_df['lev_g'] = (g_1h_res.loc[common_idx, 'score_macd_1h'] * ws["MACD_1H"] + 
+                         g_1d.loc[common_idx, 'score_macd_1d'] * ws["MACD_1D"] + 
+                         g_1d.loc[common_idx, 'score_sma_1d'] * ws["SMA_1D"]) / denom * TARGET_STRAT_LEV
     
     return final_df
 
-# ==========================================
-# OPTIMIZATION & ANALYSIS
-# ==========================================
-def run_backtest_vectorized(df, weights):
-    """
-    Fast vectorized backtest given weights [w_p, w_t, w_g]
-    """
-    net_lev = df['lev_p'] * weights[0] + df['lev_t'] * weights[1] + df['lev_g'] * weights[2]
-    
-    # Calculate daily returns of the strategy
-    # Strategy Return = Net Lev * Asset Return - Friction
-    asset_ret = df['close'].pct_change().fillna(0)
-    
-    # Friction approx (assuming daily rebalance)
-    friction = np.abs(net_lev) * 0.0006 * 0.1 # Very rough estimate of daily friction cost
-    
-    strat_ret = net_lev.shift(1) * asset_ret - friction
-    equity = (1 + strat_ret).cumprod()
-    return equity, strat_ret
-
 def optimize_weights(df):
-    print("\nOptimizing Weights (Maximizing Sharpe Ratio)...")
-    
+    print("Optimizing Weights...")
     def objective(w):
-        # Constraint: Sum of weights is flexible, but let's say max leverage sum is bounded or 
-        # we just penalize volatility.
-        # Let's target max Sharpe.
-        _, rets = run_backtest_vectorized(df, w)
-        if rets.std() == 0: return 999
-        sharpe = rets.mean() / rets.std() * np.sqrt(365)
-        return -sharpe # Minimize negative Sharpe
-
-    # Bounds for weights (0.0 to 2.0 each - allowing overdrive)
-    bounds = ((0.0, 2.0), (0.0, 2.0), (0.0, 2.0))
-    # Initial guess
-    x0 = [0.33, 0.33, 0.33]
+        net_lev = df['lev_p']*w[0] + df['lev_t']*w[1] + df['lev_g']*w[2]
+        strat_ret = net_lev.shift(1) * df['close'].pct_change().fillna(0) - np.abs(net_lev)*0.00006
+        if strat_ret.std() == 0: return 999
+        return -(strat_ret.mean() / strat_ret.std() * np.sqrt(365))
     
-    res = optimize.minimize(objective, x0, method='SLSQP', bounds=bounds)
+    res = optimize.minimize(objective, [0.33, 0.33, 0.33], method='SLSQP', bounds=((0, 2), (0, 2), (0, 2)))
     return res.x
 
-def quantize_analysis(df, weights):
-    equity, rets = run_backtest_vectorized(df, weights)
-    
-    # Create Quarter Column
-    df['quarter'] = df.index.to_period('Q')
-    df['strat_ret'] = rets
-    
-    print("\n" + "="*60)
-    print(f"QUARTERLY QUANTIZATION REPORT (Weights: P={weights[0]:.2f}, T={weights[1]:.2f}, G={weights[2]:.2f})")
-    print(f"{'Quarter':<10} | {'Return':<10} | {'StdDev':<10} | {'Sharpe':<10} | {'MaxDD':<10}")
-    print("-" * 60)
-    
-    quarters = df.groupby('quarter')
-    stats = []
-    
-    for q, data in quarters:
-        if len(data) < 10: continue
-        q_ret = (data['strat_ret'] + 1).prod() - 1
-        q_std = data['strat_ret'].std() * np.sqrt(len(data)) # Volatility over the quarter
-        q_sharpe = (data['strat_ret'].mean() / data['strat_ret'].std() * np.sqrt(252)) if data['strat_ret'].std() > 0 else 0
-        
-        # MaxDD in Quarter
-        cum = (1 + data['strat_ret']).cumprod()
-        dd = (cum / cum.cummax() - 1).min()
-        
-        print(f"{str(q):<10} | {q_ret*100:6.2f}%   | {q_std*100:6.2f}%   | {q_sharpe:6.2f}     | {dd*100:6.2f}%")
-        stats.append({'q': str(q), 'ret': q_ret, 'sharpe': q_sharpe})
-        
-    print("-" * 60)
-    
-    # Overall
-    total_ret = equity.iloc[-1] - 1
-    ann_ret = rets.mean() * 365
-    ann_vol = rets.std() * np.sqrt(365)
-    sharpe = ann_ret / ann_vol
-    print(f"OVERALL | CAGR: {ann_ret*100:.2f}% | Vol: {ann_vol*100:.2f}% | Sharpe: {sharpe:.2f}")
-
-    return equity
-
 def export_to_json(df):
-    # Downsample for web (Weekly or every 3rd day to save space if needed, 
-    # but 1D for 5 years is ~1800 points, which is fine for JSON)
     export_data = []
     for date, row in df.iterrows():
         export_data.append({
@@ -392,43 +237,32 @@ def export_to_json(df):
             'lev_t': round(row['lev_t'], 3),
             'lev_g': round(row['lev_g'], 3)
         })
-    
-    js_content = f"window.BACKTEST_DATA = {json.dumps(export_data)};"
     with open("backtest_data.js", "w") as f:
-        f.write(js_content)
-    print("\nData exported to backtest_data.js")
+        f.write(f"window.BACKTEST_DATA = {json.dumps(export_data)};")
+    print("Data exported.")
 
 # ==========================================
-# MAIN EXECUTION
+# SERVER
 # ==========================================
 if __name__ == "__main__":
-    print("Fetching Data...")
-    df_1h = fetch_binance_klines(SYMBOL, '1h', START_DATE)
-    df_1d = resample_1h_to_1d(df_1h)
-    
-    # 1. Generate Signals
-    sig_df = precalc_strategies(df_1h, df_1d)
-    
-    # 2. Optimize
-    opt_weights = optimize_weights(sig_df)
-    print(f"Optimal Weights Found: Planner={opt_weights[0]:.3f}, Tumbler={opt_weights[1]:.3f}, Gainer={opt_weights[2]:.3f}")
-    
-    # 3. Quantize & Report
-    quantize_analysis(sig_df, opt_weights)
-    
-    # 4. Export for Web
-    export_to_json(sig_df)
-    
-    # 5. Serve
-    PORT = 8000
-    server_address = ('', PORT)
-    httpd = HTTPServer(server_address, SimpleHTTPRequestHandler)
-    print(f"\nStarting Leverage Playground at http://localhost:{PORT}/dashboard.html")
-    print("Press Ctrl+C to stop.")
-    
-    threading.Timer(1.5, lambda: webbrowser.open(f"http://localhost:{PORT}/dashboard.html")).start()
-    
+    # 1. Prepare Data
     try:
-        httpd.serve_forever()
-    except KeyboardInterrupt:
-        print("\nServer stopped.")
+        df_1h = fetch_binance_klines(SYMBOL, '1h', START_DATE)
+        df_1d = resample_1h_to_1d(df_1h)
+        sig_df = precalc_strategies(df_1h, df_1d)
+        opt_weights = optimize_weights(sig_df)
+        print(f"Optimization Complete: {opt_weights}")
+        export_to_json(sig_df)
+    except Exception as e:
+        print(f"Error generating data: {e}")
+        # Create empty file if fail so server starts
+        with open("backtest_data.js", "w") as f: f.write("window.BACKTEST_DATA = [];")
+
+    # 2. Start Web Server
+    PORT = int(os.environ.get("PORT", 8080))
+    server_address = ('0.0.0.0', PORT)
+    httpd = HTTPServer(server_address, SimpleHTTPRequestHandler)
+    
+    print(f"\nServer active on port {PORT}")
+    sys.stdout.flush() # Ensure logs appear in Railway console
+    httpd.serve_forever()
