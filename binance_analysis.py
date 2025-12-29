@@ -8,13 +8,13 @@ import builtins
 import http.server
 import socketserver
 import webbrowser
+import urllib.parse
 from datetime import datetime, timedelta
 
-# --- Matplotlib Setup for Headless/Scientific Plotting ---
+# --- Matplotlib Setup ---
 import matplotlib
 matplotlib.use('Agg') # Force non-interactive backend
 import matplotlib.pyplot as plt
-from matplotlib.ticker import FuncFormatter
 
 # --- Configuration ---
 SYMBOL = "BTCUSDT"
@@ -23,8 +23,8 @@ YEARS = 8
 CACHE_FILE = "binance_data.csv"
 PORT = 8080
 
-# Strategy Constants
-CAP_SPLIT = 0.333
+# Default Constants
+DEFAULT_CAP_SPLIT = 0.333
 TARGET_STRAT_LEV = 2.0
 TUMBLER_MAX_LEV = 4.327
 
@@ -56,7 +56,9 @@ GAINER_PARAMS = {
     }
 }
 
-# --- Slow Print Configuration ---
+# Global Data Cache
+CACHED_DF = None
+
 def slow_print(*args, **kwargs):
     builtins.print(*args, **kwargs)
 
@@ -139,7 +141,8 @@ class Backtester:
         self.capital = 10000.0
         
     def precalculate_indicators(self):
-        print("[INFO] Pre-calculating indicators (Fixing Lookahead)...")
+        # Only print this if it's the first run or debugging
+        # print("[INFO] Pre-calculating indicators (Fixing Lookahead)...")
         d = self.df_1d
         
         # Shift Daily indicators by 1 day
@@ -165,32 +168,33 @@ class Backtester:
         
         self.df.dropna(inplace=True)
 
-    def run(self):
+    def run(self, cap_split):
         p_state = {
-            "s1_equity": self.capital * CAP_SPLIT, "s2_equity": self.capital * CAP_SPLIT,
+            "s1_equity": self.capital * cap_split, "s2_equity": self.capital * cap_split,
             "last_price": self.df['close'].iloc[0], "last_lev_s1": 0.0, "last_lev_s2": 0.0,
             "s1": {"entry_idx": None, "peak_equity": 0.0, "stopped": False, "trend": 0},
             "s2": {"peak_equity": 0.0, "stopped": False, "trend": 0},
         }
         
-        # Individual Strategy Curves (Starting with 1/3 capital each)
-        c_blue = [self.capital * CAP_SPLIT]  # Planner
-        c_green = [self.capital * CAP_SPLIT] # Tumbler
-        c_brown = [self.capital * CAP_SPLIT] # Gainer
+        # Individual Strategy Curves (Starting with 1/3 capital each * multiplier)
+        c_blue = [self.capital * cap_split]  # Planner
+        c_green = [self.capital * cap_split] # Tumbler
+        c_brown = [self.capital * cap_split] # Gainer
         
         tumbler_flat = False
         prev_price = self.df['close'].iloc[0]
         gw = GAINER_PARAMS["GA_WEIGHTS"]
         gw_sum = sum(gw.values())
 
-        # Previous leverages for each segment
+        # Previous leverages
         pl_blue = 0.0
         pl_green = 0.0
         pl_brown = 0.0
 
-        print("[INFO] Starting simulation loop...")
+        print(f"[SIM] Running simulation with Split Factor: {cap_split}...")
         cnt = 0
-        total_steps = len(self.df)
+        # Optimization: Converting columns to numpy arrays for speed in loop
+        # But keeping it readable as per original script structure
         
         for row in self.df.itertuples():
             cnt += 1
@@ -200,12 +204,11 @@ class Backtester:
             if cnt > 1:
                 step_ret = (curr_price - prev_price) / prev_price
                 
-                # Update individual segments independently
                 c_blue.append(c_blue[-1] * (1.0 + pl_blue * step_ret))
                 c_green.append(c_green[-1] * (1.0 + pl_green * step_ret))
                 c_brown.append(c_brown[-1] * (1.0 + pl_brown * step_ret))
                 
-                # Update Planner Internal State (Virtual Equity for Stops)
+                # Update Planner Internal State
                 p_state["s1_equity"] *= (1.0 + step_ret * p_state["last_lev_s1"])
                 p_state["s2_equity"] *= (1.0 + step_ret * p_state["last_lev_s2"])
             
@@ -266,12 +269,6 @@ class Backtester:
             pl_green = n_t
             pl_brown = n_g
             prev_price = curr_price
-            
-            if cnt % 5000 == 0:
-                sys.stdout.write(f"\r[SIM] Processed {cnt}/{total_steps} candles...")
-                sys.stdout.flush()
-        
-        print("\n[INFO] Simulation complete.")
         
         # Create DataFrame
         res_df = pd.DataFrame({
@@ -282,8 +279,7 @@ class Backtester:
         
         return res_df
 
-    def report(self, df_curves):
-        # Create Total curve by summing components
+    def report(self, df_curves, cap_split):
         equity_curve = df_curves.sum(axis=1)
         
         returns = equity_curve.pct_change().dropna()
@@ -299,48 +295,32 @@ class Backtester:
             "sharpe": sharpe,
             "max_dd": max_dd,
             "years": YEARS,
-            "symbol": SYMBOL
+            "symbol": SYMBOL,
+            "cap_split": cap_split
         }
-        
-        print("\n" + "="*40)
-        print(f" REAL BACKTEST RESULTS (No Lookahead)")
-        print(f" Period: {YEARS} Years | Asset: {SYMBOL}")
-        print("="*40)
-        print(f"Final Equity (Total): ${results['final_equity']:,.2f}")
-        print(f"Total Return:         {results['total_return']*100:.2f}%")
-        print(f"CAGR:                 {results['cagr']*100:.2f}%")
-        print(f"Sharpe Ratio:         {results['sharpe']:.4f}")
-        print(f"Max Drawdown:         {results['max_dd']*100:.2f}%")
-        print("="*40)
-        
         return results
 
-# --- Scientific Visualization Functions ---
+# --- Viz & Report ---
 
 def generate_scientific_report(df, df_curves, stats):
-    print("[VIZ] Generating academic plot with Matplotlib...")
+    print("[VIZ] Generating plot...")
     
     plt.style.use('classic')
-    
     fig, ax1 = plt.subplots(figsize=(10, 6))
     
-    # Left Axis: Price (Grey)
     color_price = '#555555'
-    ax1.set_xlabel('Date (Year)')
+    ax1.set_xlabel('Date')
     ax1.set_ylabel(f'{stats["symbol"]} Price ($)', color=color_price)
     
-    # Downsample for cleaner plot
-    factor = max(1, len(df_curves) // 2000)
+    factor = max(1, len(df_curves) // 1000)
     p_series = df['close'].reindex(df_curves.index)[::factor]
-    ax1.plot(p_series.index, p_series.values, color=color_price, linewidth=0.8, label='Asset Price', alpha=0.5, linestyle='--')
+    ax1.plot(p_series.index, p_series.values, color=color_price, linewidth=0.8, alpha=0.5, linestyle='--')
     ax1.tick_params(axis='y', labelcolor=color_price)
     ax1.grid(True, linestyle=':', alpha=0.4)
 
-    # Right Axis: Strategies (Blue, Green, Brown)
     ax2 = ax1.twinx()  
     ax2.set_ylabel('Segment Equity ($)', color='black')
     
-    # Plot segments
     c_blue = df_curves['Blue'][::factor]
     c_green = df_curves['Green'][::factor]
     c_brown = df_curves['Brown'][::factor]
@@ -354,74 +334,61 @@ def generate_scientific_report(df, df_curves, stats):
     # Combined Legend
     lines1, labels1 = ax1.get_legend_handles_labels()
     lines2, labels2 = ax2.get_legend_handles_labels()
-    ax2.legend(lines1 + lines2, labels1 + labels2, loc='upper left', frameon=True, fancybox=False, edgecolor='black')
+    ax2.legend(lines1 + lines2, labels1 + labels2, loc='upper left')
     
-    plt.title(f"Figure 1: Capital Segments Performance ({stats['years']} Years)")
-    
+    plt.title(f"Performance (Split: {stats['cap_split']})")
     fig.tight_layout()  
     plt.savefig('chart.png', dpi=100)
     plt.close()
     
-    # 2. Generate HTML Report (HTML 3.2 Style)
     html_content = f"""
 <!DOCTYPE html>
 <html>
 <head>
-<title>Simulation Report: {stats['symbol']}</title>
+<title>Simulation: {stats['symbol']}</title>
 <style>
-  body {{ background-color: #FFFFFF; color: #000000; font-family: "Times New Roman", serif; margin: 40px; }}
-  h1 {{ border-bottom: 2px solid #000000; font-size: 24pt; }}
-  h2 {{ font-size: 18pt; margin-top: 30px; }}
-  table {{ border-collapse: collapse; width: 600px; margin-bottom: 20px; }}
-  th, td {{ border: 1px solid #000000; padding: 5px; text-align: left; }}
-  th {{ background-color: #E0E0E0; }}
-  .chart-container {{ border: 1px solid #000000; padding: 10px; display: inline-block; }}
-  .footer {{ margin-top: 50px; font-size: 10pt; font-style: italic; border-top: 1px solid #000000; padding-top: 10px; }}
+  body {{ background-color: #f4f4f9; color: #333; font-family: "Helvetica Neue", Helvetica, Arial, sans-serif; margin: 0; padding: 20px; }}
+  .container {{ max_width: 900px; margin: 0 auto; background: white; padding: 30px; box-shadow: 0 2px 5px rgba(0,0,0,0.1); border-radius: 8px; }}
+  h1 {{ border-bottom: 2px solid #eee; padding-bottom: 10px; color: #2c3e50; }}
+  .controls {{ background: #e8f4f8; padding: 15px; border-radius: 5px; margin-bottom: 20px; border: 1px solid #bce8f1; }}
+  .controls form {{ display: flex; align-items: center; gap: 10px; }}
+  input[type="number"] {{ padding: 8px; border: 1px solid #ddd; border-radius: 4px; width: 100px; }}
+  input[type="submit"] {{ padding: 8px 15px; background: #3498db; color: white; border: none; border-radius: 4px; cursor: pointer; font-weight: bold; }}
+  input[type="submit"]:hover {{ background: #2980b9; }}
+  table {{ width: 100%; border-collapse: collapse; margin: 20px 0; }}
+  th, td {{ border-bottom: 1px solid #eee; padding: 12px; text-align: left; }}
+  th {{ background-color: #f8f9fa; color: #2c3e50; }}
+  .chart-container {{ text-align: center; margin-top: 20px; }}
+  .chart-container img {{ max-width: 100%; height: auto; border: 1px solid #eee; }}
 </style>
 </head>
 <body>
 
-<h1>Simulation Report: {stats['symbol']}</h1>
-<p><strong>Date Generated:</strong> {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}</p>
-<p><strong>Methodology:</strong> Segregated Capital Pools (Blue/Green/Brown) with independent compounding.</p>
+<div class="container">
+    <h1>Strategy Simulation: {stats['symbol']}</h1>
+    
+    <div class="controls">
+        <form action="/" method="GET">
+            <label for="split"><strong>Capital Split Factor (Leverage Scaling):</strong></label>
+            <input type="number" id="split" name="split" value="{stats['cap_split']}" step="0.001" min="0.001" max="10.0">
+            <input type="submit" value="Run Simulation">
+        </form>
+        <p><small>Default: 0.333 (1/3 per strategy). Increasing this scales exposure without altering internal stop logic.</small></p>
+    </div>
 
-<h2>1. Statistical Summary (Combined Portfolio)</h2>
-<table>
-  <tr>
-    <th>Metric</th>
-    <th>Value</th>
-  </tr>
-  <tr>
-    <td>Final Equity (Total)</td>
-    <td>${stats['final_equity']:,.2f}</td>
-  </tr>
-  <tr>
-    <td>Total Return</td>
-    <td>{stats['total_return']*100:.2f}%</td>
-  </tr>
-  <tr>
-    <td>CAGR</td>
-    <td>{stats['cagr']*100:.2f}%</td>
-  </tr>
-  <tr>
-    <td>Sharpe Ratio</td>
-    <td>{stats['sharpe']:.4f}</td>
-  </tr>
-  <tr>
-    <td>Maximum Drawdown</td>
-    <td>{stats['max_dd']*100:.2f}%</td>
-  </tr>
-</table>
+    <h2>Statistical Summary</h2>
+    <table>
+      <tr><th>Metric</th><th>Value</th></tr>
+      <tr><td>Final Equity</td><td><strong>${stats['final_equity']:,.2f}</strong></td></tr>
+      <tr><td>Total Return</td><td>{stats['total_return']*100:.2f}%</td></tr>
+      <tr><td>CAGR</td><td>{stats['cagr']*100:.2f}%</td></tr>
+      <tr><td>Sharpe Ratio</td><td>{stats['sharpe']:.4f}</td></tr>
+      <tr><td>Max Drawdown</td><td><span style="color: red">{stats['max_dd']*100:.2f}%</span></td></tr>
+    </table>
 
-<h2>2. Segment Visualization</h2>
-<div class="chart-container">
-    <img src="chart.png" alt="Performance Chart" width="800">
-    <br>
-    <small>Fig 1. Performance of Blue (Planner), Green (Tumbler), and Brown (Gainer) capital segments.</small>
-</div>
-
-<div class="footer">
-    Generated by Python Backtester v2.1 | Scientific Visualization Module
+    <div class="chart-container">
+        <img src="chart.png" alt="Performance Chart">
+    </div>
 </div>
 
 </body>
@@ -430,36 +397,60 @@ def generate_scientific_report(df, df_curves, stats):
     
     with open("index.html", "w") as f:
         f.write(html_content)
-    print(f"[WEB] Scientific report generated at index.html")
+    print(f"[WEB] Report updated.")
 
-def run_server():
-    Handler = http.server.SimpleHTTPRequestHandler
-    socketserver.TCPServer.allow_reuse_address = True
+# --- Server & Execution ---
+
+def run_simulation(cap_split):
+    global CACHED_DF
+    if CACHED_DF is None:
+        CACHED_DF = fetch_binance_data(SYMBOL, INTERVAL, YEARS)
     
-    with socketserver.TCPServer(("", PORT), Handler) as httpd:
-        print(f"\n[SERVER] Serving report at http://localhost:{PORT}")
-        print("[SERVER] Press Ctrl+C to stop.")
+    # Initialize backtester (indicators are pre-calc once ideally, but cheap enough to do here for safety)
+    bt = Backtester(CACHED_DF)
+    bt.precalculate_indicators()
+    
+    # Run with variable split
+    equity_df = bt.run(cap_split)
+    stats = bt.report(equity_df, cap_split)
+    
+    generate_scientific_report(CACHED_DF, equity_df, stats)
+
+class InteractiveHandler(http.server.SimpleHTTPRequestHandler):
+    def do_GET(self):
+        parsed_path = urllib.parse.urlparse(self.path)
+        query_params = urllib.parse.parse_qs(parsed_path.query)
+        
+        # Check if 'split' parameter is present
+        if 'split' in query_params:
+            try:
+                new_split = float(query_params['split'][0])
+                print(f"\n[REQ] Received request to update Split to: {new_split}")
+                run_simulation(new_split)
+                # Redirect to root to clean URL, or just serve index
+                self.path = '/index.html'
+            except ValueError:
+                print("[ERR] Invalid split value")
+        
+        # Default behavior: Serve static files
+        return super().do_GET()
+
+def start_server():
+    # Initial Run
+    run_simulation(DEFAULT_CAP_SPLIT)
+    
+    with socketserver.TCPServer(("", PORT), InteractiveHandler) as httpd:
+        print(f"\n[SERVER] Interactive dashboard running at http://localhost:{PORT}")
+        print("[SERVER] Change 'Capital Split' in the browser to update results.")
         try:
             webbrowser.open(f"http://localhost:{PORT}")
         except:
             pass
-        httpd.serve_forever()
+        try:
+            httpd.serve_forever()
+        except KeyboardInterrupt:
+            print("\n[SERVER] Stopping...")
+            httpd.server_close()
 
 if __name__ == "__main__":
-    # 1. Fetch
-    df = fetch_binance_data(SYMBOL, INTERVAL, YEARS)
-    
-    # 2. Backtest
-    bt = Backtester(df)
-    bt.precalculate_indicators()
-    equity_df = bt.run()
-    stats = bt.report(equity_df)
-    
-    # 3. Generate Report
-    generate_scientific_report(df, equity_df, stats)
-    
-    # 4. Start Server
-    try:
-        run_server()
-    except KeyboardInterrupt:
-        print("\n[SERVER] Stopped.")
+    start_server()
