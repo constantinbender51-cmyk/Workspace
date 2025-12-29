@@ -172,10 +172,21 @@ class Backtester:
             "s1": {"entry_idx": None, "peak_equity": 0.0, "stopped": False, "trend": 0},
             "s2": {"peak_equity": 0.0, "stopped": False, "trend": 0},
         }
-        tumbler_flat, portfolio_curve = False, [self.capital]
-        prev_total_lev, prev_price = 0.0, self.df['close'].iloc[0]
+        
+        # Individual Strategy Curves (Starting with 1/3 capital each)
+        c_blue = [self.capital * CAP_SPLIT]  # Planner
+        c_green = [self.capital * CAP_SPLIT] # Tumbler
+        c_brown = [self.capital * CAP_SPLIT] # Gainer
+        
+        tumbler_flat = False
+        prev_price = self.df['close'].iloc[0]
         gw = GAINER_PARAMS["GA_WEIGHTS"]
         gw_sum = sum(gw.values())
+
+        # Previous leverages for each segment
+        pl_blue = 0.0
+        pl_green = 0.0
+        pl_brown = 0.0
 
         print("[INFO] Starting simulation loop...")
         cnt = 0
@@ -185,12 +196,22 @@ class Backtester:
             cnt += 1
             curr_price = row.close
             
+            # 1. Apply Returns
             if cnt > 1:
                 step_ret = (curr_price - prev_price) / prev_price
-                portfolio_curve.append(portfolio_curve[-1] * (1.0 + prev_total_lev * step_ret))
+                
+                # Update individual segments independently
+                c_blue.append(c_blue[-1] * (1.0 + pl_blue * step_ret))
+                c_green.append(c_green[-1] * (1.0 + pl_green * step_ret))
+                c_brown.append(c_brown[-1] * (1.0 + pl_brown * step_ret))
+                
+                # Update Planner Internal State (Virtual Equity for Stops)
                 p_state["s1_equity"] *= (1.0 + step_ret * p_state["last_lev_s1"])
                 p_state["s2_equity"] *= (1.0 + step_ret * p_state["last_lev_s2"])
             
+            # 2. Calculate Signals
+            
+            # Strategy 1 & 2: Planner (BLUE)
             s1_trend = 1 if curr_price > row.d_sma120 else -1
             s1 = p_state["s1"]
             if s1["trend"] != s1_trend:
@@ -217,6 +238,7 @@ class Backtester:
             
             s2_lev_out = float(s2_trend) * (0.5 if is_prox else 1.0) if not s2["stopped"] else 0.0
             
+            # Strategy 3: Tumbler (GREEN)
             if row.d_iii < TUMBLER_PARAMS["FLAT_THRESH"]: tumbler_flat = True
             if tumbler_flat and (abs(curr_price - row.d_sma32) <= row.d_sma32 * TUMBLER_PARAMS["BAND"] or 
                                abs(curr_price - row.d_sma114) <= row.d_sma114 * TUMBLER_PARAMS["BAND"]):
@@ -230,14 +252,19 @@ class Backtester:
                 if curr_price > row.d_sma32 and curr_price > row.d_sma114: t_lev = base
                 elif curr_price < row.d_sma32 and curr_price < row.d_sma114: t_lev = -base
             
+            # Store Planner Internal
             p_state["last_lev_s1"] = s1_lev_out
             p_state["last_lev_s2"] = s2_lev_out
             
-            n_p = max(-2.0, min(2.0, s1_lev_out + s2_lev_out))
-            n_t = t_lev * (TARGET_STRAT_LEV / TUMBLER_MAX_LEV)
-            n_g = ((row.h_gainer_macd * gw["MACD_1H"] + row.d_gainer_macd * gw["MACD_1D"] + row.d_gainer_sma * gw["SMA_1D"]) / gw_sum) * TARGET_STRAT_LEV
+            # Calculate Next Step Leverages
+            n_p = max(-2.0, min(2.0, s1_lev_out + s2_lev_out)) # Blue Leverage
+            n_t = t_lev * (TARGET_STRAT_LEV / TUMBLER_MAX_LEV) # Green Leverage
+            n_g = ((row.h_gainer_macd * gw["MACD_1H"] + row.d_gainer_macd * gw["MACD_1D"] + row.d_gainer_sma * gw["SMA_1D"]) / gw_sum) * TARGET_STRAT_LEV # Brown Leverage
             
-            prev_total_lev = (n_p + n_t + n_g) * CAP_SPLIT
+            # Update state for next loop
+            pl_blue = n_p
+            pl_green = n_t
+            pl_brown = n_g
             prev_price = curr_price
             
             if cnt % 5000 == 0:
@@ -245,9 +272,20 @@ class Backtester:
                 sys.stdout.flush()
         
         print("\n[INFO] Simulation complete.")
-        return pd.Series(portfolio_curve, index=self.df.index[:len(portfolio_curve)])
+        
+        # Create DataFrame
+        res_df = pd.DataFrame({
+            'Blue': c_blue,
+            'Green': c_green,
+            'Brown': c_brown
+        }, index=self.df.index[:len(c_blue)])
+        
+        return res_df
 
-    def report(self, equity_curve):
+    def report(self, df_curves):
+        # Create Total curve by summing components
+        equity_curve = df_curves.sum(axis=1)
+        
         returns = equity_curve.pct_change().dropna()
         total_ret = (equity_curve.iloc[-1] / self.capital) - 1
         cagr = (equity_curve.iloc[-1] / self.capital) ** (365*24 / len(equity_curve)) - 1
@@ -268,45 +306,57 @@ class Backtester:
         print(f" REAL BACKTEST RESULTS (No Lookahead)")
         print(f" Period: {YEARS} Years | Asset: {SYMBOL}")
         print("="*40)
-        print(f"Final Equity:   ${results['final_equity']:,.2f}")
-        print(f"Total Return:   {results['total_return']*100:.2f}%")
-        print(f"CAGR:           {results['cagr']*100:.2f}%")
-        print(f"Sharpe Ratio:   {results['sharpe']:.4f}")
-        print(f"Max Drawdown:   {results['max_dd']*100:.2f}%")
+        print(f"Final Equity (Total): ${results['final_equity']:,.2f}")
+        print(f"Total Return:         {results['total_return']*100:.2f}%")
+        print(f"CAGR:                 {results['cagr']*100:.2f}%")
+        print(f"Sharpe Ratio:         {results['sharpe']:.4f}")
+        print(f"Max Drawdown:         {results['max_dd']*100:.2f}%")
         print("="*40)
         
         return results
 
 # --- Scientific Visualization Functions ---
 
-def generate_scientific_report(df, equity_curve, stats):
+def generate_scientific_report(df, df_curves, stats):
     print("[VIZ] Generating academic plot with Matplotlib...")
     
-    # 1. Generate Static Image (Matplotlib)
-    # Use "Classic" style for that 90s/Matlab look
     plt.style.use('classic')
     
     fig, ax1 = plt.subplots(figsize=(10, 6))
     
-    # Plot Price (Log Scale usually preferred for long term, but linear requested by style implication)
-    color = 'blue'
+    # Left Axis: Price (Grey)
+    color_price = '#555555'
     ax1.set_xlabel('Date (Year)')
-    ax1.set_ylabel(f'{stats["symbol"]} Price ($)', color=color)
-    # Downsample for plotting speed/cleanliness
-    p_series = df['close'].reindex(equity_curve.index)
-    ax1.plot(p_series.index, p_series.values, color=color, linewidth=0.5, label='Asset Price')
-    ax1.tick_params(axis='y', labelcolor=color)
-    ax1.grid(True, linestyle='--', alpha=0.5)
-
-    # Instantiate a second axes that shares the same x-axis
-    ax2 = ax1.twinx()  
-    color = 'green'
-    ax2.set_ylabel('Strategy Equity ($)', color=color)  
-    ax2.plot(equity_curve.index, equity_curve.values, color=color, linewidth=1.5, label='Strategy Equity')
-    ax2.tick_params(axis='y', labelcolor=color)
+    ax1.set_ylabel(f'{stats["symbol"]} Price ($)', color=color_price)
     
-    # Title
-    plt.title(f"Figure 1: {stats['symbol']} vs Strategy Performance ({stats['years']} Years)")
+    # Downsample for cleaner plot
+    factor = max(1, len(df_curves) // 2000)
+    p_series = df['close'].reindex(df_curves.index)[::factor]
+    ax1.plot(p_series.index, p_series.values, color=color_price, linewidth=0.8, label='Asset Price', alpha=0.5, linestyle='--')
+    ax1.tick_params(axis='y', labelcolor=color_price)
+    ax1.grid(True, linestyle=':', alpha=0.4)
+
+    # Right Axis: Strategies (Blue, Green, Brown)
+    ax2 = ax1.twinx()  
+    ax2.set_ylabel('Segment Equity ($)', color='black')
+    
+    # Plot segments
+    c_blue = df_curves['Blue'][::factor]
+    c_green = df_curves['Green'][::factor]
+    c_brown = df_curves['Brown'][::factor]
+    
+    ax2.plot(c_blue.index, c_blue.values, color='blue', linewidth=1.5, label='Blue (Planner)', alpha=0.8)
+    ax2.plot(c_green.index, c_green.values, color='green', linewidth=1.5, label='Green (Tumbler)', alpha=0.8)
+    ax2.plot(c_brown.index, c_brown.values, color='brown', linewidth=1.5, label='Brown (Gainer)', alpha=0.8)
+    
+    ax2.tick_params(axis='y', labelcolor='black')
+    
+    # Combined Legend
+    lines1, labels1 = ax1.get_legend_handles_labels()
+    lines2, labels2 = ax2.get_legend_handles_labels()
+    ax2.legend(lines1 + lines2, labels1 + labels2, loc='upper left', frameon=True, fancybox=False, edgecolor='black')
+    
+    plt.title(f"Figure 1: Capital Segments Performance ({stats['years']} Years)")
     
     fig.tight_layout()  
     plt.savefig('chart.png', dpi=100)
@@ -322,7 +372,7 @@ def generate_scientific_report(df, equity_curve, stats):
   body {{ background-color: #FFFFFF; color: #000000; font-family: "Times New Roman", serif; margin: 40px; }}
   h1 {{ border-bottom: 2px solid #000000; font-size: 24pt; }}
   h2 {{ font-size: 18pt; margin-top: 30px; }}
-  table {{ border-collapse: collapse; width: 500px; margin-bottom: 20px; }}
+  table {{ border-collapse: collapse; width: 600px; margin-bottom: 20px; }}
   th, td {{ border: 1px solid #000000; padding: 5px; text-align: left; }}
   th {{ background-color: #E0E0E0; }}
   .chart-container {{ border: 1px solid #000000; padding: 10px; display: inline-block; }}
@@ -333,16 +383,16 @@ def generate_scientific_report(df, equity_curve, stats):
 
 <h1>Simulation Report: {stats['symbol']}</h1>
 <p><strong>Date Generated:</strong> {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}</p>
-<p><strong>Methodology:</strong> Multi-strategy composite (Planner + Tumbler + Gainer) with zero-lookahead constraint.</p>
+<p><strong>Methodology:</strong> Segregated Capital Pools (Blue/Green/Brown) with independent compounding.</p>
 
-<h2>1. Statistical Summary</h2>
+<h2>1. Statistical Summary (Combined Portfolio)</h2>
 <table>
   <tr>
     <th>Metric</th>
     <th>Value</th>
   </tr>
   <tr>
-    <td>Final Equity</td>
+    <td>Final Equity (Total)</td>
     <td>${stats['final_equity']:,.2f}</td>
   </tr>
   <tr>
@@ -350,7 +400,7 @@ def generate_scientific_report(df, equity_curve, stats):
     <td>{stats['total_return']*100:.2f}%</td>
   </tr>
   <tr>
-    <td>Compound Annual Growth Rate (CAGR)</td>
+    <td>CAGR</td>
     <td>{stats['cagr']*100:.2f}%</td>
   </tr>
   <tr>
@@ -363,15 +413,15 @@ def generate_scientific_report(df, equity_curve, stats):
   </tr>
 </table>
 
-<h2>2. Performance Visualization</h2>
+<h2>2. Segment Visualization</h2>
 <div class="chart-container">
     <img src="chart.png" alt="Performance Chart" width="800">
     <br>
-    <small>Fig 1. Dual-axis comparison of Asset Price (Blue, Left) vs Strategy Equity (Green, Right).</small>
+    <small>Fig 1. Performance of Blue (Planner), Green (Tumbler), and Brown (Gainer) capital segments.</small>
 </div>
 
 <div class="footer">
-    Generated by Python Backtester v2.0 | Scientific Visualization Module
+    Generated by Python Backtester v2.1 | Scientific Visualization Module
 </div>
 
 </body>
@@ -402,11 +452,11 @@ if __name__ == "__main__":
     # 2. Backtest
     bt = Backtester(df)
     bt.precalculate_indicators()
-    equity = bt.run()
-    stats = bt.report(equity)
+    equity_df = bt.run()
+    stats = bt.report(equity_df)
     
     # 3. Generate Report
-    generate_scientific_report(df, equity, stats)
+    generate_scientific_report(df, equity_df, stats)
     
     # 4. Start Server
     try:
