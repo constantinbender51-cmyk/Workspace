@@ -11,7 +11,7 @@ import webbrowser
 import urllib.parse
 from datetime import datetime, timedelta
 
-# --- Matplotlib Setup ---
+# --- Matplotlib Setup for Headless/Scientific Plotting ---
 import matplotlib
 matplotlib.use('Agg') # Force non-interactive backend
 import matplotlib.pyplot as plt
@@ -141,8 +141,7 @@ class Backtester:
         self.capital = 10000.0
         
     def precalculate_indicators(self):
-        # Only print this if it's the first run or debugging
-        # print("[INFO] Pre-calculating indicators (Fixing Lookahead)...")
+        # print("[INFO] Pre-calculating indicators...")
         d = self.df_1d
         
         # Shift Daily indicators by 1 day
@@ -193,8 +192,6 @@ class Backtester:
 
         print(f"[SIM] Running simulation with Split Factor: {cap_split}...")
         cnt = 0
-        # Optimization: Converting columns to numpy arrays for speed in loop
-        # But keeping it readable as per original script structure
         
         for row in self.df.itertuples():
             cnt += 1
@@ -209,6 +206,7 @@ class Backtester:
                 c_brown.append(c_brown[-1] * (1.0 + pl_brown * step_ret))
                 
                 # Update Planner Internal State
+                # CRITICAL: This scales equity, but percentage drawdown logic remains invariant
                 p_state["s1_equity"] *= (1.0 + step_ret * p_state["last_lev_s1"])
                 p_state["s2_equity"] *= (1.0 + step_ret * p_state["last_lev_s2"])
             
@@ -221,6 +219,9 @@ class Backtester:
                 s1.update({"trend": s1_trend, "entry_idx": cnt, "stopped": False, "peak_equity": p_state["s1_equity"]})
             if p_state["s1_equity"] > s1["peak_equity"]: s1["peak_equity"] = p_state["s1_equity"]
             
+            # DRAWDOWN CHECK: (Peak - Current) / Peak
+            # This is a ratio, so multiplying both Peak and Current by 'cap_split' cancels out.
+            # The logic is preserved.
             dd_s1 = (s1["peak_equity"] - p_state["s1_equity"]) / max(s1["peak_equity"], 1e-9)
             if dd_s1 > PLANNER_PARAMS["S1_STOP"]: s1["stopped"] = True
             
@@ -282,21 +283,42 @@ class Backtester:
     def report(self, df_curves, cap_split):
         equity_curve = df_curves.sum(axis=1)
         
+        # Helper for stats
+        def get_stats(series, start_cap):
+            ret = series.pct_change().dropna()
+            # Handle edge case of flat returns
+            if ret.std() == 0: sharpe = 0.0
+            else: sharpe = ret.mean() / ret.std() * np.sqrt(365 * 24)
+            return sharpe
+            
+        # Calculate Individual Sharpes
+        # Note: Each strategy started with (capital * cap_split)
+        start_seg = self.capital * cap_split
+        sharpe_blue = get_stats(df_curves['Blue'], start_seg)
+        sharpe_green = get_stats(df_curves['Green'], start_seg)
+        sharpe_brown = get_stats(df_curves['Brown'], start_seg)
+
+        # Total Stats
         returns = equity_curve.pct_change().dropna()
         total_ret = (equity_curve.iloc[-1] / self.capital) - 1
         cagr = (equity_curve.iloc[-1] / self.capital) ** (365*24 / len(equity_curve)) - 1
-        sharpe = returns.mean() / returns.std() * np.sqrt(365 * 24)
+        sharpe_total = returns.mean() / returns.std() * np.sqrt(365 * 24)
         max_dd = ((equity_curve - equity_curve.cummax()) / equity_curve.cummax()).min()
         
         results = {
             "final_equity": equity_curve.iloc[-1],
             "total_return": total_ret,
             "cagr": cagr,
-            "sharpe": sharpe,
+            "sharpe": sharpe_total,
             "max_dd": max_dd,
             "years": YEARS,
             "symbol": SYMBOL,
-            "cap_split": cap_split
+            "cap_split": cap_split,
+            "sharpes": {
+                "blue": sharpe_blue,
+                "green": sharpe_green,
+                "brown": sharpe_brown
+            }
         }
         return results
 
@@ -325,9 +347,9 @@ def generate_scientific_report(df, df_curves, stats):
     c_green = df_curves['Green'][::factor]
     c_brown = df_curves['Brown'][::factor]
     
-    ax2.plot(c_blue.index, c_blue.values, color='blue', linewidth=1.5, label='Blue (Planner)', alpha=0.8)
-    ax2.plot(c_green.index, c_green.values, color='green', linewidth=1.5, label='Green (Tumbler)', alpha=0.8)
-    ax2.plot(c_brown.index, c_brown.values, color='brown', linewidth=1.5, label='Brown (Gainer)', alpha=0.8)
+    ax2.plot(c_blue.index, c_blue.values, color='blue', linewidth=1.5, label=f'Blue (Sharpe: {stats["sharpes"]["blue"]:.2f})', alpha=0.8)
+    ax2.plot(c_green.index, c_green.values, color='green', linewidth=1.5, label=f'Green (Sharpe: {stats["sharpes"]["green"]:.2f})', alpha=0.8)
+    ax2.plot(c_brown.index, c_brown.values, color='brown', linewidth=1.5, label=f'Brown (Sharpe: {stats["sharpes"]["brown"]:.2f})', alpha=0.8)
     
     ax2.tick_params(axis='y', labelcolor='black')
     
@@ -336,7 +358,7 @@ def generate_scientific_report(df, df_curves, stats):
     lines2, labels2 = ax2.get_legend_handles_labels()
     ax2.legend(lines1 + lines2, labels1 + labels2, loc='upper left')
     
-    plt.title(f"Performance (Split: {stats['cap_split']})")
+    plt.title(f"Performance (Split: {stats['cap_split']}) | Total Sharpe: {stats['sharpe']:.2f}")
     fig.tight_layout()  
     plt.savefig('chart.png', dpi=100)
     plt.close()
@@ -360,6 +382,10 @@ def generate_scientific_report(df, df_curves, stats):
   th {{ background-color: #f8f9fa; color: #2c3e50; }}
   .chart-container {{ text-align: center; margin-top: 20px; }}
   .chart-container img {{ max-width: 100%; height: auto; border: 1px solid #eee; }}
+  .strat-row td {{ font-weight: bold; }}
+  .blue {{ color: blue; }}
+  .green {{ color: green; }}
+  .brown {{ color: brown; }}
 </style>
 </head>
 <body>
@@ -373,16 +399,23 @@ def generate_scientific_report(df, df_curves, stats):
             <input type="number" id="split" name="split" value="{stats['cap_split']}" step="0.001" min="0.001" max="10.0">
             <input type="submit" value="Run Simulation">
         </form>
-        <p><small>Default: 0.333 (1/3 per strategy). Increasing this scales exposure without altering internal stop logic.</small></p>
+        <p><small>Default: 0.333. Increasing this scales exposure. <br><strong>Logic Check:</strong> Stop losses are based on % drawdown, so scaling capital here does <em>not</em> break the logic.</small></p>
     </div>
 
-    <h2>Statistical Summary</h2>
+    <h2>Strategy Components (Sharpe Analysis)</h2>
+    <table>
+      <tr><th>Strategy</th><th>Sharpe Ratio</th></tr>
+      <tr class="strat-row blue"><td>Blue (Planner)</td><td>{stats['sharpes']['blue']:.3f}</td></tr>
+      <tr class="strat-row green"><td>Green (Tumbler)</td><td>{stats['sharpes']['green']:.3f}</td></tr>
+      <tr class="strat-row brown"><td>Brown (Gainer)</td><td>{stats['sharpes']['brown']:.3f}</td></tr>
+    </table>
+
+    <h2>Portfolio Stats</h2>
     <table>
       <tr><th>Metric</th><th>Value</th></tr>
       <tr><td>Final Equity</td><td><strong>${stats['final_equity']:,.2f}</strong></td></tr>
       <tr><td>Total Return</td><td>{stats['total_return']*100:.2f}%</td></tr>
-      <tr><td>CAGR</td><td>{stats['cagr']*100:.2f}%</td></tr>
-      <tr><td>Sharpe Ratio</td><td>{stats['sharpe']:.4f}</td></tr>
+      <tr><td>Combined Sharpe</td><td>{stats['sharpe']:.4f}</td></tr>
       <tr><td>Max Drawdown</td><td><span style="color: red">{stats['max_dd']*100:.2f}%</span></td></tr>
     </table>
 
