@@ -1,7 +1,6 @@
 import os
 import sys
 import time
-import json
 import requests
 import numpy as np
 import pandas as pd
@@ -10,7 +9,12 @@ import http.server
 import socketserver
 import webbrowser
 from datetime import datetime, timedelta
-from threading import Thread
+
+# --- Matplotlib Setup for Headless/Scientific Plotting ---
+import matplotlib
+matplotlib.use('Agg') # Force non-interactive backend
+import matplotlib.pyplot as plt
+from matplotlib.ticker import FuncFormatter
 
 # --- Configuration ---
 SYMBOL = "BTCUSDT"
@@ -54,10 +58,7 @@ GAINER_PARAMS = {
 
 # --- Slow Print Configuration ---
 def slow_print(*args, **kwargs):
-    # Only slow print if not called from the server thread potentially
     builtins.print(*args, **kwargs)
-    # Removing sleep to prevent server lag, user can add time.sleep(0.05) if strictly desired for effect
-    # time.sleep(0.05) 
 
 print = slow_print
 
@@ -90,7 +91,7 @@ def fetch_binance_data(symbol, interval="1h", years=8):
             current_ts = last_close_ts + 1
             sys.stdout.write(f"\r[FETCH] Fetched {len(klines)} candles... Last: {datetime.fromtimestamp(last_close_ts/1000)}")
             sys.stdout.flush()
-            time.sleep(0.05) # Rate limit kindness
+            time.sleep(0.05)
             if len(data) < 1000: break
         except Exception as e:
             print(f"\n[ERROR] Fetch failed: {e}")
@@ -184,18 +185,12 @@ class Backtester:
             cnt += 1
             curr_price = row.close
             
-            # 1. Apply Returns
             if cnt > 1:
                 step_ret = (curr_price - prev_price) / prev_price
                 portfolio_curve.append(portfolio_curve[-1] * (1.0 + prev_total_lev * step_ret))
-                
-                # Update Planner
                 p_state["s1_equity"] *= (1.0 + step_ret * p_state["last_lev_s1"])
                 p_state["s2_equity"] *= (1.0 + step_ret * p_state["last_lev_s2"])
             
-            # 2. Calculate Signals
-            
-            # Strategy 1
             s1_trend = 1 if curr_price > row.d_sma120 else -1
             s1 = p_state["s1"]
             if s1["trend"] != s1_trend:
@@ -207,7 +202,6 @@ class Backtester:
             
             s1_lev_out = float(s1_trend) * calculate_decay(s1["entry_idx"], cnt, PLANNER_PARAMS["S1_DECAY"]) if not s1["stopped"] else 0.0
 
-            # Strategy 2
             s2_trend = 1 if curr_price > row.d_sma400 else -1
             s2 = p_state["s2"]
             if s2["trend"] != s2_trend:
@@ -223,7 +217,6 @@ class Backtester:
             
             s2_lev_out = float(s2_trend) * (0.5 if is_prox else 1.0) if not s2["stopped"] else 0.0
             
-            # Strategy 3
             if row.d_iii < TUMBLER_PARAMS["FLAT_THRESH"]: tumbler_flat = True
             if tumbler_flat and (abs(curr_price - row.d_sma32) <= row.d_sma32 * TUMBLER_PARAMS["BAND"] or 
                                abs(curr_price - row.d_sma114) <= row.d_sma114 * TUMBLER_PARAMS["BAND"]):
@@ -237,7 +230,6 @@ class Backtester:
                 if curr_price > row.d_sma32 and curr_price > row.d_sma114: t_lev = base
                 elif curr_price < row.d_sma32 and curr_price < row.d_sma114: t_lev = -base
             
-            # Store Signals
             p_state["last_lev_s1"] = s1_lev_out
             p_state["last_lev_s2"] = s2_lev_out
             
@@ -285,154 +277,118 @@ class Backtester:
         
         return results
 
-# --- Web Server Functions ---
+# --- Scientific Visualization Functions ---
 
-def generate_web_files(df, equity_curve, stats):
-    print("[WEB] Generating visualization data...")
+def generate_scientific_report(df, equity_curve, stats):
+    print("[VIZ] Generating academic plot with Matplotlib...")
     
-    # 1. Prepare JSON Data
-    # Downsample for web performance if too large (>10k points)
-    factor = max(1, len(equity_curve) // 8000)
+    # 1. Generate Static Image (Matplotlib)
+    # Use "Classic" style for that 90s/Matlab look
+    plt.style.use('classic')
     
-    eq_data = []
-    price_data = []
+    fig, ax1 = plt.subplots(figsize=(10, 6))
     
-    # Using unix timestamps for Lightweight Charts
-    times = equity_curve.index[::factor]
-    equities = equity_curve.values[::factor]
-    prices = df['close'].reindex(equity_curve.index)[::factor].values
-    
-    for t, e, p in zip(times, equities, prices):
-        ts = int(t.timestamp())
-        eq_data.append({"time": ts, "value": float(e)})
-        price_data.append({"time": ts, "value": float(p)})
+    # Plot Price (Log Scale usually preferred for long term, but linear requested by style implication)
+    color = 'blue'
+    ax1.set_xlabel('Date (Year)')
+    ax1.set_ylabel(f'{stats["symbol"]} Price ($)', color=color)
+    # Downsample for plotting speed/cleanliness
+    p_series = df['close'].reindex(equity_curve.index)
+    ax1.plot(p_series.index, p_series.values, color=color, linewidth=0.5, label='Asset Price')
+    ax1.tick_params(axis='y', labelcolor=color)
+    ax1.grid(True, linestyle='--', alpha=0.5)
 
-    json_data = {
-        "stats": {
-            "final_equity": f"${stats['final_equity']:,.2f}",
-            "total_return": f"{stats['total_return']*100:.2f}%",
-            "cagr": f"{stats['cagr']*100:.2f}%",
-            "sharpe": f"{stats['sharpe']:.2f}",
-            "max_dd": f"{stats['max_dd']*100:.2f}%",
-            "symbol": stats['symbol']
-        },
-        "series": {
-            "equity": eq_data,
-            "price": price_data
-        }
-    }
+    # Instantiate a second axes that shares the same x-axis
+    ax2 = ax1.twinx()  
+    color = 'green'
+    ax2.set_ylabel('Strategy Equity ($)', color=color)  
+    ax2.plot(equity_curve.index, equity_curve.values, color=color, linewidth=1.5, label='Strategy Equity')
+    ax2.tick_params(axis='y', labelcolor=color)
     
-    with open("backtest_data.json", "w") as f:
-        json.dump(json_data, f)
-        
-    # 2. Generate HTML
-    html_content = """
+    # Title
+    plt.title(f"Figure 1: {stats['symbol']} vs Strategy Performance ({stats['years']} Years)")
+    
+    fig.tight_layout()  
+    plt.savefig('chart.png', dpi=100)
+    plt.close()
+    
+    # 2. Generate HTML Report (HTML 3.2 Style)
+    html_content = f"""
 <!DOCTYPE html>
-<html lang="en">
+<html>
 <head>
-    <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Backtest Results</title>
-    <script src="https://unpkg.com/lightweight-charts/dist/lightweight-charts.standalone.production.js"></script>
-    <style>
-        body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Ubuntu, "Helvetica Neue", sans-serif; background: #111; color: #eee; margin: 0; padding: 20px; }
-        .container { max-width: 1200px; margin: 0 auto; }
-        .header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 20px; border-bottom: 1px solid #333; padding-bottom: 10px; }
-        .stats-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); gap: 10px; margin-bottom: 20px; }
-        .stat-card { background: #222; padding: 15px; border-radius: 8px; text-align: center; border: 1px solid #333; }
-        .stat-val { font-size: 1.5em; font-weight: bold; color: #4caf50; }
-        .stat-label { font-size: 0.9em; color: #888; margin-top: 5px; }
-        .chart-container { height: 600px; width: 100%; border-radius: 8px; overflow: hidden; border: 1px solid #333; }
-        .dd-val { color: #ff5252; }
-    </style>
+<title>Simulation Report: {stats['symbol']}</title>
+<style>
+  body {{ background-color: #FFFFFF; color: #000000; font-family: "Times New Roman", serif; margin: 40px; }}
+  h1 {{ border-bottom: 2px solid #000000; font-size: 24pt; }}
+  h2 {{ font-size: 18pt; margin-top: 30px; }}
+  table {{ border-collapse: collapse; width: 500px; margin-bottom: 20px; }}
+  th, td {{ border: 1px solid #000000; padding: 5px; text-align: left; }}
+  th {{ background-color: #E0E0E0; }}
+  .chart-container {{ border: 1px solid #000000; padding: 10px; display: inline-block; }}
+  .footer {{ margin-top: 50px; font-size: 10pt; font-style: italic; border-top: 1px solid #000000; padding-top: 10px; }}
+</style>
 </head>
 <body>
-    <div class="container">
-        <div class="header">
-            <h1>Backtest Results: <span id="sym"></span></h1>
-            <div style="font-size: 0.8em; color: #666;">Strategy Visualization</div>
-        </div>
-        
-        <div class="stats-grid">
-            <div class="stat-card"><div class="stat-val" id="final_equity">...</div><div class="stat-label">Final Equity</div></div>
-            <div class="stat-card"><div class="stat-val" id="total_return">...</div><div class="stat-label">Total Return</div></div>
-            <div class="stat-card"><div class="stat-val" id="cagr">...</div><div class="stat-label">CAGR</div></div>
-            <div class="stat-card"><div class="stat-val" id="sharpe">...</div><div class="stat-label">Sharpe Ratio</div></div>
-            <div class="stat-card"><div class="stat-val dd-val" id="max_dd">...</div><div class="stat-label">Max Drawdown</div></div>
-        </div>
 
-        <div id="chart" class="chart-container"></div>
-    </div>
+<h1>Simulation Report: {stats['symbol']}</h1>
+<p><strong>Date Generated:</strong> {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}</p>
+<p><strong>Methodology:</strong> Multi-strategy composite (Planner + Tumbler + Gainer) with zero-lookahead constraint.</p>
 
-    <script>
-        fetch('backtest_data.json')
-            .then(response => response.json())
-            .then(data => {
-                // Populate Stats
-                document.getElementById('sym').innerText = data.stats.symbol;
-                document.getElementById('final_equity').innerText = data.stats.final_equity;
-                document.getElementById('total_return').innerText = data.stats.total_return;
-                document.getElementById('cagr').innerText = data.stats.cagr;
-                document.getElementById('sharpe').innerText = data.stats.sharpe;
-                document.getElementById('max_dd').innerText = data.stats.max_dd;
+<h2>1. Statistical Summary</h2>
+<table>
+  <tr>
+    <th>Metric</th>
+    <th>Value</th>
+  </tr>
+  <tr>
+    <td>Final Equity</td>
+    <td>${stats['final_equity']:,.2f}</td>
+  </tr>
+  <tr>
+    <td>Total Return</td>
+    <td>{stats['total_return']*100:.2f}%</td>
+  </tr>
+  <tr>
+    <td>Compound Annual Growth Rate (CAGR)</td>
+    <td>{stats['cagr']*100:.2f}%</td>
+  </tr>
+  <tr>
+    <td>Sharpe Ratio</td>
+    <td>{stats['sharpe']:.4f}</td>
+  </tr>
+  <tr>
+    <td>Maximum Drawdown</td>
+    <td>{stats['max_dd']*100:.2f}%</td>
+  </tr>
+</table>
 
-                // Create Chart
-                const chartContainer = document.getElementById('chart');
-                const chart = LightweightCharts.createChart(chartContainer, {
-                    layout: { background: { color: '#111' }, textColor: '#DDD' },
-                    grid: { vertLines: { color: '#222' }, horzLines: { color: '#222' } },
-                    rightPriceScale: { borderColor: '#333' },
-                    timeScale: { borderColor: '#333', timeVisible: true },
-                    crosshair: { mode: LightweightCharts.CrosshairMode.Normal },
-                });
+<h2>2. Performance Visualization</h2>
+<div class="chart-container">
+    <img src="chart.png" alt="Performance Chart" width="800">
+    <br>
+    <small>Fig 1. Dual-axis comparison of Asset Price (Blue, Left) vs Strategy Equity (Green, Right).</small>
+</div>
 
-                // Equity Series (Green Area)
-                const equitySeries = chart.addAreaSeries({
-                    topColor: 'rgba(76, 175, 80, 0.56)',
-                    bottomColor: 'rgba(76, 175, 80, 0.04)',
-                    lineColor: 'rgba(76, 175, 80, 1)',
-                    lineWidth: 2,
-                    priceFormat: { type: 'price', precision: 2, minMove: 0.01 },
-                });
-                equitySeries.setData(data.series.equity);
+<div class="footer">
+    Generated by Python Backtester v2.0 | Scientific Visualization Module
+</div>
 
-                // Price Series (Overlay Line, Right Scale with Margin)
-                // We create a separate scale to compare relative moves or just overlay
-                const priceSeries = chart.addLineSeries({
-                    color: 'rgba(41, 98, 255, 0.6)',
-                    lineWidth: 1,
-                    priceScaleId: 'left', // Use left axis for price to separate from equity
-                    title: 'Asset Price'
-                });
-                chart.priceScale('left').applyOptions({
-                     visible: true,
-                     borderColor: '#333'
-                });
-                
-                priceSeries.setData(data.series.price);
-                
-                chart.timeScale().fitContent();
-            })
-            .catch(err => console.error("Error loading data:", err));
-    </script>
 </body>
 </html>
     """
     
     with open("index.html", "w") as f:
         f.write(html_content)
-    print(f"[WEB] Dashboard generated at index.html")
+    print(f"[WEB] Scientific report generated at index.html")
 
 def run_server():
     Handler = http.server.SimpleHTTPRequestHandler
-    
-    # Allow address reuse to prevent "Address already in use" errors on quick restarts
     socketserver.TCPServer.allow_reuse_address = True
     
     with socketserver.TCPServer(("", PORT), Handler) as httpd:
-        print(f"\n[SERVER] Serving at http://localhost:{PORT}")
+        print(f"\n[SERVER] Serving report at http://localhost:{PORT}")
         print("[SERVER] Press Ctrl+C to stop.")
-        # Try to open browser automatically
         try:
             webbrowser.open(f"http://localhost:{PORT}")
         except:
@@ -449,8 +405,8 @@ if __name__ == "__main__":
     equity = bt.run()
     stats = bt.report(equity)
     
-    # 3. Generate Website
-    generate_web_files(df, equity, stats)
+    # 3. Generate Report
+    generate_scientific_report(df, equity, stats)
     
     # 4. Start Server
     try:
