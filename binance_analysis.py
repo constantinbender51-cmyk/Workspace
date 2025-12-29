@@ -73,24 +73,18 @@ def fetch_binance_data(symbol, interval="1h", years=8):
     while True:
         url = "https://api.binance.com/api/v3/klines"
         params = {"symbol": symbol, "interval": interval, "startTime": current_ts, "limit": 1000}
-        
         try:
             r = requests.get(url, params=params)
             r.raise_for_status()
             data = r.json()
             if not data: break
-                
             klines.extend(data)
             last_close_ts = data[-1][6]
             current_ts = last_close_ts + 1
-            
-            # Progress indicator with delay
             sys.stdout.write(f"\r[FETCH] Fetched {len(klines)} candles... Last: {datetime.fromtimestamp(last_close_ts/1000)}")
             sys.stdout.flush()
-            time.sleep(0.05) # Small sleep for the stream
-            
+            time.sleep(0.05)
             if len(data) < 1000: break
-            time.sleep(0.1)
         except Exception as e:
             print(f"\n[ERROR] Fetch failed: {e}")
             break
@@ -137,21 +131,31 @@ class Backtester:
         self.capital = 10000.0
         
     def precalculate_indicators(self):
-        print("[INFO] Pre-calculating indicators...")
+        print("[INFO] Pre-calculating indicators (Fixing Lookahead)...")
         d = self.df_1d
-        self.df['d_sma120'] = get_sma(d['close'], PLANNER_PARAMS["S1_SMA"]).reindex(self.df.index, method='ffill')
-        self.df['d_sma400'] = get_sma(d['close'], PLANNER_PARAMS["S2_SMA"]).reindex(self.df.index, method='ffill')
-        self.df['d_sma32'] = get_sma(d['close'], TUMBLER_PARAMS["SMA1"]).reindex(self.df.index, method='ffill')
-        self.df['d_sma114'] = get_sma(d['close'], TUMBLER_PARAMS["SMA2"]).reindex(self.df.index, method='ffill')
+        
+        # Shift Daily indicators by 1 day so that on any given hour of Day T, 
+        # we only know the indicators as of the close of Day T-1.
+        self.df['d_sma120'] = get_sma(d['close'], PLANNER_PARAMS["S1_SMA"]).shift(1).reindex(self.df.index, method='ffill')
+        self.df['d_sma400'] = get_sma(d['close'], PLANNER_PARAMS["S2_SMA"]).shift(1).reindex(self.df.index, method='ffill')
+        self.df['d_sma32'] = get_sma(d['close'], TUMBLER_PARAMS["SMA1"]).shift(1).reindex(self.df.index, method='ffill')
+        self.df['d_sma114'] = get_sma(d['close'], TUMBLER_PARAMS["SMA2"]).shift(1).reindex(self.df.index, method='ffill')
         
         log_ret = np.log(d['close'] / d['close'].shift(1))
         w = TUMBLER_PARAMS["III_WIN"]
         iii = (log_ret.rolling(w).sum().abs() / log_ret.abs().rolling(w).sum()).fillna(0)
-        self.df['d_iii'] = iii.reindex(self.df.index, method='ffill')
+        self.df['d_iii'] = iii.shift(1).reindex(self.df.index, method='ffill')
         
-        self.df['d_gainer_macd'] = pd.Series(calc_macd_pos(d['close'], GAINER_PARAMS["MACD_1D"]), index=d.index).reindex(self.df.index, method='ffill')
-        self.df['d_gainer_sma'] = pd.Series(calc_sma_pos(d['close'], GAINER_PARAMS["SMA_1D"]), index=d.index).reindex(self.df.index, method='ffill')
-        self.df['h_gainer_macd'] = calc_macd_pos(self.df['close'], GAINER_PARAMS["MACD_1H"])
+        d_g_macd = pd.Series(calc_macd_pos(d['close'], GAINER_PARAMS["MACD_1D"]), index=d.index)
+        d_g_sma = pd.Series(calc_sma_pos(d['close'], GAINER_PARAMS["SMA_1D"]), index=d.index)
+        
+        self.df['d_gainer_macd'] = d_g_macd.shift(1).reindex(self.df.index, method='ffill')
+        self.df['d_gainer_sma'] = d_g_sma.shift(1).reindex(self.df.index, method='ffill')
+        
+        # Shift Hourly MACD by 1 hour so signal at 14:00 uses 13:00 close.
+        h_g_macd = pd.Series(calc_macd_pos(self.df['close'], GAINER_PARAMS["MACD_1H"]), index=self.df.index)
+        self.df['h_gainer_macd'] = h_g_macd.shift(1)
+        
         self.df.dropna(inplace=True)
 
     def run(self):
@@ -171,36 +175,53 @@ class Backtester:
         for row in self.df.itertuples():
             cnt += 1
             curr_price = row.close
+            
+            # 1. Apply Returns based on signal from PREVIOUS bar (Zero Lookahead)
             if cnt > 1:
                 step_ret = (curr_price - prev_price) / prev_price
-                portfolio_curve.append(portfolio_curve[-1] + (portfolio_curve[-1] * prev_total_lev * step_ret))
+                portfolio_curve.append(portfolio_curve[-1] * (1.0 + prev_total_lev * step_ret))
+                
+                # Update Planner's Virtual Equity using its specific contribution to the previous step
                 p_state["s1_equity"] *= (1.0 + step_ret * p_state["last_lev_s1"])
                 p_state["s2_equity"] *= (1.0 + step_ret * p_state["last_lev_s2"])
             
-            # Planner
+            # 2. Calculate New Signals (To be used for the NEXT bar)
+            
+            # Strategy 1: Planner
             s1_trend = 1 if curr_price > row.d_sma120 else -1
             s1 = p_state["s1"]
             if s1["trend"] != s1_trend:
                 s1.update({"trend": s1_trend, "entry_idx": cnt, "stopped": False, "peak_equity": p_state["s1_equity"]})
             if p_state["s1_equity"] > s1["peak_equity"]: s1["peak_equity"] = p_state["s1_equity"]
-            if (s1["peak_equity"] - p_state["s1_equity"]) / max(s1["peak_equity"], 1) > PLANNER_PARAMS["S1_STOP"]: s1["stopped"] = True
-            p_state["last_lev_s1"] = float(s1_trend) * calculate_decay(s1["entry_idx"], cnt, PLANNER_PARAMS["S1_DECAY"]) if not s1["stopped"] else 0.0
+            
+            dd_s1 = (s1["peak_equity"] - p_state["s1_equity"]) / max(s1["peak_equity"], 1e-9)
+            if dd_s1 > PLANNER_PARAMS["S1_STOP"]: s1["stopped"] = True
+            
+            # Signal generated at current bar Close
+            s1_lev_out = float(s1_trend) * calculate_decay(s1["entry_idx"], cnt, PLANNER_PARAMS["S1_DECAY"]) if not s1["stopped"] else 0.0
 
+            # Strategy 2: Planner Core
             s2_trend = 1 if curr_price > row.d_sma400 else -1
             s2 = p_state["s2"]
             if s2["trend"] != s2_trend:
                 s2.update({"trend": s2_trend, "stopped": False, "peak_equity": p_state["s2_equity"]})
             if p_state["s2_equity"] > s2["peak_equity"]: s2["peak_equity"] = p_state["s2_equity"]
-            if (s2["peak_equity"] - p_state["s2_equity"]) / max(s2["peak_equity"], 1) > PLANNER_PARAMS["S2_STOP"]: s2["stopped"] = True
+            
+            dd_s2 = (s2["peak_equity"] - p_state["s2_equity"]) / max(s2["peak_equity"], 1e-9)
+            if dd_s2 > PLANNER_PARAMS["S2_STOP"]: s2["stopped"] = True
+            
             is_prox = (abs(curr_price - row.d_sma400) / row.d_sma400) < PLANNER_PARAMS["S2_PROX"]
             if s2["stopped"] and is_prox:
                 s2.update({"stopped": False, "peak_equity": p_state["s2_equity"]})
-            p_state["last_lev_s2"] = float(s2_trend) * (0.5 if is_prox else 1.0) if not s2["stopped"] else 0.0
             
-            # Tumbler
+            s2_lev_out = float(s2_trend) * (0.5 if is_prox else 1.0) if not s2["stopped"] else 0.0
+            
+            # Strategy 3: Tumbler
             if row.d_iii < TUMBLER_PARAMS["FLAT_THRESH"]: tumbler_flat = True
-            if tumbler_flat and (abs(curr_price - row.d_sma32) <= row.d_sma32 * TUMBLER_PARAMS["BAND"] or abs(curr_price - row.d_sma114) <= row.d_sma114 * TUMBLER_PARAMS["BAND"]):
+            if tumbler_flat and (abs(curr_price - row.d_sma32) <= row.d_sma32 * TUMBLER_PARAMS["BAND"] or 
+                               abs(curr_price - row.d_sma114) <= row.d_sma114 * TUMBLER_PARAMS["BAND"]):
                 tumbler_flat = False
+            
             t_lev = 0.0
             if not tumbler_flat:
                 base = TUMBLER_PARAMS["LEVS"][2]
@@ -209,8 +230,11 @@ class Backtester:
                 if curr_price > row.d_sma32 and curr_price > row.d_sma114: t_lev = base
                 elif curr_price < row.d_sma32 and curr_price < row.d_sma114: t_lev = -base
             
-            # Combined Levs
-            n_p = max(-2.0, min(2.0, p_state["last_lev_s1"] + p_state["last_lev_s2"]))
+            # Store Signals to be applied to the NEXT bar
+            p_state["last_lev_s1"] = s1_lev_out
+            p_state["last_lev_s2"] = s2_lev_out
+            
+            n_p = max(-2.0, min(2.0, s1_lev_out + s2_lev_out))
             n_t = t_lev * (TARGET_STRAT_LEV / TUMBLER_MAX_LEV)
             n_g = ((row.h_gainer_macd * gw["MACD_1H"] + row.d_gainer_macd * gw["MACD_1D"] + row.d_gainer_sma * gw["SMA_1D"]) / gw_sum) * TARGET_STRAT_LEV
             
@@ -233,7 +257,8 @@ class Backtester:
         max_dd = ((equity_curve - equity_curve.cummax()) / equity_curve.cummax()).min()
         
         print("\n" + "="*40)
-        print(f" BACKTEST RESULTS ({YEARS} Years - {SYMBOL})")
+        print(f" REAL BACKTEST RESULTS (No Lookahead)")
+        print(f" Period: {YEARS} Years | Asset: {SYMBOL}")
         print("="*40)
         print(f"Final Equity:   ${equity_curve.iloc[-1]:,.2f}")
         print(f"Total Return:   {total_ret*100:.2f}%")
