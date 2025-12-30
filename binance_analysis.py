@@ -7,153 +7,198 @@ import sys
 import http.server
 import socketserver
 import base64
+import urllib.parse
 from io import BytesIO
 import matplotlib.pyplot as plt
 from datetime import datetime
 
-# Helper to handle the requested print delay
+# Global variable to store pre-loaded 5m data to speed up slider interaction
+DATA_5M = None
+
 def delayed_print(text):
     print(text)
     sys.stdout.flush()
-    time.sleep(0.3)
+    time.sleep(0.1)
 
 def download_data(file_id, output_filename='ohlcv_data.csv'):
     url = f'https://drive.google.com/uc?id={file_id}'
     if os.path.exists(output_filename):
-        delayed_print(f"[INFO] File {output_filename} already exists. Skipping download.")
         return
-    delayed_print("[INFO] Initializing download from Google Drive...")
-    gdown.download(url, output_filename, quiet=False)
-    delayed_print("[SUCCESS] Download complete.")
+    delayed_print("[INFO] Downloading dataset...")
+    gdown.download(url, output_filename, quiet=True)
 
-def run_strategy(csv_file):
-    delayed_print("[PROCESS] Loading dataset...")
-    try:
-        df = pd.read_csv(csv_file)
-        date_col = df.columns[0]
-        df[date_col] = pd.to_datetime(df[date_col])
-        df.set_index(date_col, inplace=True)
-        df.columns = [c.lower() for c in df.columns]
-        
-        delayed_print("[PROCESS] Resampling to 5-minute bars...")
-        df_5m = df.resample('5min').agg({
-            'open': 'first', 'high': 'max', 'low': 'min', 'close': 'last', 'volume': 'sum'
-        }).dropna()
-        
-        delayed_print("[PROCESS] Calculating signals for independent streams...")
-        df_5m['sma_40'] = df_5m['close'].rolling(window=40).mean()
-        hold_period = 288 # 24 hours
-        
-        # Binary signals
-        df_5m['long_sig'] = (df_5m['close'] > df_5m['sma_40']).astype(int)
-        df_5m['short_sig'] = (df_5m['close'] < df_5m['sma_40']).astype(int)
-        
-        # Independent additive positions
-        df_5m['pos_long'] = df_5m['long_sig'].rolling(window=hold_period).sum()
-        df_5m['pos_short'] = df_5m['short_sig'].rolling(window=hold_period).sum()
-        df_5m['net_exposure'] = df_5m['pos_long'] - df_5m['pos_short']
+def prepare_data(csv_file):
+    global DATA_5M
+    delayed_print("[PROCESS] Pre-processing data into 5m intervals...")
+    df = pd.read_csv(csv_file)
+    date_col = df.columns[0]
+    df[date_col] = pd.to_datetime(df[date_col])
+    df.set_index(date_col, inplace=True)
+    df.columns = [c.lower() for c in df.columns]
+    DATA_5M = df.resample('5min').agg({
+        'open': 'first', 'high': 'max', 'low': 'min', 'close': 'last', 'volume': 'sum'
+    }).dropna()
 
-        # Returns calculation
-        future_close = df_5m['close'].shift(-hold_period)
-        pct_change = (future_close - df_5m['close']) / df_5m['close']
-        
-        # PnL contribution from each stream
-        df_5m['long_ret'] = df_5m['long_sig'] * pct_change
-        df_5m['short_ret'] = df_5m['short_sig'] * (-pct_change)
-        df_5m['total_ret'] = df_5m['long_ret'] + df_5m['short_ret']
-        
-        results = df_5m.dropna(subset=['total_ret', 'sma_40']).copy()
-        results['equity'] = results['total_ret'].cumsum()
-        results['cum_long'] = results['long_ret'].cumsum()
-        results['cum_short'] = results['short_ret'].cumsum()
-        
-        delayed_print("[FINALIZE] Calculating Realistic Daily Sharpe...")
-        
-        # --- SHARPE CALCULATION ---
-        daily_equity = results['equity'].resample('D').last().dropna()
-        daily_diff = daily_equity.diff().dropna()
-        if len(daily_diff) > 1:
-            sharpe = (daily_diff.mean() / daily_diff.std()) * np.sqrt(365)
-        else:
-            sharpe = 0
+def run_backtest(sma_period):
+    global DATA_5M
+    if DATA_5M is None:
+        return None, None
+    
+    df = DATA_5M.copy()
+    df['sma'] = df['close'].rolling(window=sma_period).mean()
+    hold_period = 288 # Constant 24h hold
+
+    # Independent Streams
+    df['long_sig'] = (df['close'] > df['sma']).astype(int)
+    df['short_sig'] = (df['close'] < df['sma']).astype(int)
+    
+    df['pos_long'] = df['long_sig'].rolling(window=hold_period).sum()
+    df['pos_short'] = df['short_sig'].rolling(window=hold_period).sum()
+    df['net_exposure'] = df['pos_long'] - df['pos_short']
+
+    future_close = df['close'].shift(-hold_period)
+    pct_change = (future_close - df['close']) / df['close']
+    
+    df['long_ret'] = df['long_sig'] * pct_change
+    df['short_ret'] = df['short_sig'] * (-pct_change)
+    df['total_ret'] = df['long_ret'] + df['short_ret']
+    
+    results = df.dropna(subset=['total_ret', 'sma']).copy()
+    results['equity'] = results['total_ret'].cumsum()
+    results['cum_long'] = results['long_ret'].cumsum()
+    results['cum_short'] = results['short_ret'].cumsum()
+    
+    # Sharpe
+    daily_equity = results['equity'].resample('D').last().dropna()
+    daily_diff = daily_equity.diff().dropna()
+    sharpe = (daily_diff.mean() / daily_diff.std()) * np.sqrt(365) if len(daily_diff) > 1 and daily_diff.std() != 0 else 0
             
-        # Drawdown Fix (expressed as a positive percentage)
-        highmark = results['equity'].cummax()
-        drawdown_series = (highmark - results['equity'])
-        max_dd_val = drawdown_series.max() * 100
+    # Drawdown
+    highmark = results['equity'].cummax()
+    max_dd = (highmark - results['equity']).max() * 100
 
-        metrics = {
-            "trades": len(results),
-            "sharpe": sharpe,
-            "total_return": results['equity'].iloc[-1] * 100,
-            "long_return": results['cum_long'].iloc[-1] * 100,
-            "short_return": results['cum_short'].iloc[-1] * 100,
-            "max_dd": max_dd_val,
-            "max_long_units": results['pos_long'].max(),
-            "max_short_units": results['pos_short'].max(),
-            "timestamp": datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-        }
+    metrics = {
+        "sma_period": sma_period,
+        "sharpe": sharpe,
+        "total_return": results['equity'].iloc[-1] * 100,
+        "long_return": results['cum_long'].iloc[-1] * 100,
+        "short_return": results['cum_short'].iloc[-1] * 100,
+        "max_dd": max_dd,
+        "max_long_units": results['pos_long'].max(),
+        "max_short_units": results['pos_short'].max(),
+    }
 
-        # Plotting
-        fig, (ax1, ax2) = plt.subplots(2, 1, figsize=(10, 8), sharex=True, gridspec_kw={'height_ratios': [2, 1]})
+    # Plot
+    fig, (ax1, ax2) = plt.subplots(2, 1, figsize=(10, 7), sharex=True, gridspec_kw={'height_ratios': [2, 1]})
+    ax1.plot(results.index, results['equity']*100, color='#1a73e8', lw=2, label='Total')
+    ax1.plot(results.index, results['cum_long']*100, color='#1e8e3e', lw=1, alpha=0.4, label='Long Only')
+    ax1.plot(results.index, results['cum_short']*100, color='#d93025', lw=1, alpha=0.4, label='Short Only')
+    ax1.set_title(f'Cumulative Return % (SMA: {sma_period})')
+    ax1.legend(loc='upper left', fontsize='small')
+    ax1.grid(True, alpha=0.2)
+    
+    ax2.plot(results.index, results['pos_long'], color='#1e8e3e', lw=1, alpha=0.6)
+    ax2.plot(results.index, -results['pos_short'], color='#d93025', lw=1, alpha=0.6)
+    ax2.fill_between(results.index, results['net_exposure'], color='#1a73e8', alpha=0.2)
+    ax2.set_title('Exposure (Units)')
+    ax2.grid(True, alpha=0.2)
+    
+    plt.tight_layout()
+    buf = BytesIO(); plt.savefig(buf, format='png', dpi=90); plt.close()
+    plot_b64 = base64.b64encode(buf.getvalue()).decode('utf-8')
+
+    return metrics, plot_b64
+
+class StrategyHandler(http.server.SimpleHTTPRequestHandler):
+    def do_GET(self):
+        query = urllib.parse.urlparse(self.path).query
+        params = urllib.parse.parse_qs(query)
+        sma_val = int(params.get('sma', [40])[0])
         
-        # Equity Curve with independent lines
-        ax1.plot(results.index, results['equity']*100, color='#1a73e8', lw=2, label='Total Strategy')
-        ax1.plot(results.index, results['cum_long']*100, color='#1e8e3e', lw=1, alpha=0.5, label='Long Only')
-        ax1.plot(results.index, results['cum_short']*100, color='#d93025', lw=1, alpha=0.5, label='Short Only')
-        ax1.set_title('Cumulative Return (%)', fontsize=12)
-        ax1.grid(True, alpha=0.2); ax1.legend(loc='upper left', fontsize='small')
+        # Clamp value
+        sma_val = max(40, min(sma_val, 2016))
         
-        # Independent Position Sizes
-        ax2.plot(results.index, results['pos_long'], color='#1e8e3e', lw=1, label='Long Units')
-        ax2.plot(results.index, -results['pos_short'], color='#d93025', lw=1, label='Short Units')
-        ax2.fill_between(results.index, results['net_exposure'], color='#1a73e8', alpha=0.2, label='Net Exposure')
-        ax2.set_title('Independent Position Exposure (Additive)', fontsize=12)
-        ax2.grid(True, alpha=0.2); ax2.legend(loc='lower left', fontsize='x-small')
+        metrics, plot_b64 = run_backtest(sma_val)
         
-        plt.tight_layout()
-        buf = BytesIO(); plt.savefig(buf, format='png', dpi=100); plt.close()
-        plot_b64 = base64.b64encode(buf.getvalue()).decode('utf-8')
+        if metrics is None:
+            self.send_error(500, "Data not ready")
+            return
 
-        return metrics, plot_b64
-    except Exception as e:
-        delayed_print(f"[ERROR] {e}"); return None, None
+        html = f"""
+        <!DOCTYPE html><html><head><title>SMA Backtest Simulator</title>
+        <style>
+            body {{ font-family: -apple-system, sans-serif; background: #f0f2f5; margin:0; padding:20px; color: #202124; }}
+            .container {{ max-width: 1100px; margin: auto; background: white; padding: 30px; border-radius: 12px; box-shadow: 0 4px 20px rgba(0,0,0,0.08); }}
+            .header {{ display: flex; justify-content: space-between; align-items: center; border-bottom: 1px solid #eee; padding-bottom: 20px; margin-bottom: 25px; }}
+            h1 {{ margin:0; font-size: 1.4rem; color: #1a73e8; }}
+            .control-panel {{ background: #f8f9fa; padding: 20px; border-radius: 8px; margin-bottom: 25px; border: 1px solid #e8eaed; }}
+            .slider-container {{ display: flex; align-items: center; gap: 20px; }}
+            input[type=range] {{ flex-grow: 1; height: 8px; border-radius: 5px; background: #ddd; outline: none; }}
+            .sma-display {{ font-weight: bold; color: #1a73e8; font-size: 1.2rem; min-width: 150px; }}
+            .grid {{ display: grid; grid-template-columns: 280px 1fr; gap: 30px; }}
+            .m-card {{ border-bottom: 1px solid #f1f3f4; padding: 12px 0; display: flex; justify-content: space-between; font-size: 0.9rem; }}
+            .m-val {{ font-weight: 700; }}
+            .highlight {{ color: #1a73e8; font-size: 1.1rem; }}
+            img {{ width: 100%; border-radius: 4px; }}
+            .label-hint {{ font-size: 0.75rem; color: #70757a; margin-top: 4px; }}
+        </style>
+        </head>
+        <body>
+            <div class="container">
+                <div class="header">
+                    <h1>SMA Adaptive Strategy Simulator</h1>
+                    <div class="timestamp">{datetime.now().strftime("%H:%M:%S")}</div>
+                </div>
 
-def start_server(metrics, plot_data):
-    PORT = 8080
-    html = f"""
-    <!DOCTYPE html><html><head><title>Backtest Dashboard</title><style>
-    body {{ font-family: -apple-system, sans-serif; background: #f8f9fa; padding: 20px; color: #202124; }}
-    .card {{ background: white; padding: 25px; border-radius: 8px; box-shadow: 0 1px 3px rgba(0,0,0,0.1); max-width: 1100px; margin: auto; }}
-    h1 {{ font-size: 1.3rem; color: #1a73e8; border-bottom: 1px solid #eee; padding-bottom: 12px; margin-top:0; }}
-    .grid {{ display: grid; grid-template-columns: 300px 1fr; gap: 25px; }}
-    .m-row {{ display: flex; justify-content: space-between; padding: 12px 0; border-bottom: 1px solid #f1f3f4; font-size: 0.9rem; }}
-    .m-val {{ font-weight: 700; }}
-    .highlight {{ color: #1a73e8; font-size: 1.1rem; }}
-    img {{ width: 100%; border-radius: 4px; }}
-    .note {{ font-size: 0.75rem; color: #70757a; margin-top: 15px; border-top: 1px solid #eee; padding-top: 10px; line-height: 1.4; }}
-    </style></head><body><div class="card">
-    <h1>Strategy Dashboard: Independent Dual Streams</h1>
-    <div class="grid"><div class="side">
-    <div class="m-row"><span>Realistic Sharpe</span><span class="m-val highlight">{metrics['sharpe']:.2f}</span></div>
-    <div class="m-row"><span>Total Return</span><span class="m-val" style="color:#1e8e3e">{metrics['total_return']:.1f}%</span></div>
-    <div class="m-row"><span>Max Drawdown</span><span class="m-val" style="color:#d93025">{metrics['max_dd']:.1f}%</span></div>
-    <div class="m-row"><span>Max Long Units</span><span class="m-val" style="color:#1e8e3e">{metrics['max_long_units']:.0f}</span></div>
-    <div class="m-row"><span>Max Short Units</span><span class="m-val" style="color:#d93025">{metrics['max_short_units']:.0f}</span></div>
-    <div class="m-row"><span>Long Contr.</span><span class="m-val">{metrics['long_return']:.1f}%</span></div>
-    <div class="m-row"><span>Short Contr.</span><span class="m-val">{metrics['short_return']:.1f}%</span></div>
-    <div class="note"><b>Dual Independent Positions:</b> Long and Short streams operate as additive 24-hour holds triggered every 5 minutes. Drawdown is magnitude from peak.</div>
-    </div><div class="main"><img src="data:image/png;base64,{plot_data}"></div></div></div></body></html>
-    """
-    class H(http.server.SimpleHTTPRequestHandler):
-        def do_GET(self):
-            self.send_response(200); self.send_header("Content-type", "text/html"); self.end_headers()
-            self.wfile.write(html.encode())
-    with socketserver.TCPServer(("", PORT), H) as httpd:
-        delayed_print(f"[INFO] Server live at http://localhost:{PORT}"); httpd.serve_forever()
+                <div class="control-panel">
+                    <div class="slider-container">
+                        <label>SMA Window:</label>
+                        <input type="range" id="smaSlider" min="40" max="2016" value="{sma_val}" oninput="updateVal(this.value)" onchange="applyVal(this.value)">
+                        <div class="sma-display" id="smaValDisplay">{sma_val} Bars</div>
+                    </div>
+                    <div class="label-hint">Range: 40 (5m) to 2016 (1 Week). Hold period fixed at 24h.</div>
+                </div>
+
+                <div class="grid">
+                    <div class="sidebar">
+                        <div class="m-card"><span>Realistic Sharpe</span><span class="m-val highlight">{metrics['sharpe']:.2f}</span></div>
+                        <div class="m-card"><span>Total Return</span><span class="m-val" style="color:#1e8e3e">{metrics['total_return']:.1f}%</span></div>
+                        <div class="m-card"><span>Max Drawdown</span><span class="m-val" style="color:#d93025">{metrics['max_dd']:.1f}%</span></div>
+                        <div class="m-card"><span>Max Long Units</span><span class="m-val">{metrics['max_long_units']:.0f}</span></div>
+                        <div class="m-card"><span>Max Short Units</span><span class="m-val">{metrics['max_short_units']:.0f}</span></div>
+                        <div class="m-card"><span>Long Contr.</span><span class="m-val">{metrics['long_return']:.1f}%</span></div>
+                        <div class="m-card"><span>Short Contr.</span><span class="m-val">{metrics['short_return']:.1f}%</span></div>
+                    </div>
+                    <div class="main-content">
+                        <img src="data:image/png;base64,{plot_b64}" alt="Backtest Plot">
+                    </div>
+                </div>
+            </div>
+
+            <script>
+                function updateVal(val) {{
+                    document.getElementById('smaValDisplay').innerText = val + " Bars";
+                }}
+                function applyVal(val) {{
+                    window.location.href = "?sma=" + val;
+                }}
+            </script>
+        </body></html>
+        """
+        self.send_response(200)
+        self.send_header("Content-type", "text/html")
+        self.end_headers()
+        self.wfile.write(html.encode())
 
 if __name__ == "__main__":
-    FILE_ID = '1kDCl_29nXyW1mLNUAS-nsJe0O2pOuO6o'; FILENAME = 'ohlcv.csv'
+    FILE_ID = '1kDCl_29nXyW1mLNUAS-nsJe0O2pOuO6o'
+    FILENAME = 'ohlcv.csv'
+    PORT = 8080
+
     download_data(FILE_ID, FILENAME)
-    res, plot = run_strategy(FILENAME)
-    if res: start_server(res, plot)
+    prepare_data(FILENAME)
+    
+    delayed_print(f"[SERVER] Starting interactive server on port {PORT}...")
+    with socketserver.TCPServer(("", PORT), StrategyHandler) as httpd:
+        delayed_print(f"[INFO] Simulator live at http://localhost:{PORT}")
+        httpd.serve_forever()
