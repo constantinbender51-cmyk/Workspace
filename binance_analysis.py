@@ -52,7 +52,7 @@ def prepare_data(csv_file):
     
     df = pd.read_csv(csv_file)
     
-    # Remove first 4 years: 12*24*365*4 = 420,480 bars
+    # User Request: Remove the first 12*24*365*4 entries
     skip_rows = 12 * 24 * 365 * 4
     delayed_print(f"[INFO] Skipping first {skip_rows} entries.")
     df = df.iloc[skip_rows:].reset_index(drop=True)
@@ -77,7 +77,8 @@ def calc_vectorized_macd_signal(df, config):
         slow = df['close'].ewm(span=s, adjust=False).mean()
         macd = fast - slow
         signal_line = macd.ewm(span=sp, adjust=False).mean()
-        # +1 if macd > signal_line, else -1
+        # Lookahead Fix: Signal at index i depends on macd/signal at index i
+        # But in the strategy, we shift this result by 1 so we trade on it at i+1
         sub_signal = np.where(macd > signal_line, 1.0, -1.0)
         total_signal += sub_signal * w
         
@@ -90,7 +91,6 @@ def calc_vectorized_sma_signal(df, config):
     
     for p, w in zip(params, weights):
         sma = df['close'].rolling(window=p).mean()
-        # +1 if current close > sma, else -1
         sub_signal = np.where(df['close'] > sma, 1.0, -1.0)
         total_signal += sub_signal * w
         
@@ -103,7 +103,7 @@ def run_backtest(hold_days):
     hold_period_5m = int(hold_days * 288) 
     delayed_print(f"[PROCESS] Running Gainer Backtest (Hold: {hold_days} days)...")
     
-    # 1. Calculate base signals on their respective timeframes (Vectorized)
+    # 1. Calculate base signals on their respective timeframes
     sig_1h = calc_vectorized_macd_signal(DATA_1H, GAINER_PARAMS["MACD_1H"])
     sig_1d_macd = calc_vectorized_macd_signal(DATA_1D, GAINER_PARAMS["MACD_1D"])
     sig_1d_sma = calc_vectorized_sma_signal(DATA_1D, GAINER_PARAMS["SMA_1D"])
@@ -113,36 +113,42 @@ def run_backtest(hold_days):
     s_1d_macd = sig_1d_macd.reindex(DATA_5M.index, method='ffill').fillna(0)
     s_1d_sma = sig_1d_sma.reindex(DATA_5M.index, method='ffill').fillna(0)
     
-    # 3. Combine signals using Gainer Weights
+    # 3. Combine signals
     w = GAINER_PARAMS["GA_WEIGHTS"]
-    combined_signal = (
+    raw_signal = (
         s_1h * w["MACD_1H"] + 
         s_1d_macd * w["MACD_1D"] + 
         s_1d_sma * w["SMA_1D"]
     ) / sum(w.values())
     
+    # 4. LOOKAHEAD BIAS FIX: Shift signal by 1 bar
+    # A trade at 'T' must be based on the signal calculated from data ending at 'T-1'
     df = DATA_5M.copy()
-    df['signal'] = combined_signal
+    df['signal'] = raw_signal.shift(1).fillna(0)
     
-    # 4. Additive position calculation
+    # 5. Additive position calculation
+    # position at time T = sum of signals from (T - hold_period) to T
     df['net_exposure'] = df['signal'].rolling(window=hold_period_5m).sum()
     
-    # 5. Fees: 0.02% per unit of delta change
+    # 6. Fees: 0.02% per unit of delta change
     fee_rate = 0.0002
     df['pos_delta'] = df['net_exposure'].diff().abs().fillna(0)
     df['fees'] = df['pos_delta'] * fee_rate
     
-    # 6. Returns Calculation
-    # Note: Using shift(-hold) for the 24h forward return
+    # 7. Returns Calculation
+    # We enter at the CLOSE of the signal bar. 
+    # We exit at the CLOSE of the bar 'hold_period_5m' steps in the future.
     future_close = df['close'].shift(-hold_period_5m)
     pct_change = (future_close - df['close']) / df['close']
+    
+    # The strategy return for the signal at Time T is signal[T] * pct_change[T]
     df['strategy_ret_raw'] = df['signal'] * pct_change
     df['strategy_ret_net'] = df['strategy_ret_raw'] - df['fees']
     
-    results = df.dropna(subset=['strategy_ret_net']).copy()
+    results = df.dropna(subset=['strategy_ret_net', 'close']).copy()
     results['equity'] = results['strategy_ret_net'].cumsum()
     
-    # 7. Metrics
+    # 8. Metrics (Daily sample)
     daily_equity = results['equity'].resample('D').last().dropna()
     daily_diff = daily_equity.diff().dropna()
     
@@ -162,16 +168,16 @@ def run_backtest(hold_days):
         "max_exposure": results['net_exposure'].abs().max(),
     }
 
-    # 8. Plotting
+    # Plotting
     fig, (ax1, ax2) = plt.subplots(2, 1, figsize=(10, 7), sharex=True, gridspec_kw={'height_ratios': [2, 1]})
     ax1.plot(results.index, results['equity']*100, color='#1a73e8', lw=2)
-    ax1.set_title(f'Gainer Ensemble Strategy | Hold: {hold_days} Days')
+    ax1.set_title(f'Gainer Strategy | No Lookahead | Hold: {hold_days} Days')
     ax1.set_ylabel('Net Return %')
     ax1.grid(True, alpha=0.2)
     
     ax2.fill_between(results.index, results['net_exposure'], color='#1a73e8', alpha=0.2)
     ax2.plot(results.index, results['net_exposure'], color='#1a73e8', lw=1)
-    ax2.set_title('Stacked Position Exposure (Additive Units)')
+    ax2.set_title('Stacked Exposure (Units)')
     ax2.set_ylabel('Units')
     ax2.grid(True, alpha=0.2)
     
@@ -191,7 +197,7 @@ class SimulatorHandler(http.server.SimpleHTTPRequestHandler):
         metrics, plot_b64 = run_backtest(hold_val)
         
         html = f"""
-        <!DOCTYPE html><html><head><title>Gainer Ensemble Simulator</title>
+        <!DOCTYPE html><html><head><title>No-Lookahead Gainer Simulator</title>
         <style>
             body {{ font-family: -apple-system, sans-serif; background: #f4f6f9; margin:0; padding:20px; color: #202124; }}
             .container {{ max-width: 1100px; margin: auto; background: white; padding: 30px; border-radius: 12px; box-shadow: 0 4px 20px rgba(0,0,0,0.08); }}
@@ -211,7 +217,7 @@ class SimulatorHandler(http.server.SimpleHTTPRequestHandler):
         <body>
             <div class="container">
                 <div class="header">
-                    <h1>Gainer Ensemble Simulator</h1>
+                    <h1>Gainer Simulator (Anti-Lookahead)</h1>
                     <div class="timestamp">{datetime.now().strftime("%H:%M:%S")}</div>
                 </div>
                 <div class="control-panel">
@@ -221,9 +227,9 @@ class SimulatorHandler(http.server.SimpleHTTPRequestHandler):
                         <div class="display" id="holdDisplay">{hold_val} Days</div>
                     </div>
                     <div class="hint">
-                        <b>Configuration:</b> Skipping first 4 years (~420k bars). <br/>
-                        <b>Strategy:</b> Full Gainer Ensemble (MACD 1h/1d + SMA 1d weights). <br/>
-                        <b>Logic:</b> Additive 24h holds stacked based on 5m entry signals.
+                        <b>Anti-Lookahead Logic:</b> Signal[T] = Ensemble_Calculation(Prices[:T-1]). <br/>
+                        <b>Strategy:</b> Gainer Weighted Ensemble. <br/>
+                        <b>Calculation:</b> Enter at Close(T), Exit at Close(T + HoldPeriod).
                     </div>
                 </div>
                 <div class="grid">
@@ -232,7 +238,7 @@ class SimulatorHandler(http.server.SimpleHTTPRequestHandler):
                         <div class="m-card"><span>Total Return (Net)</span><span class="m-val" style="color:#1e8e3e">{metrics['total_return']:.1f}%</span></div>
                         <div class="m-card"><span>Total Fees Paid</span><span class="m-val" style="color:#d93025">{metrics['total_fees']:.1f}%</span></div>
                         <div class="m-card"><span>Max Drawdown</span><span class="m-val">{metrics['max_dd']:.1f}%</span></div>
-                        <div class="m-card"><span>Max Unit Depth</span><span class="m-val">{metrics['max_exposure']:.0f}</span></div>
+                        <div class="m-card"><span>Max Net Units</span><span class="m-val">{metrics['max_exposure']:.0f}</span></div>
                     </div>
                     <div class="main-content"><img src="data:image/png;base64,{plot_b64}"></div>
                 </div>
