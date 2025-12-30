@@ -55,29 +55,38 @@ def run_strategy(csv_file):
         df_5m['sma_40'] = df_5m['close'].rolling(window=40).mean()
 
         hold_period = 288 # 24 hours in 5-minute bars
-        delayed_print(f"[PROCESS] Applying strategy logic (Hold period: {hold_period} bars)...")
+        delayed_print(f"[PROCESS] Simulating independent Long and Short streams...")
         
-        # Base Signal (Individual 5m entry)
-        df_5m['signal'] = 0
-        df_5m.loc[df_5m['close'] > df_5m['sma_40'], 'signal'] = 1
-        df_5m.loc[df_5m['close'] < df_5m['sma_40'], 'signal'] = -1
+        # 1. Generate individual trade signals
+        df_5m['long_signal'] = (df_5m['close'] > df_5m['sma_40']).astype(int)
+        df_5m['short_signal'] = (df_5m['close'] < df_5m['sma_40']).astype(int)
 
-        # Position Size Calculation (Cumulative exposure of overlapping trades)
-        # Each signal starts at t and ends at t + hold_period.
-        # Total position at time T is sum of signals from (T - hold_period) to T.
-        delayed_print("[PROCESS] Calculating additive position sizes...")
-        df_5m['position_size'] = df_5m['signal'].rolling(window=hold_period).sum()
+        # 2. Calculate additive position sizes for each stream
+        # Each signal lasts for 288 bars.
+        delayed_print("[PROCESS] Calculating independent additive exposures...")
+        df_5m['pos_long'] = df_5m['long_signal'].rolling(window=hold_period).sum()
+        df_5m['pos_short'] = df_5m['short_signal'].rolling(window=hold_period).sum()
+        df_5m['net_exposure'] = df_5m['pos_long'] - df_5m['pos_short']
 
-        delayed_print("[PROCESS] Calculating trade returns (24-hour forward window)...")
+        # 3. Calculate Returns
+        delayed_print("[PROCESS] Calculating performance for independent trades...")
         future_close = df_5m['close'].shift(-hold_period)
-        df_5m['trade_return'] = (future_close - df_5m['close']) / df_5m['close']
-        df_5m['strategy_return'] = df_5m['signal'] * df_5m['trade_return']
+        pct_change = (future_close - df_5m['close']) / df_5m['close']
         
-        results = df_5m.dropna(subset=['strategy_return', 'sma_40', 'position_size']).copy()
+        # Long trades profit from price increase, Short trades profit from price decrease
+        df_5m['long_return'] = df_5m['long_signal'] * pct_change
+        df_5m['short_return'] = df_5m['short_signal'] * (-pct_change)
+        
+        # Total strategy return is the sum of both independent streams
+        df_5m['strategy_return'] = df_5m['long_return'] + df_5m['short_return']
+        
+        results = df_5m.dropna(subset=['strategy_return', 'sma_40', 'pos_long', 'pos_short']).copy()
         
         delayed_print("[FINALIZE] Aggregating performance metrics...")
         
-        # Calculate Equity Curve
+        # Calculate Equity Curves
+        results['cum_ret_long'] = results['long_return'].cumsum()
+        results['cum_ret_short'] = results['short_return'].cumsum()
         results['cumulative_return'] = results['strategy_return'].cumsum()
         
         # Metrics
@@ -99,9 +108,12 @@ def run_strategy(csv_file):
             "avg_return": avg_ret * 100,
             "ret_std_ratio": ret_std_ratio,
             "total_return": results['strategy_return'].sum() * 100,
+            "long_return": results['long_return'].sum() * 100,
+            "short_return": results['short_return'].sum() * 100,
             "profit_factor": profit_factor,
             "max_drawdown": max_drawdown * 100,
-            "max_pos_size": results['position_size'].abs().max(),
+            "max_pos_long": results['pos_long'].max(),
+            "max_pos_short": results['pos_short'].max(),
             "timestamp": datetime.now().strftime("%Y-%m-%d %H:%M:%S")
         }
 
@@ -110,33 +122,36 @@ def run_strategy(csv_file):
         fig, (ax1, ax2) = plt.subplots(2, 1, figsize=(10, 8), sharex=True, gridspec_kw={'height_ratios': [2, 1]})
         
         # Plot 1: Equity Curve
-        ax1.plot(results.index, results['cumulative_return'] * 100, color='#1a73e8', linewidth=1.5)
+        ax1.plot(results.index, results['cumulative_return'] * 100, color='#1a73e8', linewidth=2, label='Total Strategy')
+        ax1.plot(results.index, results['cum_ret_long'] * 100, color='#1e8e3e', linewidth=1, alpha=0.6, label='Long Stream')
+        ax1.plot(results.index, results['cum_ret_short'] * 100, color='#d93025', linewidth=1, alpha=0.6, label='Short Stream')
         ax1.set_title('Cumulative Strategy Return (%)', fontsize=12)
         ax1.set_ylabel('Return %')
-        ax1.grid(True, linestyle='--', alpha=0.4)
+        ax1.grid(True, linestyle='--', alpha=0.3)
+        ax1.legend(loc='upper left', fontsize='small')
         
-        # Plot 2: Position Size
-        ax2.fill_between(results.index, results['position_size'], color='#e8f0fe', alpha=0.5)
-        ax2.plot(results.index, results['position_size'], color='#1a73e8', linewidth=1, label='Net Exposure')
-        ax2.set_title('Total Additive Position Size (Net Units)', fontsize=12)
+        # Plot 2: Independent Position Sizes
+        ax2.plot(results.index, results['pos_long'], color='#1e8e3e', linewidth=1, label='Long Exposure')
+        ax2.plot(results.index, -results['pos_short'], color='#d93025', linewidth=1, label='Short Exposure')
+        ax2.fill_between(results.index, results['net_exposure'], color='#1a73e8', alpha=0.2, label='Net Exposure')
+        ax2.set_title('Independent & Net Position Exposure (Units)', fontsize=12)
         ax2.set_ylabel('Units')
-        ax2.grid(True, linestyle='--', alpha=0.4)
-        ax2.legend(loc='upper right')
+        ax2.grid(True, linestyle='--', alpha=0.3)
+        ax2.legend(loc='lower left', fontsize='x-small')
         
         plt.tight_layout()
         
-        # Convert plot to base64
         buf = BytesIO()
         plt.savefig(buf, format='png', dpi=100)
         plt.close()
         plot_base64 = base64.b64encode(buf.getvalue()).decode('utf-8')
 
         delayed_print("--------------------------------------------------")
-        delayed_print(f"STRATEGY REPORT: SMA 40 Cross + 24H Hold")
+        delayed_print(f"REPORT: Independent Additive Positions")
         delayed_print("--------------------------------------------------")
-        delayed_print(f"Max Position Exposure: {metrics['max_pos_size']:.0f} units")
-        delayed_print(f"Return / STD Ratio:    {metrics['ret_std_ratio']:.4f}")
-        delayed_print(f"Total Return (Sum):    {metrics['total_return']:.2f}%")
+        delayed_print(f"Max Long Exposure:    {metrics['max_pos_long']:.0f} units")
+        delayed_print(f"Max Short Exposure:   {metrics['max_pos_short']:.0f} units")
+        delayed_print(f"Total Return (Sum):   {metrics['total_return']:.2f}%")
         delayed_print("--------------------------------------------------")
         
         return metrics, plot_base64
@@ -152,38 +167,42 @@ def start_server(metrics, plot_data):
     <!DOCTYPE html>
     <html>
     <head>
-        <title>Backtest Dashboard</title>
+        <title>Backtest Dashboard - Independent Streams</title>
         <style>
             body {{ font-family: -apple-system, system-ui, sans-serif; background-color: #f8f9fa; color: #202124; margin: 0; padding: 20px; }}
             .container {{ max-width: 1100px; margin: 0 auto; }}
             .card {{ background: white; padding: 30px; border-radius: 8px; box-shadow: 0 1px 3px rgba(0,0,0,0.12); }}
             h1 {{ font-size: 1.4rem; color: #1a73e8; margin-top: 0; margin-bottom: 25px; border-bottom: 1px solid #eee; padding-bottom: 15px; }}
-            .dashboard-grid {{ display: grid; grid-template-columns: 300px 1fr; gap: 30px; }}
+            .dashboard-grid {{ display: grid; grid-template-columns: 320px 1fr; gap: 30px; }}
             .metric-box {{ border-bottom: 1px solid #f1f3f4; padding: 12px 0; display: flex; justify-content: space-between; }}
-            .metric-label {{ color: #5f6368; font-size: 0.9rem; }}
+            .metric-label {{ color: #5f6368; font-size: 0.85rem; }}
             .metric-value {{ font-weight: 700; color: #202124; }}
             .chart-area {{ text-align: center; }}
             .chart-area img {{ width: 100%; border-radius: 4px; }}
-            .pos-note {{ background: #e8f0fe; padding: 15px; border-radius: 6px; margin-top: 20px; font-size: 0.85rem; color: #1967d2; line-height: 1.4; }}
+            .info-panel {{ background: #fdf7e3; padding: 15px; border-radius: 6px; margin-top: 20px; font-size: 0.8rem; color: #856404; line-height: 1.4; border: 1px solid #ffeeba; }}
             .footer {{ text-align: center; margin-top: 30px; color: #70757a; font-size: 0.8rem; }}
         </style>
     </head>
     <body>
         <div class="container">
             <div class="card">
-                <h1>Quant Strategy: SMA 40 / 24H Hold</h1>
+                <h1>Independent Long/Short Additive Strategy</h1>
                 <div class="dashboard-grid">
                     <div class="metrics-sidebar">
                         <div class="metric-box"><span class="metric-label">Total Bars</span><span class="metric-value">{metrics['total_trades']}</span></div>
-                        <div class="metric-box"><span class="metric-label">Win Rate</span><span class="metric-value">{metrics['win_rate']:.1f}%</span></div>
                         <div class="metric-box"><span class="metric-label">Return / STD</span><span class="metric-value" style="color:#1a73e8">{metrics['ret_std_ratio']:.4f}</span></div>
-                        <div class="metric-box"><span class="metric-label">Max Exposure</span><span class="metric-value">{metrics['max_pos_size']:.0f} units</span></div>
                         <div class="metric-box"><span class="metric-label">Profit Factor</span><span class="metric-value">{metrics['profit_factor']:.2f}</span></div>
-                        <div class="metric-box"><span class="metric-label">Max Drawdown</span><span class="metric-value" style="color:#d93025">{metrics['max_drawdown']:.2f}%</span></div>
-                        <div class="metric-box"><span class="metric-label">Total Return</span><span class="metric-value" style="color:#1e8e3e">{metrics['total_return']:.2f}%</span></div>
+                        <div class="metric-box"><span class="metric-label">Max Long Units</span><span class="metric-value" style="color:#1e8e3e">{metrics['max_pos_long']:.0f}</span></div>
+                        <div class="metric-box"><span class="metric-label">Max Short Units</span><span class="metric-value" style="color:#d93025">{metrics['max_pos_short']:.0f}</span></div>
+                        <div class="metric-box"><span class="metric-label">Long Return</span><span class="metric-value">{metrics['long_return']:.2f}%</span></div>
+                        <div class="metric-box"><span class="metric-label">Short Return</span><span class="metric-value">{metrics['short_return']:.2f}%</span></div>
+                        <div class="metric-box"><span class="metric-label">Total Return</span><span class="metric-value" style="color:#1a73e8; font-size:1.1rem">{metrics['total_return']:.2f}%</span></div>
                         
-                        <div class="pos-note">
-                            <strong>Note on Position Sizing:</strong> Positions are additive. Since a new trade is opened every 5 minutes and held for 24 hours, you hold up to 288 overlapping positions simultaneously.
+                        <div class="info-panel">
+                            <strong>Logic:</strong> Long and Short streams are independent. 
+                            If the price is above SMA, a 24h Long is opened. 
+                            If the price is below SMA, a 24h Short is opened. 
+                            These positions accumulate independently based on 5-minute entry signals.
                         </div>
                     </div>
                     <div class="chart-area">
@@ -191,7 +210,7 @@ def start_server(metrics, plot_data):
                     </div>
                 </div>
             </div>
-            <div class="footer">Simulation generated at {metrics['timestamp']} | Port: 8080</div>
+            <div class="footer">Simulation generated at {metrics['timestamp']}</div>
         </div>
     </body>
     </html>
