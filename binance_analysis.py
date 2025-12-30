@@ -56,19 +56,26 @@ def run_backtest(sma_period):
     df['pos_short'] = df['short_sig'].rolling(window=hold_period).sum()
     df['net_exposure'] = df['pos_long'] - df['pos_short']
 
+    # Fee Logic: 0.02% on delta change of net position size
+    # We use abs(diff) because increasing or decreasing exposure incurs fees
+    fee_rate = 0.0002
+    df['pos_delta'] = df['net_exposure'].diff().abs().fillna(0)
+    df['fees'] = df['pos_delta'] * fee_rate
+
     future_close = df['close'].shift(-hold_period)
     pct_change = (future_close - df['close']) / df['close']
     
-    df['long_ret'] = df['long_sig'] * pct_change
-    df['short_ret'] = df['short_sig'] * (-pct_change)
-    df['total_ret'] = df['long_ret'] + df['short_ret']
+    df['long_ret_raw'] = df['long_sig'] * pct_change
+    df['short_ret_raw'] = df['short_sig'] * (-pct_change)
     
-    results = df.dropna(subset=['total_ret', 'sma']).copy()
-    results['equity'] = results['total_ret'].cumsum()
-    results['cum_long'] = results['long_ret'].cumsum()
-    results['cum_short'] = results['short_ret'].cumsum()
+    # We subtract fees from the total return stream
+    # Note: In an additive model, fees are usually attributed to the bar of execution
+    df['total_ret_net'] = (df['long_ret_raw'] + df['short_ret_raw']) - df['fees']
     
-    # Sharpe
+    results = df.dropna(subset=['total_ret_net', 'sma']).copy()
+    results['equity'] = results['total_ret_net'].cumsum()
+    
+    # Sharpe (using net equity)
     daily_equity = results['equity'].resample('D').last().dropna()
     daily_diff = daily_equity.diff().dropna()
     sharpe = (daily_diff.mean() / daily_diff.std()) * np.sqrt(365) if len(daily_diff) > 1 and daily_diff.std() != 0 else 0
@@ -80,9 +87,9 @@ def run_backtest(sma_period):
     metrics = {
         "sma_period": sma_period,
         "sharpe": sharpe,
+        "avg_trade_ret": results['total_ret_net'].mean() * 100,
         "total_return": results['equity'].iloc[-1] * 100,
-        "long_return": results['cum_long'].iloc[-1] * 100,
-        "short_return": results['cum_short'].iloc[-1] * 100,
+        "total_fees": results['fees'].sum() * 100,
         "max_dd": max_dd,
         "max_long_units": results['pos_long'].max(),
         "max_short_units": results['pos_short'].max(),
@@ -90,18 +97,18 @@ def run_backtest(sma_period):
 
     # Plot
     fig, (ax1, ax2) = plt.subplots(2, 1, figsize=(10, 7), sharex=True, gridspec_kw={'height_ratios': [2, 1]})
-    ax1.plot(results.index, results['equity']*100, color='#1a73e8', lw=2, label='Total')
-    ax1.plot(results.index, results['cum_long']*100, color='#1e8e3e', lw=1, alpha=0.4, label='Long Only')
-    ax1.plot(results.index, results['cum_short']*100, color='#d93025', lw=1, alpha=0.4, label='Short Only')
-    ax1.set_title(f'Cumulative Return % (SMA: {sma_period})')
-    ax1.legend(loc='upper left', fontsize='small')
+    ax1.plot(results.index, results['equity']*100, color='#1a73e8', lw=2, label='Equity (Net of Fees)')
+    ax1.set_title(f'Cumulative Net Return % (SMA: {sma_period})')
+    ax1.set_ylabel('Net Return %')
     ax1.grid(True, alpha=0.2)
+    ax1.legend(loc='upper left', fontsize='small')
     
-    ax2.plot(results.index, results['pos_long'], color='#1e8e3e', lw=1, alpha=0.6)
-    ax2.plot(results.index, -results['pos_short'], color='#d93025', lw=1, alpha=0.6)
-    ax2.fill_between(results.index, results['net_exposure'], color='#1a73e8', alpha=0.2)
+    ax2.plot(results.index, results['pos_long'], color='#1e8e3e', lw=1, alpha=0.6, label='Long Units')
+    ax2.plot(results.index, -results['pos_short'], color='#d93025', lw=1, alpha=0.6, label='Short Units')
+    ax2.fill_between(results.index, results['net_exposure'], color='#1a73e8', alpha=0.2, label='Net Exposure')
     ax2.set_title('Exposure (Units)')
     ax2.grid(True, alpha=0.2)
+    ax2.legend(loc='lower left', fontsize='x-small')
     
     plt.tight_layout()
     buf = BytesIO(); plt.savefig(buf, format='png', dpi=90); plt.close()
@@ -114,8 +121,6 @@ class StrategyHandler(http.server.SimpleHTTPRequestHandler):
         query = urllib.parse.urlparse(self.path).query
         params = urllib.parse.parse_qs(query)
         sma_val = int(params.get('sma', [40])[0])
-        
-        # Max limit set to 120 days (12 bars/hr * 24 hr/day * 120 days = 34560)
         sma_val = max(40, min(sma_val, 34560))
         
         metrics, plot_b64 = run_backtest(sma_val)
@@ -156,18 +161,18 @@ class StrategyHandler(http.server.SimpleHTTPRequestHandler):
                         <input type="range" id="smaSlider" min="40" max="34560" value="{sma_val}" oninput="updateVal(this.value)" onchange="applyVal(this.value)">
                         <div class="sma-display" id="smaValDisplay">{sma_val} Bars ({(sma_val/288):.1f} Days)</div>
                     </div>
-                    <div class="label-hint">Range: 40 (5m) to 34560 (120 Days). Hold period fixed at 24h.</div>
+                    <div class="label-hint">Range: 40 (5m) to 34560 (120 Days). Hold: 24h. Fees: 0.02% per delta unit.</div>
                 </div>
 
                 <div class="grid">
                     <div class="sidebar">
                         <div class="m-card"><span>Realistic Sharpe</span><span class="m-val highlight">{metrics['sharpe']:.2f}</span></div>
-                        <div class="m-card"><span>Total Return</span><span class="m-val" style="color:#1e8e3e">{metrics['total_return']:.1f}%</span></div>
-                        <div class="m-card"><span>Max Drawdown</span><span class="m-val" style="color:#d93025">{metrics['max_dd']:.1f}%</span></div>
+                        <div class="m-card"><span>Avg Trade (Net)</span><span class="m-val" style="color:#1a73e8">{metrics['avg_trade_ret']:.4f}%</span></div>
+                        <div class="m-card"><span>Total Return (Net)</span><span class="m-val" style="color:#1e8e3e">{metrics['total_return']:.1f}%</span></div>
+                        <div class="m-card"><span>Total Fees Paid</span><span class="m-val" style="color:#d93025">{metrics['total_fees']:.1f}%</span></div>
+                        <div class="m-card"><span>Max Drawdown</span><span class="m-val">{metrics['max_dd']:.1f}%</span></div>
                         <div class="m-card"><span>Max Long Units</span><span class="m-val">{metrics['max_long_units']:.0f}</span></div>
                         <div class="m-card"><span>Max Short Units</span><span class="m-val">{metrics['max_short_units']:.0f}</span></div>
-                        <div class="m-card"><span>Long Contr.</span><span class="m-val">{metrics['long_return']:.1f}%</span></div>
-                        <div class="m-card"><span>Short Contr.</span><span class="m-val">{metrics['short_return']:.1f}%</span></div>
                     </div>
                     <div class="main-content">
                         <img src="data:image/png;base64,{plot_b64}" alt="Backtest Plot">
