@@ -115,8 +115,8 @@ class StrategyHandler(http.server.SimpleHTTPRequestHandler):
         params = urllib.parse.parse_qs(query)
         sma_val = int(params.get('sma', [40])[0])
         
-        # Clamp value
-        sma_val = max(40, min(sma_val, 2016))
+        # Max limit set to 120 days (12 bars/hr * 24 hr/day * 120 days = 34560)
+        sma_val = max(40, min(sma_val, 34560))
         
         metrics, plot_b64 = run_backtest(sma_val)
         
@@ -134,7 +134,7 @@ class StrategyHandler(http.server.SimpleHTTPRequestHandler):
             .control-panel {{ background: #f8f9fa; padding: 20px; border-radius: 8px; margin-bottom: 25px; border: 1px solid #e8eaed; }}
             .slider-container {{ display: flex; align-items: center; gap: 20px; }}
             input[type=range] {{ flex-grow: 1; height: 8px; border-radius: 5px; background: #ddd; outline: none; }}
-            .sma-display {{ font-weight: bold; color: #1a73e8; font-size: 1.2rem; min-width: 150px; }}
+            .sma-display {{ font-weight: bold; color: #1a73e8; font-size: 1.2rem; min-width: 180px; text-align: right; }}
             .grid {{ display: grid; grid-template-columns: 280px 1fr; gap: 30px; }}
             .m-card {{ border-bottom: 1px solid #f1f3f4; padding: 12px 0; display: flex; justify-content: space-between; font-size: 0.9rem; }}
             .m-val {{ font-weight: 700; }}
@@ -153,10 +153,10 @@ class StrategyHandler(http.server.SimpleHTTPRequestHandler):
                 <div class="control-panel">
                     <div class="slider-container">
                         <label>SMA Window:</label>
-                        <input type="range" id="smaSlider" min="40" max="2016" value="{sma_val}" oninput="updateVal(this.value)" onchange="applyVal(this.value)">
-                        <div class="sma-display" id="smaValDisplay">{sma_val} Bars</div>
+                        <input type="range" id="smaSlider" min="40" max="34560" value="{sma_val}" oninput="updateVal(this.value)" onchange="applyVal(this.value)">
+                        <div class="sma-display" id="smaValDisplay">{sma_val} Bars ({(sma_val/288):.1f} Days)</div>
                     </div>
-                    <div class="label-hint">Range: 40 (5m) to 2016 (1 Week). Hold period fixed at 24h.</div>
+                    <div class="label-hint">Range: 40 (5m) to 34560 (120 Days). Hold period fixed at 24h.</div>
                 </div>
 
                 <div class="grid">
@@ -177,7 +177,8 @@ class StrategyHandler(http.server.SimpleHTTPRequestHandler):
 
             <script>
                 function updateVal(val) {{
-                    document.getElementById('smaValDisplay').innerText = val + " Bars";
+                    let days = (val / 288).toFixed(1);
+                    document.getElementById('smaValDisplay').innerText = val + " Bars (" + days + " Days)";
                 }}
                 function applyVal(val) {{
                     window.location.href = "?sma=" + val;
