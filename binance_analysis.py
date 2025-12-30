@@ -40,74 +40,76 @@ def run_strategy(csv_file):
             'open': 'first', 'high': 'max', 'low': 'min', 'close': 'last', 'volume': 'sum'
         }).dropna()
         
-        delayed_print("[PROCESS] Calculating 40 SMA and signals...")
+        delayed_print("[PROCESS] Calculating signals for independent streams...")
         df_5m['sma_40'] = df_5m['close'].rolling(window=40).mean()
         hold_period = 288 # 24 hours
         
-        # Signals
-        df_5m['long_signal'] = (df_5m['close'] > df_5m['sma_40']).astype(int)
-        df_5m['short_signal'] = (df_5m['close'] < df_5m['sma_40']).astype(int)
+        # Binary signals
+        df_5m['long_sig'] = (df_5m['close'] > df_5m['sma_40']).astype(int)
+        df_5m['short_sig'] = (df_5m['close'] < df_5m['sma_40']).astype(int)
         
-        # Additive positions
-        df_5m['pos_long'] = df_5m['long_signal'].rolling(window=hold_period).sum()
-        df_5m['pos_short'] = df_5m['short_signal'].rolling(window=hold_period).sum()
+        # Independent additive positions
+        df_5m['pos_long'] = df_5m['long_sig'].rolling(window=hold_period).sum()
+        df_5m['pos_short'] = df_5m['short_sig'].rolling(window=hold_period).sum()
         df_5m['net_exposure'] = df_5m['pos_long'] - df_5m['pos_short']
 
         # Returns calculation
         future_close = df_5m['close'].shift(-hold_period)
         pct_change = (future_close - df_5m['close']) / df_5m['close']
-        df_5m['long_ret'] = df_5m['long_signal'] * pct_change
-        df_5m['short_ret'] = df_5m['short_signal'] * (-pct_change)
+        
+        # PnL contribution from each stream
+        df_5m['long_ret'] = df_5m['long_sig'] * pct_change
+        df_5m['short_ret'] = df_5m['short_sig'] * (-pct_change)
         df_5m['total_ret'] = df_5m['long_ret'] + df_5m['short_ret']
         
         results = df_5m.dropna(subset=['total_ret', 'sma_40']).copy()
         results['equity'] = results['total_ret'].cumsum()
+        results['cum_long'] = results['long_ret'].cumsum()
+        results['cum_short'] = results['short_ret'].cumsum()
         
-        delayed_print("[FINALIZE] Calculating Realistic (Daily) Sharpe Ratio...")
+        delayed_print("[FINALIZE] Calculating Realistic Daily Sharpe...")
         
-        # --- THE CORRECT SHARPE CALCULATION ---
-        # 1. Resample equity to Daily close
+        # --- SHARPE CALCULATION ---
         daily_equity = results['equity'].resample('D').last().dropna()
-        # 2. Calculate daily returns from the equity curve
         daily_diff = daily_equity.diff().dropna()
-        # 3. Calculate Sharpe based on Daily standard deviation
         if len(daily_diff) > 1:
-            daily_mean = daily_diff.mean()
-            daily_std = daily_diff.std()
-            # Annualize by multiplying by sqrt(365)
-            sharpe = (daily_mean / daily_std) * np.sqrt(365) if daily_std != 0 else 0
+            sharpe = (daily_diff.mean() / daily_diff.std()) * np.sqrt(365)
         else:
             sharpe = 0
             
-        # Profit Factor & Drawdown
-        gross_p = results[results['total_ret'] > 0]['total_ret'].sum()
-        gross_l = abs(results[results['total_ret'] < 0]['total_ret'].sum())
-        pf = gross_p / gross_l if gross_l != 0 else 0
-        
+        # Drawdown Fix (expressed as a positive percentage)
         highmark = results['equity'].cummax()
-        dd = results['equity'] - highmark
-        max_dd = dd.min()
+        drawdown_series = (highmark - results['equity'])
+        max_dd_val = drawdown_series.max() * 100
 
         metrics = {
             "trades": len(results),
             "sharpe": sharpe,
             "total_return": results['equity'].iloc[-1] * 100,
-            "pf": pf,
-            "max_dd": max_dd * 100,
-            "max_exp": results['net_exposure'].abs().max(),
+            "long_return": results['cum_long'].iloc[-1] * 100,
+            "short_return": results['cum_short'].iloc[-1] * 100,
+            "max_dd": max_dd_val,
+            "max_long_units": results['pos_long'].max(),
+            "max_short_units": results['pos_short'].max(),
             "timestamp": datetime.now().strftime("%Y-%m-%d %H:%M:%S")
         }
 
         # Plotting
         fig, (ax1, ax2) = plt.subplots(2, 1, figsize=(10, 8), sharex=True, gridspec_kw={'height_ratios': [2, 1]})
-        ax1.plot(results.index, results['equity']*100, color='#1a73e8', lw=1.5)
-        ax1.set_title('Cumulative Return (%)', fontsize=12)
-        ax1.grid(True, alpha=0.2); ax1.set_ylabel('% Return')
         
-        ax2.fill_between(results.index, results['net_exposure'], color='#1a73e8', alpha=0.2)
-        ax2.plot(results.index, results['net_exposure'], color='#1a73e8', lw=1)
-        ax2.set_title('Net Position Exposure (Additive Units)', fontsize=12)
-        ax2.grid(True, alpha=0.2); ax2.set_ylabel('Units')
+        # Equity Curve with independent lines
+        ax1.plot(results.index, results['equity']*100, color='#1a73e8', lw=2, label='Total Strategy')
+        ax1.plot(results.index, results['cum_long']*100, color='#1e8e3e', lw=1, alpha=0.5, label='Long Only')
+        ax1.plot(results.index, results['cum_short']*100, color='#d93025', lw=1, alpha=0.5, label='Short Only')
+        ax1.set_title('Cumulative Return (%)', fontsize=12)
+        ax1.grid(True, alpha=0.2); ax1.legend(loc='upper left', fontsize='small')
+        
+        # Independent Position Sizes
+        ax2.plot(results.index, results['pos_long'], color='#1e8e3e', lw=1, label='Long Units')
+        ax2.plot(results.index, -results['pos_short'], color='#d93025', lw=1, label='Short Units')
+        ax2.fill_between(results.index, results['net_exposure'], color='#1a73e8', alpha=0.2, label='Net Exposure')
+        ax2.set_title('Independent Position Exposure (Additive)', fontsize=12)
+        ax2.grid(True, alpha=0.2); ax2.legend(loc='lower left', fontsize='x-small')
         
         plt.tight_layout()
         buf = BytesIO(); plt.savefig(buf, format='png', dpi=100); plt.close()
@@ -122,23 +124,25 @@ def start_server(metrics, plot_data):
     html = f"""
     <!DOCTYPE html><html><head><title>Backtest Dashboard</title><style>
     body {{ font-family: -apple-system, sans-serif; background: #f8f9fa; padding: 20px; color: #202124; }}
-    .card {{ background: white; padding: 25px; border-radius: 8px; box-shadow: 0 1px 3px rgba(0,0,0,0.1); max-width: 1000px; margin: auto; }}
-    h1 {{ font-size: 1.2rem; color: #1a73e8; border-bottom: 1px solid #eee; padding-bottom: 10px; }}
-    .grid {{ display: grid; grid-template-columns: 280px 1fr; gap: 20px; }}
-    .m-row {{ display: flex; justify-content: space-between; padding: 10px 0; border-bottom: 1px solid #f1f3f4; font-size: 0.9rem; }}
+    .card {{ background: white; padding: 25px; border-radius: 8px; box-shadow: 0 1px 3px rgba(0,0,0,0.1); max-width: 1100px; margin: auto; }}
+    h1 {{ font-size: 1.3rem; color: #1a73e8; border-bottom: 1px solid #eee; padding-bottom: 12px; margin-top:0; }}
+    .grid {{ display: grid; grid-template-columns: 300px 1fr; gap: 25px; }}
+    .m-row {{ display: flex; justify-content: space-between; padding: 12px 0; border-bottom: 1px solid #f1f3f4; font-size: 0.9rem; }}
     .m-val {{ font-weight: 700; }}
-    .sharpe-val {{ color: #1a73e8; font-size: 1.1rem; }}
+    .highlight {{ color: #1a73e8; font-size: 1.1rem; }}
     img {{ width: 100%; border-radius: 4px; }}
-    .note {{ font-size: 0.75rem; color: #70757a; margin-top: 15px; font-style: italic; }}
+    .note {{ font-size: 0.75rem; color: #70757a; margin-top: 15px; border-top: 1px solid #eee; padding-top: 10px; line-height: 1.4; }}
     </style></head><body><div class="card">
-    <h1>SMA Strategy: Corrected Realistic Sharpe</h1>
+    <h1>Strategy Dashboard: Independent Dual Streams</h1>
     <div class="grid"><div class="side">
-    <div class="m-row"><span>Realistic Sharpe</span><span class="m-val sharpe-val">{metrics['sharpe']:.2f}</span></div>
+    <div class="m-row"><span>Realistic Sharpe</span><span class="m-val highlight">{metrics['sharpe']:.2f}</span></div>
     <div class="m-row"><span>Total Return</span><span class="m-val" style="color:#1e8e3e">{metrics['total_return']:.1f}%</span></div>
-    <div class="m-row"><span>Profit Factor</span><span class="m-val">{metrics['pf']:.2f}</span></div>
     <div class="m-row"><span>Max Drawdown</span><span class="m-val" style="color:#d93025">{metrics['max_dd']:.1f}%</span></div>
-    <div class="m-row"><span>Max Net Units</span><span class="m-val">{metrics['max_exp']:.0f}</span></div>
-    <div class="note">Sharpe is calculated on <b>Daily Equity Delta</b> to remove 5-min autocorrelation bias. Annualized by sqrt(365).</div>
+    <div class="m-row"><span>Max Long Units</span><span class="m-val" style="color:#1e8e3e">{metrics['max_long_units']:.0f}</span></div>
+    <div class="m-row"><span>Max Short Units</span><span class="m-val" style="color:#d93025">{metrics['max_short_units']:.0f}</span></div>
+    <div class="m-row"><span>Long Contr.</span><span class="m-val">{metrics['long_return']:.1f}%</span></div>
+    <div class="m-row"><span>Short Contr.</span><span class="m-val">{metrics['short_return']:.1f}%</span></div>
+    <div class="note"><b>Dual Independent Positions:</b> Long and Short streams operate as additive 24-hour holds triggered every 5 minutes. Drawdown is magnitude from peak.</div>
     </div><div class="main"><img src="data:image/png;base64,{plot_data}"></div></div></div></body></html>
     """
     class H(http.server.SimpleHTTPRequestHandler):
