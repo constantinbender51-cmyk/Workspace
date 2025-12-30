@@ -54,26 +54,33 @@ def run_strategy(csv_file):
         delayed_print("[PROCESS] Calculating 40-period Simple Moving Average (SMA)...")
         df_5m['sma_40'] = df_5m['close'].rolling(window=40).mean()
 
-        hold_period = 288 
+        hold_period = 288 # 24 hours in 5-minute bars
         delayed_print(f"[PROCESS] Applying strategy logic (Hold period: {hold_period} bars)...")
         
+        # Base Signal (Individual 5m entry)
         df_5m['signal'] = 0
         df_5m.loc[df_5m['close'] > df_5m['sma_40'], 'signal'] = 1
         df_5m.loc[df_5m['close'] < df_5m['sma_40'], 'signal'] = -1
+
+        # Position Size Calculation (Cumulative exposure of overlapping trades)
+        # Each signal starts at t and ends at t + hold_period.
+        # Total position at time T is sum of signals from (T - hold_period) to T.
+        delayed_print("[PROCESS] Calculating additive position sizes...")
+        df_5m['position_size'] = df_5m['signal'].rolling(window=hold_period).sum()
 
         delayed_print("[PROCESS] Calculating trade returns (24-hour forward window)...")
         future_close = df_5m['close'].shift(-hold_period)
         df_5m['trade_return'] = (future_close - df_5m['close']) / df_5m['close']
         df_5m['strategy_return'] = df_5m['signal'] * df_5m['trade_return']
         
-        results = df_5m.dropna(subset=['strategy_return', 'sma_40']).copy()
+        results = df_5m.dropna(subset=['strategy_return', 'sma_40', 'position_size']).copy()
         
         delayed_print("[FINALIZE] Aggregating performance metrics...")
         
         # Calculate Equity Curve
         results['cumulative_return'] = results['strategy_return'].cumsum()
         
-        # Additional Metrics
+        # Metrics
         avg_ret = results['strategy_return'].mean()
         std_ret = results['strategy_return'].std()
         ret_std_ratio = avg_ret / std_ret if std_ret != 0 else 0
@@ -82,32 +89,40 @@ def run_strategy(csv_file):
         gross_loss = abs(results[results['strategy_return'] < 0]['strategy_return'].sum())
         profit_factor = gross_profit / gross_loss if gross_loss != 0 else float('inf')
         
-        # Max Drawdown
         running_max = results['cumulative_return'].cummax()
         drawdown = results['cumulative_return'] - running_max
         max_drawdown = drawdown.min()
 
         metrics = {
             "total_trades": len(results),
-            "wins": len(results[results['strategy_return'] > 0]),
-            "losses": len(results[results['strategy_return'] < 0]),
             "win_rate": (len(results[results['strategy_return'] > 0]) / len(results)) * 100,
             "avg_return": avg_ret * 100,
-            "std_return": std_ret * 100,
             "ret_std_ratio": ret_std_ratio,
             "total_return": results['strategy_return'].sum() * 100,
             "profit_factor": profit_factor,
             "max_drawdown": max_drawdown * 100,
+            "max_pos_size": results['position_size'].abs().max(),
             "timestamp": datetime.now().strftime("%Y-%m-%d %H:%M:%S")
         }
 
-        # Generate Plot
-        delayed_print("[PROCESS] Generating performance graph...")
-        plt.figure(figsize=(10, 5))
-        plt.plot(results.index, results['cumulative_return'] * 100, color='#2980b9', linewidth=1.5)
-        plt.title('Cumulative Strategy Return (%)', fontsize=14, pad=15)
-        plt.ylabel('Return %')
-        plt.grid(True, linestyle='--', alpha=0.7)
+        # Generate Multi-Plot Graph
+        delayed_print("[PROCESS] Generating performance and position graphs...")
+        fig, (ax1, ax2) = plt.subplots(2, 1, figsize=(10, 8), sharex=True, gridspec_kw={'height_ratios': [2, 1]})
+        
+        # Plot 1: Equity Curve
+        ax1.plot(results.index, results['cumulative_return'] * 100, color='#1a73e8', linewidth=1.5)
+        ax1.set_title('Cumulative Strategy Return (%)', fontsize=12)
+        ax1.set_ylabel('Return %')
+        ax1.grid(True, linestyle='--', alpha=0.4)
+        
+        # Plot 2: Position Size
+        ax2.fill_between(results.index, results['position_size'], color='#e8f0fe', alpha=0.5)
+        ax2.plot(results.index, results['position_size'], color='#1a73e8', linewidth=1, label='Net Exposure')
+        ax2.set_title('Total Additive Position Size (Net Units)', fontsize=12)
+        ax2.set_ylabel('Units')
+        ax2.grid(True, linestyle='--', alpha=0.4)
+        ax2.legend(loc='upper right')
+        
         plt.tight_layout()
         
         # Convert plot to base64
@@ -116,16 +131,12 @@ def run_strategy(csv_file):
         plt.close()
         plot_base64 = base64.b64encode(buf.getvalue()).decode('utf-8')
 
-        # Detailed Console Output
         delayed_print("--------------------------------------------------")
         delayed_print(f"STRATEGY REPORT: SMA 40 Cross + 24H Hold")
         delayed_print("--------------------------------------------------")
-        delayed_print(f"Total Observations:   {metrics['total_trades']}")
-        delayed_print(f"Win Rate:             {metrics['win_rate']:.2f}%")
-        delayed_print(f"Return / STD Ratio:   {metrics['ret_std_ratio']:.4f}")
-        delayed_print(f"Total Return (Sum):   {metrics['total_return']:.2f}%")
-        delayed_print(f"Profit Factor:        {metrics['profit_factor']:.2f}")
-        delayed_print(f"Max Drawdown:         {metrics['max_drawdown']:.2f}%")
+        delayed_print(f"Max Position Exposure: {metrics['max_pos_size']:.0f} units")
+        delayed_print(f"Return / STD Ratio:    {metrics['ret_std_ratio']:.4f}")
+        delayed_print(f"Total Return (Sum):    {metrics['total_return']:.2f}%")
         delayed_print("--------------------------------------------------")
         
         return metrics, plot_base64
@@ -141,47 +152,46 @@ def start_server(metrics, plot_data):
     <!DOCTYPE html>
     <html>
     <head>
-        <title>Backtest Results</title>
+        <title>Backtest Dashboard</title>
         <style>
-            body {{ font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif; background-color: #f0f2f5; color: #1c1e21; margin: 0; padding: 40px; display: flex; flex-direction: column; align-items: center; }}
-            .container {{ max-width: 1000px; width: 100%; }}
-            .grid {{ display: grid; grid-template-columns: 1fr 2fr; gap: 20px; }}
-            .card {{ background: white; padding: 24px; border-radius: 12px; box-shadow: 0 2px 4px rgba(0,0,0,0.08); margin-bottom: 20px; }}
-            h1 {{ font-size: 1.5rem; margin-top: 0; color: #1a73e8; border-bottom: 1px solid #eee; padding-bottom: 12px; }}
-            h2 {{ font-size: 1.1rem; color: #5f6368; margin-bottom: 20px; }}
-            .stat-row {{ display: flex; justify-content: space-between; padding: 12px 0; border-bottom: 1px solid #f8f9fa; }}
-            .label {{ color: #70757a; font-weight: 500; }}
-            .value {{ font-weight: 700; color: #202124; }}
-            .plot-container {{ text-align: center; }}
-            .plot-container img {{ max-width: 100%; border-radius: 8px; }}
-            .footer {{ font-size: 0.85rem; color: #9aa0a6; text-align: center; margin-top: 30px; }}
-            .positive {{ color: #1e8e3e; }}
-            .negative {{ color: #d93025; }}
-            .highlight {{ color: #1a73e8; }}
+            body {{ font-family: -apple-system, system-ui, sans-serif; background-color: #f8f9fa; color: #202124; margin: 0; padding: 20px; }}
+            .container {{ max-width: 1100px; margin: 0 auto; }}
+            .card {{ background: white; padding: 30px; border-radius: 8px; box-shadow: 0 1px 3px rgba(0,0,0,0.12); }}
+            h1 {{ font-size: 1.4rem; color: #1a73e8; margin-top: 0; margin-bottom: 25px; border-bottom: 1px solid #eee; padding-bottom: 15px; }}
+            .dashboard-grid {{ display: grid; grid-template-columns: 300px 1fr; gap: 30px; }}
+            .metric-box {{ border-bottom: 1px solid #f1f3f4; padding: 12px 0; display: flex; justify-content: space-between; }}
+            .metric-label {{ color: #5f6368; font-size: 0.9rem; }}
+            .metric-value {{ font-weight: 700; color: #202124; }}
+            .chart-area {{ text-align: center; }}
+            .chart-area img {{ width: 100%; border-radius: 4px; }}
+            .pos-note {{ background: #e8f0fe; padding: 15px; border-radius: 6px; margin-top: 20px; font-size: 0.85rem; color: #1967d2; line-height: 1.4; }}
+            .footer {{ text-align: center; margin-top: 30px; color: #70757a; font-size: 0.8rem; }}
         </style>
     </head>
     <body>
         <div class="container">
             <div class="card">
-                <h1>SMA Crossover Backtest Results</h1>
-                <div class="grid">
-                    <div class="stats-panel">
-                        <h2>Key Metrics</h2>
-                        <div class="stat-row"><span class="label">Total Trades</span><span class="value">{metrics['total_trades']}</span></div>
-                        <div class="stat-row"><span class="label">Win Rate</span><span class="value">{metrics['win_rate']:.2f}%</span></div>
-                        <div class="stat-row"><span class="label">Return / STD</span><span class="value highlight">{metrics['ret_std_ratio']:.4f}</span></div>
-                        <div class="stat-row"><span class="label">Profit Factor</span><span class="value">{metrics['profit_factor']:.2f}</span></div>
-                        <div class="stat-row"><span class="label">Avg Return</span><span class="value { 'positive' if metrics['avg_return'] > 0 else 'negative' }">{metrics['avg_return']:.4f}%</span></div>
-                        <div class="stat-row"><span class="label">Total Return</span><span class="value { 'positive' if metrics['total_return'] > 0 else 'negative' }">{metrics['total_return']:.2f}%</span></div>
-                        <div class="stat-row"><span class="label">Max Drawdown</span><span class="value negative">{metrics['max_drawdown']:.2f}%</span></div>
+                <h1>Quant Strategy: SMA 40 / 24H Hold</h1>
+                <div class="dashboard-grid">
+                    <div class="metrics-sidebar">
+                        <div class="metric-box"><span class="metric-label">Total Bars</span><span class="metric-value">{metrics['total_trades']}</span></div>
+                        <div class="metric-box"><span class="metric-label">Win Rate</span><span class="metric-value">{metrics['win_rate']:.1f}%</span></div>
+                        <div class="metric-box"><span class="metric-label">Return / STD</span><span class="metric-value" style="color:#1a73e8">{metrics['ret_std_ratio']:.4f}</span></div>
+                        <div class="metric-box"><span class="metric-label">Max Exposure</span><span class="metric-value">{metrics['max_pos_size']:.0f} units</span></div>
+                        <div class="metric-box"><span class="metric-label">Profit Factor</span><span class="metric-value">{metrics['profit_factor']:.2f}</span></div>
+                        <div class="metric-box"><span class="metric-label">Max Drawdown</span><span class="metric-value" style="color:#d93025">{metrics['max_drawdown']:.2f}%</span></div>
+                        <div class="metric-box"><span class="metric-label">Total Return</span><span class="metric-value" style="color:#1e8e3e">{metrics['total_return']:.2f}%</span></div>
+                        
+                        <div class="pos-note">
+                            <strong>Note on Position Sizing:</strong> Positions are additive. Since a new trade is opened every 5 minutes and held for 24 hours, you hold up to 288 overlapping positions simultaneously.
+                        </div>
                     </div>
-                    <div class="plot-container">
-                        <h2>Equity Curve</h2>
-                        <img src="data:image/png;base64,{plot_data}" alt="Strategy Plot">
+                    <div class="chart-area">
+                        <img src="data:image/png;base64,{plot_data}" alt="Equity and Position Curves">
                     </div>
                 </div>
             </div>
-            <div class="footer">Backtest completed at {metrics['timestamp']} | Hold Period: 24h | Intervals: 5m</div>
+            <div class="footer">Simulation generated at {metrics['timestamp']} | Port: 8080</div>
         </div>
     </body>
     </html>
@@ -197,7 +207,6 @@ def start_server(metrics, plot_data):
     delayed_print(f"[SERVER] Starting web server on port {PORT}...")
     with socketserver.TCPServer(("", PORT), CustomHandler) as httpd:
         delayed_print(f"[INFO] Server live at http://localhost:{PORT}")
-        delayed_print("[INFO] Press Ctrl+C to stop the script and server.")
         httpd.serve_forever()
 
 if __name__ == "__main__":
