@@ -122,21 +122,25 @@ def get_base_signal_series(target_index):
 # --- Genetic Algorithm ---
 def run_genetic_optimization():
     global GA_BEST_ALL, GA_BEST_2Y
-    delayed_print("[GA] Starting Genetic Optimization (2-month slicing)...")
+    delayed_print("[GA] Starting Extensive Genetic Optimization...")
+    delayed_print("[GA] Config: Pop=50 | Gens=15 | Slices=5 | Range=[5m, 20d]")
     
     # Pre-calculate full signal series to avoid re-computing indicators in GA loop
     full_sigs = get_base_signal_series(DATA_5M.index)
     
     def fitness_fn(hold_days, data_df, signal_series):
         # Constraint: Use a random 2-month (60 day) slice
-        if len(data_df) < 17280: # 60 days * 288 bars
+        # 60 days * 288 bars = 17280 bars
+        SLICE_SIZE = 17280
+        
+        if len(data_df) < SLICE_SIZE:
             slice_df = data_df
             slice_sig = signal_series
         else:
-            max_start = len(data_df) - 17280
+            max_start = len(data_df) - SLICE_SIZE
             start_idx = random.randint(0, max_start)
-            slice_df = data_df.iloc[start_idx : start_idx + 17280].copy()
-            slice_sig = signal_series.iloc[start_idx : start_idx + 17280].copy()
+            slice_df = data_df.iloc[start_idx : start_idx + SLICE_SIZE].copy()
+            slice_sig = signal_series.iloc[start_idx : start_idx + SLICE_SIZE].copy()
             
         hold_bars = max(1, int(hold_days * 288))
         
@@ -150,44 +154,73 @@ def run_genetic_optimization():
         cum_ret = ret.cumsum().ffill()
         # Daily Sharpe approximation on slice
         daily = cum_ret.iloc[::288] # Sample every day
-        if len(daily) < 2 or daily.diff().std() == 0: return -999
+        if len(daily) < 2 or daily.diff().std() == 0: return -999.0
         return (daily.diff().mean() / daily.diff().std()) * np.sqrt(365)
 
     def optimize_dataset(name, df, full_signal_idx):
         delayed_print(f"[GA] Optimizing {name}...")
-        # Population: 15 random holds between 1 and 20
-        population = [random.uniform(1.0, 20.0) for _ in range(15)]
+        
+        # GA Configuration
+        POP_SIZE = 50
+        GENERATIONS = 15
+        SLICES_PER_EVAL = 5
+        ELITISM_COUNT = 3
+        
+        # Initial Population: Random float between 5 mins (approx 0.0035 days) and 20 days
+        population = [random.uniform(1.0/288, 20.0) for _ in range(POP_SIZE)]
         
         # Subset signals for this DF
         df_sigs = full_sigs.loc[df.index]
         
-        for gen in range(5): # 5 Generations
+        best_overall_sharpe = -999.0
+        best_overall_gene = 1.0
+
+        for gen in range(GENERATIONS):
             scores = []
             for indiv in population:
-                # Average fitness over 3 random slices to be robust
-                s = np.mean([fitness_fn(indiv, df, df_sigs) for _ in range(3)])
-                scores.append((s, indiv))
+                # Average fitness over multiple random slices to ensure robustness
+                sharpe_avg = np.mean([fitness_fn(indiv, df, df_sigs) for _ in range(SLICES_PER_EVAL)])
+                scores.append((sharpe_avg, indiv))
             
             scores.sort(reverse=True)
-            best_sharpe, best_gene = scores[0]
             
-            # Selection: Top 5
-            survivors = [x[1] for x in scores[:5]]
+            # Track best ever
+            if scores[0][0] > best_overall_sharpe:
+                best_overall_sharpe = scores[0][0]
+                best_overall_gene = scores[0][1]
+            
+            # Logging every few generations
+            if (gen + 1) % 3 == 0 or gen == 0:
+                delayed_print(f"  > Gen {gen+1}/{GENERATIONS}: Best Sharpe={best_overall_sharpe:.3f} (Hold={best_overall_gene:.3f}d)")
+            
+            # Selection: Keep top 20% parents
+            survivor_count = int(POP_SIZE * 0.2)
+            survivors = [x[1] for x in scores[:survivor_count]]
+            
+            # Elitism: Directly carry over top performers
+            new_pop = [x[1] for x in scores[:ELITISM_COUNT]]
             
             # Breeding
-            new_pop = survivors[:]
-            while len(new_pop) < 15:
+            while len(new_pop) < POP_SIZE:
                 p1, p2 = random.sample(survivors, 2)
-                child = (p1 + p2) / 2
-                # Mutation
-                if random.random() < 0.3:
-                    child += random.gauss(0, 1.0)
+                # Blend crossover
+                alpha = random.random()
+                child = p1 * alpha + p2 * (1 - alpha)
+                
+                # Mutation (40% chance)
+                if random.random() < 0.4:
+                    # Variable mutation strength
+                    mutation_strength = random.uniform(0.1, 2.0)
+                    child += random.gauss(0, mutation_strength)
+                
+                # Clamp boundaries
                 child = max(1.0/288, min(child, 20.0))
                 new_pop.append(child)
+                
             population = new_pop
             
-        delayed_print(f"[GA] Best Hold for {name}: {best_gene:.2f} days (Sharpe: {best_sharpe:.2f})")
-        return best_gene
+        delayed_print(f"[GA] Result for {name}: {best_overall_gene:.4f} days (Sharpe: {best_overall_sharpe:.2f})")
+        return best_overall_gene
 
     GA_BEST_ALL = optimize_dataset("Full History", DATA_5M, DATA_5M.index)
     GA_BEST_2Y = optimize_dataset("Last 2 Years", DATA_5M_2Y, DATA_5M_2Y.index)
