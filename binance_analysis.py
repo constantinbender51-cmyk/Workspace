@@ -39,7 +39,7 @@ def delayed_print(text):
     sys.stdout.flush()
     time.sleep(0.1)
 
-def download_data(file_id, output_filename='ohlcv_data.csv'):
+def download_data(file_id, output_filename='ohlcv.csv'):
     url = f'https://drive.google.com/uc?id={file_id}'
     if os.path.exists(output_filename):
         return
@@ -77,8 +77,6 @@ def calc_vectorized_macd_signal(df, config):
         slow = df['close'].ewm(span=s, adjust=False).mean()
         macd = fast - slow
         signal_line = macd.ewm(span=sp, adjust=False).mean()
-        # Lookahead Fix: Signal at index i depends on macd/signal at index i
-        # But in the strategy, we shift this result by 1 so we trade on it at i+1
         sub_signal = np.where(macd > signal_line, 1.0, -1.0)
         total_signal += sub_signal * w
         
@@ -100,20 +98,19 @@ def run_backtest(hold_days):
     global DATA_1H, DATA_1D, DATA_5M
     if DATA_5M is None: return None, None
     
-    hold_period_5m = int(hold_days * 288) 
-    delayed_print(f"[PROCESS] Running Gainer Backtest (Hold: {hold_days} days)...")
+    # hold_days can now be as low as 5 minutes (5 / 1440 days)
+    hold_period_5m = max(1, int(round(hold_days * 288)))
     
-    # 1. Calculate base signals on their respective timeframes
+    delayed_print(f"[PROCESS] Running Gainer Backtest (Hold: {hold_days:.4f} days / {hold_period_5m} bars)...")
+    
     sig_1h = calc_vectorized_macd_signal(DATA_1H, GAINER_PARAMS["MACD_1H"])
     sig_1d_macd = calc_vectorized_macd_signal(DATA_1D, GAINER_PARAMS["MACD_1D"])
     sig_1d_sma = calc_vectorized_sma_signal(DATA_1D, GAINER_PARAMS["SMA_1D"])
     
-    # 2. Reindex and Forward Fill signals to 5m timeframe
     s_1h = sig_1h.reindex(DATA_5M.index, method='ffill').fillna(0)
     s_1d_macd = sig_1d_macd.reindex(DATA_5M.index, method='ffill').fillna(0)
     s_1d_sma = sig_1d_sma.reindex(DATA_5M.index, method='ffill').fillna(0)
     
-    # 3. Combine signals
     w = GAINER_PARAMS["GA_WEIGHTS"]
     raw_signal = (
         s_1h * w["MACD_1H"] + 
@@ -121,34 +118,24 @@ def run_backtest(hold_days):
         s_1d_sma * w["SMA_1D"]
     ) / sum(w.values())
     
-    # 4. LOOKAHEAD BIAS FIX: Shift signal by 1 bar
-    # A trade at 'T' must be based on the signal calculated from data ending at 'T-1'
     df = DATA_5M.copy()
     df['signal'] = raw_signal.shift(1).fillna(0)
     
-    # 5. Additive position calculation
-    # position at time T = sum of signals from (T - hold_period) to T
     df['net_exposure'] = df['signal'].rolling(window=hold_period_5m).sum()
     
-    # 6. Fees: 0.02% per unit of delta change
     fee_rate = 0.0002
     df['pos_delta'] = df['net_exposure'].diff().abs().fillna(0)
     df['fees'] = df['pos_delta'] * fee_rate
     
-    # 7. Returns Calculation
-    # We enter at the CLOSE of the signal bar. 
-    # We exit at the CLOSE of the bar 'hold_period_5m' steps in the future.
     future_close = df['close'].shift(-hold_period_5m)
     pct_change = (future_close - df['close']) / df['close']
     
-    # The strategy return for the signal at Time T is signal[T] * pct_change[T]
     df['strategy_ret_raw'] = df['signal'] * pct_change
     df['strategy_ret_net'] = df['strategy_ret_raw'] - df['fees']
     
     results = df.dropna(subset=['strategy_ret_net', 'close']).copy()
     results['equity'] = results['strategy_ret_net'].cumsum()
     
-    # 8. Metrics (Daily sample)
     daily_equity = results['equity'].resample('D').last().dropna()
     daily_diff = daily_equity.diff().dropna()
     
@@ -161,6 +148,7 @@ def run_backtest(hold_days):
 
     metrics = {
         "hold_days": hold_days,
+        "hold_bars": hold_period_5m,
         "sharpe": sharpe,
         "total_return": results['equity'].iloc[-1] * 100,
         "total_fees": results['fees'].sum() * 100,
@@ -171,7 +159,7 @@ def run_backtest(hold_days):
     # Plotting
     fig, (ax1, ax2) = plt.subplots(2, 1, figsize=(10, 7), sharex=True, gridspec_kw={'height_ratios': [2, 1]})
     ax1.plot(results.index, results['equity']*100, color='#1a73e8', lw=2)
-    ax1.set_title(f'Gainer Strategy | No Lookahead | Hold: {hold_days} Days')
+    ax1.set_title(f'Gainer Strategy | No Lookahead | Hold: {hold_period_5m} Bars')
     ax1.set_ylabel('Net Return %')
     ax1.grid(True, alpha=0.2)
     
@@ -191,11 +179,25 @@ class SimulatorHandler(http.server.SimpleHTTPRequestHandler):
     def do_GET(self):
         query = urllib.parse.urlparse(self.path).query
         params = urllib.parse.parse_qs(query)
+        
+        # hold is now a float (days)
+        # 5 minutes is 1/288 days
         hold_val = float(params.get('hold', [1.0])[0])
-        hold_val = max(1.0, min(hold_val, 20.0))
+        hold_val = max(1/288, min(hold_val, 20.0))
         
         metrics, plot_b64 = run_backtest(hold_val)
         
+        # UI Formatting for the hold duration
+        bars = metrics['hold_bars']
+        if bars == 1:
+            hold_str = "5 Minutes"
+        elif bars < 12:
+            hold_str = f"{bars*5} Minutes"
+        elif bars < 288:
+            hold_str = f"{(bars*5/60):.1f} Hours"
+        else:
+            hold_str = f"{(bars/288):.1f} Days"
+
         html = f"""
         <!DOCTYPE html><html><head><title>No-Lookahead Gainer Simulator</title>
         <style>
@@ -206,7 +208,7 @@ class SimulatorHandler(http.server.SimpleHTTPRequestHandler):
             .control-panel {{ background: #fff; padding: 20px; border-radius: 8px; margin-bottom: 25px; border: 1px solid #e8eaed; }}
             .slider-container {{ display: flex; align-items: center; gap: 20px; }}
             input[type=range] {{ flex-grow: 1; cursor: pointer; }}
-            .display {{ font-weight: bold; color: #1a73e8; font-size: 1.2rem; min-width: 120px; text-align: right; }}
+            .display {{ font-weight: bold; color: #1a73e8; font-size: 1.2rem; min-width: 150px; text-align: right; }}
             .grid {{ display: grid; grid-template-columns: 280px 1fr; gap: 30px; }}
             .m-card {{ border-bottom: 1px solid #f1f3f4; padding: 12px 0; display: flex; justify-content: space-between; font-size: 0.9rem; }}
             .m-val {{ font-weight: 700; }}
@@ -223,13 +225,13 @@ class SimulatorHandler(http.server.SimpleHTTPRequestHandler):
                 <div class="control-panel">
                     <div class="slider-container">
                         <label>Hold Window:</label>
-                        <input type="range" min="1" max="20" step="0.5" value="{hold_val}" oninput="updateVal(this.value)" onchange="applyVal(this.value)">
-                        <div class="display" id="holdDisplay">{hold_val} Days</div>
+                        <!-- Range in days: 1/288 (5m) to 20 days -->
+                        <input type="range" min="{1/288}" max="20" step="{1/288}" value="{hold_val}" oninput="updateVal(this.value)" onchange="applyVal(this.value)">
+                        <div class="display" id="holdDisplay">{hold_str}</div>
                     </div>
                     <div class="hint">
-                        <b>Anti-Lookahead Logic:</b> Signal[T] = Ensemble_Calculation(Prices[:T-1]). <br/>
-                        <b>Strategy:</b> Gainer Weighted Ensemble. <br/>
-                        <b>Calculation:</b> Enter at Close(T), Exit at Close(T + HoldPeriod).
+                        <b>Min Hold:</b> 5 minutes (1 bar). <b>Max Hold:</b> 20 days (5760 bars).<br/>
+                        <b>Logic:</b> Signal[T] = Ensemble_Calculation(Prices[:T-1]). Enter at Close(T), Exit at Close(T + Hold).
                     </div>
                 </div>
                 <div class="grid">
@@ -244,7 +246,15 @@ class SimulatorHandler(http.server.SimpleHTTPRequestHandler):
                 </div>
             </div>
             <script>
-                function updateVal(v) {{ document.getElementById('holdDisplay').innerText = v + " Days"; }}
+                function updateVal(v) {{ 
+                    let bars = Math.round(v * 288);
+                    let label = "";
+                    if (bars == 1) label = "5 Minutes";
+                    else if (bars < 12) label = (bars * 5) + " Minutes";
+                    else if (bars < 288) label = (bars * 5 / 60).toFixed(1) + " Hours";
+                    else label = (bars / 288).toFixed(1) + " Days";
+                    document.getElementById('holdDisplay').innerText = label; 
+                }}
                 function applyVal(v) {{ window.location.href = "?hold=" + v; }}
             </script>
         </body></html>
