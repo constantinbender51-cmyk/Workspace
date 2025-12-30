@@ -12,12 +12,12 @@ from io import BytesIO
 import matplotlib.pyplot as plt
 from datetime import datetime
 
-# Global variables for pre-loaded data
+# Global variables
 DATA_1H = None
 DATA_1D = None
 DATA_5M = None
 
-# Gainer Ensemble Configuration from main (28).py
+# Gainer Configuration
 GAINER_PARAMS = {
     "GA_WEIGHTS": {"MACD_1H": 0.8, "MACD_1D": 0.4, "SMA_1D": 0.4},
     "MACD_1H": {
@@ -48,13 +48,13 @@ def download_data(file_id, output_filename='ohlcv.csv'):
 
 def prepare_data(csv_file):
     global DATA_1H, DATA_1D, DATA_5M
-    delayed_print("[PROCESS] Loading and slicing data...")
+    delayed_print("[PROCESS] Loading data...")
     
     df = pd.read_csv(csv_file)
     
-    # User Request: Remove the first 12*24*365*4 entries
-    skip_rows = 12 * 24 * 365 * 4
-    delayed_print(f"[INFO] Skipping first {skip_rows} entries.")
+    # 1. Skip first 4 years (60 * 24 * 365 * 4 = 2,102,400 minutes)
+    skip_rows = 60 * 24 * 365 * 4
+    delayed_print(f"[INFO] Skipping first {skip_rows} raw 1-min candles.")
     df = df.iloc[skip_rows:].reset_index(drop=True)
     
     date_col = df.columns[0]
@@ -62,16 +62,25 @@ def prepare_data(csv_file):
     df.set_index(date_col, inplace=True)
     df.columns = [c.lower() for c in df.columns]
     
-    delayed_print("[PROCESS] Generating Resampled Frames...")
-    DATA_5M = df.resample('5min').agg({'close': 'last'}).dropna()
-    DATA_1H = df.resample('1H').agg({'close': 'last'}).dropna()
-    DATA_1D = df.resample('1D').agg({'close': 'last'}).dropna()
+    delayed_print("[PROCESS] Resampling with Anti-Lookahead (Right-Labeling)...")
+    
+    # CRITICAL FIX: label='right', closed='right'
+    # This ensures the timestamp represents the END of the interval.
+    # 10:00-11:00 data is indexed at 11:00.
+    # Therefore, 10:30 will NOT see 11:00 data when ffilled.
+    
+    DATA_5M = df.resample('5min', label='right', closed='right').agg({'close': 'last'}).dropna()
+    DATA_1H = df.resample('1H', label='right', closed='right').agg({'close': 'last'}).dropna()
+    DATA_1D = df.resample('1D', label='right', closed='right').agg({'close': 'last'}).dropna()
+    
+    delayed_print(f"[SUCCESS] {len(DATA_5M)} simulation bars ready.")
 
 def calc_vectorized_macd_signal(df, config):
     params = config['params']
     weights = config['weights']
     total_signal = pd.Series(0.0, index=df.index)
     
+    # Standard EWM calculation is safe because it only looks backward
     for (f, s, sp), w in zip(params, weights):
         fast = df['close'].ewm(span=f, adjust=False).mean()
         slow = df['close'].ewm(span=s, adjust=False).mean()
@@ -98,15 +107,17 @@ def run_backtest(hold_days):
     global DATA_1H, DATA_1D, DATA_5M
     if DATA_5M is None: return None, None
     
-    # hold_days can now be as low as 5 minutes (5 / 1440 days)
     hold_period_5m = max(1, int(round(hold_days * 288)))
     
-    delayed_print(f"[PROCESS] Running Gainer Backtest (Hold: {hold_days:.4f} days / {hold_period_5m} bars)...")
-    
+    # 1. Calculate Signals on Higher Timeframes (Right-labeled)
     sig_1h = calc_vectorized_macd_signal(DATA_1H, GAINER_PARAMS["MACD_1H"])
     sig_1d_macd = calc_vectorized_macd_signal(DATA_1D, GAINER_PARAMS["MACD_1D"])
     sig_1d_sma = calc_vectorized_sma_signal(DATA_1D, GAINER_PARAMS["SMA_1D"])
     
+    # 2. Reindex to 5m (Safe Broadcasting)
+    # Because of label='right', at 10:30 (5m), ffill will see index 10:00 (1H).
+    # It will NOT see 11:00 (1H) because 11:00 > 10:30. 
+    # This prevents the lookahead.
     s_1h = sig_1h.reindex(DATA_5M.index, method='ffill').fillna(0)
     s_1d_macd = sig_1d_macd.reindex(DATA_5M.index, method='ffill').fillna(0)
     s_1d_sma = sig_1d_sma.reindex(DATA_5M.index, method='ffill').fillna(0)
@@ -119,14 +130,21 @@ def run_backtest(hold_days):
     ) / sum(w.values())
     
     df = DATA_5M.copy()
+    
+    # 3. Execution Lag (Shift 1)
+    # Even though we fixed the resampling, we add shift(1) to simulate 
+    # entering at the CLOSE of the *next* bar, or the OPEN of the next bar,
+    # to ensure we don't trade on the same tick the signal is generated.
     df['signal'] = raw_signal.shift(1).fillna(0)
     
+    # 4. Additive Stacking
     df['net_exposure'] = df['signal'].rolling(window=hold_period_5m).sum()
     
-    fee_rate = 0.0002
+    # 5. Fees (0.02% per delta unit)
     df['pos_delta'] = df['net_exposure'].diff().abs().fillna(0)
-    df['fees'] = df['pos_delta'] * fee_rate
+    df['fees'] = df['pos_delta'] * 0.0002
     
+    # 6. Returns
     future_close = df['close'].shift(-hold_period_5m)
     pct_change = (future_close - df['close']) / df['close']
     
@@ -136,14 +154,10 @@ def run_backtest(hold_days):
     results = df.dropna(subset=['strategy_ret_net', 'close']).copy()
     results['equity'] = results['strategy_ret_net'].cumsum()
     
+    # Metrics
     daily_equity = results['equity'].resample('D').last().dropna()
     daily_diff = daily_equity.diff().dropna()
-    
-    if len(daily_diff) > 1 and daily_diff.std() != 0:
-        sharpe = (daily_diff.mean() / daily_diff.std()) * np.sqrt(365)
-    else:
-        sharpe = 0
-        
+    sharpe = (daily_diff.mean() / daily_diff.std()) * np.sqrt(365) if len(daily_diff) > 1 and daily_diff.std() != 0 else 0
     max_dd = (results['equity'].cummax() - results['equity']).max() * 100
 
     metrics = {
@@ -159,15 +173,15 @@ def run_backtest(hold_days):
     # Plotting
     fig, (ax1, ax2) = plt.subplots(2, 1, figsize=(10, 7), sharex=True, gridspec_kw={'height_ratios': [2, 1]})
     ax1.plot(results.index, results['equity']*100, color='#1a73e8', lw=2)
-    ax1.set_title(f'Gainer Strategy | No Lookahead | Hold: {hold_period_5m} Bars')
+    ax1.set_title(f'Gainer Strategy | Strict No Lookahead | Hold: {hold_period_5m} Bars')
     ax1.set_ylabel('Net Return %')
-    ax1.grid(True, alpha=0.2)
+    ax1.grid(True, alpha=0.15)
     
-    ax2.fill_between(results.index, results['net_exposure'], color='#1a73e8', alpha=0.2)
+    ax2.fill_between(results.index, results['net_exposure'], color='#1a73e8', alpha=0.15)
     ax2.plot(results.index, results['net_exposure'], color='#1a73e8', lw=1)
     ax2.set_title('Stacked Exposure (Units)')
     ax2.set_ylabel('Units')
-    ax2.grid(True, alpha=0.2)
+    ax2.grid(True, alpha=0.15)
     
     plt.tight_layout()
     buf = BytesIO(); plt.savefig(buf, format='png', dpi=90); plt.close()
@@ -179,29 +193,21 @@ class SimulatorHandler(http.server.SimpleHTTPRequestHandler):
     def do_GET(self):
         query = urllib.parse.urlparse(self.path).query
         params = urllib.parse.parse_qs(query)
-        
-        # hold is now a float (days)
-        # 5 minutes is 1/288 days
         hold_val = float(params.get('hold', [1.0])[0])
         hold_val = max(1/288, min(hold_val, 20.0))
         
         metrics, plot_b64 = run_backtest(hold_val)
         
-        # UI Formatting for the hold duration
         bars = metrics['hold_bars']
-        if bars == 1:
-            hold_str = "5 Minutes"
-        elif bars < 12:
-            hold_str = f"{bars*5} Minutes"
-        elif bars < 288:
-            hold_str = f"{(bars*5/60):.1f} Hours"
-        else:
-            hold_str = f"{(bars/288):.1f} Days"
+        if bars == 1: hold_str = "5 Minutes"
+        elif bars < 12: hold_str = f"{bars*5} Minutes"
+        elif bars < 288: hold_str = f"{(bars*5/60):.1f} Hours"
+        else: hold_str = f"{(bars/288):.1f} Days"
 
         html = f"""
         <!DOCTYPE html><html><head><title>No-Lookahead Gainer Simulator</title>
         <style>
-            body {{ font-family: -apple-system, sans-serif; background: #f4f6f9; margin:0; padding:20px; color: #202124; }}
+            body {{ font-family: -apple-system, system-ui, sans-serif; background: #f4f6f9; margin:0; padding:20px; color: #202124; }}
             .container {{ max-width: 1100px; margin: auto; background: white; padding: 30px; border-radius: 12px; box-shadow: 0 4px 20px rgba(0,0,0,0.08); }}
             .header {{ display: flex; justify-content: space-between; align-items: center; border-bottom: 1px solid #eee; padding-bottom: 15px; margin-bottom: 20px; }}
             h1 {{ margin:0; font-size: 1.3rem; color: #1a73e8; }}
@@ -225,13 +231,12 @@ class SimulatorHandler(http.server.SimpleHTTPRequestHandler):
                 <div class="control-panel">
                     <div class="slider-container">
                         <label>Hold Window:</label>
-                        <!-- Range in days: 1/288 (5m) to 20 days -->
                         <input type="range" min="{1/288}" max="20" step="{1/288}" value="{hold_val}" oninput="updateVal(this.value)" onchange="applyVal(this.value)">
                         <div class="display" id="holdDisplay">{hold_str}</div>
                     </div>
                     <div class="hint">
-                        <b>Min Hold:</b> 5 minutes (1 bar). <b>Max Hold:</b> 20 days (5760 bars).<br/>
-                        <b>Logic:</b> Signal[T] = Ensemble_Calculation(Prices[:T-1]). Enter at Close(T), Exit at Close(T + Hold).
+                        <b>Lookahead Fix:</b> Using <code>label='right'</code> resampling. <br/>
+                        <b>Data:</b> Skipping first 4 years. <b>Fee:</b> 0.02% per delta unit.<br/>
                     </div>
                 </div>
                 <div class="grid">
@@ -240,7 +245,7 @@ class SimulatorHandler(http.server.SimpleHTTPRequestHandler):
                         <div class="m-card"><span>Total Return (Net)</span><span class="m-val" style="color:#1e8e3e">{metrics['total_return']:.1f}%</span></div>
                         <div class="m-card"><span>Total Fees Paid</span><span class="m-val" style="color:#d93025">{metrics['total_fees']:.1f}%</span></div>
                         <div class="m-card"><span>Max Drawdown</span><span class="m-val">{metrics['max_dd']:.1f}%</span></div>
-                        <div class="m-card"><span>Max Net Units</span><span class="m-val">{metrics['max_exposure']:.0f}</span></div>
+                        <div class="m-card"><span>Max Stack Depth</span><span class="m-val">{metrics['max_exposure']:.0f} units</span></div>
                     </div>
                     <div class="main-content"><img src="data:image/png;base64,{plot_b64}"></div>
                 </div>
