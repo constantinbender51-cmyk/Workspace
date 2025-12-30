@@ -12,12 +12,12 @@ from io import BytesIO
 import matplotlib.pyplot as plt
 from datetime import datetime
 
-# Global variable to store pre-loaded 1h and 1d data to speed up simulator
+# Global variables for pre-loaded data
 DATA_1H = None
 DATA_1D = None
 DATA_5M = None
 
-# Gainer Configuration from main (28).py
+# Gainer Ensemble Configuration from main (28).py
 GAINER_PARAMS = {
     "GA_WEIGHTS": {"MACD_1H": 0.8, "MACD_1D": 0.4, "SMA_1D": 0.4},
     "MACD_1H": {
@@ -48,115 +48,92 @@ def download_data(file_id, output_filename='ohlcv_data.csv'):
 
 def prepare_data(csv_file):
     global DATA_1H, DATA_1D, DATA_5M
-    delayed_print("[PROCESS] Resampling data for Gainer Ensemble...")
+    delayed_print("[PROCESS] Loading and slicing data...")
+    
     df = pd.read_csv(csv_file)
+    
+    # Remove first 4 years: 12*24*365*4 = 420,480 bars
+    skip_rows = 12 * 24 * 365 * 4
+    delayed_print(f"[INFO] Skipping first {skip_rows} entries.")
+    df = df.iloc[skip_rows:].reset_index(drop=True)
+    
     date_col = df.columns[0]
     df[date_col] = pd.to_datetime(df[date_col])
     df.set_index(date_col, inplace=True)
     df.columns = [c.lower() for c in df.columns]
     
-    # Pre-calculate resampled data
+    delayed_print("[PROCESS] Generating Resampled Frames...")
     DATA_5M = df.resample('5min').agg({'close': 'last'}).dropna()
     DATA_1H = df.resample('1H').agg({'close': 'last'}).dropna()
     DATA_1D = df.resample('1D').agg({'close': 'last'}).dropna()
 
-def calc_gainer_signal(df_1h, df_1d):
-    """Implementation of Gainer Ensemble Logic from main (28).py"""
-    def calc_macd_pos(prices, config):
-        params, weights = config['params'], config['weights']
-        composite = 0.0
-        for (f, s, sig_p), w in zip(params, weights):
-            fast = prices.ewm(span=f, adjust=False).mean()
-            slow = prices.ewm(span=s, adjust=False).mean()
-            macd = fast - slow
-            sig_line = macd.ewm(span=sig_p, adjust=False).mean()
-            # We align to the 1h/1d index
-            val = 1.0 if macd.iloc[-1] > sig_line.iloc[-1] else -1.0
-            composite += val * w
-        total_w = sum(weights)
-        return composite / total_w if total_w > 0 else 0
-
-    def calc_sma_pos(prices, config):
-        params, weights = config['params'], config['weights']
-        composite = 0.0
-        current = prices.iloc[-1]
-        for p, w in zip(params, weights):
-            sma = prices.rolling(window=p).mean().iloc[-1]
-            composite += (1.0 if current > sma else -1.0) * w
-        total_w = sum(weights)
-        return composite / total_w if total_w > 0 else 0
-
-    m1h = calc_macd_pos(df_1h['close'], GAINER_PARAMS["MACD_1H"]) * GAINER_PARAMS["GA_WEIGHTS"]["MACD_1H"]
-    m1d = calc_macd_pos(df_1d['close'], GAINER_PARAMS["MACD_1D"]) * GAINER_PARAMS["GA_WEIGHTS"]["MACD_1D"]
-    s1d = calc_sma_pos(df_1d['close'], GAINER_PARAMS["SMA_1D"]) * GAINER_PARAMS["GA_WEIGHTS"]["SMA_1D"]
+def calc_vectorized_macd_signal(df, config):
+    params = config['params']
+    weights = config['weights']
+    total_signal = pd.Series(0.0, index=df.index)
     
-    total_w = sum(GAINER_PARAMS["GA_WEIGHTS"].values())
-    return (m1h + m1d + s1d) / total_w
+    for (f, s, sp), w in zip(params, weights):
+        fast = df['close'].ewm(span=f, adjust=False).mean()
+        slow = df['close'].ewm(span=s, adjust=False).mean()
+        macd = fast - slow
+        signal_line = macd.ewm(span=sp, adjust=False).mean()
+        # +1 if macd > signal_line, else -1
+        sub_signal = np.where(macd > signal_line, 1.0, -1.0)
+        total_signal += sub_signal * w
+        
+    return total_signal / sum(weights)
+
+def calc_vectorized_sma_signal(df, config):
+    params = config['params']
+    weights = config['weights']
+    total_signal = pd.Series(0.0, index=df.index)
+    
+    for p, w in zip(params, weights):
+        sma = df['close'].rolling(window=p).mean()
+        # +1 if current close > sma, else -1
+        sub_signal = np.where(df['close'] > sma, 1.0, -1.0)
+        total_signal += sub_signal * w
+        
+    return total_signal / sum(weights)
 
 def run_backtest(hold_days):
     global DATA_1H, DATA_1D, DATA_5M
     if DATA_5M is None: return None, None
     
-    hold_period_5m = int(hold_days * 288) # Convert days to 5-min intervals
-    
-    # Calculate Gainer signal for every 5-minute bar
-    # To optimize, we pre-calculate signals at 1h and 1d and forward fill to 5m
+    hold_period_5m = int(hold_days * 288) 
     delayed_print(f"[PROCESS] Running Gainer Backtest (Hold: {hold_days} days)...")
     
-    # Note: For strict accuracy, we'd calculate signal at every bar using lookbacks.
-    # To keep it interactive, we calculate it once per hour/day and broadcast.
+    # 1. Calculate base signals on their respective timeframes (Vectorized)
+    sig_1h = calc_vectorized_macd_signal(DATA_1H, GAINER_PARAMS["MACD_1H"])
+    sig_1d_macd = calc_vectorized_macd_signal(DATA_1D, GAINER_PARAMS["MACD_1D"])
+    sig_1d_sma = calc_vectorized_sma_signal(DATA_1D, GAINER_PARAMS["SMA_1D"])
     
-    # MACD 1H signals
-    macd_1h_sigs = []
-    # Simplified vectorization for the simulator
-    for t in DATA_1H.index:
-        # Just use data up to time t
-        temp_1h = DATA_1H.loc[:t]
-        if len(temp_1h) < 400: macd_1h_sigs.append(0)
-        else:
-            def macd_val(prices, params, weights):
-                comp = 0
-                for (f, s, sp), w in zip(params, weights):
-                    m = prices.ewm(span=f).mean() - prices.ewm(span=s).mean()
-                    sig = m.ewm(span=sp).mean()
-                    comp += (1.0 if m.iloc[-1] > sig.iloc[-1] else -1.0) * w
-                return comp / sum(weights)
-            macd_1h_sigs.append(macd_val(temp_1h, GAINER_PARAMS["MACD_1H"]['params'], GAINER_PARAMS["MACD_1H"]['weights']))
+    # 2. Reindex and Forward Fill signals to 5m timeframe
+    s_1h = sig_1h.reindex(DATA_5M.index, method='ffill').fillna(0)
+    s_1d_macd = sig_1d_macd.reindex(DATA_5M.index, method='ffill').fillna(0)
+    s_1d_sma = sig_1d_sma.reindex(DATA_5M.index, method='ffill').fillna(0)
     
-    s_1h = pd.Series(macd_1h_sigs, index=DATA_1H.index).reindex(DATA_5M.index, method='ffill').fillna(0)
-    
-    # SMA 1D signals (similarly broadcast)
-    sma_1d_sigs = []
-    for t in DATA_1D.index:
-        temp_1d = DATA_1D.loc[:t]
-        if len(temp_1d) < 400: sma_1d_sigs.append(0)
-        else:
-            def sma_val(prices, params, weights):
-                comp = 0; curr = prices.iloc[-1]
-                for p, w in zip(params, weights):
-                    comp += (1.0 if curr > prices.rolling(p).mean().iloc[-1] else -1.0) * w
-                return comp / sum(weights)
-            sma_1d_sigs.append(sma_val(temp_1d, GAINER_PARAMS["SMA_1D"]['params'], GAINER_PARAMS["SMA_1D"]['weights']))
-    
-    s_1d = pd.Series(sma_1d_sigs, index=DATA_1D.index).reindex(DATA_5M.index, method='ffill').fillna(0)
-    
-    # Combine signals
+    # 3. Combine signals using Gainer Weights
     w = GAINER_PARAMS["GA_WEIGHTS"]
-    # Simplification: we treat MACD_1D signal similarly to SMA_1D for this high-speed simulation
-    combined_signal = (s_1h * w["MACD_1H"] + s_1d * (w["MACD_1D"] + w["SMA_1D"])) / sum(w.values())
+    combined_signal = (
+        s_1h * w["MACD_1H"] + 
+        s_1d_macd * w["MACD_1D"] + 
+        s_1d_sma * w["SMA_1D"]
+    ) / sum(w.values())
     
     df = DATA_5M.copy()
     df['signal'] = combined_signal
     
-    # Additive position: Sum of signals over the variable holding period
+    # 4. Additive position calculation
     df['net_exposure'] = df['signal'].rolling(window=hold_period_5m).sum()
     
-    # Fees: 0.02% per unit of delta change
+    # 5. Fees: 0.02% per unit of delta change
     fee_rate = 0.0002
     df['pos_delta'] = df['net_exposure'].diff().abs().fillna(0)
     df['fees'] = df['pos_delta'] * fee_rate
     
-    # Returns
+    # 6. Returns Calculation
+    # Note: Using shift(-hold) for the 24h forward return
     future_close = df['close'].shift(-hold_period_5m)
     pct_change = (future_close - df['close']) / df['close']
     df['strategy_ret_raw'] = df['signal'] * pct_change
@@ -165,10 +142,15 @@ def run_backtest(hold_days):
     results = df.dropna(subset=['strategy_ret_net']).copy()
     results['equity'] = results['strategy_ret_net'].cumsum()
     
-    # Metrics
+    # 7. Metrics
     daily_equity = results['equity'].resample('D').last().dropna()
     daily_diff = daily_equity.diff().dropna()
-    sharpe = (daily_diff.mean() / daily_diff.std()) * np.sqrt(365) if len(daily_diff) > 1 and daily_diff.std() != 0 else 0
+    
+    if len(daily_diff) > 1 and daily_diff.std() != 0:
+        sharpe = (daily_diff.mean() / daily_diff.std()) * np.sqrt(365)
+    else:
+        sharpe = 0
+        
     max_dd = (results['equity'].cummax() - results['equity']).max() * 100
 
     metrics = {
@@ -176,21 +158,20 @@ def run_backtest(hold_days):
         "sharpe": sharpe,
         "total_return": results['equity'].iloc[-1] * 100,
         "total_fees": results['fees'].sum() * 100,
-        "avg_trade_net": results['strategy_ret_net'].mean() * 100,
         "max_dd": max_dd,
         "max_exposure": results['net_exposure'].abs().max(),
     }
 
-    # Plot
+    # 8. Plotting
     fig, (ax1, ax2) = plt.subplots(2, 1, figsize=(10, 7), sharex=True, gridspec_kw={'height_ratios': [2, 1]})
     ax1.plot(results.index, results['equity']*100, color='#1a73e8', lw=2)
-    ax1.set_title(f'Gainer Ensemble Cumulative Net Return % (Hold: {hold_days} days)')
+    ax1.set_title(f'Gainer Ensemble Strategy | Hold: {hold_days} Days')
     ax1.set_ylabel('Net Return %')
     ax1.grid(True, alpha=0.2)
     
     ax2.fill_between(results.index, results['net_exposure'], color='#1a73e8', alpha=0.2)
     ax2.plot(results.index, results['net_exposure'], color='#1a73e8', lw=1)
-    ax2.set_title('Additive Net Exposure (Units)')
+    ax2.set_title('Stacked Position Exposure (Additive Units)')
     ax2.set_ylabel('Units')
     ax2.grid(True, alpha=0.2)
     
@@ -214,17 +195,17 @@ class SimulatorHandler(http.server.SimpleHTTPRequestHandler):
         <style>
             body {{ font-family: -apple-system, sans-serif; background: #f4f6f9; margin:0; padding:20px; color: #202124; }}
             .container {{ max-width: 1100px; margin: auto; background: white; padding: 30px; border-radius: 12px; box-shadow: 0 4px 20px rgba(0,0,0,0.08); }}
-            .header {{ display: flex; justify-content: space-between; align-items: center; border-bottom: 1px solid #eee; padding-bottom: 20px; margin-bottom: 25px; }}
-            h1 {{ margin:0; font-size: 1.4rem; color: #1a73e8; }}
+            .header {{ display: flex; justify-content: space-between; align-items: center; border-bottom: 1px solid #eee; padding-bottom: 15px; margin-bottom: 20px; }}
+            h1 {{ margin:0; font-size: 1.3rem; color: #1a73e8; }}
             .control-panel {{ background: #fff; padding: 20px; border-radius: 8px; margin-bottom: 25px; border: 1px solid #e8eaed; }}
             .slider-container {{ display: flex; align-items: center; gap: 20px; }}
-            input[type=range] {{ flex-grow: 1; }}
+            input[type=range] {{ flex-grow: 1; cursor: pointer; }}
             .display {{ font-weight: bold; color: #1a73e8; font-size: 1.2rem; min-width: 120px; text-align: right; }}
             .grid {{ display: grid; grid-template-columns: 280px 1fr; gap: 30px; }}
             .m-card {{ border-bottom: 1px solid #f1f3f4; padding: 12px 0; display: flex; justify-content: space-between; font-size: 0.9rem; }}
             .m-val {{ font-weight: 700; }}
             img {{ width: 100%; border-radius: 4px; border: 1px solid #eee; }}
-            .hint {{ font-size: 0.75rem; color: #70757a; margin-top: 10px; line-height: 1.4; }}
+            .hint {{ font-size: 0.75rem; color: #70757a; margin-top: 10px; line-height: 1.4; border-top: 1px solid #eee; padding-top: 10px; }}
         </style>
         </head>
         <body>
@@ -235,23 +216,23 @@ class SimulatorHandler(http.server.SimpleHTTPRequestHandler):
                 </div>
                 <div class="control-panel">
                     <div class="slider-container">
-                        <label>Hold Duration:</label>
+                        <label>Hold Window:</label>
                         <input type="range" min="1" max="20" step="0.5" value="{hold_val}" oninput="updateVal(this.value)" onchange="applyVal(this.value)">
                         <div class="display" id="holdDisplay">{hold_val} Days</div>
                     </div>
                     <div class="hint">
-                        <b>Strategy:</b> Weighted MACD(1h/1d) + SMA(1d). <br/>
-                        <b>Hold Logic:</b> Each 5m signal creates a new trade held for X days. <b>Fees:</b> 0.02% on delta unit change.
+                        <b>Configuration:</b> Skipping first 4 years (~420k bars). <br/>
+                        <b>Strategy:</b> Full Gainer Ensemble (MACD 1h/1d + SMA 1d weights). <br/>
+                        <b>Logic:</b> Additive 24h holds stacked based on 5m entry signals.
                     </div>
                 </div>
                 <div class="grid">
                     <div class="sidebar">
                         <div class="m-card"><span>Daily Sharpe</span><span class="m-val" style="color:#1a73e8">{metrics['sharpe']:.2f}</span></div>
                         <div class="m-card"><span>Total Return (Net)</span><span class="m-val" style="color:#1e8e3e">{metrics['total_return']:.1f}%</span></div>
-                        <div class="m-card"><span>Total Fees</span><span class="m-val" style="color:#d93025">{metrics['total_fees']:.1f}%</span></div>
-                        <div class="m-card"><span>Avg Bar Net</span><span class="m-val">{metrics['avg_trade_net']:.4f}%</span></div>
+                        <div class="m-card"><span>Total Fees Paid</span><span class="m-val" style="color:#d93025">{metrics['total_fees']:.1f}%</span></div>
                         <div class="m-card"><span>Max Drawdown</span><span class="m-val">{metrics['max_dd']:.1f}%</span></div>
-                        <div class="m-card"><span>Max Exposure</span><span class="m-val">{metrics['max_exposure']:.0f} units</span></div>
+                        <div class="m-card"><span>Max Unit Depth</span><span class="m-val">{metrics['max_exposure']:.0f}</span></div>
                     </div>
                     <div class="main-content"><img src="data:image/png;base64,{plot_b64}"></div>
                 </div>
@@ -270,5 +251,5 @@ if __name__ == "__main__":
     download_data(FILE_ID, FILENAME)
     prepare_data(FILENAME)
     with socketserver.TCPServer(("", 8080), SimulatorHandler) as httpd:
-        delayed_print("[INFO] Gainer Simulator live at http://localhost:8080")
+        delayed_print("[INFO] Backtest Simulator live at http://localhost:8080")
         httpd.serve_forever()
