@@ -6,7 +6,9 @@ import time
 import sys
 import http.server
 import socketserver
-import threading
+import base64
+from io import BytesIO
+import matplotlib.pyplot as plt
 from datetime import datetime
 
 # Helper to handle the requested print delay
@@ -64,19 +66,55 @@ def run_strategy(csv_file):
         df_5m['trade_return'] = (future_close - df_5m['close']) / df_5m['close']
         df_5m['strategy_return'] = df_5m['signal'] * df_5m['trade_return']
         
-        results = df_5m.dropna(subset=['strategy_return', 'sma_40'])
+        results = df_5m.dropna(subset=['strategy_return', 'sma_40']).copy()
         
         delayed_print("[FINALIZE] Aggregating performance metrics...")
         
+        # Calculate Equity Curve
+        results['cumulative_return'] = results['strategy_return'].cumsum()
+        
+        # Additional Metrics
+        avg_ret = results['strategy_return'].mean()
+        std_ret = results['strategy_return'].std()
+        ret_std_ratio = avg_ret / std_ret if std_ret != 0 else 0
+        
+        gross_profit = results[results['strategy_return'] > 0]['strategy_return'].sum()
+        gross_loss = abs(results[results['strategy_return'] < 0]['strategy_return'].sum())
+        profit_factor = gross_profit / gross_loss if gross_loss != 0 else float('inf')
+        
+        # Max Drawdown
+        running_max = results['cumulative_return'].cummax()
+        drawdown = results['cumulative_return'] - running_max
+        max_drawdown = drawdown.min()
+
         metrics = {
             "total_trades": len(results),
             "wins": len(results[results['strategy_return'] > 0]),
             "losses": len(results[results['strategy_return'] < 0]),
             "win_rate": (len(results[results['strategy_return'] > 0]) / len(results)) * 100,
-            "avg_return": results['strategy_return'].mean() * 100,
+            "avg_return": avg_ret * 100,
+            "std_return": std_ret * 100,
+            "ret_std_ratio": ret_std_ratio,
             "total_return": results['strategy_return'].sum() * 100,
+            "profit_factor": profit_factor,
+            "max_drawdown": max_drawdown * 100,
             "timestamp": datetime.now().strftime("%Y-%m-%d %H:%M:%S")
         }
+
+        # Generate Plot
+        delayed_print("[PROCESS] Generating performance graph...")
+        plt.figure(figsize=(10, 5))
+        plt.plot(results.index, results['cumulative_return'] * 100, color='#2980b9', linewidth=1.5)
+        plt.title('Cumulative Strategy Return (%)', fontsize=14, pad=15)
+        plt.ylabel('Return %')
+        plt.grid(True, linestyle='--', alpha=0.7)
+        plt.tight_layout()
+        
+        # Convert plot to base64
+        buf = BytesIO()
+        plt.savefig(buf, format='png', dpi=100)
+        plt.close()
+        plot_base64 = base64.b64encode(buf.getvalue()).decode('utf-8')
 
         # Detailed Console Output
         delayed_print("--------------------------------------------------")
@@ -84,16 +122,19 @@ def run_strategy(csv_file):
         delayed_print("--------------------------------------------------")
         delayed_print(f"Total Observations:   {metrics['total_trades']}")
         delayed_print(f"Win Rate:             {metrics['win_rate']:.2f}%")
+        delayed_print(f"Return / STD Ratio:   {metrics['ret_std_ratio']:.4f}")
         delayed_print(f"Total Return (Sum):   {metrics['total_return']:.2f}%")
+        delayed_print(f"Profit Factor:        {metrics['profit_factor']:.2f}")
+        delayed_print(f"Max Drawdown:         {metrics['max_drawdown']:.2f}%")
         delayed_print("--------------------------------------------------")
         
-        return metrics
+        return metrics, plot_base64
 
     except Exception as e:
         delayed_print(f"[ERROR] An error occurred: {e}")
-        return None
+        return None, None
 
-def start_server(metrics):
+def start_server(metrics, plot_data):
     PORT = 8080
     
     html_content = f"""
@@ -102,25 +143,45 @@ def start_server(metrics):
     <head>
         <title>Backtest Results</title>
         <style>
-            body {{ font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif; background-color: #f4f7f6; color: #333; display: flex; justify-content: center; align-items: center; height: 100vh; margin: 0; }}
-            .card {{ background: white; padding: 2rem; border-radius: 12px; box-shadow: 0 4px 6px rgba(0,0,0,0.1); width: 400px; }}
-            h1 {{ font-size: 1.5rem; border-bottom: 2px solid #eee; padding-bottom: 1rem; margin-top: 0; color: #2c3e50; }}
-            .stat-row {{ display: flex; justify-content: space-between; padding: 10px 0; border-bottom: 1px solid #fafafa; }}
-            .label {{ color: #7f8c8d; font-weight: 500; }}
-            .value {{ font-weight: 700; color: #2980b9; }}
-            .footer {{ font-size: 0.8rem; color: #bdc3c7; margin-top: 1.5rem; text-align: center; }}
+            body {{ font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif; background-color: #f0f2f5; color: #1c1e21; margin: 0; padding: 40px; display: flex; flex-direction: column; align-items: center; }}
+            .container {{ max-width: 1000px; width: 100%; }}
+            .grid {{ display: grid; grid-template-columns: 1fr 2fr; gap: 20px; }}
+            .card {{ background: white; padding: 24px; border-radius: 12px; box-shadow: 0 2px 4px rgba(0,0,0,0.08); margin-bottom: 20px; }}
+            h1 {{ font-size: 1.5rem; margin-top: 0; color: #1a73e8; border-bottom: 1px solid #eee; padding-bottom: 12px; }}
+            h2 {{ font-size: 1.1rem; color: #5f6368; margin-bottom: 20px; }}
+            .stat-row {{ display: flex; justify-content: space-between; padding: 12px 0; border-bottom: 1px solid #f8f9fa; }}
+            .label {{ color: #70757a; font-weight: 500; }}
+            .value {{ font-weight: 700; color: #202124; }}
+            .plot-container {{ text-align: center; }}
+            .plot-container img {{ max-width: 100%; border-radius: 8px; }}
+            .footer {{ font-size: 0.85rem; color: #9aa0a6; text-align: center; margin-top: 30px; }}
+            .positive {{ color: #1e8e3e; }}
+            .negative {{ color: #d93025; }}
+            .highlight {{ color: #1a73e8; }}
         </style>
     </head>
     <body>
-        <div class="card">
-            <h1>Strategy Dashboard</h1>
-            <div class="stat-row"><span class="label">Algorithm</span><span class="value">SMA 40 Cross</span></div>
-            <div class="stat-row"><span class="label">Hold Period</span><span class="value">24 Hours</span></div>
-            <div class="stat-row"><span class="label">Total Trades</span><span class="value">{metrics['total_trades']}</span></div>
-            <div class="stat-row"><span class="label">Win Rate</span><span class="value">{metrics['win_rate']:.2f}%</span></div>
-            <div class="stat-row"><span class="label">Avg Return</span><span class="value">{metrics['avg_return']:.4f}%</span></div>
-            <div class="stat-row"><span class="label">Total Return</span><span class="value">{metrics['total_return']:.2f}%</span></div>
-            <div class="footer">Backtest completed at {metrics['timestamp']}</div>
+        <div class="container">
+            <div class="card">
+                <h1>SMA Crossover Backtest Results</h1>
+                <div class="grid">
+                    <div class="stats-panel">
+                        <h2>Key Metrics</h2>
+                        <div class="stat-row"><span class="label">Total Trades</span><span class="value">{metrics['total_trades']}</span></div>
+                        <div class="stat-row"><span class="label">Win Rate</span><span class="value">{metrics['win_rate']:.2f}%</span></div>
+                        <div class="stat-row"><span class="label">Return / STD</span><span class="value highlight">{metrics['ret_std_ratio']:.4f}</span></div>
+                        <div class="stat-row"><span class="label">Profit Factor</span><span class="value">{metrics['profit_factor']:.2f}</span></div>
+                        <div class="stat-row"><span class="label">Avg Return</span><span class="value { 'positive' if metrics['avg_return'] > 0 else 'negative' }">{metrics['avg_return']:.4f}%</span></div>
+                        <div class="stat-row"><span class="label">Total Return</span><span class="value { 'positive' if metrics['total_return'] > 0 else 'negative' }">{metrics['total_return']:.2f}%</span></div>
+                        <div class="stat-row"><span class="label">Max Drawdown</span><span class="value negative">{metrics['max_drawdown']:.2f}%</span></div>
+                    </div>
+                    <div class="plot-container">
+                        <h2>Equity Curve</h2>
+                        <img src="data:image/png;base64,{plot_data}" alt="Strategy Plot">
+                    </div>
+                </div>
+            </div>
+            <div class="footer">Backtest completed at {metrics['timestamp']} | Hold Period: 24h | Intervals: 5m</div>
         </div>
     </body>
     </html>
@@ -144,7 +205,7 @@ if __name__ == "__main__":
     FILENAME = 'downloaded_ohlcv.csv'
 
     download_data(FILE_ID, FILENAME)
-    results = run_strategy(FILENAME)
+    results, plot_b64 = run_strategy(FILENAME)
     
     if results:
-        start_server(results)
+        start_server(results, plot_b64)
