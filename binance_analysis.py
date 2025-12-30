@@ -123,15 +123,15 @@ def get_base_signal_series(target_index):
 def run_genetic_optimization():
     global GA_BEST_ALL, GA_BEST_2Y
     delayed_print("[GA] Starting Extensive Genetic Optimization...")
-    delayed_print("[GA] Config: Pop=50 | Gens=15 | Slices=5 | Range=[5m, 20d]")
+    delayed_print("[GA] Config: Pop=50 | Gens=15 | Slices=5 (4 months each) | Range=[5m, 20d]")
     
     # Pre-calculate full signal series to avoid re-computing indicators in GA loop
     full_sigs = get_base_signal_series(DATA_5M.index)
     
     def fitness_fn(hold_days, data_df, signal_series):
-        # Constraint: Use a random 2-month (60 day) slice
-        # 60 days * 288 bars = 17280 bars
-        SLICE_SIZE = 17280
+        # Constraint: Use a random 4-month (120 day) slice
+        # 120 days * 288 bars = 34560 bars
+        SLICE_SIZE = 34560
         
         if len(data_df) < SLICE_SIZE:
             slice_df = data_df
@@ -335,7 +335,7 @@ class SimulatorHandler(http.server.SimpleHTTPRequestHandler):
                         <div class="ga-box">
                             <div class="ga-title">GENETIC ALGORITHM SUGGESTION</div>
                             Optimal Hold: <b>{GA_BEST_ALL:.2f} Days</b><br/>
-                            <small>Optimized on random 2-month slices</small>
+                            <small>Optimized on random 4-month slices</small>
                         </div>
                         <div class="stats-grid">
                             <div class="stat">Sharpe <span>{m_all['sharpe']:.2f}</span></div>
@@ -352,7 +352,7 @@ class SimulatorHandler(http.server.SimpleHTTPRequestHandler):
                         <div class="ga-box">
                             <div class="ga-title">GENETIC ALGORITHM SUGGESTION</div>
                             Optimal Hold: <b>{GA_BEST_2Y:.2f} Days</b><br/>
-                            <small>Optimized on random 2-month slices</small>
+                            <small>Optimized on random 4-month slices</small>
                         </div>
                         <div class="stats-grid">
                             <div class="stat">Sharpe <span>{m_2y['sharpe']:.2f}</span></div>
