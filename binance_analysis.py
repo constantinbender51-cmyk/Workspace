@@ -49,38 +49,42 @@ def run_backtest(sma_period):
     hold_period = 288 # Constant 24h hold
 
     # Independent Streams
+    # 1 if condition met, 0 otherwise
     df['long_sig'] = (df['close'] > df['sma']).astype(int)
     df['short_sig'] = (df['close'] < df['sma']).astype(int)
     
+    # Additive positions: sum of signals over the last 24 hours
     df['pos_long'] = df['long_sig'].rolling(window=hold_period).sum()
     df['pos_short'] = df['short_sig'].rolling(window=hold_period).sum()
     df['net_exposure'] = df['pos_long'] - df['pos_short']
 
-    # Fee Logic: 0.02% on delta change of net position size
-    # We use abs(diff) because increasing or decreasing exposure incurs fees
+    # Fee Logic: 0.02% (0.0002) on delta change of net position size
+    # If net_exposure moves from 1 to 2, delta is 1. Fee = 1 * 0.0002.
     fee_rate = 0.0002
     df['pos_delta'] = df['net_exposure'].diff().abs().fillna(0)
     df['fees'] = df['pos_delta'] * fee_rate
 
+    # Calculate returns for the holding period
+    # We enter at 'close' and exit 288 bars later at 'future_close'
     future_close = df['close'].shift(-hold_period)
     pct_change = (future_close - df['close']) / df['close']
     
+    # Raw returns from long and short signals
     df['long_ret_raw'] = df['long_sig'] * pct_change
     df['short_ret_raw'] = df['short_sig'] * (-pct_change)
     
-    # We subtract fees from the total return stream
-    # Note: In an additive model, fees are usually attributed to the bar of execution
+    # Net return = (Sum of stream returns) - Fees incurred at this specific bar
     df['total_ret_net'] = (df['long_ret_raw'] + df['short_ret_raw']) - df['fees']
     
     results = df.dropna(subset=['total_ret_net', 'sma']).copy()
     results['equity'] = results['total_ret_net'].cumsum()
     
-    # Sharpe (using net equity)
+    # Sharpe (calculated on daily equity changes for realism)
     daily_equity = results['equity'].resample('D').last().dropna()
     daily_diff = daily_equity.diff().dropna()
     sharpe = (daily_diff.mean() / daily_diff.std()) * np.sqrt(365) if len(daily_diff) > 1 and daily_diff.std() != 0 else 0
             
-    # Drawdown
+    # Drawdown magnitude calculation
     highmark = results['equity'].cummax()
     max_dd = (highmark - results['equity']).max() * 100
 
@@ -95,18 +99,22 @@ def run_backtest(sma_period):
         "max_short_units": results['pos_short'].max(),
     }
 
-    # Plot
+    # Plot generation
     fig, (ax1, ax2) = plt.subplots(2, 1, figsize=(10, 7), sharex=True, gridspec_kw={'height_ratios': [2, 1]})
-    ax1.plot(results.index, results['equity']*100, color='#1a73e8', lw=2, label='Equity (Net of Fees)')
-    ax1.set_title(f'Cumulative Net Return % (SMA: {sma_period})')
-    ax1.set_ylabel('Net Return %')
+    
+    # Equity Plot
+    ax1.plot(results.index, results['equity']*100, color='#1a73e8', lw=2, label='Net Equity')
+    ax1.set_title(f'Cumulative Strategy Return % (Net of Fees)')
+    ax1.set_ylabel('Return %')
     ax1.grid(True, alpha=0.2)
     ax1.legend(loc='upper left', fontsize='small')
     
-    ax2.plot(results.index, results['pos_long'], color='#1e8e3e', lw=1, alpha=0.6, label='Long Units')
-    ax2.plot(results.index, -results['pos_short'], color='#d93025', lw=1, alpha=0.6, label='Short Units')
+    # Exposure Plot
+    ax2.plot(results.index, results['pos_long'], color='#1e8e3e', lw=1, alpha=0.5, label='Long Stack')
+    ax2.plot(results.index, -results['pos_short'], color='#d93025', lw=1, alpha=0.5, label='Short Stack')
     ax2.fill_between(results.index, results['net_exposure'], color='#1a73e8', alpha=0.2, label='Net Exposure')
-    ax2.set_title('Exposure (Units)')
+    ax2.set_title('Independent and Net Exposure (Units)')
+    ax2.set_ylabel('Units')
     ax2.grid(True, alpha=0.2)
     ax2.legend(loc='lower left', fontsize='x-small')
     
@@ -121,61 +129,62 @@ class StrategyHandler(http.server.SimpleHTTPRequestHandler):
         query = urllib.parse.urlparse(self.path).query
         params = urllib.parse.parse_qs(query)
         sma_val = int(params.get('sma', [40])[0])
+        # Limit SMA up to 120 days
         sma_val = max(40, min(sma_val, 34560))
         
         metrics, plot_b64 = run_backtest(sma_val)
         
         if metrics is None:
-            self.send_error(500, "Data not ready")
+            self.send_error(500, "Simulator Error: Data not pre-processed")
             return
 
         html = f"""
-        <!DOCTYPE html><html><head><title>SMA Backtest Simulator</title>
+        <!DOCTYPE html><html><head><title>Backtest Simulator</title>
         <style>
-            body {{ font-family: -apple-system, sans-serif; background: #f0f2f5; margin:0; padding:20px; color: #202124; }}
+            body {{ font-family: -apple-system, system-ui, sans-serif; background: #f0f2f5; margin:0; padding:20px; color: #202124; }}
             .container {{ max-width: 1100px; margin: auto; background: white; padding: 30px; border-radius: 12px; box-shadow: 0 4px 20px rgba(0,0,0,0.08); }}
             .header {{ display: flex; justify-content: space-between; align-items: center; border-bottom: 1px solid #eee; padding-bottom: 20px; margin-bottom: 25px; }}
             h1 {{ margin:0; font-size: 1.4rem; color: #1a73e8; }}
             .control-panel {{ background: #f8f9fa; padding: 20px; border-radius: 8px; margin-bottom: 25px; border: 1px solid #e8eaed; }}
             .slider-container {{ display: flex; align-items: center; gap: 20px; }}
-            input[type=range] {{ flex-grow: 1; height: 8px; border-radius: 5px; background: #ddd; outline: none; }}
+            input[type=range] {{ flex-grow: 1; cursor: pointer; }}
             .sma-display {{ font-weight: bold; color: #1a73e8; font-size: 1.2rem; min-width: 180px; text-align: right; }}
             .grid {{ display: grid; grid-template-columns: 280px 1fr; gap: 30px; }}
             .m-card {{ border-bottom: 1px solid #f1f3f4; padding: 12px 0; display: flex; justify-content: space-between; font-size: 0.9rem; }}
             .m-val {{ font-weight: 700; }}
             .highlight {{ color: #1a73e8; font-size: 1.1rem; }}
-            img {{ width: 100%; border-radius: 4px; }}
-            .label-hint {{ font-size: 0.75rem; color: #70757a; margin-top: 4px; }}
+            img {{ width: 100%; border-radius: 4px; border: 1px solid #eee; }}
+            .label-hint {{ font-size: 0.75rem; color: #70757a; margin-top: 6px; }}
         </style>
         </head>
         <body>
             <div class="container">
                 <div class="header">
-                    <h1>SMA Adaptive Strategy Simulator</h1>
+                    <h1>Additive Strategy Simulator (Dual Positions)</h1>
                     <div class="timestamp">{datetime.now().strftime("%H:%M:%S")}</div>
                 </div>
 
                 <div class="control-panel">
                     <div class="slider-container">
-                        <label>SMA Window:</label>
+                        <label>SMA Period:</label>
                         <input type="range" id="smaSlider" min="40" max="34560" value="{sma_val}" oninput="updateVal(this.value)" onchange="applyVal(this.value)">
                         <div class="sma-display" id="smaValDisplay">{sma_val} Bars ({(sma_val/288):.1f} Days)</div>
                     </div>
-                    <div class="label-hint">Range: 40 (5m) to 34560 (120 Days). Hold: 24h. Fees: 0.02% per delta unit.</div>
+                    <div class="label-hint">Fee Logic: 0.02% charged on every absolute unit change of net exposure. Hold period: 24h.</div>
                 </div>
 
                 <div class="grid">
                     <div class="sidebar">
                         <div class="m-card"><span>Realistic Sharpe</span><span class="m-val highlight">{metrics['sharpe']:.2f}</span></div>
-                        <div class="m-card"><span>Avg Trade (Net)</span><span class="m-val" style="color:#1a73e8">{metrics['avg_trade_ret']:.4f}%</span></div>
-                        <div class="m-card"><span>Total Return (Net)</span><span class="m-val" style="color:#1e8e3e">{metrics['total_return']:.1f}%</span></div>
-                        <div class="m-card"><span>Total Fees Paid</span><span class="m-val" style="color:#d93025">{metrics['total_fees']:.1f}%</span></div>
+                        <div class="m-card"><span>Avg Bar (Net)</span><span class="m-val" style="color:#1a73e8">{metrics['avg_trade_ret']:.4f}%</span></div>
+                        <div class="m-card"><span>Total Return</span><span class="m-val" style="color:#1e8e3e">{metrics['total_return']:.1f}%</span></div>
+                        <div class="m-card"><span>Total Fees</span><span class="m-val" style="color:#d93025">{metrics['total_fees']:.1f}%</span></div>
                         <div class="m-card"><span>Max Drawdown</span><span class="m-val">{metrics['max_dd']:.1f}%</span></div>
-                        <div class="m-card"><span>Max Long Units</span><span class="m-val">{metrics['max_long_units']:.0f}</span></div>
-                        <div class="m-card"><span>Max Short Units</span><span class="m-val">{metrics['max_short_units']:.0f}</span></div>
+                        <div class="m-card"><span>Max Long Exp.</span><span class="m-val">{metrics['max_long_units']:.0f}</span></div>
+                        <div class="m-card"><span>Max Short Exp.</span><span class="m-val">{metrics['max_short_units']:.0f}</span></div>
                     </div>
                     <div class="main-content">
-                        <img src="data:image/png;base64,{plot_b64}" alt="Backtest Plot">
+                        <img src="data:image/png;base64,{plot_b64}" alt="Backtest Performance">
                     </div>
                 </div>
             </div>
@@ -204,7 +213,7 @@ if __name__ == "__main__":
     download_data(FILE_ID, FILENAME)
     prepare_data(FILENAME)
     
-    delayed_print(f"[SERVER] Starting interactive server on port {PORT}...")
+    delayed_print(f"[SERVER] Starting interactive backtest server on port {PORT}...")
     with socketserver.TCPServer(("", PORT), StrategyHandler) as httpd:
-        delayed_print(f"[INFO] Simulator live at http://localhost:{PORT}")
+        delayed_print(f"[INFO] Dashboard available at http://localhost:{PORT}")
         httpd.serve_forever()
