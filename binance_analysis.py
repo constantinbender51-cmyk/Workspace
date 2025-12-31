@@ -1,67 +1,31 @@
 import pandas as pd
 from flask import Flask, render_template_string
 import json
-import io
 
 app = Flask(__name__)
 
-# CSS für das "Matrix/Militär-Terminal" der 90er
+# Mapping für die wichtigsten NACE-Handelsklassen in Österreich
+NACE_MAP = {
+    "4711": "Supermärkte / Lebensmittel",
+    "4719": "Warenhäuser (Non-Food)",
+    "4741": "Computer / Software",
+    "4751": "Textilien",
+    "4764": "Sportartikel",
+    "4771": "Bekleidung",
+    "4791": "Online-Handel / Versand",
+    "4511": "Auto-Handel"
+}
+
 STYLE = """
 <style>
-    body { 
-        background-color: #000b00; 
-        color: #00ff41; 
-        font-family: 'Courier New', Courier, monospace; 
-        margin: 0; 
-        overflow-x: hidden;
-    }
-    .terminal {
-        padding: 30px;
-        max-width: 900px;
-        margin: auto;
-        position: relative;
-    }
-    .scanline {
-        width: 100%; height: 3px; background: rgba(0, 255, 65, 0.1);
-        position: fixed; top: 0; left: 0; pointer-events: none;
-        animation: scan 8s linear infinite;
-    }
-    @keyframes scan { from { top: 0; } to { top: 100%; } }
-    h1 { 
-        border: 2px solid #00ff41; 
-        padding: 10px; 
-        text-align: center; 
-        text-shadow: 0 0 5px #00ff41;
-        letter-spacing: 5px;
-    }
-    .stats-grid {
-        display: grid;
-        grid-template-columns: 1fr 1fr;
-        gap: 20px;
-        margin-top: 20px;
-    }
-    .box {
-        border: 1px solid #00ff41;
-        padding: 15px;
-        background: rgba(0, 255, 65, 0.05);
-    }
-    .chart-container {
-        border: 1px solid #00ff41;
-        margin: 20px 0;
-        background: #000;
-        padding: 10px;
-    }
-    table {
-        width: 100%;
-        border-collapse: collapse;
-        margin-top: 20px;
-        font-size: 0.85em;
-    }
-    th { background: #00441b; border: 1px solid #00ff41; padding: 10px; }
-    td { border: 1px solid #00ff41; padding: 8px; text-align: center; }
-    .liquidity-high { color: #fff; text-shadow: 0 0 10px #00ff41; font-weight: bold; }
-    .blink { animation: blinker 1s steps(2, start) infinite; }
-    @keyframes blinker { to { visibility: hidden; } }
+    body { background-color: #f0f0f0; color: #333; font-family: 'Segoe UI', Tahoma, sans-serif; margin: 0; }
+    .header { background: #003366; color: white; padding: 20px; text-align: center; border-bottom: 5px solid #ffcc00; }
+    .container { max-width: 1000px; margin: 20px auto; padding: 20px; background: white; border-radius: 8px; box-shadow: 0 4px 6px rgba(0,0,0,0.1); }
+    .ranking-card { border-left: 5px solid #003366; background: #f9f9f9; padding: 15px; margin-bottom: 10px; display: flex; justify-content: space-between; align-items: center; }
+    .index-val { font-size: 1.5em; font-weight: bold; color: #003366; }
+    .label { font-weight: bold; color: #666; }
+    .recommendation { background: #e7f3fe; border: 1px solid #b6d4fe; padding: 15px; border-radius: 5px; margin-top: 20px; }
+    .tag { background: #ffcc00; color: #000; padding: 2px 8px; border-radius: 4px; font-size: 0.8em; font-weight: bold; }
 </style>
 """
 
@@ -69,148 +33,77 @@ HTML_TEMPLATE = """
 <!DOCTYPE html>
 <html>
 <head>
-    <title>LIQUIDITY TERMINAL V.4791</title>
-    <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+    <title>Markt-Liquidität Österreich</title>
     {{ style|safe }}
 </head>
 <body>
-    <div class="scanline"></div>
-    <div class="terminal">
-        <p style="font-size: 0.7em;">LOGGED IN AS: RESEARCH_UNITS_AUT | ACCESS_LEVEL: RESTRICTED</p>
-        <h1>E-COMMERCE LIQUIDITY MONITOR</h1>
-        
-        <div class="stats-grid">
-            <div class="box">
-                <p>> SEKTOR: <span class="blink">G4791</span></p>
-                <p>> DESC: Versand- & Internet-Einzelhandel</p>
-                <p>> REGION: Österreich</p>
-            </div>
-            <div class="box">
-                <p>> BASIS_YR: 2021 (Index=100)</p>
-                <p>> STATUS: Datenstrom synchronisiert</p>
-                <p>> ANALYSE: {{ row_count }} Zeitpunkte gefunden</p>
-            </div>
-        </div>
-
-        <div class="chart-container">
-            <canvas id="liquidChart" style="height: 300px;"></canvas>
-        </div>
-
-        <table>
-            <thead>
-                <tr>
-                    <th>ZEITRAUM</th>
-                    <th>LIQUIDITÄT (NOM)</th>
-                    <th>REAL-WERT</th>
-                    <th>PERSONAL-IDX</th>
-                </tr>
-            </thead>
-            <tbody>
-                {% for row in rows %}
-                <tr>
-                    <td>{{ row['Zeitraum'] }}</td>
-                    <td class="liquidity-high">{{ row['Umsatz_Nom'] }}</td>
-                    <td>{{ row['Umsatz_Real'] }}</td>
-                    <td>{{ row['Beschäftigte'] }}</td>
-                </tr>
-                {% endfor %}
-            </tbody>
-        </table>
-
-        <p style="margin-top: 20px; font-size: 0.8em; text-align: center;">
-            *** INTERPRETATION: Werte > 100 zeigen erhöhte Marktaktivität gegenüber dem Basisjahr 2021 ***
-        </p>
+    <div class="header">
+        <h1>Produkt-Kategorien Ranking</h1>
+        <p>Welche Branche bewegt in Österreich das meiste Kapital?</p>
     </div>
-
-    <script>
-        const ctx = document.getElementById('liquidChart').getContext('2d');
-        const d = {{ chart_json|safe }};
+    
+    <div class="container">
+        <h2>Aktuelle Liquiditäts-Rangliste (Umsatzindex)</h2>
+        <p>Ein Index über 100 bedeutet: Die Branche ist aktiver als im Durchschnitt von 2021.</p>
         
-        new Chart(ctx, {
-            type: 'line',
-            data: {
-                labels: d.labels,
-                datasets: [{
-                    label: 'Online-Liquidity Index',
-                    data: d.values,
-                    borderColor: '#00ff41',
-                    backgroundColor: 'rgba(0, 255, 65, 0.2)',
-                    fill: true,
-                    tension: 0.4,
-                    borderWidth: 3,
-                    pointBackgroundColor: '#fff'
-                }]
-            },
-            options: {
-                responsive: true,
-                maintainAspectRatio: false,
-                scales: {
-                    y: { grid: { color: '#00441b' }, ticks: { color: '#00ff41' } },
-                    x: { grid: { color: '#00441b' }, ticks: { color: '#00ff41' } }
-                },
-                plugins: {
-                    legend: { labels: { color: '#00ff41', font: { family: 'Courier New' } } }
-                }
-            }
-        });
-    </script>
+        {% for item in ranking %}
+        <div class="ranking-card">
+            <div>
+                <span class="tag">NACE {{ item.code }}</span>
+                <div style="font-size: 1.1em; margin-top: 5px;">{{ item.name }}</div>
+            </div>
+            <div class="index-val">{{ item.value }}</div>
+        </div>
+        {% endfor %}
+
+        <div class="recommendation">
+            <strong>🚀 Strategische Empfehlung:</strong><br>
+            Konzentriere dich auf Sektoren, die einen <strong>Umsatzindex (Nominal) > 110</strong> haben. 
+            Diese Branchen sind derzeit "liquide" – das Geld der Konsumenten fließt dort aktiv. 
+            Wenn der Online-Handel (4791) führt, ist ein reines E-Commerce-Modell am sinnvollsten.
+        </div>
+
+        <div style="margin-top:30px; font-size: 0.9em; color: #888;">
+            * Quelle: Statistik Austria | Basierend auf deiner data.csv
+        </div>
+    </div>
 </body>
 </html>
 """
 
-def clean_val(val):
-    """Bereinigt Präfixe und europäische Zahlenformate."""
-    if pd.isna(val): return 0.0
-    s = str(val).replace('TIIDX-', '').replace('NACEIDX-', '').replace(',', '.')
+def get_ranking():
     try:
-        return float(s)
-    except:
-        return s
-
-def process():
-    try:
-        # Lade die CSV (Semikolon oder Tab getrennt basierend auf deinem Snippet)
         df = pd.read_csv('data.csv', sep=None, engine='python', header=None)
+        # Spalten-Indizes basierend auf deinem Snippet
+        # 0: Zeitraum, 1: NACE, 2: Umsatz_Nom
         
-        # Wir benennen die Spalten nach deinem Schema
-        df.columns = [
-            "C-TIIDXM-0", "C-NACEIDX-0", "F-UIDXNOM", "F-UIDXREAL", 
-            "F-BESCHIDX", "F-UIDXNAB", "F-UIDXNSB", "F-UIDXRAB", 
-            "F-UIDXRSB", "F-IDXBLG", "F-IDXBLGAB", "F-IDXGA", "F-IDXGAAB"
-        ]
-
-        # Filter auf E-Commerce
-        online_df = df[df['C-NACEIDX-0'].astype(str).str.contains('4791')].copy()
-
-        # Daten bereinigen
-        online_df['Zeitraum'] = online_df['C-TIIDXM-0'].apply(clean_val)
-        online_df['Umsatz_Nom'] = online_df['F-UIDXNOM'].apply(clean_val)
-        online_df['Umsatz_Real'] = online_df['F-UIDXREAL'].apply(clean_val)
-        online_df['Beschäftigte'] = online_df['F-BESCHIDX'].apply(clean_val)
-
-        # Sortieren für Chart (Zeitstrahl)
-        online_df = online_df.sort_values(by='Zeitraum')
-
-        chart_data = {
-            "labels": online_df['Zeitraum'].tolist(),
-            "values": online_df['Umsatz_Nom'].tolist()
-        }
-
-        return online_df.to_dict('records'), len(online_df), chart_data
+        # Nur den aktuellsten Monat nehmen
+        latest_month = df[0].iloc[0]
+        current_data = df[df[0] == latest_month]
+        
+        results = []
+        for _, row in current_data.iterrows():
+            raw_code = str(row[1]).replace('NACEIDX-', '')
+            val = str(row[2]).replace(',', '.')
+            try:
+                val_float = float(val)
+                results.append({
+                    "code": raw_code,
+                    "name": NACE_MAP.get(raw_code, "Sonstiger Handel / Spezialsortiment"),
+                    "value": val_float
+                })
+            except:
+                continue
+        
+        # Sortieren nach höchstem Umsatzindex (Liquidität)
+        return sorted(results, key=lambda x: x['value'], reverse=True)
     except Exception as e:
-        print(f"ERROR: {e}")
-        return [], 0, {"labels": [], "values": []}
+        return [{"code": "ERR", "name": str(e), "value": 0}]
 
 @app.route('/')
 def index():
-    rows, count, chart_json = process()
-    return render_template_string(
-        HTML_TEMPLATE, 
-        style=STYLE, 
-        rows=rows, 
-        row_count=count,
-        chart_json=json.dumps(chart_json)
-    )
+    ranking = get_ranking()
+    return render_template_string(HTML_TEMPLATE, style=STYLE, ranking=ranking)
 
 if __name__ == '__main__':
     app.run(host='0.0.0.0', port=8080)
