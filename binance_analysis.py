@@ -1,83 +1,67 @@
 import pandas as pd
 from flask import Flask, render_template_string
 import json
+import io
 
 app = Flask(__name__)
 
-# Mapping der technischen Kürzel auf lesbare Namen
-COLUMN_MAPPING = {
-    "C-TIIDXM-0": "Zeitraum",
-    "F-UIDXNOM": "Umsatz (Nom.)",
-    "F-UIDXREAL": "Umsatz (Real)",
-    "F-BESCHIDX": "Beschäftigte",
-    "F-UIDXNAB": "Umsatz Nom. (ber.)",
-    "F-UIDXNSB": "Umsatz Nom. (sais.)",
-    "F-UIDXRAB": "Umsatz Real (ber.)",
-    "F-UIDXRSB": "Umsatz Real (sais.)",
-    "F-IDXBLG": "Lohnindex",
-    "F-IDXGA": "Arbeitsstunden",
-    "C-NACEIDX-0": "NACE Branche"
-}
-
+# CSS für das "Matrix/Militär-Terminal" der 90er
 STYLE = """
 <style>
-    body {
-        background-color: #c0c0c0;
-        background-image: radial-gradient(#888 1px, transparent 1px);
-        background-size: 25px 25px;
-        color: #000080;
-        font-family: "Courier New", Courier, monospace;
-        margin: 20px;
+    body { 
+        background-color: #000b00; 
+        color: #00ff41; 
+        font-family: 'Courier New', Courier, monospace; 
+        margin: 0; 
+        overflow-x: hidden;
     }
-    .win-container {
-        border: 3px outset #ffffff;
+    .terminal {
+        padding: 30px;
+        max-width: 900px;
+        margin: auto;
+        position: relative;
+    }
+    .scanline {
+        width: 100%; height: 3px; background: rgba(0, 255, 65, 0.1);
+        position: fixed; top: 0; left: 0; pointer-events: none;
+        animation: scan 8s linear infinite;
+    }
+    @keyframes scan { from { top: 0; } to { top: 100%; } }
+    h1 { 
+        border: 2px solid #00ff41; 
+        padding: 10px; 
+        text-align: center; 
+        text-shadow: 0 0 5px #00ff41;
+        letter-spacing: 5px;
+    }
+    .stats-grid {
+        display: grid;
+        grid-template-columns: 1fr 1fr;
+        gap: 20px;
+        margin-top: 20px;
+    }
+    .box {
+        border: 1px solid #00ff41;
         padding: 15px;
-        background-color: #d4d0c8;
-        box-shadow: 5px 5px 0px #444;
+        background: rgba(0, 255, 65, 0.05);
     }
-    .header-bar {
-        background: linear-gradient(90deg, #000080, #1084d0);
-        color: white;
-        padding: 4px 10px;
-        font-weight: bold;
-        margin-bottom: 15px;
-        display: flex;
-        justify-content: space-between;
-    }
-    h1 {
-        text-align: center;
-        color: #800000;
-        font-size: 1.5em;
-        text-transform: uppercase;
-        margin: 10px 0;
-    }
-    .chart-box {
-        background-color: #000;
-        border: 4px inset #888;
-        padding: 10px;
+    .chart-container {
+        border: 1px solid #00ff41;
         margin: 20px 0;
+        background: #000;
+        padding: 10px;
     }
     table {
-        border-collapse: collapse;
         width: 100%;
-        background-color: #ffffff;
-        border: 2px inset #ffffff;
+        border-collapse: collapse;
+        margin-top: 20px;
+        font-size: 0.85em;
     }
-    th {
-        background-color: #c0c0c0;
-        color: #000;
-        padding: 5px;
-        border: 1px solid #888;
-        font-size: 0.8em;
-    }
-    td {
-        border: 1px solid #dfdfdf;
-        padding: 4px;
-        font-size: 0.8em;
-    }
-    .blink { animation: blinker 1s linear infinite; color: #00ff00; }
-    @keyframes blinker { 50% { opacity: 0; } }
-    footer { text-align: center; font-size: 0.7em; margin-top: 20px; }
+    th { background: #00441b; border: 1px solid #00ff41; padding: 10px; }
+    td { border: 1px solid #00ff41; padding: 8px; text-align: center; }
+    .liquidity-high { color: #fff; text-shadow: 0 0 10px #00ff41; font-weight: bold; }
+    .blink { animation: blinker 1s steps(2, start) infinite; }
+    @keyframes blinker { to { visibility: hidden; } }
 </style>
 """
 
@@ -85,90 +69,87 @@ HTML_TEMPLATE = """
 <!DOCTYPE html>
 <html>
 <head>
-    <title>TERMINAL - HANDELSDATEN ÖSTERREICH</title>
+    <title>LIQUIDITY TERMINAL V.4791</title>
     <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
     {{ style|safe }}
 </head>
 <body>
-    <div class="win-container">
-        <div class="header-bar">
-            <span>DATA_REPORTER.EXE</span>
-            <span>[X]</span>
-        </div>
+    <div class="scanline"></div>
+    <div class="terminal">
+        <p style="font-size: 0.7em;">LOGGED IN AS: RESEARCH_UNITS_AUT | ACCESS_LEVEL: RESTRICTED</p>
+        <h1>E-COMMERCE LIQUIDITY MONITOR</h1>
         
-        <h1>Marktanalyse: Österreichischer Handel (Basis 2021)</h1>
-        
-        <div style="background:#000; color:#0f0; padding:10px; font-size:0.9em; margin-bottom:15px;">
-            > SYSTEM STATUS: <span class="blink">SCANNING LIQUIDITY...</span><br>
-            > SOURCE: Statistik Austria Open Data Portal<br>
-            > RECORDS: {{ row_count }} geladen.
+        <div class="stats-grid">
+            <div class="box">
+                <p>> SEKTOR: <span class="blink">G4791</span></p>
+                <p>> DESC: Versand- & Internet-Einzelhandel</p>
+                <p>> REGION: Österreich</p>
+            </div>
+            <div class="box">
+                <p>> BASIS_YR: 2021 (Index=100)</p>
+                <p>> STATUS: Datenstrom synchronisiert</p>
+                <p>> ANALYSE: {{ row_count }} Zeitpunkte gefunden</p>
+            </div>
         </div>
 
-        <div class="chart-box">
-            <canvas id="mainChart" style="max-height: 300px;"></canvas>
+        <div class="chart-container">
+            <canvas id="liquidChart" style="height: 300px;"></canvas>
         </div>
 
-        <div style="overflow-x: auto;">
-            <table>
-                <thead>
-                    <tr>
-                        {% for col in columns %}
-                        <th>{{ col }}</th>
-                        {% endfor %}
-                    </tr>
-                </thead>
-                <tbody>
-                    {% for row in rows %}
-                    <tr>
-                        {% for cell in row %}
-                        <td>{{ cell }}</td>
-                        {% endfor %}
-                    </tr>
-                    {% endfor %}
-                </tbody>
-            </table>
-        </div>
+        <table>
+            <thead>
+                <tr>
+                    <th>ZEITRAUM</th>
+                    <th>LIQUIDITÄT (NOM)</th>
+                    <th>REAL-WERT</th>
+                    <th>PERSONAL-IDX</th>
+                </tr>
+            </thead>
+            <tbody>
+                {% for row in rows %}
+                <tr>
+                    <td>{{ row['Zeitraum'] }}</td>
+                    <td class="liquidity-high">{{ row['Umsatz_Nom'] }}</td>
+                    <td>{{ row['Umsatz_Real'] }}</td>
+                    <td>{{ row['Beschäftigte'] }}</td>
+                </tr>
+                {% endfor %}
+            </tbody>
+        </table>
 
-        <footer>
-            PROZESSIERT MIT PYTHON 3.x / FLASK 2.0<br>
-            VERBINDUNG ZU STATISTIK.AT HERGESTELLT...
-        </footer>
+        <p style="margin-top: 20px; font-size: 0.8em; text-align: center;">
+            *** INTERPRETATION: Werte > 100 zeigen erhöhte Marktaktivität gegenüber dem Basisjahr 2021 ***
+        </p>
     </div>
 
     <script>
-        const ctx = document.getElementById('mainChart').getContext('2d');
-        const chartData = {{ chart_json|safe }};
+        const ctx = document.getElementById('liquidChart').getContext('2d');
+        const d = {{ chart_json|safe }};
         
         new Chart(ctx, {
             type: 'line',
             data: {
-                labels: chartData.labels,
+                labels: d.labels,
                 datasets: [{
-                    label: 'Umsatzindex Nominell',
-                    data: chartData.turnover,
-                    borderColor: '#00ff00',
-                    backgroundColor: 'rgba(0, 255, 0, 0.1)',
-                    borderWidth: 2,
-                    pointRadius: 1,
-                    tension: 0.1
-                }, {
-                    label: 'Beschäftigtenindex',
-                    data: chartData.employment,
-                    borderColor: '#ff00ff',
-                    borderWidth: 2,
-                    pointRadius: 1,
-                    tension: 0.1
+                    label: 'Online-Liquidity Index',
+                    data: d.values,
+                    borderColor: '#00ff41',
+                    backgroundColor: 'rgba(0, 255, 65, 0.2)',
+                    fill: true,
+                    tension: 0.4,
+                    borderWidth: 3,
+                    pointBackgroundColor: '#fff'
                 }]
             },
             options: {
                 responsive: true,
                 maintainAspectRatio: false,
                 scales: {
-                    y: { grid: { color: '#333' }, ticks: { color: '#0f0' } },
-                    x: { grid: { color: '#333' }, ticks: { color: '#0f0' } }
+                    y: { grid: { color: '#00441b' }, ticks: { color: '#00ff41' } },
+                    x: { grid: { color: '#00441b' }, ticks: { color: '#00ff41' } }
                 },
                 plugins: {
-                    legend: { labels: { color: '#0f0', font: { family: 'Courier New' } } }
+                    legend: { labels: { color: '#00ff41', font: { family: 'Courier New' } } }
                 }
             }
         });
@@ -177,48 +158,59 @@ HTML_TEMPLATE = """
 </html>
 """
 
-def load_data():
+def clean_val(val):
+    """Bereinigt Präfixe und europäische Zahlenformate."""
+    if pd.isna(val): return 0.0
+    s = str(val).replace('TIIDX-', '').replace('NACEIDX-', '').replace(',', '.')
     try:
-        # Lade CSV (erkennt automatisch Komma oder Semikolon)
-        try:
-            df = pd.read_csv('data.csv', sep=';')
-        except:
-            df = pd.read_csv('data.csv')
-            
-        # Spalten umbenennen basierend auf dem Mapping
-        df = df.rename(columns=COLUMN_MAPPING)
-        
-        # Daten für die Chart vorbereiten (letzte 24 Monate für bessere Sichtbarkeit)
-        chart_subset = df.head(24) if len(df) > 24 else df
-        # Falls Kommas statt Punkte in Zahlen sind:
-        for col in ["Umsatz (Nom.)", "Beschäftigte"]:
-            if col in chart_subset.columns:
-                chart_subset[col] = pd.to_numeric(chart_subset[col].astype(str).str.replace(',', '.'), errors='coerce')
+        return float(s)
+    except:
+        return s
 
-        chart_json = {
-            "labels": chart_subset["Zeitraum"].tolist()[::-1],
-            "turnover": chart_subset["Umsatz (Nom.)"].tolist()[::-1],
-            "employment": chart_subset["Beschäftigte"].tolist()[::-1]
+def process():
+    try:
+        # Lade die CSV (Semikolon oder Tab getrennt basierend auf deinem Snippet)
+        df = pd.read_csv('data.csv', sep=None, engine='python', header=None)
+        
+        # Wir benennen die Spalten nach deinem Schema
+        df.columns = [
+            "C-TIIDXM-0", "C-NACEIDX-0", "F-UIDXNOM", "F-UIDXREAL", 
+            "F-BESCHIDX", "F-UIDXNAB", "F-UIDXNSB", "F-UIDXRAB", 
+            "F-UIDXRSB", "F-IDXBLG", "F-IDXBLGAB", "F-IDXGA", "F-IDXGAAB"
+        ]
+
+        # Filter auf E-Commerce
+        online_df = df[df['C-NACEIDX-0'].astype(str).str.contains('4791')].copy()
+
+        # Daten bereinigen
+        online_df['Zeitraum'] = online_df['C-TIIDXM-0'].apply(clean_val)
+        online_df['Umsatz_Nom'] = online_df['F-UIDXNOM'].apply(clean_val)
+        online_df['Umsatz_Real'] = online_df['F-UIDXREAL'].apply(clean_val)
+        online_df['Beschäftigte'] = online_df['F-BESCHIDX'].apply(clean_val)
+
+        # Sortieren für Chart (Zeitstrahl)
+        online_df = online_df.sort_values(by='Zeitraum')
+
+        chart_data = {
+            "labels": online_df['Zeitraum'].tolist(),
+            "values": online_df['Umsatz_Nom'].tolist()
         }
 
-        # Tabellendaten (Top 50 für Web-Übersicht)
-        sample = df.head(50)
-        return sample.columns.tolist(), sample.values.tolist(), len(df), chart_json
+        return online_df.to_dict('records'), len(online_df), chart_data
     except Exception as e:
-        return ["Fehler"], [[str(e)]], 0, {"labels":[], "turnover":[], "employment":[]}
+        print(f"ERROR: {e}")
+        return [], 0, {"labels": [], "values": []}
 
 @app.route('/')
 def index():
-    cols, rows, count, chart_json = load_data()
+    rows, count, chart_json = process()
     return render_template_string(
         HTML_TEMPLATE, 
         style=STYLE, 
-        columns=cols, 
         rows=rows, 
         row_count=count,
         chart_json=json.dumps(chart_json)
     )
 
 if __name__ == '__main__':
-    print("Initialisiere Forschungs-Terminal...")
     app.run(host='0.0.0.0', port=8080)
