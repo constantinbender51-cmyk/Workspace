@@ -1,196 +1,170 @@
+import gdown
 import pandas as pd
-from flask import Flask, render_template_string
-import json
-import re
+import numpy as np
+import dash
+from dash import dcc, html
+import plotly.graph_objects as go
+from datetime import timedelta
+import os
 
-app = Flask(__name__)
+# --- 1. Data Download & Loading ---
+def get_data():
+    file_id = '1kDCl_29nXyW1mLNUAS-nsJe0O2pOuO6o'
+    url = f'https://drive.google.com/uc?id={file_id}'
+    output_file = 'ohlcv_data.csv'
 
-# Extended Mapping for KJPC2 / NACE Industry Divisions
-INDUSTRY_MAP = {
-    "01": "Landwirtschaft & Jagd",
-    "02": "Forstwirtschaft",
-    "03": "Fischerei & Aquakultur",
-    "05": "Kohlenbergbau",
-    "08": "Steine & Erden (Bergbau)",
-    "10": "Nahrungsmittel (Lebensmittelproduktion)",
-    "11": "Getränke (Spirituosen, Wein, Bier, Softdrinks)",
-    "12": "Tabakwaren",
-    "13": "Textilien (Stoffe, Garne)",
-    "14": "Bekleidung (Kleidung, Kürschnerei)",
-    "15": "Lederwaren & Schuhe",
-    "16": "Holz-, Flecht- & Korbwaren (ohne Möbel)",
-    "17": "Papier, Pappe & Waren daraus",
-    "18": "Druckerzeugnisse & Vervielfältigung",
-    "19": "Kokerei & Mineralölverarbeitung",
-    "20": "Chemische Erzeugnisse (Kosmetik, Reinigungsmittel)",
-    "21": "Pharmazeutische Erzeugnisse (Medizin)",
-    "22": "Gummi- & Kunststoffwaren",
-    "23": "Glas, Keramik, Steine & Erden (Verarbeitung)",
-    "24": "Metallerzeugung & -bearbeitung",
-    "25": "Metallerzeugnisse (Werkzeuge, Waffen, Behälter)",
-    "26": "Datenverarbeitungsgeräte, elektronische & optische Erzeugnisse",
-    "27": "Elektrische Ausrüstungen (Batterien, Kabel, Leuchten)",
-    "28": "Maschinenbau (Industriemaschinen)",
-    "29": "Kraftwagen & Kraftwagenteile",
-    "30": "Sonstiger Fahrzeugbau (Schiffe, Flugzeuge, Bahn)",
-    "31": "Möbel (Wohn-, Büro- & Küchenmöbel)",
-    "32": "Schmuck, Musikinstrumente, Sportgeräte, Spielwaren",
-    "33": "Reparatur & Installation von Maschinen",
-    "35": "Energieversorgung (Strom, Gas, Fernwärme)",
-    "38": "Abfallentsorgung & Recycling",
-    "41": "Hochbau (Gebäudeerrichtung)",
-    "42": "Tiefbau (Straßen, Schienen, Leitungen)",
-    "43": "Vorbereitende Baustellenarbeiten & Ausbau",
-    "44": "Spezialisierte Bautätigkeiten",
-    "46": "Großhandel (Handelsvermittlung)",
-    "47": "Einzelhandel (Gesamtmarkt)",
-    "4791": "Versand- & Internet-Einzelhandel"
-}
+    # Download if not exists (or force download if needed)
+    if not os.path.exists(output_file):
+        print("Downloading data from Google Drive...")
+        gdown.download(url, output_file, quiet=False)
+    else:
+        print("File already exists. Using local copy.")
 
-STYLE = """
-<style>
-    body { background-color: #000; color: #00ff00; font-family: 'Courier New', Courier, monospace; margin: 0; padding: 20px; }
-    .terminal { border: 2px solid #00ff00; background: #050505; padding: 20px; box-shadow: 0 0 30px #003300; }
-    .header { border-bottom: 2px double #00ff00; margin-bottom: 20px; padding-bottom: 10px; }
-    .row-item { display: grid; grid-template-columns: 120px 1fr 180px 120px; gap: 10px; padding: 8px; border-bottom: 1px solid #003300; }
-    .row-item:hover { background: #002200; }
-    .label-header { font-weight: bold; color: #fff; background: #003300; padding: 5px; }
-    .code { color: #888; font-size: 0.9em; }
-    .industry { font-weight: bold; color: #00ff00; }
-    .value { text-align: right; color: #ffff00; font-weight: bold; }
-    .status { text-align: center; font-size: 0.8em; }
-    .blink { animation: blinker 1s steps(2, start) infinite; color: #ff0000; font-weight: bold; }
-    @keyframes blinker { to { visibility: hidden; } }
-    .high-liquidity { background-color: rgba(255, 255, 0, 0.05); border-left: 4px solid #ffff00; }
-    .error-msg { color: #ff0000; border: 1px solid #ff0000; padding: 10px; margin-bottom: 20px; }
-</style>
-"""
-
-HTML_TEMPLATE = """
-<!DOCTYPE html>
-<html>
-<head>
-    <title>AUSTRIA_INDUSTRY_DECODER_V3</title>
-    {{ style|safe }}
-</head>
-<body>
-    <div class="terminal">
-        <div class="header">
-            <h2 style="margin:0;">[SYSTEM_DECODE] INDUSTRY & PRODUCT ANALYSIS</h2>
-            <div style="font-size: 0.8em; margin-top:5px;">DATA SOURCE: STATISTIK AUSTRIA | PARAMETER: F-PROD4 / UMSATZINDEX</div>
-        </div>
-
-        {% if error %}
-        <div class="error-msg">SYSTEM ERROR: {{ error }}</div>
-        {% endif %}
-
-        <div class="row-item label-header">
-            <div>CODE</div>
-            <div>INDUSTRIE / PRODUKTGRUPPE</div>
-            <div style="text-align:right;">WERT / ABSATZ</div>
-            <div style="text-align:center;">STATUS</div>
-        </div>
-
-        {% for row in data %}
-        <div class="row-item {{ 'high-liquidity' if row.val > 100 or row.val > 5000000 else '' }}">
-            <div class="code">{{ row.raw_code }}</div>
-            <div class="industry">{{ row.name }}</div>
-            <div class="value">{{ "{:,.2f}".format(row.val).replace(',', 'X').replace('.', ',').replace('X', '.') }}</div>
-            <div class="status">
-                {% if row.val > 100 or row.val > 10000000 %}
-                <span class="blink">HOT</span>
-                {% else %}
-                STABIL
-                {% endif %}
-            </div>
-        </div>
-        {% endfor %}
-
-        <div style="margin-top: 20px; border-top: 1px solid #00ff00; padding-top: 10px; font-size: 0.8em;">
-            > ANALYSE AKTIV: Erkenne Codes (NACE/KJPC/ÖCPA)...<br>
-            > HINWEIS: Werte > 100 bei Indizes oder hohe Millionenwerte deuten auf Liquiditäts-Spitzen hin.
-        </div>
-    </div>
-</body>
-</html>
-"""
-
-def clean_code(raw):
-    """Extrahiert die reine Zahl aus dem String."""
-    s = str(raw).upper()
-    # Entferne bekannte Rausch-Wörter
-    s = re.sub(r'SEKTOR|KJPC2-|NACEIDX-|PCM2-|TIIDX-|IDX-', '', s)
-    # Entferne alles, was kein Buchstabe oder Zahl ist
-    s = s.strip().split(' ')[-1] # Nimm den letzten Teil, falls Leerzeichen da sind
-    return s
-
-def clean_val(raw):
-    """Reinigt Zahlenformate (1.000,50 oder 100,50)."""
-    if pd.isna(raw): return 0.0
-    s = str(raw).replace(' EUR', '').replace('.', '').replace(',', '.')
+    # Load data
     try:
-        return float(s)
-    except:
-        return 0.0
-
-def process():
-    error = None
-    try:
-        # Lade die CSV
-        df = pd.read_csv('data.csv', sep=None, engine='python', header=None)
-        
-        results = []
-        for _, row in df.iterrows():
-            best_code = None
-            best_val = 0.0
-            raw_code_display = "N/A"
-            
-            # Scanne jede Spalte in der Reihe
-            for cell in row:
-                cell_str = str(cell)
-                # Suche nach einem Code (NACE, KJPC, etc.)
-                if any(x in cell_str for x in ["NACE", "KJPC", "PCM", "47", "35", "10"]):
-                    clean = clean_code(cell_str)
-                    if clean in INDUSTRY_MAP or (clean.isdigit() and len(clean) in [2, 4]):
-                        best_code = clean
-                        raw_code_display = cell_str
-                
-                # Suche nach einem Wert (enthält Ziffern und Komma/Punkt)
-                if any(char.isdigit() for char in cell_str):
-                    val = clean_val(cell_str)
-                    if val > best_val:
-                        best_val = val
-            
-            if best_code:
-                results.append({
-                    "raw_code": raw_code_display,
-                    "code": best_code,
-                    "name": INDUSTRY_MAP.get(best_code, "Spezialsortiment"),
-                    "val": best_val
-                })
-        
-        if not results:
-            error = "Keine passenden Branchen-Codes in der CSV gefunden."
-            return [], error
-
-        # Sortieren nach Wert
-        results = sorted(results, key=lambda x: x['val'], reverse=True)
-        return results, error
-    except FileNotFoundError:
-        return [], "Datei 'data.csv' nicht gefunden."
+        df = pd.read_csv(output_file)
     except Exception as e:
-        return [], str(e)
+        print(f"Error reading CSV: {e}")
+        return pd.DataFrame()
 
-@app.route('/')
-def index():
-    data, error = process()
-    # Falls gar nichts gefunden wurde, Fallback auf Demo zur Ansicht
-    if not data and not error:
-        data = [
-            {"raw_code": "KJPC2-35", "code": "35", "name": "Energieversorgung", "val": 43983933.0},
-            {"raw_code": "NACE-4791", "code": "4791", "name": "Online-Handel", "val": 103.4}
-        ]
-    return render_template_string(HTML_TEMPLATE, style=STYLE, data=data, error=error)
+    # Normalize column names to lowercase to handle variations like "Date", "date", "Close", "close"
+    df.columns = [c.lower() for c in df.columns]
+    
+    # Identify timestamp column
+    date_col = next((col for col in df.columns if 'date' in col or 'time' in col), None)
+    if not date_col:
+        raise ValueError("Could not identify a date/timestamp column.")
 
+    # Convert to datetime
+    df[date_col] = pd.to_datetime(df[date_col])
+    
+    # Sort by date just in case
+    df = df.sort_values(by=date_col).reset_index(drop=True)
+    
+    return df, date_col
+
+# --- 2. Data Processing & Regression ---
+def process_last_30_days(df, date_col):
+    if df.empty:
+        return df, None, None, None
+
+    # Determine the "last 30 days" based on the dataset's latest entry
+    max_date = df[date_col].max()
+    cutoff_date = max_date - timedelta(days=30)
+    
+    # Filter data
+    mask = df[date_col] > cutoff_date
+    subset = df.loc[mask].copy()
+
+    if subset.empty:
+        print("No data found in the last 30 days window.")
+        return subset, None, None, None
+
+    # Prepare X (minutes/time) and Y (price)
+    # We use timestamp (seconds) / 60 to get "minutes" as requested
+    subset['x_minutes'] = subset[date_col].astype('int64') // 10**9 // 60
+    
+    # Use 'close' price for Y, fallback to whatever is available if not
+    price_col = 'close' if 'close' in subset.columns else subset.columns[1]
+    
+    X = subset['x_minutes'].values
+    Y = subset[price_col].values
+
+    # --- Manual Linear Regression Implementation ---
+    # Formula: m = sum((x - x_avg)(y - y_avg)) / sum((x - x_avg)^2)
+    #          b = y_avg - m * x_avg
+    
+    x_avg = np.mean(X)
+    y_avg = np.mean(Y)
+    
+    numerator = np.sum((X - x_avg) * (Y - y_avg))
+    denominator = np.sum((X - x_avg) ** 2)
+    
+    if denominator == 0:
+        m = 0
+    else:
+        m = numerator / denominator
+        
+    b = y_avg - (m * x_avg)
+    
+    # Calculate regression line for plotting
+    subset['y_pred'] = (m * X) + b
+    
+    stats = {
+        'slope': m,
+        'intercept': b,
+        'x_avg': x_avg,
+        'y_avg': y_avg
+    }
+    
+    return subset, stats, date_col, price_col
+
+# --- 3. Visualization Server ---
+def start_server(df_30d, stats, date_col, price_col):
+    app = dash.Dash(__name__, title="OHLCV Regression")
+
+    # Create the figure
+    fig = go.Figure()
+
+    # Add OHLC(V) Candlesticks
+    # Check for standard ohlc columns
+    if all(col in df_30d.columns for col in ['open', 'high', 'low', 'close']):
+        fig.add_trace(go.Candlestick(
+            x=df_30d[date_col],
+            open=df_30d['open'],
+            high=df_30d['high'],
+            low=df_30d['low'],
+            close=df_30d['close'],
+            name='OHLC Data'
+        ))
+    else:
+        # Fallback to simple line if OHLC not fully present
+        fig.add_trace(go.Scatter(x=df_30d[date_col], y=df_30d[price_col], mode='lines', name='Price'))
+
+    # Add Regression Line
+    fig.add_trace(go.Scatter(
+        x=df_30d[date_col], 
+        y=df_30d['y_pred'],
+        mode='lines',
+        name='Linear Fit (Last 30 Days)',
+        line=dict(color='orange', width=2, dash='dash')
+    ))
+
+    # Formatting equation string
+    eq_str = f"y = {stats['slope']:.5f}x + {stats['intercept']:.2f}"
+
+    fig.update_layout(
+        title=f"30-Day Price Trend Analysis<br><sub>Fit: {eq_str}</sub>",
+        yaxis_title="Price",
+        xaxis_title="Date",
+        template="plotly_dark",
+        height=800
+    )
+
+    # App Layout
+    app.layout = html.Div([
+        html.H1("Market Data Regression Analysis", style={'textAlign': 'center', 'fontFamily': 'sans-serif'}),
+        html.Div([
+            html.P(f"Dataset Range: {df_30d[date_col].min()} to {df_30d[date_col].max()}"),
+            html.P(f"Regression Slope (m): {stats['slope']}"),
+            html.P(f"Regression Intercept (b): {stats['intercept']}"),
+        ], style={'padding': '20px', 'backgroundColor': '#f0f0f0', 'borderRadius': '5px', 'margin': '20px'}),
+        dcc.Graph(figure=fig)
+    ])
+
+    print("\nStarting Dash Server...")
+    app.run_server(debug=True, port=8050)
+
+# --- Main Execution ---
 if __name__ == '__main__':
-    app.run(host='0.0.0.0', port=8080)
+    # 1. Get Data
+    full_df, date_column_name = get_data()
+    
+    # 2. Process
+    df_30, regression_stats, date_col, price_col = process_last_30_days(full_df, date_column_name)
+    
+    if df_30 is not None and not df_30.empty:
+        # 3. Visualize
+        start_server(df_30, regression_stats, date_col, price_col)
+    else:
+        print("Could not process data for visualization.")
