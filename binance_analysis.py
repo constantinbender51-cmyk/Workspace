@@ -1,10 +1,10 @@
 import gdown
 import pandas as pd
 import numpy as np
-import dash
-from dash import dcc, html, Input, Output, callback
-import plotly.graph_objects as go
+import matplotlib.pyplot as plt
+from flask import Flask, render_template_string, send_file
 from datetime import timedelta
+import io
 import os
 
 # --- 1. Data Download & Loading ---
@@ -32,26 +32,23 @@ def get_data():
     df.columns = [c.lower().strip() for c in df.columns]
     date_col = next((col for col in df.columns if 'date' in col or 'time' in col), None)
     if not date_col:
-        raise ValueError("Could not identify a date/timestamp column in the CSV.")
+        raise ValueError("Could not identify a date/timestamp column.")
 
     df[date_col] = pd.to_datetime(df[date_col])
     df = df.sort_values(by=date_col).reset_index(drop=True)
     
     return df, date_col
 
-# --- 2. Regression Calculation Logic ---
-def calculate_regression(df, date_col, lookback_days):
-    """Fits y = mx + b for the last 'lookback_days' of data."""
-    if df.empty:
-        return None, None, None
-
+# --- 2. Mathematical Logic ---
+def get_regression_for_days(df, date_col, days):
+    """Calculates y = mx + b for a specific lookback window."""
     max_date = df[date_col].max()
-    cutoff_date = max_date - timedelta(days=lookback_days)
+    cutoff_date = max_date - timedelta(days=days)
     subset = df.loc[df[date_col] >= cutoff_date].copy()
 
     if subset.empty:
-        return subset, None, None
-
+        return None, None
+    
     # Calculate X in minutes (Unix epoch seconds // 60)
     subset['x_minutes'] = subset[date_col].astype('int64') // 10**9 // 60
     price_col = 'close' if 'close' in subset.columns else subset.columns[1]
@@ -59,7 +56,9 @@ def calculate_regression(df, date_col, lookback_days):
     X = subset['x_minutes'].values
     Y = subset[price_col].values
 
-    # Formula: m = sum((x - avg_x)(y - avg_y)) / sum((x - avg_x)^2)
+    # Formula per request: 
+    # m = sum((x - avg_x)(y - avg_y)) / sum(x - avg_x)^2
+    # b = avg_y - m(avg_x)
     avg_x, avg_y = np.mean(X), np.mean(Y)
     num = np.sum((X - avg_x) * (Y - avg_y))
     den = np.sum((X - avg_x) ** 2)
@@ -67,104 +66,91 @@ def calculate_regression(df, date_col, lookback_days):
     m = num / den if den != 0 else 0
     b = avg_y - (m * avg_x)
     
-    subset['y_pred'] = (m * X) + b
+    y_pred = (m * X) + b
     
-    stats = {
-        'm': m,
-        'b': b,
-        'points': len(subset),
-        'start': subset[date_col].min(),
-        'end': subset[date_col].max(),
-        'price_col': price_col
-    }
+    return subset, (m, b, price_col, y_pred)
+
+# --- 3. Flask Web Server with Matplotlib ---
+app = Flask(__name__)
+full_df = None
+date_column_name = None
+
+HTML_TEMPLATE = """
+<!DOCTYPE html>
+<html>
+<head>
+    <title>OHLCV Regression Analysis</title>
+    <style>
+        body { font-family: sans-serif; background: #1a1a1a; color: white; text-align: center; padding: 20px; }
+        .controls { margin-bottom: 30px; background: #2a2a2a; padding: 20px; border-radius: 10px; display: inline-block; }
+        img { border: 2px solid #444; border-radius: 5px; max-width: 95%; height: auto; }
+        .btn-group { display: flex; flex-wrap: wrap; justify-content: center; gap: 5px; max-width: 800px; margin: 0 auto; }
+        a { text-decoration: none; padding: 8px 12px; background: #444; color: white; border-radius: 4px; font-size: 12px; }
+        a:hover { background: #666; }
+        a.active { background: #ffcc00; color: black; font-weight: bold; }
+    </style>
+</head>
+<body>
+    <h1>Market Regression Analysis</h1>
+    <div class="controls">
+        <p>Select Lookback Window (Days):</p>
+        <div class="btn-group">
+            {% for i in range(1, 31) %}
+            <a href="/{{ i }}" class="{{ 'active' if i == current_day else '' }}">{{ i }}d</a>
+            {% endfor %}
+        </div>
+    </div>
+    <div id="chart">
+        <img src="/plot/{{ current_day }}" alt="Regression Plot">
+    </div>
+</body>
+</html>
+"""
+
+@app.route('/')
+@app.route('/<int:days>')
+def index(days=30):
+    return render_template_string(HTML_TEMPLATE, current_day=days)
+
+@app.route('/plot/<int:days>')
+def plot_png(days):
+    subset, stats = get_regression_for_days(full_df, date_column_name, days)
+    if subset is None:
+        return "No data", 404
     
-    return subset, stats, date_col
+    m, b, price_col, y_pred = stats
 
-# --- 3. Visualization Server ---
-def start_server(full_df, date_column_name):
-    app = dash.Dash(__name__, title="Dynamic OHLCV Regression")
+    # Create Matplotlib Plot
+    plt.style.use('dark_background')
+    fig, ax = plt.subplots(figsize=(12, 6), dpi=100)
+    
+    # Plot price data
+    ax.plot(subset[date_column_name], subset[price_col], color='#00d2ff', alpha=0.6, label=f'Price ({price_col})')
+    
+    # Plot regression line
+    ax.plot(subset[date_column_name], y_pred, color='#ffcc00', linewidth=2, label=f'Fit: y = {m:.6f}x + {b:.2f}')
+    
+    ax.set_title(f"Linear Regression: Last {days} Day(s)", fontsize=14, color='#ffcc00')
+    ax.set_xlabel("Time")
+    ax.set_ylabel("Price")
+    ax.legend()
+    ax.grid(True, linestyle='--', alpha=0.3)
+    
+    # Rotation for dates
+    plt.xticks(rotation=45)
+    plt.tight_layout()
 
-    app.layout = html.Div(style={'backgroundColor': '#111', 'color': 'white', 'padding': '20px', 'fontFamily': 'Segoe UI, Arial'}, children=[
-        html.H1("Dynamic Market Regression", style={'textAlign': 'center', 'marginBottom': '30px'}),
-        
-        # Control Panel
-        html.Div([
-            html.Label("Lookback Window (Days):", style={'fontSize': '18px', 'fontWeight': 'bold'}),
-            dcc.Slider(
-                id='day-slider',
-                min=1,
-                max=30,
-                step=1,
-                value=30,
-                marks={i: f'{i}d' for i in [1, 5, 10, 15, 20, 25, 30]},
-                tooltip={"placement": "bottom", "always_visible": True}
-            ),
-        ], style={'padding': '20px', 'backgroundColor': '#222', 'borderRadius': '10px', 'marginBottom': '20px'}),
-
-        # Stats Display
-        html.Div(id='stats-container', style={'display': 'flex', 'gap': '20px', 'marginBottom': '20px'}),
-        
-        # Graph
-        dcc.Graph(id='regression-graph', style={'height': '70vh'}),
-        
-        dcc.Store(id='full-data-store')
-    ])
-
-    @app.callback(
-        [Output('regression-graph', 'figure'),
-         Output('stats-container', 'children')],
-        [Input('day-slider', 'value')]
-    )
-    def update_graph(lookback_days):
-        subset, stats, date_col = calculate_regression(full_df, date_column_name, lookback_days)
-        
-        if subset.empty or stats is None:
-            return go.Figure(), html.Div("No data for this range.")
-
-        # Create Figure
-        fig = go.Figure()
-
-        # Add OHLC/Price
-        ohlc_cols = ['open', 'high', 'low', 'close']
-        if all(col in subset.columns for col in ohlc_cols):
-            fig.add_trace(go.Candlestick(
-                x=subset[date_col],
-                open=subset['open'], high=subset['high'],
-                low=subset['low'], close=subset['close'],
-                name='Market Data', opacity=0.4
-            ))
-        else:
-            fig.add_trace(go.Scatter(x=subset[date_col], y=subset[stats['price_col']], name='Price', line=dict(color='#00d2ff')))
-
-        # Add Regression Line
-        fig.add_trace(go.Scatter(
-            x=subset[date_col], y=subset['y_pred'],
-            mode='lines', name=f'Fit ({lookback_days}d)',
-            line=dict(color='#ffcc00', width=3)
-        ))
-
-        fig.update_layout(
-            template='plotly_dark',
-            margin=dict(l=40, r=40, t=40, b=40),
-            xaxis_rangeslider_visible=False,
-            title=f"Linear Regression: y = {stats['m']:.6f}x + {stats['b']:.2f}",
-            hovermode='x unified'
-        )
-
-        # Stats Cards
-        stats_html = [
-            html.Div([html.Small("Slope (m)"), html.H3(f"{stats['m']:.8f}")], style={'flex': 1, 'padding': '10px', 'border': '1px solid #444'}),
-            html.Div([html.Small("Intercept (b)"), html.H3(f"{stats['b']:.2f}")], style={'flex': 1, 'padding': '10px', 'border': '1px solid #444'}),
-            html.Div([html.Small("Points"), html.H3(f"{stats['points']}")], style={'flex': 1, 'padding': '10px', 'border': '1px solid #444'}),
-            html.Div([html.Small("Start Date"), html.H3(f"{stats['start'].strftime('%Y-%m-%d')}")], style={'flex': 1, 'padding': '10px', 'border': '1px solid #444'})
-        ]
-
-        return fig, stats_html
-
-    print("\nStarting Web Server on http://0.0.0.0:8050")
-    app.run(host='0.0.0.0', port=8050, debug=False)
+    # Save to buffer
+    img = io.BytesIO()
+    plt.savefig(img, format='png', facecolor='#1a1a1a')
+    img.seek(0)
+    plt.close()
+    
+    return send_file(img, mimetype='image/png')
 
 if __name__ == '__main__':
-    df, date_col = get_data()
-    if not df.empty:
-        start_server(df, date_col)
+    full_df, date_column_name = get_data()
+    if not full_df.empty:
+        print("\nStarting Web Server on http://0.0.0.0:8050")
+        # Set host to 0.0.0.0 for public network access
+        app.run(host='0.0.0.0', port=8050, debug=False)
