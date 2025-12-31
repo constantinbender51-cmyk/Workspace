@@ -2,7 +2,7 @@ import gdown
 import pandas as pd
 import numpy as np
 import dash
-from dash import dcc, html
+from dash import dcc, html, Input, Output, callback
 import plotly.graph_objects as go
 from datetime import timedelta
 import os
@@ -13,7 +13,6 @@ def get_data():
     url = f'https://drive.google.com/uc?id={file_id}'
     output_file = 'ohlcv_data.csv'
 
-    # Download if not exists
     if not os.path.exists(output_file):
         print("Downloading data from Google Drive...")
         try:
@@ -24,176 +23,148 @@ def get_data():
     else:
         print("File already exists. Using local copy.")
 
-    # Load data
     try:
-        # We use low_memory=False to handle large datasets effectively
         df = pd.read_csv(output_file)
     except Exception as e:
         print(f"Error reading CSV: {e}")
         return pd.DataFrame(), None
 
-    # Normalize column names to lowercase
     df.columns = [c.lower().strip() for c in df.columns]
-    
-    # Identify timestamp column (common names: 'time', 'date', 'timestamp')
     date_col = next((col for col in df.columns if 'date' in col or 'time' in col), None)
     if not date_col:
         raise ValueError("Could not identify a date/timestamp column in the CSV.")
 
-    # Convert to datetime
     df[date_col] = pd.to_datetime(df[date_col])
-    
-    # Sort by date for time-series integrity
     df = df.sort_values(by=date_col).reset_index(drop=True)
     
     return df, date_col
 
-# --- 2. Data Processing & Regression ---
-def process_last_30_days(df, date_col):
+# --- 2. Regression Calculation Logic ---
+def calculate_regression(df, date_col, lookback_days):
+    """Fits y = mx + b for the last 'lookback_days' of data."""
     if df.empty:
-        return df, None, None, None
+        return None, None, None
 
-    # Determine the "last 30 days" based on the dataset's latest entry
     max_date = df[date_col].max()
-    cutoff_date = max_date - timedelta(days=30)
-    
-    # Filter data
-    mask = df[date_col] > cutoff_date
-    subset = df.loc[mask].copy()
+    cutoff_date = max_date - timedelta(days=lookback_days)
+    subset = df.loc[df[date_col] >= cutoff_date].copy()
 
     if subset.empty:
-        print("No data found in the last 30 days window.")
-        return subset, None, None, None
+        return subset, None, None
 
-    # Prepare X (minutes) and Y (price)
-    # We convert timestamps to unix epoch (seconds) and divide by 60 for minutes
+    # Calculate X in minutes (Unix epoch seconds // 60)
     subset['x_minutes'] = subset[date_col].astype('int64') // 10**9 // 60
-    
-    # Use 'close' price for Y, fallback to the second column if 'close' isn't found
     price_col = 'close' if 'close' in subset.columns else subset.columns[1]
     
     X = subset['x_minutes'].values
     Y = subset[price_col].values
 
-    # --- Manual Linear Regression Implementation ---
-    # m = sum((x - avg_x)(y - avg_y)) / sum((x - avg_x)^2)
-    # b = avg_y - m(avg_x)
+    # Formula: m = sum((x - avg_x)(y - avg_y)) / sum((x - avg_x)^2)
+    avg_x, avg_y = np.mean(X), np.mean(Y)
+    num = np.sum((X - avg_x) * (Y - avg_y))
+    den = np.sum((X - avg_x) ** 2)
     
-    avg_x = np.mean(X)
-    avg_y = np.mean(Y)
-    
-    numerator = np.sum((X - avg_x) * (Y - avg_y))
-    denominator = np.sum((X - avg_x) ** 2)
-    
-    # Guard against division by zero (e.g., if all x values are the same)
-    m = numerator / denominator if denominator != 0 else 0
+    m = num / den if den != 0 else 0
     b = avg_y - (m * avg_x)
     
-    # Calculate regression line values
     subset['y_pred'] = (m * X) + b
     
     stats = {
-        'slope': m,
-        'intercept': b,
-        'avg_x': avg_x,
-        'avg_y': avg_y
+        'm': m,
+        'b': b,
+        'points': len(subset),
+        'start': subset[date_col].min(),
+        'end': subset[date_col].max(),
+        'price_col': price_col
     }
     
-    return subset, stats, date_col, price_col
+    return subset, stats, date_col
 
 # --- 3. Visualization Server ---
-def start_server(df_30d, stats, date_col, price_col):
-    # Initialize Dash App
-    app = dash.Dash(__name__, title="OHLCV Regression")
+def start_server(full_df, date_column_name):
+    app = dash.Dash(__name__, title="Dynamic OHLCV Regression")
 
-    # Create Plotly figure
-    fig = go.Figure()
-
-    # 1. Add Price Data (Candlesticks if possible, else line)
-    ohlc_cols = ['open', 'high', 'low', 'close']
-    if all(col in df_30d.columns for col in ohlc_cols):
-        fig.add_trace(go.Candlestick(
-            x=df_30d[date_col],
-            open=df_30d['open'],
-            high=df_30d['high'],
-            low=df_30d['low'],
-            close=df_30d['close'],
-            name='OHLC Data',
-            opacity=0.6
-        ))
-    else:
-        fig.add_trace(go.Scatter(
-            x=df_30d[date_col], 
-            y=df_30d[price_col], 
-            mode='lines', 
-            name='Close Price',
-            line=dict(color='cyan', width=1)
-        ))
-
-    # 2. Add Regression Line
-    fig.add_trace(go.Scatter(
-        x=df_30d[date_col], 
-        y=df_30d['y_pred'],
-        mode='lines',
-        name='Linear Regression (Last 30 Days)',
-        line=dict(color='#FFD700', width=3, dash='solid')
-    ))
-
-    # Regression formula display
-    equation_text = f"Equation: y = {stats['slope']:.6f}x + {stats['intercept']:.2f}"
-
-    fig.update_layout(
-        title=dict(
-            text=f"Market Trend Analysis (Last 30 Days)<br><sup>{equation_text}</sup>",
-            x=0.5,
-            xanchor='center'
-        ),
-        xaxis_title="Time",
-        yaxis_title="Price (USD)",
-        template="plotly_dark",
-        height=700,
-        xaxis_rangeslider_visible=False
-    )
-
-    # Layout Definition
-    app.layout = html.Div(style={'backgroundColor': '#111', 'color': 'white', 'padding': '20px', 'fontFamily': 'Arial'}, children=[
-        html.H1("OHLCV Linear Regression Dashboard", style={'textAlign': 'center'}),
+    app.layout = html.Div(style={'backgroundColor': '#111', 'color': 'white', 'padding': '20px', 'fontFamily': 'Segoe UI, Arial'}, children=[
+        html.H1("Dynamic Market Regression", style={'textAlign': 'center', 'marginBottom': '30px'}),
         
+        # Control Panel
         html.Div([
-            html.Div([
-                html.H4("Analysis Stats"),
-                html.P(f"Data Points: {len(df_30d)}"),
-                html.P(f"Slope (m): {stats['slope']:.8f}"),
-                html.P(f"Intercept (b): {stats['intercept']:.4f}"),
-            ], style={'flex': '1', 'padding': '15px', 'border': '1px solid #444', 'marginRight': '10px'}),
-            
-            html.Div([
-                html.H4("Timeframe"),
-                html.P(f"From: {df_30d[date_col].min()}"),
-                html.P(f"To: {df_30d[date_col].max()}"),
-            ], style={'flex': '1', 'padding': '15px', 'border': '1px solid #444', 'marginLeft': '10px'}),
-        ], style={'display': 'flex', 'marginBottom': '20px'}),
+            html.Label("Lookback Window (Days):", style={'fontSize': '18px', 'fontWeight': 'bold'}),
+            dcc.Slider(
+                id='day-slider',
+                min=1,
+                max=30,
+                step=1,
+                value=30,
+                marks={i: f'{i}d' for i in [1, 5, 10, 15, 20, 25, 30]},
+                tooltip={"placement": "bottom", "always_visible": True}
+            ),
+        ], style={'padding': '20px', 'backgroundColor': '#222', 'borderRadius': '10px', 'marginBottom': '20px'}),
+
+        # Stats Display
+        html.Div(id='stats-container', style={'display': 'flex', 'gap': '20px', 'marginBottom': '20px'}),
         
-        dcc.Graph(figure=fig)
+        # Graph
+        dcc.Graph(id='regression-graph', style={'height': '70vh'}),
+        
+        dcc.Store(id='full-data-store')
     ])
 
-    print("\nStarting Web Server at http://127.0.0.1:8050/")
-    # Replaced run_server with run as per the latest Dash versions
-    app.run(host='0.0.0.0', debug=True, port=8050)
-
-# --- Execution Entry Point ---
-if __name__ == '__main__':
-    # 1. Download and Parse
-    full_df, date_column_name = get_data()
-    
-    if full_df is not None and not full_df.empty:
-        # 2. Extract and Fit
-        df_30, regression_stats, date_col, price_col = process_last_30_days(full_df, date_column_name)
+    @app.callback(
+        [Output('regression-graph', 'figure'),
+         Output('stats-container', 'children')],
+        [Input('day-slider', 'value')]
+    )
+    def update_graph(lookback_days):
+        subset, stats, date_col = calculate_regression(full_df, date_column_name, lookback_days)
         
-        if df_30 is not None and not df_30.empty:
-            # 3. Serve Visualization
-            start_server(df_30, regression_stats, date_col, price_col)
+        if subset.empty or stats is None:
+            return go.Figure(), html.Div("No data for this range.")
+
+        # Create Figure
+        fig = go.Figure()
+
+        # Add OHLC/Price
+        ohlc_cols = ['open', 'high', 'low', 'close']
+        if all(col in subset.columns for col in ohlc_cols):
+            fig.add_trace(go.Candlestick(
+                x=subset[date_col],
+                open=subset['open'], high=subset['high'],
+                low=subset['low'], close=subset['close'],
+                name='Market Data', opacity=0.4
+            ))
         else:
-            print("Processing failed. No data found for the specified period.")
-    else:
-        print("Data retrieval failed.")
+            fig.add_trace(go.Scatter(x=subset[date_col], y=subset[stats['price_col']], name='Price', line=dict(color='#00d2ff')))
+
+        # Add Regression Line
+        fig.add_trace(go.Scatter(
+            x=subset[date_col], y=subset['y_pred'],
+            mode='lines', name=f'Fit ({lookback_days}d)',
+            line=dict(color='#ffcc00', width=3)
+        ))
+
+        fig.update_layout(
+            template='plotly_dark',
+            margin=dict(l=40, r=40, t=40, b=40),
+            xaxis_rangeslider_visible=False,
+            title=f"Linear Regression: y = {stats['m']:.6f}x + {stats['b']:.2f}",
+            hovermode='x unified'
+        )
+
+        # Stats Cards
+        stats_html = [
+            html.Div([html.Small("Slope (m)"), html.H3(f"{stats['m']:.8f}")], style={'flex': 1, 'padding': '10px', 'border': '1px solid #444'}),
+            html.Div([html.Small("Intercept (b)"), html.H3(f"{stats['b']:.2f}")], style={'flex': 1, 'padding': '10px', 'border': '1px solid #444'}),
+            html.Div([html.Small("Points"), html.H3(f"{stats['points']}")], style={'flex': 1, 'padding': '10px', 'border': '1px solid #444'}),
+            html.Div([html.Small("Start Date"), html.H3(f"{stats['start'].strftime('%Y-%m-%d')}")], style={'flex': 1, 'padding': '10px', 'border': '1px solid #444'})
+        ]
+
+        return fig, stats_html
+
+    print("\nStarting Web Server on http://0.0.0.0:8050")
+    app.run(host='0.0.0.0', port=8050, debug=False)
+
+if __name__ == '__main__':
+    df, date_col = get_data()
+    if not df.empty:
+        start_server(df, date_col)
