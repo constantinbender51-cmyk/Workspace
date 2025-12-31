@@ -1,10 +1,11 @@
 import pandas as pd
 from flask import Flask, render_template_string
 import json
+import re
 
 app = Flask(__name__)
 
-# Extended Mapping for KJPC2 (ÖCPA 2-Steller) Industry Divisions
+# Extended Mapping for KJPC2 / NACE Industry Divisions
 INDUSTRY_MAP = {
     "01": "Landwirtschaft & Jagd",
     "02": "Forstwirtschaft",
@@ -41,7 +42,9 @@ INDUSTRY_MAP = {
     "42": "Tiefbau (Straßen, Schienen, Leitungen)",
     "43": "Vorbereitende Baustellenarbeiten & Ausbau",
     "44": "Spezialisierte Bautätigkeiten",
-    "46": "Großhandel (Handelsvermittlung)"
+    "46": "Großhandel (Handelsvermittlung)",
+    "47": "Einzelhandel (Gesamtmarkt)",
+    "4791": "Versand- & Internet-Einzelhandel"
 }
 
 STYLE = """
@@ -49,16 +52,17 @@ STYLE = """
     body { background-color: #000; color: #00ff00; font-family: 'Courier New', Courier, monospace; margin: 0; padding: 20px; }
     .terminal { border: 2px solid #00ff00; background: #050505; padding: 20px; box-shadow: 0 0 30px #003300; }
     .header { border-bottom: 2px double #00ff00; margin-bottom: 20px; padding-bottom: 10px; }
-    .row-item { display: grid; grid-template-columns: 100px 1fr 180px 120px; gap: 10px; padding: 8px; border-bottom: 1px solid #003300; }
+    .row-item { display: grid; grid-template-columns: 120px 1fr 180px 120px; gap: 10px; padding: 8px; border-bottom: 1px solid #003300; }
     .row-item:hover { background: #002200; }
     .label-header { font-weight: bold; color: #fff; background: #003300; padding: 5px; }
-    .code { color: #888; }
+    .code { color: #888; font-size: 0.9em; }
     .industry { font-weight: bold; color: #00ff00; }
     .value { text-align: right; color: #ffff00; font-weight: bold; }
     .status { text-align: center; font-size: 0.8em; }
-    .blink { animation: blinker 1s steps(2, start) infinite; color: red; }
+    .blink { animation: blinker 1s steps(2, start) infinite; color: #ff0000; font-weight: bold; }
     @keyframes blinker { to { visibility: hidden; } }
-    .high-liquidity { background-color: rgba(255, 255, 0, 0.1); }
+    .high-liquidity { background-color: rgba(255, 255, 0, 0.05); border-left: 4px solid #ffff00; }
+    .error-msg { color: #ff0000; border: 1px solid #ff0000; padding: 10px; margin-bottom: 20px; }
 </style>
 """
 
@@ -66,31 +70,35 @@ HTML_TEMPLATE = """
 <!DOCTYPE html>
 <html>
 <head>
-    <title>AUSTRIA_INDUSTRY_DECODER_V2</title>
+    <title>AUSTRIA_INDUSTRY_DECODER_V3</title>
     {{ style|safe }}
 </head>
 <body>
     <div class="terminal">
         <div class="header">
             <h2 style="margin:0;">[SYSTEM_DECODE] INDUSTRY & PRODUCT ANALYSIS</h2>
-            <div style="font-size: 0.8em; margin-top:5px;">DATA SOURCE: STATISTIK AUSTRIA | PARAMETER: F-PROD4 (ABSATZWERT)</div>
+            <div style="font-size: 0.8em; margin-top:5px;">DATA SOURCE: STATISTIK AUSTRIA | PARAMETER: F-PROD4 / UMSATZINDEX</div>
         </div>
+
+        {% if error %}
+        <div class="error-msg">SYSTEM ERROR: {{ error }}</div>
+        {% endif %}
 
         <div class="row-item label-header">
             <div>CODE</div>
             <div>INDUSTRIE / PRODUKTGRUPPE</div>
-            <div style="text-align:right;">ABSATZWERT (EUR)</div>
+            <div style="text-align:right;">WERT / ABSATZ</div>
             <div style="text-align:center;">STATUS</div>
         </div>
 
         {% for row in data %}
-        <div class="row-item {{ 'high-liquidity' if row.val > 10000000 else '' }}">
-            <div class="code">{{ row.code }}</div>
+        <div class="row-item {{ 'high-liquidity' if row.val > 100 or row.val > 5000000 else '' }}">
+            <div class="code">{{ row.raw_code }}</div>
             <div class="industry">{{ row.name }}</div>
-            <div class="value">{{ "{:,.0f}".format(row.val).replace(',', '.') }}</div>
+            <div class="value">{{ "{:,.2f}".format(row.val).replace(',', 'X').replace('.', ',').replace('X', '.') }}</div>
             <div class="status">
-                {% if row.val > 10000000 %}
-                <span class="blink">TOP-SELLER</span>
+                {% if row.val > 100 or row.val > 10000000 %}
+                <span class="blink">HOT</span>
                 {% else %}
                 STABIL
                 {% endif %}
@@ -99,8 +107,8 @@ HTML_TEMPLATE = """
         {% endfor %}
 
         <div style="margin-top: 20px; border-top: 1px solid #00ff00; padding-top: 10px; font-size: 0.8em;">
-            > ANALYSE AKTIV: Suche nach Nischen in Sektoren 10, 20 und 26...<br>
-            > HINWEIS: Hohe Millionenwerte in Sektoren 35/43 deuten auf Infrastruktur hin. Konsumgüter finden sich bevorzugt in Sektoren 10-32.
+            > ANALYSE AKTIV: Erkenne Codes (NACE/KJPC/ÖCPA)...<br>
+            > HINWEIS: Werte > 100 bei Indizes oder hohe Millionenwerte deuten auf Liquiditäts-Spitzen hin.
         </div>
     </div>
 </body>
@@ -108,58 +116,81 @@ HTML_TEMPLATE = """
 """
 
 def clean_code(raw):
-    """Extrahiert die reine Zahl aus dem Code KJPC2-XX oder NACEIDX-XX."""
+    """Extrahiert die reine Zahl aus dem String."""
     s = str(raw).upper()
-    s = s.replace('KJPC2-', '').replace('NACEIDX-', '').replace('PCM2-', '')
-    return s.strip()
+    # Entferne bekannte Rausch-Wörter
+    s = re.sub(r'SEKTOR|KJPC2-|NACEIDX-|PCM2-|TIIDX-|IDX-', '', s)
+    # Entferne alles, was kein Buchstabe oder Zahl ist
+    s = s.strip().split(' ')[-1] # Nimm den letzten Teil, falls Leerzeichen da sind
+    return s
 
 def clean_val(raw):
+    """Reinigt Zahlenformate (1.000,50 oder 100,50)."""
     if pd.isna(raw): return 0.0
     s = str(raw).replace(' EUR', '').replace('.', '').replace(',', '.')
-    try: return float(s)
-    except: return 0.0
+    try:
+        return float(s)
+    except:
+        return 0.0
 
 def process():
+    error = None
     try:
-        # Lade die CSV (Automatische Erkennung von Trennern)
+        # Lade die CSV
         df = pd.read_csv('data.csv', sep=None, engine='python', header=None)
         
-        # Annahme: Spalte 0 ist der Code, Spalte 1 ist der Wert (basierend auf deinem Snippet)
-        # Wir passen dies dynamisch an, falls Spaltennamen vorhanden sind
         results = []
         for _, row in df.iterrows():
-            raw_code = clean_code(row[0])
-            raw_val = clean_val(row[1])
+            best_code = None
+            best_val = 0.0
+            raw_code_display = "N/A"
             
-            if raw_code.isdigit() or raw_code in INDUSTRY_MAP:
+            # Scanne jede Spalte in der Reihe
+            for cell in row:
+                cell_str = str(cell)
+                # Suche nach einem Code (NACE, KJPC, etc.)
+                if any(x in cell_str for x in ["NACE", "KJPC", "PCM", "47", "35", "10"]):
+                    clean = clean_code(cell_str)
+                    if clean in INDUSTRY_MAP or (clean.isdigit() and len(clean) in [2, 4]):
+                        best_code = clean
+                        raw_code_display = cell_str
+                
+                # Suche nach einem Wert (enthält Ziffern und Komma/Punkt)
+                if any(char.isdigit() for char in cell_str):
+                    val = clean_val(cell_str)
+                    if val > best_val:
+                        best_val = val
+            
+            if best_code:
                 results.append({
-                    "code": f"KJPC2-{raw_code}",
-                    "name": INDUSTRY_MAP.get(raw_code, "Unbekannter Sektor"),
-                    "val": raw_val
+                    "raw_code": raw_code_display,
+                    "code": best_code,
+                    "name": INDUSTRY_MAP.get(best_code, "Spezialsortiment"),
+                    "val": best_val
                 })
         
-        # Sortieren nach Absatzwert
+        if not results:
+            error = "Keine passenden Branchen-Codes in der CSV gefunden."
+            return [], error
+
+        # Sortieren nach Wert
         results = sorted(results, key=lambda x: x['val'], reverse=True)
-        return results
+        return results, error
+    except FileNotFoundError:
+        return [], "Datei 'data.csv' nicht gefunden."
     except Exception as e:
-        # Fallback mit deinen geposteten Daten für die Demo
-        demo_data = [
-            ("35", 43983933), ("43", 16737792), ("28", 16482587), ("24", 15855018),
-            ("10", 15402229), ("25", 11759429), ("46", 11147452), ("29", 10997720),
-            ("41", 10122694), ("27", 8575699), ("11", 8076775), ("26", 7487654),
-            ("42", 7334836), ("16", 7014997), ("20", 6656164), ("33", 6154166),
-            ("22", 5358848), ("17", 4947561), ("44", 4828166), ("21", 4569305),
-            ("23", 4319086), ("19", 4081418), ("38", 3981756)
-        ]
-        results = []
-        for c, v in demo_data:
-            results.append({"code": f"KJPC2-{c}", "name": INDUSTRY_MAP.get(c, "Diverses"), "val": v})
-        return results
+        return [], str(e)
 
 @app.route('/')
 def index():
-    data = process()
-    return render_template_string(HTML_TEMPLATE, style=STYLE, data=data)
+    data, error = process()
+    # Falls gar nichts gefunden wurde, Fallback auf Demo zur Ansicht
+    if not data and not error:
+        data = [
+            {"raw_code": "KJPC2-35", "code": "35", "name": "Energieversorgung", "val": 43983933.0},
+            {"raw_code": "NACE-4791", "code": "4791", "name": "Online-Handel", "val": 103.4}
+        ]
+    return render_template_string(HTML_TEMPLATE, style=STYLE, data=data, error=error)
 
 if __name__ == '__main__':
     app.run(host='0.0.0.0', port=8080)
