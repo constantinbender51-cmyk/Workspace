@@ -179,7 +179,7 @@ def start_server(df_30d, stats, date_col, price_col):
 
     print("\nStarting Web Server at http://127.0.0.1:8050/")
     # Replaced run_server with run as per the latest Dash versions
-    app.run(debug=True, port=8050)
+    app.run(host='0.0.0.0', debug=True, port=8050)
 
 # --- Execution Entry Point ---
 if __name__ == '__main__':
