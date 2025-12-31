@@ -4,28 +4,37 @@ import json
 
 app = Flask(__name__)
 
-# Mapping für die wichtigsten NACE-Handelsklassen in Österreich
-NACE_MAP = {
-    "4711": "Supermärkte / Lebensmittel",
-    "4719": "Warenhäuser (Non-Food)",
-    "4741": "Computer / Software",
-    "4751": "Textilien",
-    "4764": "Sportartikel",
-    "4771": "Bekleidung",
-    "4791": "Online-Handel / Versand",
-    "4511": "Auto-Handel"
+# Mapping der ÖCPA 2-Steller Codes auf lesbare Produktgruppen
+OCPA_MAP = {
+    "10": "Lebensmittel",
+    "11": "Getränke",
+    "13": "Textilien",
+    "14": "Bekleidung",
+    "15": "Lederwaren & Schuhe",
+    "16": "Holzwaren (ohne Möbel)",
+    "20": "Chemische Erzeugnisse (Kosmetik/Reiniger)",
+    "21": "Pharmazeutische Erzeugnisse",
+    "26": "Elektronik & Optik",
+    "27": "Elektrische Ausrüstungen",
+    "28": "Maschinenbau",
+    "31": "Möbel",
+    "32": "Schmuck, Musikinstrumente, Sportgeräte"
 }
 
 STYLE = """
 <style>
-    body { background-color: #f0f0f0; color: #333; font-family: 'Segoe UI', Tahoma, sans-serif; margin: 0; }
-    .header { background: #003366; color: white; padding: 20px; text-align: center; border-bottom: 5px solid #ffcc00; }
-    .container { max-width: 1000px; margin: 20px auto; padding: 20px; background: white; border-radius: 8px; box-shadow: 0 4px 6px rgba(0,0,0,0.1); }
-    .ranking-card { border-left: 5px solid #003366; background: #f9f9f9; padding: 15px; margin-bottom: 10px; display: flex; justify-content: space-between; align-items: center; }
-    .index-val { font-size: 1.5em; font-weight: bold; color: #003366; }
-    .label { font-weight: bold; color: #666; }
-    .recommendation { background: #e7f3fe; border: 1px solid #b6d4fe; padding: 15px; border-radius: 5px; margin-top: 20px; }
-    .tag { background: #ffcc00; color: #000; padding: 2px 8px; border-radius: 4px; font-size: 0.8em; font-weight: bold; }
+    body { background-color: #000; color: #00ff00; font-family: 'Courier New', monospace; margin: 0; padding: 20px; }
+    .window { border: 2px solid #00ff00; background: #050505; padding: 20px; box-shadow: 0 0 20px #004400; }
+    .header { border-bottom: 2px solid #00ff00; margin-bottom: 20px; padding-bottom: 10px; color: #fff; }
+    .summary-box { border: 1px dashed #00ff00; padding: 15px; margin-bottom: 20px; background: rgba(0,255,0,0.05); }
+    .chart-box { background: #111; border: 1px solid #333; margin: 20px 0; padding: 10px; height: 300px; }
+    table { width: 100%; border-collapse: collapse; font-size: 0.9em; }
+    th { background: #003300; border: 1px solid #00ff00; padding: 8px; text-align: left; }
+    td { border: 1px solid #004400; padding: 8px; }
+    .highlight { color: #fff; font-weight: bold; }
+    .blink { animation: blinker 1s steps(2, start) infinite; }
+    @keyframes blinker { to { visibility: hidden; } }
+    .hot-indicator { background: #00ff00; color: #000; padding: 2px 5px; font-weight: bold; font-size: 0.7em; margin-left: 10px; }
 </style>
 """
 
@@ -33,77 +42,138 @@ HTML_TEMPLATE = """
 <!DOCTYPE html>
 <html>
 <head>
-    <title>Markt-Liquidität Österreich</title>
+    <title>ÖCPA_LIQUIDITY_ANALYZER</title>
+    <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
     {{ style|safe }}
 </head>
 <body>
-    <div class="header">
-        <h1>Produkt-Kategorien Ranking</h1>
-        <p>Welche Branche bewegt in Österreich das meiste Kapital?</p>
+    <div class="window">
+        <div class="header">
+            <div style="font-size: 0.7em; float: right;">LEVEL: ANALYST</div>
+            <h2>[ÖCPA-RADAR] BESTSELLER-IDENTIFIKATION</h2>
+        </div>
+
+        <div class="summary-box">
+            <span class="blink">>>></span> ANALYSE-PARAMETER: Spalte 'F-PROD4' (Abgesetzte Produktion)<br>
+            <span class="blink">>>></span> BEDEUTUNG: Hoher AP-Wert = Hoher Marktabsatz (Liquidität)<br>
+            <span class="blink">>>></span> FILTER: Wertauswahl (Euro-Beträge)
+        </div>
+
+        <div class="chart-box">
+            <canvas id="apChart"></canvas>
+        </div>
+
+        <table>
+            <thead>
+                <tr>
+                    <th>CODE</th>
+                    <th>PRODUKTGRUPPE</th>
+                    <th>ABSATZWERT (AP)</th>
+                    <th>STATUS</th>
+                </tr>
+            </thead>
+            <tbody>
+                {% for row in data %}
+                <tr>
+                    <td>{{ row.code }}</td>
+                    <td class="highlight">{{ row.name }}</td>
+                    <td>{{ "{:,.0f}".format(row.val).replace(',', '.') }} EUR</td>
+                    <td>
+                        {% if row.val > avg_val %}
+                        <span class="hot-indicator">TOP-SELLER</span>
+                        {% else %}
+                        <span>STABIL</span>
+                        {% endif %}
+                    </td>
+                </tr>
+                {% endfor %}
+            </tbody>
+        </table>
     </div>
-    
-    <div class="container">
-        <h2>Aktuelle Liquiditäts-Rangliste (Umsatzindex)</h2>
-        <p>Ein Index über 100 bedeutet: Die Branche ist aktiver als im Durchschnitt von 2021.</p>
+
+    <script>
+        const ctx = document.getElementById('apChart').getContext('2d');
+        const d = {{ chart_json|safe }};
         
-        {% for item in ranking %}
-        <div class="ranking-card">
-            <div>
-                <span class="tag">NACE {{ item.code }}</span>
-                <div style="font-size: 1.1em; margin-top: 5px;">{{ item.name }}</div>
-            </div>
-            <div class="index-val">{{ item.value }}</div>
-        </div>
-        {% endfor %}
-
-        <div class="recommendation">
-            <strong>🚀 Strategische Empfehlung:</strong><br>
-            Konzentriere dich auf Sektoren, die einen <strong>Umsatzindex (Nominal) > 110</strong> haben. 
-            Diese Branchen sind derzeit "liquide" – das Geld der Konsumenten fließt dort aktiv. 
-            Wenn der Online-Handel (4791) führt, ist ein reines E-Commerce-Modell am sinnvollsten.
-        </div>
-
-        <div style="margin-top:30px; font-size: 0.9em; color: #888;">
-            * Quelle: Statistik Austria | Basierend auf deiner data.csv
-        </div>
-    </div>
+        new Chart(ctx, {
+            type: 'bar',
+            data: {
+                labels: d.labels,
+                datasets: [{
+                    label: 'Abgesetzte Produktion (Absatz in EUR)',
+                    data: d.values,
+                    backgroundColor: '#00ff00',
+                    borderColor: '#fff',
+                    borderWidth: 1
+                }]
+            },
+            options: {
+                indexAxis: 'y',
+                responsive: true,
+                maintainAspectRatio: false,
+                scales: {
+                    x: { grid: { color: '#222' }, ticks: { color: '#00ff00' } },
+                    y: { grid: { color: '#222' }, ticks: { color: '#00ff00' } }
+                },
+                plugins: {
+                    legend: { labels: { color: '#00ff00', font: { family: 'Courier New' } } }
+                }
+            }
+        });
+    </script>
 </body>
 </html>
 """
 
-def get_ranking():
+def clean_num(val):
+    if pd.isna(val): return 0.0
+    s = str(val).replace(',', '.')
+    try: return float(s)
+    except: return 0.0
+
+def process():
     try:
-        df = pd.read_csv('data.csv', sep=None, engine='python', header=None)
-        # Spalten-Indizes basierend auf deinem Snippet
-        # 0: Zeitraum, 1: NACE, 2: Umsatz_Nom
+        # Lade CSV
+        df = pd.read_csv('data.csv', sep=None, engine='python')
         
-        # Nur den aktuellsten Monat nehmen
-        latest_month = df[0].iloc[0]
-        current_data = df[df[0] == latest_month]
+        # Spaltennamen-Mapping zur Sicherheit
+        # Wir nutzen die vom User genannten Header
+        col_ap = "F-PROD4"
+        col_code = "C-PCM2-0"
+        
+        # Bereinigung der Werte
+        df[col_ap] = df[col_ap].apply(clean_num)
+        df[col_code] = df[col_code].astype(str).str.replace('PCM2-', '')
+
+        # Gruppierung nach Produktgruppe (ÖCPA 2-Steller)
+        grouped = df.groupby(col_code)[col_ap].sum().reset_index()
+        
+        # Mapping der Namen
+        grouped['name'] = grouped[col_code].map(lambda x: OCPA_MAP.get(x, f"Sektor {x}"))
+        
+        # Sortieren nach Absatzwert
+        grouped = grouped.sort_values(by=col_ap, ascending=False)
+        
+        avg = grouped[col_ap].mean()
         
         results = []
-        for _, row in current_data.iterrows():
-            raw_code = str(row[1]).replace('NACEIDX-', '')
-            val = str(row[2]).replace(',', '.')
-            try:
-                val_float = float(val)
-                results.append({
-                    "code": raw_code,
-                    "name": NACE_MAP.get(raw_code, "Sonstiger Handel / Spezialsortiment"),
-                    "value": val_float
-                })
-            except:
-                continue
+        for _, r in grouped.iterrows():
+            results.append({"code": r[col_code], "name": r['name'], "val": r[col_ap]})
+            
+        chart_data = {
+            "labels": [r['name'] for r in results[:10]],
+            "values": [r['val'] for r in results[:10]]
+        }
         
-        # Sortieren nach höchstem Umsatzindex (Liquidität)
-        return sorted(results, key=lambda x: x['value'], reverse=True)
+        return results, avg, chart_data
     except Exception as e:
-        return [{"code": "ERR", "name": str(e), "value": 0}]
+        print(f"Error: {e}")
+        return [], 0, {"labels":[], "values":[]}
 
 @app.route('/')
 def index():
-    ranking = get_ranking()
-    return render_template_string(HTML_TEMPLATE, style=STYLE, ranking=ranking)
+    data, avg, chart_json = process()
+    return render_template_string(HTML_TEMPLATE, style=STYLE, data=data, avg_val=avg, chart_json=json.dumps(chart_json))
 
 if __name__ == '__main__':
     app.run(host='0.0.0.0', port=8080)
