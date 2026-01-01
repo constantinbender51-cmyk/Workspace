@@ -8,7 +8,7 @@ import io
 import base64
 import random
 from flask import Flask, render_template_string
-from datetime import datetime
+from datetime import datetime, timedelta
 
 app = Flask(__name__)
 
@@ -48,8 +48,8 @@ def fetch_kraken_data(pair, interval):
 
 def analyze_structure(df):
     """
-    Applies the Market Structure Logic to the DataFrame.
-    Adds a 'vector' column [-1, 0, 1] covering the ENTIRE timeframe.
+    Applies the Market Structure Logic.
+    Values: -1 (Correction), 0 (Accumulation), 1 (Expansion), 2 (Undefined)
     """
     if df.empty: return df, [], [], []
     df = df.copy()
@@ -78,33 +78,31 @@ def analyze_structure(df):
 
     # 4. Vector generation
     events = sorted([(i, 'H') for i in highs] + [(i, 'S') for i in stabs] + [(i, 'L') for i in lows])
-    vector = np.full(len(df), np.nan)
+    
+    # Initialize with 2 (Undefined)
+    vector = np.full(len(df), 2.0)
     
     # Fill between known events
     for i in range(len(events) - 1):
         idx, t = events[i]
         n_idx, n_t = events[i+1]
         
-        val = np.nan
+        val = 2 # Default to Undefined
         if t == 'H' and n_t == 'L': val = -1
         elif t == 'L' and n_t == 'S': val = 0
         elif t == 'S' and n_t == 'H': val = 1
         
-        if not np.isnan(val): 
-            vector[idx:n_idx] = val
+        # Fill the range
+        vector[idx:n_idx] = val
 
-    # --- CRITICAL FIX: Fill from last event to current date ---
+    # Fill tail (from last event to end)
     if events:
         last_idx, last_type = events[-1]
-        last_val = np.nan
-        
-        # Determine the ongoing phase based on the last trigger
-        if last_type == 'H': last_val = -1   # High -> (Correction/Bear)
-        elif last_type == 'L': last_val = 0  # Low -> (Accumulation)
-        elif last_type == 'S': last_val = 1  # Stability -> (Expansion/Bull)
-        
-        if not np.isnan(last_val):
-            vector[last_idx:] = last_val
+        last_val = 2
+        if last_type == 'H': last_val = -1
+        elif last_type == 'L': last_val = 0
+        elif last_type == 'S': last_val = 1
+        vector[last_idx:] = last_val
             
     df['vector'] = vector
     return df, highs, stabs, lows
@@ -113,21 +111,21 @@ def generate_warped_reality(df):
     """
     Creates an alternate reality by:
     1. Time Warp: Expanding/contracting month duration.
-    2. Propagating the 'vector' signal with the time warp.
+    2. Propagating the 'vector' signal.
     3. Persistent Return Warp: Modifying prices.
     """
     if df.empty: return pd.DataFrame()
     
     daily_stream = []
     
-    # --- Step 1: Time Warp Expansion (Carrying Vector) ---
+    # --- Step 1: Time Warp Expansion ---
     for _, row in df.iterrows():
         time_warp = random.uniform(-1, 1)
         days_in_month = int(30 + (30 * time_warp))
         days_in_month = max(1, days_in_month)
         
-        # We propagate the vector state (e.g., 1.0, -1.0, 0.0) to the expanded days
-        current_vector = row['vector'] if 'vector' in row else np.nan
+        # Propagate signal
+        current_vector = row['vector'] if 'vector' in row else 2.0
         
         for _ in range(days_in_month):
             daily_stream.append({
@@ -135,7 +133,7 @@ def generate_warped_reality(df):
                 'high': row['high'], 
                 'low': row['low'], 
                 'close': row['close'],
-                'vector': current_vector # Carry signal
+                'vector': current_vector
             })
             
     warped_df = pd.DataFrame(daily_stream)
@@ -146,11 +144,9 @@ def generate_warped_reality(df):
     warped_df.set_index('time', inplace=True)
     
     # Resample back to 30D buckets
-    # For price: standard OHLC aggregation
-    # For vector: take the 'first' value encountered in that bucket to maintain state continuity
     warped_monthly = warped_df.resample('30D').agg({
         'open': 'first', 'high': 'max', 'low': 'min', 'close': 'last',
-        'vector': 'first' 
+        'vector': 'first' # Use first value to maintain start-of-month state
     }).dropna().reset_index()
 
     # --- Step 2: Persistent Return Randomization ---
@@ -184,7 +180,7 @@ def generate_warped_reality(df):
 def create_plot_and_vector(df):
     if df.empty: return None, []
     
-    # Analyze Structure on ORIGINAL data first to get the correct vector
+    # Analyze Structure on ORIGINAL data
     df, highs, stabs, lows = analyze_structure(df)
     
     fig, (ax1, ax2) = plt.subplots(2, 1, figsize=(15, 16), facecolor='#f1f2f6')
@@ -196,51 +192,63 @@ def create_plot_and_vector(df):
     ax1.scatter(df.loc[stabs, 'time'], df.loc[stabs, 'close'], color='#8e44ad', s=120, marker='d', edgecolors='white', zorder=5)
     ax1.scatter(df.loc[lows, 'time'], df.loc[lows, 'low'], color='#2ed573', s=120, marker='^', edgecolors='black', zorder=5)
     ax1.set_yscale('linear')
-    ax1.set_title("Reality A: Actual Historical Data (Linear)", fontsize=16, fontweight='bold')
+    ax1.set_title("Reality A: Actual Historical Data", fontsize=16, fontweight='bold')
     ax1.set_ylabel("Price (USD)")
     ax1.legend(loc='upper left')
     ax1.grid(True, alpha=0.3)
 
-    # --- PLOT 2: Single Alternate Reality (Background Colors) ---
+    # --- PLOT 2: Alternate Reality (Fixed Gaps) ---
     ax2.set_facecolor('#f0f0f0') 
     
-    # Generate Warped Reality (carrying the original vector)
     w = generate_warped_reality(df)
     
-    # Plot the Price Line
+    # Plot Price
     ax2.plot(w['time'], w['close'], color='#2980b9', linewidth=2, alpha=1.0, label='Simulation Alpha', zorder=5)
 
-    # Apply Background Coloring based on Propagated Vector
-    # We iterate through the warped dataframe to draw spans
+    # --- Background Coloring Logic (Fixing Gaps) ---
+    # We iterate indices rather than groups to ensure full coverage
+    
+    # Create segments based on vector changes
     w['group'] = (w['vector'] != w['vector'].shift()).cumsum()
     
-    for _, group in w.groupby('group'):
-        state = group['vector'].iloc[0]
-        # Only plot background if state is valid number
-        if not np.isnan(state):
-            start_t = group['time'].iloc[0]
-            end_t = group['time'].iloc[-1]
-            
-            # Define Color based on state
-            face_color = None
-            if state == 1:   face_color = '#d4edda' # Light Green
-            elif state == -1: face_color = '#f8d7da' # Light Red
-            elif state == 0:  face_color = '#e2e3e5' # Light Grey
-            
-            if face_color:
-                ax2.axvspan(start_t, end_t, color=face_color, alpha=0.6, zorder=1)
+    # Get the time of the *next* row to fill the gap
+    # We create a 'next_time' column
+    w['next_time'] = w['time'].shift(-1)
+    # Fill the last next_time with a dummy delta (e.g. +30 days)
+    w.loc[w.index[-1], 'next_time'] = w.loc[w.index[-1], 'time'] + timedelta(days=30)
+
+    # Aggregate start and end times for each group
+    groups = w.groupby('group').agg({
+        'time': 'first',
+        'next_time': 'last',
+        'vector': 'first'
+    })
+
+    for _, row in groups.iterrows():
+        state = row['vector']
+        start_t = row['time']
+        end_t = row['next_time'] # Connects to start of next block
+        
+        face_color = None
+        if state == 1:   face_color = '#d4edda' # Green
+        elif state == -1: face_color = '#f8d7da' # Red
+        elif state == 0:  face_color = '#e2e3e5' # Grey
+        elif state == 2:  face_color = '#fff3cd' # Yellow (Undefined)
+        
+        if face_color:
+            ax2.axvspan(start_t, end_t, color=face_color, alpha=0.6, zorder=1)
 
     ax2.set_yscale('linear')
-    ax2.set_title("Reality B: Persistent Return Drift (Original Signals Mapped)", fontsize=16, fontweight='bold')
+    ax2.set_title("Reality B: Persistent Drift (Seamless Signal Mapping)", fontsize=16, fontweight='bold')
     ax2.set_ylabel("Price (USD)")
     
-    # Legend for Backgrounds
     from matplotlib.patches import Patch
     legend_elements = [
         plt.Line2D([0], [0], color='#2980b9', lw=2, label='Sim Price'),
         Patch(facecolor='#d4edda', edgecolor='#c3e6cb', label='Expansion (+1)'),
         Patch(facecolor='#f8d7da', edgecolor='#f5c6cb', label='Correction (-1)'),
-        Patch(facecolor='#e2e3e5', edgecolor='#d6d8db', label='Accumulation (0)')
+        Patch(facecolor='#e2e3e5', edgecolor='#d6d8db', label='Accumulation (0)'),
+        Patch(facecolor='#fff3cd', edgecolor='#ffeeba', label='Undefined (2)')
     ]
     ax2.legend(handles=legend_elements, loc='upper left')
     ax2.grid(True, alpha=0.3, zorder=2)
@@ -250,7 +258,7 @@ def create_plot_and_vector(df):
     plt.savefig(buf, format='png', dpi=110)
     plt.close()
     
-    clean_v = [{"date": r['time'].strftime('%Y-%m'), "val": "N/A" if np.isnan(r['vector']) else int(r['vector'])} for i, r in df.iterrows()]
+    clean_v = [{"date": r['time'].strftime('%Y-%m'), "val": int(r['vector'])} for i, r in df.iterrows()]
     return base64.b64encode(buf.getvalue()).decode(), clean_v
 
 @app.route('/')
@@ -269,24 +277,25 @@ def index():
         .grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(90px, 1fr)); gap: 8px; height: 250px; overflow-y: scroll; background: #f8f9fa; padding: 15px; border-radius: 10px; border: 1px solid #eee; }
         .c { padding: 10px; text-align: center; font-size: 11px; border: 1px solid #ddd; border-radius: 4px; }
         .v-1 { background: #ff7675; color: white; } .v0 { background: #dfe6e9; color: #636e72; } .v1 { background: #55efc4; color: #006266; font-weight: bold; }
+        .v2 { background: #ffeaa7; color: #d35400; border-color: #fdcb6e; }
         .btn { display: block; width: fit-content; margin: 0 auto 20px; padding: 12px 24px; background: #6c5ce7; color: #fff; text-decoration: none; border-radius: 8px; font-weight: bold; transition: background 0.2s; }
         .btn:hover { background: #5b4cc4; }
         .desc { background: #fffbe6; padding: 15px; border-radius: 8px; border: 1px solid #ffe58f; margin-bottom: 20px; font-size: 0.9em; }
     </style></head><body>
     <div class="container">
-        <h1>Bitcoin: Persistent Drift & Structural Warp</h1>
+        <h1>Bitcoin: Seamless Signal Warp</h1>
         <div class="desc">
-            <strong>Reality B:</strong> The background colors represent the <em>Original Reality's</em> structural signals, warped onto the new timeline.
-            <br>
-            <span style="background:#d4edda; padding:2px 5px">Green</span> = Expansion Phase | 
-            <span style="background:#f8d7da; padding:2px 5px">Red</span> = Correction Phase | 
-            <span style="background:#e2e3e5; padding:2px 5px">Grey</span> = Accumulation
+            <strong>Signal Legend:</strong><br>
+            <span style="background:#d4edda; padding:2px 5px">Green (+1)</span> Expansion | 
+            <span style="background:#f8d7da; padding:2px 5px">Red (-1)</span> Correction | 
+            <span style="background:#e2e3e5; padding:2px 5px">Grey (0)</span> Accumulation |
+            <span style="background:#fff3cd; padding:2px 5px">Yellow (2)</span> Undefined
         </div>
         <a href="/" class="btn">Generate New Reality</a>
         <img src="data:image/png;base64,{{p}}">
-        <h3>Reality A Monthly Vector [-1, 0, 1]</h3>
+        <h3>Reality A Monthly Vector</h3>
         <div class="grid">
-            {% for i in v %}<div class="c {% if i.val == -1 %}v-1{% elif i.val == 0 %}v0{% elif i.val == 1 %}v1{% endif %}">{{i.date}}<br><span style="font-size:1.2em;">{{i.val}}</span></div>{% endfor %}
+            {% for i in v %}<div class="c {% if i.val == -1 %}v-1{% elif i.val == 0 %}v0{% elif i.val == 1 %}v1{% elif i.val == 2 %}v2{% endif %}">{{i.date}}<br><span style="font-size:1.2em;">{{i.val}}</span></div>{% endfor %}
         </div>
     </div></body></html>
     """
