@@ -108,18 +108,18 @@ def analyze_structure_original(df):
 def analyze_structure_new(df):
     """
     NEW LOGIC (For Random Reality Only):
-    1. Peak: 2yr radius.
+    1. Peak: 1yr radius (Highest Close in ±12 months).
     * Only finding peaks for now, marked with black lines.
     """
     if df.empty: return df, [], [], []
     df = df.copy()
     
-    # 1. High detection (2yr radius)
-    # Highest Close in ±2 years (49 months centered)
-    df['h_max'] = df['close'].rolling(window=49, center=True, min_periods=25).max()
+    # 1. High detection (1yr radius)
+    # Highest Close in ±1 year (25 months centered: 12 prev + 1 curr + 12 next)
+    df['h_max'] = df['close'].rolling(window=25, center=True, min_periods=13).max()
     
-    # Invalidate tail (last 2 years) as we can't see the future
-    if len(df) > 24: df.loc[df.index[-24:], 'h_max'] = np.inf
+    # Invalidate tail (last 1 year) as we can't see the future
+    if len(df) > 12: df.loc[df.index[-12:], 'h_max'] = np.inf
     
     highs = df[df['close'] == df['h_max']].index.tolist()
 
@@ -130,7 +130,7 @@ def analyze_structure_new(df):
     # Vector generation (Will be sparse/empty without other signals)
     vector = np.full(len(df), np.nan)
     
-    # Just mark peaks as -1 for reference in vector, though filling requires pairs
+    # Just mark peaks as -1 for reference in vector
     for h in highs:
         vector[h] = -1
             
@@ -229,7 +229,7 @@ def create_plot_and_vector(df):
         ax2.axvline(x=row['time'], color='black', linestyle='-', linewidth=1.5, alpha=0.8)
 
     ax2.set_yscale('linear')
-    ax2.set_title("Reality B: Peaks Only (2yr Radius) - Marked Black", fontsize=16, fontweight='bold')
+    ax2.set_title("Reality B: Peaks Only (1yr Radius) - Marked Black", fontsize=16, fontweight='bold')
     ax2.set_ylabel("Price (USD)")
     
     ax2.legend(loc='upper left')
@@ -267,7 +267,7 @@ def index():
         <h1>Bitcoin: Two Realities, Two Logic Sets</h1>
         <div class="desc">
             <strong>Original Reality:</strong> Standard Signal Logic.<br>
-            <strong>Random Reality:</strong> <span style="font-weight:bold">Peaks Only</span> marked with Black Lines.
+            <strong>Random Reality:</strong> <span style="font-weight:bold">Peaks Only (1yr Radius)</span> marked with Black Lines.
         </div>
         <a href="/" class="btn">Generate New Reality</a>
         <img src="data:image/png;base64,{{p}}">
