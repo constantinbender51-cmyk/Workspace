@@ -65,64 +65,50 @@ def create_plot(df):
     # Plot Close Price
     plt.plot(df['open_time'], df['close'], label='Close Price', color='#2c3e50', linewidth=2)
     
-    # --- Analysis Logic ---
-    
-    # 1. Max Close Logic
-    max_close_row = df.loc[df['close'].idxmax()]
-    mc_date = max_close_row['open_time']
-    mc_price = max_close_row['close']
-    
-    # Mark Max Close
-    plt.scatter(mc_date, mc_price, color='crimson', s=100, zorder=5, label='Max Close')
-    plt.axvspan(mc_date - pd.DateOffset(months=1), mc_date + pd.DateOffset(months=1), color='crimson', alpha=0.15)
-    
-    # Project Max Close 4 Years Back
-    target_mc_past = mc_date - pd.DateOffset(years=4)
-    # Find nearest row to this past date
-    past_mc_row = df.iloc[(df['open_time'] - target_mc_past).abs().argsort()[:1]]
-    if not past_mc_row.empty:
-        pmc_date = past_mc_row['open_time'].values[0]
-        pmc_price = past_mc_row['close'].values[0]
-        plt.scatter(pmc_date, pmc_price, color='crimson', s=80, marker='x', zorder=5, label='Max Close - 4Y')
+    # --- Custom Events Logic ---
+    # Format: (Date String, Label, Color)
+    events = [
+        ('2012-11-01', 'Buy 1 Year', 'green'),
+        ('2013-11-01', 'Sell', 'red'),
+        ('2016-12-01', 'Buy 1 Year', 'green'),
+        ('2017-12-01', 'Sell 1 Year', 'red'),
+        ('2021-10-01', 'Buy 1 Year', 'green'),
+        ('2022-10-01', 'Sell 1 Year', 'red'),
+        ('2024-08-01', 'Buy 1 Year', 'green'),
+        ('2025-07-01', 'Sell 1 Year', 'red'),
+    ]
 
-    # Project Max Close 8 Years Back
-    target_mc_past_8 = mc_date - pd.DateOffset(years=8)
-    past_mc_row_8 = df.iloc[(df['open_time'] - target_mc_past_8).abs().argsort()[:1]]
-    if not past_mc_row_8.empty:
-        pmc_date_8 = past_mc_row_8['open_time'].values[0]
-        pmc_price_8 = past_mc_row_8['close'].values[0]
-        # Only plot if the found date is within reasonable range (e.g., data actually exists)
-        if abs((pd.to_datetime(pmc_date_8) - target_mc_past_8).days) < 60:
-            plt.scatter(pmc_date_8, pmc_price_8, color='darkred', s=80, marker='d', zorder=5, label='Max Close - 8Y')
-
-    # 2. Max High Logic
-    max_high_row = df.loc[df['high'].idxmax()]
-    mh_date = max_high_row['open_time']
-    mh_price = max_high_row['high']
-    
-    # Mark Max High
-    # We plot the High price specifically, even though the main line is Close
-    plt.scatter(mh_date, mh_price, color='forestgreen', s=100, marker='^', zorder=5, label='Max High')
-    plt.axvspan(mh_date - pd.DateOffset(months=1), mh_date + pd.DateOffset(months=1), color='forestgreen', alpha=0.15)
-    
-    # Project Max High 4 Years Back
-    target_mh_past = mh_date - pd.DateOffset(years=4)
-    past_mh_row = df.iloc[(df['open_time'] - target_mh_past).abs().argsort()[:1]]
-    if not past_mh_row.empty:
-        pmh_date = past_mh_row['open_time'].values[0]
-        # We assume we mark the close price at that past date, or the high? 
-        # Usually for projections we look at where price was. Let's mark the High of that candle to be consistent.
-        pmh_price = past_mh_row['high'].values[0]
-        plt.scatter(pmh_date, pmh_price, color='forestgreen', s=80, marker='x', zorder=5, label='Max High - 4Y')
-
-    # Project Max High 8 Years Back
-    target_mh_past_8 = mh_date - pd.DateOffset(years=8)
-    past_mh_row_8 = df.iloc[(df['open_time'] - target_mh_past_8).abs().argsort()[:1]]
-    if not past_mh_row_8.empty:
-        pmh_date_8 = past_mh_row_8['open_time'].values[0]
-        pmh_price_8 = past_mh_row_8['high'].values[0]
-        if abs((pd.to_datetime(pmh_date_8) - target_mh_past_8).days) < 60:
-            plt.scatter(pmh_date_8, pmh_price_8, color='darkgreen', s=80, marker='d', zorder=5, label='Max High - 8Y')
+    for date_str, label, color in events:
+        target_date = pd.to_datetime(date_str)
+        
+        # Find the closest available data point to this date
+        # We look for a date within a short tolerance (e.g., matching month)
+        # Calculate time difference
+        time_diff = (df['open_time'] - target_date).abs()
+        
+        # Get the index of the minimum difference
+        if time_diff.min() < pd.Timedelta(days=32):  # Ensure we are within ~1 month
+            idx = time_diff.idxmin()
+            row = df.loc[idx]
+            
+            plot_date = row['open_time']
+            plot_price = row['close']
+            
+            # Plot Marker
+            marker_style = '^' if 'Buy' in label else 'v'
+            plt.scatter(plot_date, plot_price, color=color, s=120, marker=marker_style, zorder=5)
+            
+            # Add Label Annotation
+            plt.annotate(
+                label, 
+                xy=(plot_date, plot_price),
+                xytext=(0, 15 if 'Buy' in label else -25),
+                textcoords='offset points',
+                ha='center', 
+                color=color, 
+                fontweight='bold',
+                bbox=dict(boxstyle="round,pad=0.3", fc="white", ec=color, alpha=0.8)
+            )
 
     # Configuration for Scientific Look
     plt.title(f'Historical Monthly Price Action: {SYMBOL}', fontsize=16, fontweight='bold', pad=20)
