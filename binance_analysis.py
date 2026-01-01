@@ -105,40 +105,63 @@ def analyze_structure_original(df):
 def analyze_structure_new(df):
     """
     NEW LOGIC (For Random Reality Only):
-    1. Peak: Asymmetric Window (2 years Past, 1 year Future).
-       - Rolling Window: 37 months (24 past + 1 curr + 12 future).
-       - Shifted by -12 to align the window correctly.
+    1. Peak: Highest Close in 2yr Past / 1yr Future.
+    2. Low: Lowest Close BETWEEN Peaks (or Peak to End).
     """
     if df.empty: return df, [], [], []
     df = df.copy()
     
-    # 1. High detection (2yr Past, 1yr Future)
+    # --- 1. High detection (Asymmetric) ---
+    # Rolling Max (37 months: 24 past + 1 curr + 12 future)
+    # Shifted -12 to align the 'future' part of the window
     df['h_max'] = df['close'].rolling(window=37, min_periods=13).max().shift(-12)
     
-    # Invalidate tail (last 1 year / 12 months) as we can't see the required future
+    # Invalidate tail (last 1 year)
     if len(df) > 12: df.loc[df.index[-12:], 'h_max'] = np.inf
     
-    # Find Peaks
+    # Find initial candidates
     peak_candidates = df[df['close'] == df['h_max']].index.tolist()
     
-    # --- Tie Breaking Logic ---
-    final_peaks = []
+    # Tie Breaking (First Occurrence)
+    highs = []
     if peak_candidates:
-        final_peaks.append(peak_candidates[0])
+        highs.append(peak_candidates[0])
         for p in peak_candidates[1:]:
-            if (p - final_peaks[-1]) > 12:
-                final_peaks.append(p)
+            if (p - highs[-1]) > 12:
+                highs.append(p)
     
-    highs = final_peaks
-
-    # Disable Lows and Stabs for now
+    # --- 2. Low Detection (Cycle Lows) ---
     lows = []
-    stabs = []
+    if highs:
+        # Iterate through intervals defined by peaks
+        for i in range(len(highs)):
+            current_peak = highs[i]
+            
+            # Define search range start (month after peak)
+            start_search = current_peak + 1
+            
+            # Define search range end (next peak or end of data)
+            if i < len(highs) - 1:
+                end_search = highs[i+1] # Next peak index
+            else:
+                end_search = len(df) # End of dataframe
+            
+            # Find min in this segment
+            if start_search < end_search:
+                segment = df.iloc[start_search:end_search]
+                if not segment.empty:
+                    # idxmin gives the index label (which matches our integer index here)
+                    local_low = segment['close'].idxmin()
+                    lows.append(local_low)
 
-    # Vector generation (Peaks marked as -1)
+    stabs = [] # Not defined yet
+
+    # Vector generation (Discrete Markers for Plotting)
+    # -1 = Peak
+    # -2 = Low
     vector = np.full(len(df), np.nan)
-    for h in highs:
-        vector[h] = -1
+    for h in highs: vector[h] = -1
+    for l in lows: vector[l] = -2
             
     df['vector'] = vector
     return df, highs, stabs, lows
@@ -171,7 +194,10 @@ def generate_warped_reality(df):
         'open': 'first', 'high': 'max', 'low': 'min', 'close': 'last'
     }).dropna().reset_index()
 
-    # --- Step 2: Persistent Return Randomization ---
+    # --- Step 2: Assign Signals (Using NEW Logic) ---
+    warped_monthly, _, _, _ = analyze_structure_new(warped_monthly)
+
+    # --- Step 3: Persistent Return Randomization ---
     original_returns = warped_monthly['close'].pct_change().fillna(0)
     log_multiplier = 0.0 
     new_prices = [warped_monthly['close'].iloc[0]]
@@ -194,10 +220,6 @@ def generate_warped_reality(df):
     warped_monthly['open'] *= ratios
     warped_monthly['high'] *= ratios
     warped_monthly['low'] *= ratios
-
-    # --- Step 3: Assign Signals (Using NEW Logic - Peaks Only) ---
-    # Moved to AFTER price randomization so peaks match the new reality's structure
-    warped_monthly, _, _, _ = analyze_structure_new(warped_monthly)
     
     return warped_monthly
 
@@ -221,24 +243,35 @@ def create_plot_and_vector(df):
     ax1.legend(loc='upper left')
     ax1.grid(True, alpha=0.3)
 
-    # --- PLOT 2: Alternate Reality (Peaks Only) ---
+    # --- PLOT 2: Alternate Reality (Peaks & Lows) ---
     ax2.set_facecolor('#f0f0f0') 
     w = generate_warped_reality(df)
     
     # Plot Price
     ax2.plot(w['time'], w['close'], color='#2980b9', linewidth=2, alpha=1.0, label='Simulation Alpha', zorder=5)
 
-    # Mark Peaks (Where vector == -1)
+    # Mark Peaks (Solid Line)
     peak_rows = w[w['vector'] == -1]
-    
     for _, row in peak_rows.iterrows():
-        ax2.axvline(x=row['time'], color='black', linestyle='-', linewidth=1.5, alpha=0.8)
+        ax2.axvline(x=row['time'], color='black', linestyle='-', linewidth=1.5, alpha=0.8, label='Peak' if _ == 0 else "")
+
+    # Mark Lows (Dashed Line)
+    low_rows = w[w['vector'] == -2]
+    for _, row in low_rows.iterrows():
+        ax2.axvline(x=row['time'], color='black', linestyle='--', linewidth=1.5, alpha=0.8, label='Low' if _ == 0 else "")
 
     ax2.set_yscale('linear')
-    ax2.set_title("Reality B: Peaks Only (2yr Past, 1yr Future) - Marked Black", fontsize=16, fontweight='bold')
+    ax2.set_title("Reality B: Peaks (Solid) & Cycle Lows (Dashed) - Marked Black", fontsize=16, fontweight='bold')
     ax2.set_ylabel("Price (USD)")
     
-    ax2.legend(loc='upper left')
+    # Custom Legend
+    from matplotlib.lines import Line2D
+    custom_lines = [
+        Line2D([0], [0], color='#2980b9', lw=2),
+        Line2D([0], [0], color='black', lw=1.5, linestyle='-'),
+        Line2D([0], [0], color='black', lw=1.5, linestyle='--')
+    ]
+    ax2.legend(custom_lines, ['Sim Price', 'Peak (2yr/1yr)', 'Low (Min between Peaks)'], loc='upper left')
     ax2.grid(True, alpha=0.3, zorder=2)
 
     plt.tight_layout()
@@ -273,7 +306,9 @@ def index():
         <h1>Bitcoin: Two Realities, Two Logic Sets</h1>
         <div class="desc">
             <strong>Original Reality:</strong> Standard Signal Logic.<br>
-            <strong>Random Reality:</strong> Peaks Only (Asymmetric 2yr Past / 1yr Future).
+            <strong>Random Reality:</strong> 
+            <b>Peak:</b> Max in 2yr Past/1yr Future (Solid Line).<br>
+            <b>Low:</b> Min Price between two peaks (Dashed Line).
         </div>
         <a href="/" class="btn">Generate New Reality</a>
         <img src="data:image/png;base64,{{p}}">
