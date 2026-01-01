@@ -95,15 +95,15 @@ def analyze_structure_original(df):
 
 def analyze_structure_new(df):
     """
-    NEW LOGIC (For Random Reality Only):
-    1. Peak: 2yr Past / 1yr Future.
-    2. Low: Min price between Peaks.
-    3. Stable: Backscan from Peak where sum of returns for THAT + NEXT 3 months < 10%.
+    NEW LOGIC (For Random Reality):
+    1. Peak: 2yr Past / 1yr Future radius.
+    2. Low: Lowest price between Peaks.
+    3. Stable: Backscan from Peak for sum(abs(returns)) for month + next 3 months < 10%.
     """
     if df.empty: return df, [], [], []
     df = df.copy()
     
-    # --- 1. Peak Detection ---
+    # 1. Peak Detection
     df['h_max'] = df['close'].rolling(window=37, min_periods=13).max().shift(-12)
     if len(df) > 12: df.loc[df.index[-12:], 'h_max'] = np.inf
     peak_candidates = df[df['close'] == df['h_max']].index.tolist()
@@ -114,7 +114,7 @@ def analyze_structure_new(df):
         for p in peak_candidates[1:]:
             if (p - highs[-1]) > 12: highs.append(p)
     
-    # --- 2. Low Detection ---
+    # 2. Low Detection
     lows = []
     if highs:
         for i in range(len(highs)):
@@ -125,33 +125,26 @@ def analyze_structure_new(df):
                 segment = df.iloc[start_search:end_search]
                 if not segment.empty: lows.append(segment['close'].idxmin())
 
-    # --- 3. Stability Detection ---
-    df['pct_change'] = df['close'].pct_change().fillna(0)
-    # Sum of current month and the next 3 months
-    df['sum_ret_forward_4m'] = df['pct_change'].rolling(window=4).sum().shift(-3)
+    # 3. Stability Detection
+    # Using sum of ABSOLUTE returns for current month + next 3 months
+    df['abs_pct_change'] = df['close'].pct_change().abs().fillna(0)
+    df['abs_sum_forward_4m'] = df['abs_pct_change'].rolling(window=4).sum().shift(-3)
     
     stabs = []
     for p_idx in highs:
         for i in range(p_idx - 1, -1, -1):
             if i in df.index:
-                if abs(df.loc[i, 'sum_ret_forward_4m']) < 0.10:
+                # Stability threshold: Sum of absolute movements < 10%
+                if df.loc[i, 'abs_sum_forward_4m'] < 0.10:
                     stabs.append(i)
                     break
     stabs = sorted(list(set(stabs)))
 
-    # State Machine for Backgrounds
-    events = sorted([(i, 'H') for i in highs] + [(i, 'S') for i in stabs] + [(i, 'L') for i in lows])
+    # Encode for plotting
     vector = np.full(len(df), np.nan)
-    current_state = np.nan
-    event_map = dict(events)
-    
-    for i in range(len(df)):
-        if i in event_map:
-            etype = event_map[i]
-            if etype == 'H': current_state = -1
-            elif etype == 'L': current_state = 0
-            elif etype == 'S': current_state = 1
-        vector[i] = current_state
+    for h in highs: vector[h] = -1 # Peak marker
+    for l in lows: vector[l] = -2  # Low marker
+    for s in stabs: vector[s] = -3 # Stable marker
             
     df['vector'] = vector
     return df, highs, stabs, lows
@@ -171,7 +164,7 @@ def generate_warped_reality(df):
     warped_df.set_index('time', inplace=True)
     w_m = warped_df.resample('30D').agg({'open': 'first', 'high': 'max', 'low': 'min', 'close': 'last'}).dropna().reset_index()
 
-    # Randomize Prices
+    # Price Randomization
     original_returns = w_m['close'].pct_change().fillna(0)
     log_multiplier, new_prices = 0.0, [w_m['close'].iloc[0]]
     for i in range(1, len(w_m)):
@@ -184,7 +177,7 @@ def generate_warped_reality(df):
     ratios = w_m['close'] / np.where(old_closes == 0, 1e-9, old_closes)
     w_m['open'] *= ratios; w_m['high'] *= ratios; w_m['low'] *= ratios
     
-    # Assign Signals AFTER randomization
+    # Analyze structure on final prices
     w_m, _, _, _ = analyze_structure_new(w_m)
     return w_m
 
@@ -202,22 +195,33 @@ def create_plot_and_vector(df):
     ax1.set_title("Reality A: Actual Historical Data", fontweight='bold')
     ax1.legend()
 
-    # Plot 2: Random Reality
+    # Plot 2: Random Reality (Lines instead of Shades)
     ax2.set_facecolor('#f0f0f0') 
     w = generate_warped_reality(df)
-    ax2.plot(w['time'], w['close'], color='#2980b9', linewidth=2, label='Sim Price', zorder=5)
+    ax2.plot(w['time'], w['close'], color='#2980b9', linewidth=2, label='Sim Price', zorder=4)
 
-    w['group'] = (w['vector'] != w['vector'].shift()).cumsum()
-    w['next_t'] = w['time'].shift(-1).fillna(w['time'].iloc[-1] + timedelta(days=30))
-    groups = w.groupby('group').agg({'time': 'first', 'next_t': 'last', 'vector': 'first'})
+    # Markers for structural points
+    peak_rows = w[w['vector'] == -1]
+    low_rows = w[w['vector'] == -2]
+    stab_rows = w[w['vector'] == -3]
 
-    for _, row in groups.iterrows():
-        if not np.isnan(row['vector']):
-            color = '#f8d7da' if row['vector'] == -1 else ('#e2e3e5' if row['vector'] == 0 else '#d4edda')
-            ax2.axvspan(row['time'], row['next_t'], color=color, alpha=0.6, zorder=1)
+    for _, row in peak_rows.iterrows():
+        ax2.axvline(x=row['time'], color='black', linestyle='-', linewidth=1.5, alpha=0.8, zorder=3)
+    for _, row in low_rows.iterrows():
+        ax2.axvline(x=row['time'], color='black', linestyle='--', linewidth=1.5, alpha=0.8, zorder=3)
+    for _, row in stab_rows.iterrows():
+        ax2.axvline(x=row['time'], color='black', linestyle=':', linewidth=2.0, alpha=0.9, zorder=3)
 
-    ax2.set_title("Reality B: Random Reality (4m Forward Stability)", fontweight='bold')
-    ax2.legend()
+    ax2.set_title("Reality B: Random Reality (Absolute Return Forward Stability)", fontweight='bold')
+    
+    from matplotlib.lines import Line2D
+    custom_lines = [
+        Line2D([0], [0], color='#2980b9', lw=2),
+        Line2D([0], [0], color='black', lw=1.5, linestyle='-'),
+        Line2D([0], [0], color='black', lw=1.5, linestyle='--'),
+        Line2D([0], [0], color='black', lw=2.0, linestyle=':')
+    ]
+    ax2.legend(custom_lines, ['Sim Price', 'Peak (2yr/1yr)', 'Low (Inter-Peak)', 'Stable (abs_sum forward < 10%)'], loc='upper left')
     ax2.grid(True, alpha=0.3)
 
     plt.tight_layout()
@@ -243,9 +247,10 @@ def index():
         .btn { display: block; width: fit-content; margin: 0 auto 20px; padding: 12px 24px; background: #6c5ce7; color: #fff; text-decoration: none; border-radius: 8px; font-weight: bold; }
     </style></head><body>
     <div class="container">
-        <h1>Bitcoin: Forward Stability Reality</h1>
-        <div style="background:#fffbe6; padding:15px; border-radius:8px; border:1px solid #ffe58f; margin-bottom:20px;">
-            <strong>Reality B Stability:</strong> Scanning backwards from Peak, finds the first month where the total return of that month and the next 3 months is < 10%.
+        <h1>Bitcoin: Absolute Forward Stability</h1>
+        <div style="background:#f8f9fa; padding:15px; border-radius:8px; border:1px solid #dee2e6; margin-bottom:20px;">
+            <strong>Reality B Updates:</strong> Background shading removed. Structural points now marked with black lines. 
+            Stability calculation updated to 4-month forward <strong>sum of absolute returns</strong>.
         </div>
         <a href="/" class="btn">Generate New Reality</a>
         <img src="data:image/png;base64,{{p}}">
