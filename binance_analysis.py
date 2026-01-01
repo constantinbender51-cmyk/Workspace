@@ -63,28 +63,26 @@ def create_plot(df):
                edgecolors='black', zorder=5, label='Local High (2yr)')
 
     # --- Pattern 2: Pre-Peak Stability Point ---
-    # Logic: First point preceding a peak that has no 20% move in a radius of 2 months.
-    # Radius of 2 months = 5 months centered window.
+    # Logic: First point preceding a peak that has no 50% move in a radius of 1 month.
+    # Radius of 1 month = 3 months centered window (1 pre + 1 curr + 1 post).
     
-    df['range_5m_centered'] = (df['high'].rolling(window=5, center=True).max() - 
-                               df['low'].rolling(window=5, center=True).min()) / \
-                              df['low'].rolling(window=5, center=True).min()
+    df['range_3m_centered'] = (df['high'].rolling(window=3, center=True).max() - 
+                               df['low'].rolling(window=3, center=True).min()) / \
+                              df['low'].rolling(window=3, center=True).min()
 
     pre_peak_points = []
     for peak_idx in local_highs.index:
         # Search backward from the peak index
-        # We start searching from peak_idx - 1 down to the start of the data
-        found_stab = False
-        for i in range(peak_idx - 1, 2, -1):
-            if df.loc[i, 'range_5m_centered'] <= 0.20:
+        # Radius of 1 month means we need at least 1 index before and after the point to calculate.
+        for i in range(peak_idx - 1, 1, -1):
+            if df.loc[i, 'range_3m_centered'] <= 0.50:
                 pre_peak_points.append(df.iloc[i])
-                found_stab = True
                 break # Only find the first (closest) stability point preceding the peak
                 
     if pre_peak_points:
         stab_df = pd.DataFrame(pre_peak_points)
         ax.scatter(stab_df['time'], stab_df['close'], color='#8e44ad', s=150, marker='d', 
-                   edgecolors='white', zorder=7, label='Pre-Peak Stability (20% Range / 2mo Radius)')
+                   edgecolors='white', zorder=7, label='Pre-Peak Stability (50% Range / 1mo Radius)')
 
     # --- Pattern 3: Local Low (1yr Radius) ---
     df['l_min'] = df['low'].rolling(window=25, center=True, min_periods=13).min()
@@ -141,7 +139,7 @@ def index():
             <div class="legend">
                 <strong>Analysis Legend:</strong>
                 <div class="item"><span class="marker" style="background:#ff4757; clip-path: polygon(50% 100%, 0 0, 100% 0);"></span> <b>Local High:</b> Highest Close in a 2-year radius.</div>
-                <div class="item"><span class="marker" style="background:#8e44ad; transform: rotate(45deg);"></span> <b>Pre-Peak Stability:</b> First point before a peak with &lt; 20% range in a 2-month radius.</div>
+                <div class="item"><span class="marker" style="background:#8e44ad; transform: rotate(45deg);"></span> <b>Pre-Peak Stability:</b> First point before a peak with &lt; 50% range in a 1-month radius.</div>
                 <div class="item"><span class="marker" style="background:#2ed573; clip-path: polygon(50% 0%, 0% 100%, 100% 100%);"></span> <b>Local Low:</b> Lowest Low in a 1-year radius.</div>
             </div>
         </div>
