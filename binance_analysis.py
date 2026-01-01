@@ -1,176 +1,168 @@
-import threading
-import time
-import os
-import ccxt
+import requests
 import pandas as pd
-import plotly.graph_objects as go
+import matplotlib
+matplotlib.use('Agg')  # Use non-interactive backend for server
+import matplotlib.pyplot as plt
+import io
+import base64
 from flask import Flask, render_template_string
 from datetime import datetime
 
-# --- Global Data Storage (In-Memory) ---
-# Since Railway filesystems are ephemeral, we store the latest data in memory.
-# The script thread writes to this, the web thread reads from it.
-market_data = {
-    "symbol": "BTC/USDT",
-    "df": pd.DataFrame(),
-    "last_updated": None,
-    "status": "Initializing..."
-}
-
-# --- Configuration ---
-SYMBOL = "BTC/USDT"
-TIMEFRAME = "1M"  # Monthly candles
-UPDATE_INTERVAL = 3600  # How often the script runs (in seconds) - e.g., every hour
-
-# --- The Web Server (Visualization Layer) ---
 app = Flask(__name__)
 
-HTML_TEMPLATE = """
-<!DOCTYPE html>
-<html>
-<head>
-    <title>Binance Monthly OHLCV</title>
-    <meta name="viewport" content="width=device-width, initial-scale=1">
-    <script src="https://cdn.plot.ly/plotly-latest.min.js"></script>
-    <style>
-        body { font-family: sans-serif; background: #1a1a1a; color: #e0e0e0; margin: 0; padding: 20px; }
-        .container { max-width: 1200px; margin: 0 auto; }
-        .header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 20px; }
-        .status { font-size: 0.9em; color: #888; }
-        .card { background: #2d2d2d; padding: 20px; border-radius: 8px; box-shadow: 0 4px 6px rgba(0,0,0,0.3); }
-        h1 { margin: 0; color: #f0b90b; } /* Binance Yellow */
-    </style>
-</head>
-<body>
-    <div class="container">
-        <div class="header">
-            <h1>{{ symbol }} Monthly Data</h1>
-            <div class="status">
-                Last Script Update: {{ last_updated }}<br>
-                Status: {{ status }}
-            </div>
-        </div>
-        
-        <div class="card">
-            {% if chart_json %}
-                <div id="chart"></div>
-                <script>
-                    var graphs = {{ chart_json | safe }};
-                    Plotly.newPlot('chart', graphs.data, graphs.layout);
-                </script>
-            {% else %}
-                <p>Waiting for script to fetch data...</p>
-            {% endif %}
-        </div>
-    </div>
-    <!-- Auto-refresh page every 5 minutes to see new script updates -->
-    <script>setTimeout(function(){ location.reload(); }, 300000);</script>
-</body>
-</html>
-"""
+# --- Configuration ---
+SYMBOL = 'BTCUSDT'
+INTERVAL = '1M'  # 1 Month
+PORT = 8080
 
-@app.route('/')
-def index():
-    global market_data
+def fetch_binance_data(symbol, interval):
+    """
+    Fetches historical kline (candlestick) data from Binance.
+    """
+    base_url = "https://api.binance.com/api/v3/klines"
     
-    chart_json = None
-    if not market_data["df"].empty:
-        df = market_data["df"]
-        
-        # Create Plotly Candlestick chart
-        fig = go.Figure(data=[go.Candlestick(x=df['timestamp'],
-                        open=df['open'],
-                        high=df['high'],
-                        low=df['low'],
-                        close=df['close'])])
-
-        fig.update_layout(
-            title=f'{market_data["symbol"]} Monthly Chart',
-            yaxis_title=f'{market_data["symbol"]} Price',
-            xaxis_title='Date',
-            template="plotly_dark",
-            height=600,
-            paper_bgcolor='rgba(0,0,0,0)',
-            plot_bgcolor='rgba(0,0,0,0)',
-            margin=dict(l=50, r=50, t=50, b=50)
-        )
-        
-        # Convert to JSON for embedding
-        import json
-        import plotly.utils
-        chart_json = json.dumps(fig, cls=plotly.utils.PlotlyJSONEncoder)
-
-    return render_template_string(
-        HTML_TEMPLATE, 
-        symbol=market_data["symbol"],
-        last_updated=market_data["last_updated"],
-        status=market_data["status"],
-        chart_json=chart_json
-    )
-
-def run_web_server():
-    """
-    Runs the Flask server in a separate thread.
-    Railway provides the PORT via environment variables.
-    """
-    port = int(os.environ.get("PORT", 8080))
-    print(f"Starting Web Server on port {port}...")
-    # host='0.0.0.0' is CRITICAL for Railway to expose the port
-    app.run(host='0.0.0.0', port=port, debug=False, use_reloader=False)
-
-# --- The "Script" Logic ---
-def fetch_binance_data():
-    """
-    The core logic. Downloads data using CCXT.
-    """
-    global market_data
-    print(f"[{datetime.now()}] Script: Connecting to Binance...")
+    # Binance limit is 1000 candles. Since Bitcoin's monthly history 
+    # fits well within 1000 months (~83 years), one call is sufficient.
+    params = {
+        'symbol': symbol,
+        'interval': interval,
+        'limit': 1000 
+    }
     
     try:
-        exchange = ccxt.binance()
-        # Fetch monthly candles (1M)
-        # Limit 100 ensures we get enough history without overloading in one call
-        ohlcv = exchange.fetch_ohlcv(SYMBOL, TIMEFRAME, limit=100)
+        response = requests.get(base_url, params=params)
+        response.raise_for_status()
+        data = response.json()
         
-        if ohlcv:
-            # Process Data
-            df = pd.DataFrame(ohlcv, columns=['timestamp', 'open', 'high', 'low', 'close', 'volume'])
-            df['timestamp'] = pd.to_datetime(df['timestamp'], unit='ms')
-            
-            # Update Global Storage
-            market_data["df"] = df
-            market_data["last_updated"] = datetime.now().strftime("%Y-%m-%d %H:%M:%S UTC")
-            market_data["status"] = "Active"
-            print(f"[{datetime.now()}] Script: Success! Loaded {len(df)} months of data.")
-        else:
-            market_data["status"] = "No data received"
-            print("Script: Warning - No data received.")
-            
+        # DataFrame columns based on Binance API documentation
+        df = pd.DataFrame(data, columns=[
+            'open_time', 'open', 'high', 'low', 'close', 'volume',
+            'close_time', 'quote_asset_volume', 'number_of_trades',
+            'taker_buy_base_asset_volume', 'taker_buy_quote_asset_volume', 'ignore'
+        ])
+        
+        # Convert types
+        df['open_time'] = pd.to_datetime(df['open_time'], unit='ms')
+        numeric_cols = ['open', 'high', 'low', 'close', 'volume']
+        df[numeric_cols] = df[numeric_cols].apply(pd.to_numeric, axis=1)
+        
+        return df
     except Exception as e:
-        market_data["status"] = f"Error: {str(e)}"
-        print(f"Script Error: {e}")
+        print(f"Error fetching data: {e}")
+        return pd.DataFrame()
 
-def main_script_loop():
+def create_plot(df):
     """
-    Simulates the 'Normal Application' running locally.
-    It runs an infinite loop doing its job, regardless of the web server.
+    Generates a matplotlib plot and returns it as a base64 encoded string.
     """
-    print("--- Crypto Script Started ---")
-    
-    # 1. Start the Web Server as a daemon thread
-    # Daemon means it will automatically close if the main script crashes/exits
-    server_thread = threading.Thread(target=run_web_server, daemon=True)
-    server_thread.start()
-    
-    # 2. Give the server a second to spin up
-    time.sleep(1)
-    
-    # 3. Enter the main script execution loop
-    while True:
-        fetch_binance_data()
-        
-        print(f"Script: Sleeping for {UPDATE_INTERVAL} seconds...")
-        time.sleep(UPDATE_INTERVAL)
+    if df.empty:
+        return None
 
-if __name__ == "__main__":
-    main_script_loop()
+    # Scientific Layout Setup
+    plt.figure(figsize=(12, 6))
+    plt.style.use('bmh')  # 'bmh' is a clean, scientific style
+    
+    # Plot Close Price
+    plt.plot(df['open_time'], df['close'], label='Close Price', color='#2c3e50', linewidth=2)
+    
+    # Configuration for Scientific Look
+    plt.title(f'Historical Monthly Price Action: {SYMBOL}', fontsize=16, fontweight='bold', pad=20)
+    plt.xlabel('Date', fontsize=12)
+    plt.ylabel('Price (USDT) - Log Scale', fontsize=12)
+    plt.yscale('log')  # Log scale is standard for long-term crypto history
+    plt.grid(True, which="both", ls="-", alpha=0.5)
+    plt.legend(frameon=True, loc='upper left')
+    plt.tight_layout()
+
+    # Save to IO buffer
+    img = io.BytesIO()
+    plt.savefig(img, format='png', dpi=100)
+    img.seek(0)
+    plot_url = base64.b64encode(img.getvalue()).decode()
+    plt.close()
+    return plot_url
+
+@app.route('/')
+def home():
+    # 1. Fetch Data
+    df = fetch_binance_data(SYMBOL, INTERVAL)
+    
+    # 2. Create Plot
+    plot_url = create_plot(df)
+    
+    # 3. Stats for display
+    if not df.empty:
+        current_price = f"${df['close'].iloc[-1]:,.2f}"
+        all_time_high = f"${df['high'].max():,.2f}"
+        start_date = df['open_time'].iloc[0].strftime('%Y-%m-%d')
+    else:
+        current_price = "N/A"
+        all_time_high = "N/A"
+        start_date = "N/A"
+
+    # 4. Render HTML
+    html_template = """
+    <!DOCTYPE html>
+    <html>
+    <head>
+        <title>Binance Market Data</title>
+        <meta name="viewport" content="width=device-width, initial-scale=1">
+        <style>
+            body { font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif; margin: 0; padding: 20px; background-color: #f4f4f9; color: #333; }
+            .container { max-width: 1000px; margin: 0 auto; background: white; padding: 30px; border-radius: 8px; box-shadow: 0 4px 6px rgba(0,0,0,0.1); }
+            h1 { text-align: center; color: #444; }
+            .stats { display: flex; justify-content: space-around; margin-bottom: 30px; background: #eef2f5; padding: 15px; border-radius: 5px; }
+            .stat-box { text-align: center; }
+            .stat-label { font-size: 0.9em; color: #666; text-transform: uppercase; letter-spacing: 1px; }
+            .stat-value { font-size: 1.5em; font-weight: bold; color: #2c3e50; }
+            .plot-container { text-align: center; }
+            img { max-width: 100%; height: auto; border: 1px solid #ddd; }
+            .footer { margin-top: 20px; text-align: center; font-size: 0.8em; color: #888; }
+        </style>
+    </head>
+    <body>
+        <div class="container">
+            <h1>Market Analysis: {{ symbol }}</h1>
+            
+            <div class="stats">
+                <div class="stat-box">
+                    <div class="stat-label">Current Price</div>
+                    <div class="stat-value">{{ current }}</div>
+                </div>
+                <div class="stat-box">
+                    <div class="stat-label">All Time High</div>
+                    <div class="stat-value">{{ ath }}</div>
+                </div>
+                <div class="stat-box">
+                    <div class="stat-label">Data Since</div>
+                    <div class="stat-value">{{ start }}</div>
+                </div>
+            </div>
+
+            <div class="plot-container">
+                {% if plot_url %}
+                    <img src="data:image/png;base64,{{ plot_url }}" alt="Price Chart">
+                {% else %}
+                    <p>Error loading data from Binance.</p>
+                {% endif %}
+            </div>
+            
+            <div class="footer">
+                Data fetches live from Binance API | Interval: Monthly
+            </div>
+        </div>
+    </body>
+    </html>
+    """
+    
+    return render_template_string(html_template, 
+                                  plot_url=plot_url, 
+                                  symbol=SYMBOL, 
+                                  current=current_price, 
+                                  ath=all_time_high, 
+                                  start=start_date)
+
+if __name__ == '__main__':
+    # host='0.0.0.0' allows access from other devices on the network
+    print(f"Starting server on port {PORT}...")
+    app.run(host='0.0.0.0', port=PORT, debug=False)
