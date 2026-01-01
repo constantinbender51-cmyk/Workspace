@@ -105,37 +105,37 @@ def analyze_structure_original(df):
 def analyze_structure_new(df):
     """
     NEW LOGIC (For Random Reality Only):
-    1. Peak: 1yr radius (Highest Close in ±12 months).
-       - Simplified Logic: Strict Rolling Max.
-       - Tie-Breaking: Keep first occurrence only.
+    1. Peak: Asymmetric Window (2 years Past, 1 year Future).
+       - Rolling Window: 37 months (24 past + 1 curr + 12 future).
+       - Shifted by -12 to align the window correctly.
     """
     if df.empty: return df, [], [], []
     df = df.copy()
     
-    # 1. High detection (1yr radius)
-    # Highest Close in ±1 year (25 months centered: 12 prev + 1 curr + 12 next)
-    df['h_max'] = df['close'].rolling(window=25, center=True, min_periods=13).max()
+    # 1. High detection (2yr Past, 1yr Future)
+    # Calculation:
+    # We want Max(t-24 ... t ... t+12).
+    # Rolling(37) at index 'i' covers [i-36, i].
+    # If we shift the result backwards by 12 (shift(-12)), the value at index 't'
+    # comes from the calculation at 't+12', which covers [t+12-36, t+12] => [t-24, t+12].
     
-    # Invalidate tail (last 1 year)
+    df['h_max'] = df['close'].rolling(window=37, min_periods=13).max().shift(-12)
+    
+    # Invalidate tail (last 1 year / 12 months) as we can't see the required future
     if len(df) > 12: df.loc[df.index[-12:], 'h_max'] = np.inf
     
     # Find Peaks
     peak_candidates = df[df['close'] == df['h_max']].index.tolist()
     
     # --- Tie Breaking Logic ---
-    # Since we define a peak as the max in a 1-year radius, any "clashes" must be
-    # due to identical prices. We simply iterate and drop any peak that is too close 
-    # (within radius) to a previous one we've already accepted.
-    # Since the list is sorted chronologically by default (index order), keeping the 
-    # first one encountered effectively implements "Take the first" for ties.
-    
+    # Keep first occurrence if multiple identical peaks appear within the future radius (12 months)
     final_peaks = []
     if peak_candidates:
         final_peaks.append(peak_candidates[0])
         for p in peak_candidates[1:]:
-            # Only add if it's more than 12 months away from the last accepted peak
-            # Note: A true rolling max shouldn't have higher neighbors, but identical
-            # neighbors are possible.
+            # Since the window requires it to be max for 1 year future, 
+            # duplicates can only happen if prices are equal.
+            # We enforce a 12-month gap to prevent clustering of identical tops.
             if (p - final_peaks[-1]) > 12:
                 final_peaks.append(p)
     
@@ -244,7 +244,7 @@ def create_plot_and_vector(df):
         ax2.axvline(x=row['time'], color='black', linestyle='-', linewidth=1.5, alpha=0.8)
 
     ax2.set_yscale('linear')
-    ax2.set_title("Reality B: Peaks Only (Strict Rolling Max, 1yr Radius)", fontsize=16, fontweight='bold')
+    ax2.set_title("Reality B: Peaks Only (2yr Past, 1yr Future) - Marked Black", fontsize=16, fontweight='bold')
     ax2.set_ylabel("Price (USD)")
     
     ax2.legend(loc='upper left')
