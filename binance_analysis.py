@@ -65,6 +65,46 @@ def create_plot(df):
     # Plot Close Price
     plt.plot(df['open_time'], df['close'], label='Close Price', color='#2c3e50', linewidth=2)
     
+    # --- Analysis Logic ---
+    
+    # 1. Max Close Logic
+    max_close_row = df.loc[df['close'].idxmax()]
+    mc_date = max_close_row['open_time']
+    mc_price = max_close_row['close']
+    
+    # Mark Max Close
+    plt.scatter(mc_date, mc_price, color='crimson', s=100, zorder=5, label='Max Close')
+    plt.axvspan(mc_date - pd.DateOffset(months=1), mc_date + pd.DateOffset(months=1), color='crimson', alpha=0.15)
+    
+    # Project Max Close 4 Years Back
+    target_mc_past = mc_date - pd.DateOffset(years=4)
+    # Find nearest row to this past date
+    past_mc_row = df.iloc[(df['open_time'] - target_mc_past).abs().argsort()[:1]]
+    if not past_mc_row.empty:
+        pmc_date = past_mc_row['open_time'].values[0]
+        pmc_price = past_mc_row['close'].values[0]
+        plt.scatter(pmc_date, pmc_price, color='crimson', s=80, marker='x', zorder=5, label='Max Close - 4Y')
+
+    # 2. Max High Logic
+    max_high_row = df.loc[df['high'].idxmax()]
+    mh_date = max_high_row['open_time']
+    mh_price = max_high_row['high']
+    
+    # Mark Max High
+    # We plot the High price specifically, even though the main line is Close
+    plt.scatter(mh_date, mh_price, color='forestgreen', s=100, marker='^', zorder=5, label='Max High')
+    plt.axvspan(mh_date - pd.DateOffset(months=1), mh_date + pd.DateOffset(months=1), color='forestgreen', alpha=0.15)
+    
+    # Project Max High 4 Years Back
+    target_mh_past = mh_date - pd.DateOffset(years=4)
+    past_mh_row = df.iloc[(df['open_time'] - target_mh_past).abs().argsort()[:1]]
+    if not past_mh_row.empty:
+        pmh_date = past_mh_row['open_time'].values[0]
+        # We assume we mark the close price at that past date, or the high? 
+        # Usually for projections we look at where price was. Let's mark the High of that candle to be consistent.
+        pmh_price = past_mh_row['high'].values[0]
+        plt.scatter(pmh_date, pmh_price, color='forestgreen', s=80, marker='x', zorder=5, label='Max High - 4Y')
+
     # Configuration for Scientific Look
     plt.title(f'Historical Monthly Price Action: {SYMBOL}', fontsize=16, fontweight='bold', pad=20)
     plt.xlabel('Date', fontsize=12)
