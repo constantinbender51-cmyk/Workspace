@@ -49,24 +49,22 @@ def fetch_kraken_data(pair, interval):
 def generate_warped_reality(df):
     """
     Creates an alternate reality by:
-    1. Expanding/contracting each month by a random factor [-1, 1].
-    2. Resampling back to 30-day buckets.
+    1. Time Warp: Randomly expanding/contracting month duration.
+    2. Return Warp: Randomly drifting the return multiplier, affecting all future price moves.
     """
     if df.empty: return pd.DataFrame()
     
     daily_stream = []
     
-    # 1. Expand (Time Warp only)
+    # --- Step 1: Time Warp Expansion ---
     for _, row in df.iterrows():
-        # --- Time Warp ---
-        # Random warp factor between -1 and 1
+        # Random time warp factor between -1 and 1
         time_warp = random.uniform(-1, 1)
         # Base days = 30. Calculate delta.
         days_in_month = int(30 + (30 * time_warp))
-        # Safety: Ensure at least 1 day of existence
         days_in_month = max(1, days_in_month)
         
-        # Create identical records using ORIGINAL prices
+        # Create identical records (prices stay original for now)
         for _ in range(days_in_month):
             daily_stream.append({
                 'open': row['open'],
@@ -75,26 +73,79 @@ def generate_warped_reality(df):
                 'close': row['close']
             })
             
-    # 2. Reconstruct DataFrame & Resample
+    # Reconstruct DataFrame & Resample to Monthly
     warped_df = pd.DataFrame(daily_stream)
     
-    if not warped_df.empty:
-        start_date = df['time'].iloc[0]
-        warped_df['time'] = pd.date_range(start=start_date, periods=len(warped_df), freq='D')
+    if warped_df.empty: return pd.DataFrame()
+
+    start_date = df['time'].iloc[0]
+    warped_df['time'] = pd.date_range(start=start_date, periods=len(warped_df), freq='D')
+    warped_df.set_index('time', inplace=True)
+    
+    # Base Warped Monthly Data (Time shifted, but original price levels)
+    warped_monthly = warped_df.resample('30D').agg({
+        'open': 'first',
+        'high': 'max',
+        'low': 'min',
+        'close': 'last'
+    }).dropna().reset_index()
+
+    # --- Step 2: Persistent Return Randomization ---
+    # We will modify the *returns* of this new timeline.
+    
+    # Calculate original percentage returns of the Close price
+    # We use 'adj_close' concept effectively
+    original_returns = warped_monthly['close'].pct_change().fillna(0)
+    
+    # Initialize the Persistent Multiplier
+    cumulative_multiplier = 1.0
+    
+    # New Price Series starting from the first open
+    new_prices = [warped_monthly['open'].iloc[0]]
+    
+    # Iterate through returns to build the new price path
+    # We skip index 0 (start) and process returns from index 1 onwards
+    for i in range(1, len(warped_monthly)):
+        # 1. Random Shock to the Multiplier
+        # Small shock range to prevent runaway exponential explosion, 
+        # but enough to drift significantly over time.
+        shock = random.uniform(-0.05, 0.05) 
         
-        # Resample back to "Monthly" (30-day buckets)
-        warped_df.set_index('time', inplace=True)
+        # Update the persistent state
+        cumulative_multiplier *= (1 + shock)
         
-        warped_monthly = warped_df.resample('30D').agg({
-            'open': 'first',
-            'high': 'max',
-            'low': 'min',
-            'close': 'last'
-        }).dropna().reset_index()
+        # 2. Modify the Return for this month
+        original_r = original_returns.iloc[i]
+        new_r = original_r * cumulative_multiplier
         
-        return warped_monthly
-        
-    return pd.DataFrame()
+        # 3. Calculate New Close based on previous New Close
+        prev_price = new_prices[-1]
+        new_price = prev_price * (1 + new_r)
+        new_prices.append(new_price)
+
+    # Update the dataframe with the new Close prices
+    # Note: We need to handle index 0 separately or just overwrite
+    # Since new_prices matches length of warped_monthly (we started with Open[0] which roughly equals Close[0] for plotting flow, 
+    # but strictly Close[0] is Close[0]. Let's just overwrite 'close' with new_prices)
+    
+    # Fix: new_prices[0] was set to Open[0]. It should probably be Close[0] unmodified?
+    # Actually, let's just accept the small drift from Open[0] or set new_prices[0] = warped_monthly['close'].iloc[0]
+    new_prices[0] = warped_monthly['close'].iloc[0]
+    
+    # Store old close to calculate ratios for O/H/L adjustment
+    old_closes = warped_monthly['close'].values
+    warped_monthly['close'] = new_prices
+    
+    # --- Step 3: Adjust Open/High/Low proportionally ---
+    # We scale O/H/L by the ratio of (New Close / Old Close) to preserve candle structure relative to level
+    # This assumes the intra-month volatility scales with the price level (Log-normal assumption)
+    
+    ratios = warped_monthly['close'] / old_closes
+    warped_monthly['open'] *= ratios
+    warped_monthly['high'] *= ratios
+    warped_monthly['low'] *= ratios
+    
+    return warped_monthly
 
 def analyze_structure(df):
     """
@@ -176,7 +227,7 @@ def create_plot_and_vector(df):
     ax1.legend(loc='upper left', framealpha=1)
 
     # ==========================================
-    # PLOT 2: Time Warped Realities (No Price Warp)
+    # PLOT 2: Time Warped Realities (With Persistent Return Randomization)
     # ==========================================
     ax2.set_facecolor('#dcdde1') 
     
@@ -205,12 +256,12 @@ def create_plot_and_vector(df):
     ax2.scatter(w3.loc[l3, 'time'], w3.loc[l3, 'low'], color='#c0392b', s=40, marker='^', edgecolors='black', zorder=4)
 
     ax2.set_yscale('linear')
-    ax2.set_title("Reality B: 3 Randomized Simulations (Time Warp Only)", fontsize=16, fontweight='bold', color='#444')
+    ax2.set_title("Reality B: 3 Simulations (Time Warp + Persistent Return Randomization)", fontsize=16, fontweight='bold', color='#444')
     ax2.grid(True, which='major', color='white', alpha=0.5, zorder=1)
     ax2.legend(loc='upper left', framealpha=1)
     
     # Legend Text
-    ax2.text(0.02, 0.95, "Params: Time Warp [-1.0, 1.0]\nPrice randomization removed.", 
+    ax2.text(0.02, 0.95, "Method: Monthly Return Multiplier drifts randomly.\nImpact: A single shock affects all future price levels.", 
              transform=ax2.transAxes, fontsize=10, verticalalignment='top', 
              bbox=dict(boxstyle='round', facecolor='white', alpha=0.8))
 
@@ -286,7 +337,7 @@ def index():
             <div class="header">
                 <h1>Bitcoin Market: Actual vs Multi-Reality Warp</h1>
                 <p>Kraken Pair: <strong>XBTUSD</strong> | Current Price: <strong>{{ current_price }}</strong></p>
-                <a href="/" class="refresh-btn">Regenerate Time Warp</a>
+                <a href="/" class="refresh-btn">Regenerate Time & Return Warp</a>
             </div>
             
             <div class="chart-box">
