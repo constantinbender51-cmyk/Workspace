@@ -51,13 +51,12 @@ def generate_warped_reality(df):
     Creates an alternate reality by:
     1. Expanding/contracting each month by a random factor [-1, 1].
     2. Resampling back to 30-day buckets.
-    3. Randomizing price of the resulting buckets by a multiplier [1 + rand].
     """
     if df.empty: return pd.DataFrame()
     
     daily_stream = []
     
-    # 1. Expand (Time Warp only first)
+    # 1. Expand (Time Warp only)
     for _, row in df.iterrows():
         # --- Time Warp ---
         # Random warp factor between -1 and 1
@@ -93,18 +92,6 @@ def generate_warped_reality(df):
             'close': 'last'
         }).dropna().reset_index()
         
-        # 3. Apply Price Randomization AFTER resampling
-        # We apply a different random multiplier to each row of the resulting warped monthly data
-        # Using -0.3 to 0.3 allows for a 30% variation up or down per bucket.
-        for i, row in warped_monthly.iterrows():
-            price_warp = random.uniform(-0.3, 0.3)
-            multiplier = 1 + price_warp
-            
-            warped_monthly.at[i, 'open'] *= multiplier
-            warped_monthly.at[i, 'high'] *= multiplier
-            warped_monthly.at[i, 'low'] *= multiplier
-            warped_monthly.at[i, 'close'] *= multiplier
-            
         return warped_monthly
         
     return pd.DataFrame()
@@ -189,7 +176,7 @@ def create_plot_and_vector(df):
     ax1.legend(loc='upper left', framealpha=1)
 
     # ==========================================
-    # PLOT 2: Time & Price Warped Realities
+    # PLOT 2: Time Warped Realities (No Price Warp)
     # ==========================================
     ax2.set_facecolor('#dcdde1') 
     
@@ -218,12 +205,12 @@ def create_plot_and_vector(df):
     ax2.scatter(w3.loc[l3, 'time'], w3.loc[l3, 'low'], color='#c0392b', s=40, marker='^', edgecolors='black', zorder=4)
 
     ax2.set_yscale('linear')
-    ax2.set_title("Reality B: 3 Randomized Simulations (Time & Price Warp)", fontsize=16, fontweight='bold', color='#444')
+    ax2.set_title("Reality B: 3 Randomized Simulations (Time Warp Only)", fontsize=16, fontweight='bold', color='#444')
     ax2.grid(True, which='major', color='white', alpha=0.5, zorder=1)
     ax2.legend(loc='upper left', framealpha=1)
     
     # Legend Text
-    ax2.text(0.02, 0.95, "Params: Time Warp [-1.0, 1.0], Price Warp [-0.3, 0.3]\nPrice randomized AFTER resampling to monthly buckets.", 
+    ax2.text(0.02, 0.95, "Params: Time Warp [-1.0, 1.0]\nPrice randomization removed.", 
              transform=ax2.transAxes, fontsize=10, verticalalignment='top', 
              bbox=dict(boxstyle='round', facecolor='white', alpha=0.8))
 
@@ -299,7 +286,7 @@ def index():
             <div class="header">
                 <h1>Bitcoin Market: Actual vs Multi-Reality Warp</h1>
                 <p>Kraken Pair: <strong>XBTUSD</strong> | Current Price: <strong>{{ current_price }}</strong></p>
-                <a href="/" class="refresh-btn">Regenerate Time & Price Warp</a>
+                <a href="/" class="refresh-btn">Regenerate Time Warp</a>
             </div>
             
             <div class="chart-box">
