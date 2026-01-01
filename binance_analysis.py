@@ -85,6 +85,16 @@ def create_plot(df):
         pmc_price = past_mc_row['close'].values[0]
         plt.scatter(pmc_date, pmc_price, color='crimson', s=80, marker='x', zorder=5, label='Max Close - 4Y')
 
+    # Project Max Close 8 Years Back
+    target_mc_past_8 = mc_date - pd.DateOffset(years=8)
+    past_mc_row_8 = df.iloc[(df['open_time'] - target_mc_past_8).abs().argsort()[:1]]
+    if not past_mc_row_8.empty:
+        pmc_date_8 = past_mc_row_8['open_time'].values[0]
+        pmc_price_8 = past_mc_row_8['close'].values[0]
+        # Only plot if the found date is within reasonable range (e.g., data actually exists)
+        if abs((pd.to_datetime(pmc_date_8) - target_mc_past_8).days) < 60:
+            plt.scatter(pmc_date_8, pmc_price_8, color='darkred', s=80, marker='d', zorder=5, label='Max Close - 8Y')
+
     # 2. Max High Logic
     max_high_row = df.loc[df['high'].idxmax()]
     mh_date = max_high_row['open_time']
@@ -104,6 +114,15 @@ def create_plot(df):
         # Usually for projections we look at where price was. Let's mark the High of that candle to be consistent.
         pmh_price = past_mh_row['high'].values[0]
         plt.scatter(pmh_date, pmh_price, color='forestgreen', s=80, marker='x', zorder=5, label='Max High - 4Y')
+
+    # Project Max High 8 Years Back
+    target_mh_past_8 = mh_date - pd.DateOffset(years=8)
+    past_mh_row_8 = df.iloc[(df['open_time'] - target_mh_past_8).abs().argsort()[:1]]
+    if not past_mh_row_8.empty:
+        pmh_date_8 = past_mh_row_8['open_time'].values[0]
+        pmh_price_8 = past_mh_row_8['high'].values[0]
+        if abs((pd.to_datetime(pmh_date_8) - target_mh_past_8).days) < 60:
+            plt.scatter(pmh_date_8, pmh_price_8, color='darkgreen', s=80, marker='d', zorder=5, label='Max High - 8Y')
 
     # Configuration for Scientific Look
     plt.title(f'Historical Monthly Price Action: {SYMBOL}', fontsize=16, fontweight='bold', pad=20)
