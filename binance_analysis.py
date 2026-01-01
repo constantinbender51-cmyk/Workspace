@@ -79,28 +79,22 @@ def generate_warped_reality(df):
     }).dropna().reset_index()
 
     # --- Step 2: Persistent Return Randomization ---
-    # We use a balanced random walk to ensure some realities go up and some go down.
     original_returns = warped_monthly['close'].pct_change().fillna(0)
     
-    # Initializing multiplier in log-space to ensure symmetry
     log_multiplier = 0.0 
     new_prices = [warped_monthly['close'].iloc[0]]
     
     for i in range(1, len(warped_monthly)):
         # Balanced shock to the log-multiplier
-        # We use a smaller range to keep the linear scale readable
-        shock = random.uniform(-0.04, 0.04) 
+        shock = random.uniform(-0.06, 0.06) 
         log_multiplier += shock
         
-        # Convert back to linear space
         current_multiplier = np.exp(log_multiplier)
-        
         original_r = original_returns.iloc[i]
-        # Applying the multiplier to the percentage return
         new_r = original_r * current_multiplier
         
         # Clip returns to prevent bankruptcy
-        new_r = max(-0.95, new_r)
+        new_r = max(-0.98, new_r)
         
         new_price = new_prices[-1] * (1 + new_r)
         new_prices.append(new_price)
@@ -108,8 +102,6 @@ def generate_warped_reality(df):
     # Rebuild candle OHLC proportionally
     old_closes = warped_monthly['close'].values
     warped_monthly['close'] = new_prices
-    
-    # Avoid division by zero
     old_closes[old_closes == 0] = 1e-9
     ratios = warped_monthly['close'] / old_closes
     
@@ -158,7 +150,7 @@ def create_plot_and_vector(df):
     
     fig, (ax1, ax2) = plt.subplots(2, 1, figsize=(15, 16), facecolor='#f1f2f6')
 
-    # Reality A: Actual Reality (Linear Scale)
+    # Reality A: Actual Reality
     ax1.set_facecolor('#e0e0e0') 
     df, highs, stabs, lows = analyze_structure(df)
     ax1.plot(df['time'], df['close'], color='#2f3542', linewidth=2.5, label='Actual BTC Price', zorder=3)
@@ -171,22 +163,19 @@ def create_plot_and_vector(df):
     ax1.legend(loc='upper left')
     ax1.grid(True, alpha=0.3)
 
-    # Reality B: Alternate Realities (Linear Scale)
+    # Reality B: Single Alternate Reality
     ax2.set_facecolor('#dcdde1') 
-    colors = ['#2980b9', '#27ae60', '#e67e22']
-    sim_labels = ['Sim Alpha', 'Sim Beta', 'Sim Gamma']
     
-    for i, color in enumerate(colors):
-        w = generate_warped_reality(df)
-        w, wh, ws, wl = analyze_structure(w)
-        ax2.plot(w['time'], w['close'], color=color, linewidth=1.5, alpha=0.8, label=sim_labels[i])
-        # Plot markers on the simulated lines
-        ax2.scatter(w.loc[wh, 'time'], w.loc[wh, 'close'], color=color, s=30, marker='v', edgecolors='black', alpha=0.6)
-        ax2.scatter(w.loc[ws, 'time'], w.loc[ws, 'close'], color='#8e44ad', s=25, marker='d', edgecolors='white', alpha=0.6)
-        ax2.scatter(w.loc[wl, 'time'], w.loc[wl, 'low'], color=color, s=30, marker='^', edgecolors='black', alpha=0.6)
+    w = generate_warped_reality(df)
+    w, wh, ws, wl = analyze_structure(w)
+    
+    ax2.plot(w['time'], w['close'], color='#2980b9', linewidth=2, alpha=0.9, label='Simulation Alpha')
+    ax2.scatter(w.loc[wh, 'time'], w.loc[wh, 'close'], color='#2980b9', s=60, marker='v', edgecolors='black', alpha=0.7)
+    ax2.scatter(w.loc[ws, 'time'], w.loc[ws, 'close'], color='#8e44ad', s=50, marker='d', edgecolors='white', alpha=0.7)
+    ax2.scatter(w.loc[wl, 'time'], w.loc[wl, 'low'], color='#2980b9', s=60, marker='^', edgecolors='black', alpha=0.7)
 
-    ax2.set_yscale('linear') # Reverted to Linear
-    ax2.set_title("Reality B: Persistent Return Drift Simulations (Linear)", fontsize=16, fontweight='bold')
+    ax2.set_yscale('linear')
+    ax2.set_title("Reality B: Single Persistent Return Drift Reality (Linear)", fontsize=16, fontweight='bold')
     ax2.set_ylabel("Price (USD)")
     ax2.legend(loc='upper left')
     ax2.grid(True, alpha=0.3)
@@ -206,7 +195,7 @@ def index():
     p, v = create_plot_and_vector(df)
     
     html = """
-    <!DOCTYPE html><html><head><title>BTC Time-Return Warp</title>
+    <!DOCTYPE html><html><head><title>BTC Reality Warp</title>
     <style>
         body { font-family: 'Segoe UI', sans-serif; background: #f1f2f6; padding: 20px; }
         .container { max-width: 1300px; margin: auto; background: white; padding: 40px; border-radius: 20px; box-shadow: 0 10px 30px rgba(0,0,0,0.1); }
@@ -220,13 +209,12 @@ def index():
         .desc { background: #fffbe6; padding: 15px; border-radius: 8px; border: 1px solid #ffe58f; margin-bottom: 20px; font-size: 0.9em; }
     </style></head><body>
     <div class="container">
-        <h1>Bitcoin: Persistent Random Return Simulations</h1>
+        <h1>Bitcoin: Single Persistent Alternate Reality</h1>
         <div class="desc">
             <strong>Simulation Logic:</strong> Each month's return is modified by a persistent multiplier. If a month receives a positive "shock", 
             not only is that month's price higher, but <em>every subsequent return</em> in that simulation is amplified by that multiplier. 
-            This creates butterfly-effect divergence across different realities.
         </div>
-        <a href="/" class="btn">Generate New Realities</a>
+        <a href="/" class="btn">Generate New Reality</a>
         <img src="data:image/png;base64,{{p}}">
         <h3>Reality A Monthly Vector [-1, 0, 1]</h3>
         <div class="grid">
