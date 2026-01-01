@@ -49,7 +49,7 @@ def fetch_kraken_data(pair, interval):
 def analyze_structure(df):
     """
     Applies the Market Structure Logic to the DataFrame.
-    Adds a 'vector' column [-1, 0, 1].
+    Adds a 'vector' column [-1, 0, 1] covering the ENTIRE timeframe.
     """
     if df.empty: return df, [], [], []
     df = df.copy()
@@ -80,6 +80,7 @@ def analyze_structure(df):
     events = sorted([(i, 'H') for i in highs] + [(i, 'S') for i in stabs] + [(i, 'L') for i in lows])
     vector = np.full(len(df), np.nan)
     
+    # Fill between known events
     for i in range(len(events) - 1):
         idx, t = events[i]
         n_idx, n_t = events[i+1]
@@ -91,6 +92,19 @@ def analyze_structure(df):
         
         if not np.isnan(val): 
             vector[idx:n_idx] = val
+
+    # --- CRITICAL FIX: Fill from last event to current date ---
+    if events:
+        last_idx, last_type = events[-1]
+        last_val = np.nan
+        
+        # Determine the ongoing phase based on the last trigger
+        if last_type == 'H': last_val = -1   # High -> (Correction/Bear)
+        elif last_type == 'L': last_val = 0  # Low -> (Accumulation)
+        elif last_type == 'S': last_val = 1  # Stability -> (Expansion/Bull)
+        
+        if not np.isnan(last_val):
+            vector[last_idx:] = last_val
             
     df['vector'] = vector
     return df, highs, stabs, lows
@@ -198,23 +212,23 @@ def create_plot_and_vector(df):
 
     # Apply Background Coloring based on Propagated Vector
     # We iterate through the warped dataframe to draw spans
-    # To optimize, we find contiguous blocks
-    
     w['group'] = (w['vector'] != w['vector'].shift()).cumsum()
     
     for _, group in w.groupby('group'):
         state = group['vector'].iloc[0]
-        start_t = group['time'].iloc[0]
-        end_t = group['time'].iloc[-1]
-        
-        # Define Color based on state
-        face_color = None
-        if state == 1:   face_color = '#d4edda' # Light Green
-        elif state == -1: face_color = '#f8d7da' # Light Red
-        elif state == 0:  face_color = '#e2e3e5' # Light Grey
-        
-        if face_color:
-            ax2.axvspan(start_t, end_t, color=face_color, alpha=0.6, zorder=1)
+        # Only plot background if state is valid number
+        if not np.isnan(state):
+            start_t = group['time'].iloc[0]
+            end_t = group['time'].iloc[-1]
+            
+            # Define Color based on state
+            face_color = None
+            if state == 1:   face_color = '#d4edda' # Light Green
+            elif state == -1: face_color = '#f8d7da' # Light Red
+            elif state == 0:  face_color = '#e2e3e5' # Light Grey
+            
+            if face_color:
+                ax2.axvspan(start_t, end_t, color=face_color, alpha=0.6, zorder=1)
 
     ax2.set_yscale('linear')
     ax2.set_title("Reality B: Persistent Return Drift (Original Signals Mapped)", fontsize=16, fontweight='bold')
