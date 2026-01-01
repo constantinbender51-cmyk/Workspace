@@ -48,51 +48,58 @@ def fetch_kraken_data(pair, interval):
 
 def generate_warped_reality(df):
     """
-    Creates an alternate reality by expanding/contracting each month
-    by a random factor between -1 and 1.
+    Creates an alternate reality by:
+    1. Expanding/contracting each month by a random factor [-1, 1].
+    2. Randomizing price by a multiplier [1 + rand].
     """
     if df.empty: return pd.DataFrame()
     
     daily_stream = []
     
-    # 1. Expand and Warp
     for _, row in df.iterrows():
+        # --- Time Warp ---
         # Random warp factor between -1 and 1
-        warp = random.uniform(-1, 1)
-        
+        time_warp = random.uniform(-1, 1)
         # Base days = 30. Calculate delta.
-        days_in_month = int(30 + (30 * warp))
-        
+        days_in_month = int(30 + (30 * time_warp))
         # Safety: Ensure at least 1 day of existence
         days_in_month = max(1, days_in_month)
         
-        # Create identical records for the duration
+        # --- Price Warp ---
+        # Random multiplier factor. 
+        # Using -0.3 to 0.3 allows for a 30% variation up or down per bucket.
+        price_warp = random.uniform(-0.3, 0.3)
+        price_multiplier = 1 + price_warp
+        
+        # Create identical records for the duration, with price warped
         for _ in range(days_in_month):
             daily_stream.append({
-                'open': row['open'],
-                'high': row['high'],
-                'low': row['low'],
-                'close': row['close']
+                'open': row['open'] * price_multiplier,
+                'high': row['high'] * price_multiplier,
+                'low': row['low'] * price_multiplier,
+                'close': row['close'] * price_multiplier
             })
             
-    # 2. Reconstruct DataFrame
+    # Reconstruct DataFrame
     warped_df = pd.DataFrame(daily_stream)
     
-    # 3. Assign new Synthetic Timeline
-    start_date = df['time'].iloc[0]
-    warped_df['time'] = pd.date_range(start=start_date, periods=len(warped_df), freq='D')
-    
-    # 4. Resample back to "Monthly" (30-day buckets)
-    warped_df.set_index('time', inplace=True)
-    
-    warped_monthly = warped_df.resample('30D').agg({
-        'open': 'first',
-        'high': 'max',
-        'low': 'min',
-        'close': 'last'
-    }).dropna().reset_index()
-    
-    return warped_monthly
+    # Assign new Synthetic Timeline
+    if not warped_df.empty:
+        start_date = df['time'].iloc[0]
+        warped_df['time'] = pd.date_range(start=start_date, periods=len(warped_df), freq='D')
+        
+        # Resample back to "Monthly" (30-day buckets)
+        warped_df.set_index('time', inplace=True)
+        
+        warped_monthly = warped_df.resample('30D').agg({
+            'open': 'first',
+            'high': 'max',
+            'low': 'min',
+            'close': 'last'
+        }).dropna().reset_index()
+        
+        return warped_monthly
+    return pd.DataFrame()
 
 def analyze_structure(df):
     """
@@ -174,7 +181,7 @@ def create_plot_and_vector(df):
     ax1.legend(loc='upper left', framealpha=1)
 
     # ==========================================
-    # PLOT 2: Time Warped Realities (With Analysis)
+    # PLOT 2: Time & Price Warped Realities
     # ==========================================
     ax2.set_facecolor('#dcdde1') 
     
@@ -203,12 +210,12 @@ def create_plot_and_vector(df):
     ax2.scatter(w3.loc[l3, 'time'], w3.loc[l3, 'low'], color='#c0392b', s=40, marker='^', edgecolors='black', zorder=4)
 
     ax2.set_yscale('linear')
-    ax2.set_title("Reality B: 3 Warped Simulations with Assigned Vectors", fontsize=16, fontweight='bold', color='#444')
+    ax2.set_title("Reality B: 3 Randomized Simulations (Time & Price Warp)", fontsize=16, fontweight='bold', color='#444')
     ax2.grid(True, which='major', color='white', alpha=0.5, zorder=1)
     ax2.legend(loc='upper left', framealpha=1)
     
     # Legend Text
-    ax2.text(0.02, 0.95, "Markers on simulations indicate the assigned vector transitions (High -> Low -> Stability)", 
+    ax2.text(0.02, 0.95, "Params: Time Warp [-1.0, 1.0], Price Warp [-0.3, 0.3]\nMarkers show structure analysis on warped data.", 
              transform=ax2.transAxes, fontsize=10, verticalalignment='top', 
              bbox=dict(boxstyle='round', facecolor='white', alpha=0.8))
 
@@ -284,7 +291,7 @@ def index():
             <div class="header">
                 <h1>Bitcoin Market: Actual vs Multi-Reality Warp</h1>
                 <p>Kraken Pair: <strong>XBTUSD</strong> | Current Price: <strong>{{ current_price }}</strong></p>
-                <a href="/" class="refresh-btn">Regenerate Time Warp</a>
+                <a href="/" class="refresh-btn">Regenerate Time & Price Warp</a>
             </div>
             
             <div class="chart-box">
