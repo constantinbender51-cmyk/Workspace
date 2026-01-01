@@ -71,7 +71,7 @@ def create_plot(df):
     plt.style.use('bmh')
     
     # Base Plot
-    plt.plot(df['time'], df['close'], label='Close Price', color='#2c3e50', linewidth=1.5, zorder=2)
+    plt.plot(df['time'], df['close'], label='Close Price', color='#2c3e50', linewidth=1.5, zorder=3)
     
     # --- Pattern 2: Consolidation (30% Range for >= 1 Year) ---
     indexer = pd.api.indexers.FixedForwardWindowIndexer(window_size=12)
@@ -87,12 +87,12 @@ def create_plot(df):
         end_idx = min(idx + 11, len(df) - 1)
         end_date = df.loc[end_idx, 'time']
         consolidation_mask.loc[idx:end_idx] = True
-        plt.axvspan(start_date, end_date, color='slategrey', alpha=0.1, zorder=1, edgecolor=None)
+        # Changed highlight color to white
+        plt.axvspan(start_date, end_date, color='white', alpha=0.5, zorder=1, edgecolor=None)
 
-    plt.plot([], [], color='slategrey', alpha=0.3, linewidth=10, label='Consolidation Area')
+    plt.plot([], [], color='white', alpha=0.5, linewidth=10, label='Consolidation Area')
 
     # --- Pattern 1: Local High (Close, 2yr radius) ---
-    # Radius = 24 months. Window = 49 (24 pre + 1 curr + 24 post)
     df['rolling_max_close'] = df['close'].rolling(window=49, center=True, min_periods=25).max()
     
     valid_highs = df.copy()
@@ -103,7 +103,6 @@ def create_plot(df):
     plt.scatter(local_highs['time'], local_highs['close'], color='#d63031', s=120, marker='v', zorder=5, edgecolors='white', label='Local High (2yr)')
 
     # --- Pattern 3: Local Low (Low, 1yr radius, ignoring consolidation) ---
-    # Radius = 12 months. Window = 25 (12 pre + 1 curr + 12 post)
     df_lows_clean = df.copy()
     df_lows_clean.loc[consolidation_mask, 'low'] = np.inf
     
@@ -170,7 +169,7 @@ def home():
                 <strong>Markers:</strong><br>
                 - <span style="color:#d63031">▼ Red:</span> Local Close High (2-year radius)<br>
                 - <span style="color:#00b894">▲ Green:</span> Local Low (1-year radius, excludes consolidation zones)<br>
-                - <span style="color:slategrey">■ Shaded:</span> 30% Price Range Consolidation (min 1-year duration)
+                - <span style="background:white; border: 1px solid #ccc; padding: 0 4px;">■ White:</span> 30% Price Range Consolidation (min 1-year duration)
             </div>
         </div>
     </body>
