@@ -98,7 +98,7 @@ def analyze_structure_new(df):
     NEW LOGIC (For Random Reality):
     1. Peak: 2yr Past / 1yr Future radius.
     2. Low: Lowest price between Peaks.
-    3. Stable: Backscan from Peak for sum(abs(returns)) for month + next 3 months < 10%.
+    3. Stable: Backscan from Peak for sum(abs(returns)) for month + next 3 months < 20%.
     """
     if df.empty: return df, [], [], []
     df = df.copy()
@@ -134,8 +134,8 @@ def analyze_structure_new(df):
     for p_idx in highs:
         for i in range(p_idx - 1, -1, -1):
             if i in df.index:
-                # Stability threshold: Sum of absolute movements < 10%
-                if df.loc[i, 'abs_sum_forward_4m'] < 0.10:
+                # Stability threshold: Sum of absolute movements < 20% over 4 months (next 4 inclusive)
+                if df.loc[i, 'abs_sum_forward_4m'] < 0.20:
                     stabs.append(i)
                     break
     stabs = sorted(list(set(stabs)))
@@ -212,7 +212,7 @@ def create_plot_and_vector(df):
     for _, row in stab_rows.iterrows():
         ax2.axvline(x=row['time'], color='black', linestyle=':', linewidth=2.0, alpha=0.9, zorder=3)
 
-    ax2.set_title("Reality B: Random Reality (Absolute Return Forward Stability)", fontweight='bold')
+    ax2.set_title("Reality B: Random Reality (Absolute Return Forward Stability < 20%)", fontweight='bold')
     
     from matplotlib.lines import Line2D
     custom_lines = [
@@ -221,7 +221,7 @@ def create_plot_and_vector(df):
         Line2D([0], [0], color='black', lw=1.5, linestyle='--'),
         Line2D([0], [0], color='black', lw=2.0, linestyle=':')
     ]
-    ax2.legend(custom_lines, ['Sim Price', 'Peak (2yr/1yr)', 'Low (Inter-Peak)', 'Stable (abs_sum forward < 10%)'], loc='upper left')
+    ax2.legend(custom_lines, ['Sim Price', 'Peak (2yr/1yr)', 'Low (Inter-Peak)', 'Stable (abs_sum forward < 20%)'], loc='upper left')
     ax2.grid(True, alpha=0.3)
 
     plt.tight_layout()
@@ -250,7 +250,7 @@ def index():
         <h1>Bitcoin: Absolute Forward Stability</h1>
         <div style="background:#f8f9fa; padding:15px; border-radius:8px; border:1px solid #dee2e6; margin-bottom:20px;">
             <strong>Reality B Updates:</strong> Background shading removed. Structural points now marked with black lines. 
-            Stability calculation updated to 4-month forward <strong>sum of absolute returns</strong>.
+            Stability calculation updated to 4-month forward <strong>sum of absolute returns &lt; 20%</strong>.
         </div>
         <a href="/" class="btn">Generate New Reality</a>
         <img src="data:image/png;base64,{{p}}">
