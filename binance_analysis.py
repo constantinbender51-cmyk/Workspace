@@ -65,41 +65,31 @@ def create_plot(df):
     # Plot Close Price
     plt.plot(df['open_time'], df['close'], label='Close Price', color='#2c3e50', linewidth=2)
     
-    # --- Local ATH Analysis Logic ---
+    # --- Local Close Maxima Logic (1 Year Radius) ---
     
-    # Define "Local ATH" as the highest High in a centered 1-year window (approx 13 months)
-    # This checks if a month's High is the maximum of the 6 months before and 6 months after it.
-    df['rolling_max'] = df['high'].rolling(window=13, center=True).max()
+    # We want to find months where Close is the highest within a 1-year radius.
+    # Radius of 1 year = 12 months before + 12 months after.
+    # Window size = 12 + 1 (current) + 12 = 25 months.
+    df['rolling_close_max'] = df['close'].rolling(window=25, center=True).max()
     
-    # Filter: It is a peak if the High equals the rolling max
-    peaks = df[df['high'] == df['rolling_max']]
+    # Filter: It is a local peak if the Close equals the rolling max.
+    # Note: This logic naturally leaves out the first 12 and last 12 months of the dataset
+    # because the rolling window cannot be fully satisfied (radius extends into non-existent data).
+    local_peaks = df[df['close'] == df['rolling_close_max']]
 
-    # Iterate over found peaks to place markers
-    for idx, row in peaks.iterrows():
-        peak_date = row['open_time']
-        
-        # Calculate Target Dates
-        date_preceding = peak_date - pd.DateOffset(years=1)
-        date_following = peak_date + pd.DateOffset(years=1)
-        
-        targets = [
-            (date_preceding, 'green', '^'), # Green marker 1 year before
-            (date_following, 'red', 'v')    # Red marker 1 year after
-        ]
-        
-        for target_date, color, marker in targets:
-            # Find the closest actual data row to the target date
-            time_diff = (df['open_time'] - target_date).abs()
-            
-            # Only plot if we find a match within reasonable time (e.g. data exists)
-            if time_diff.min() < pd.Timedelta(days=40):
-                match_idx = time_diff.idxmin()
-                match_row = df.loc[match_idx]
-                
-                plot_date = match_row['open_time']
-                plot_price = match_row['close'] # Mark the Close price at that time
-                
-                plt.scatter(plot_date, plot_price, color=color, s=100, marker=marker, zorder=5, edgecolors='black', linewidth=0.5)
+    # Plot markers for these peaks
+    if not local_peaks.empty:
+        plt.scatter(
+            local_peaks['open_time'], 
+            local_peaks['close'], 
+            color='#FFD700',  # Gold
+            s=200, 
+            marker='*', 
+            edgecolors='black', 
+            linewidth=0.5, 
+            zorder=5, 
+            label='1-Year Radius Max'
+        )
 
     # Configuration for Scientific Look
     plt.title(f'Historical Monthly Price Action: {SYMBOL}', fontsize=16, fontweight='bold', pad=20)
