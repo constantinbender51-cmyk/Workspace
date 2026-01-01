@@ -97,7 +97,7 @@ def analyze_structure_new(df):
     """
     NEW LOGIC (For Random Reality):
     1. Peak: 2yr Past / 1yr Future radius, AND must be a NEW ATH.
-    2. Low: Lowest price between confirmed Peaks.
+    2. Low: Lowest price between confirmed Peaks OR between last Peak and End.
     3. Stable: 3/4 point (Time) between a Low and the month with highest 3-month return.
     """
     if df.empty: return df, [], [], []
@@ -120,48 +120,54 @@ def analyze_structure_new(df):
             if (p - highs[-1]) > 12 and df.loc[p, 'close'] > df.loc[highs[-1], 'close']:
                 highs.append(p)
     
-    # 2. Low Detection
+    # 2. Low Detection (Including trailing low)
     lows = []
     if highs:
         for i in range(len(highs)):
             current_peak = highs[i]
-            start_search = highs[i-1] + 1 if i > 0 else 0
-            end_search = current_peak
+            start_search = current_peak + 1
+            # Search until next peak OR end of data
+            end_search = highs[i+1] if i < len(highs) - 1 else len(df)
+            
             if start_search < end_search:
                 segment = df.iloc[start_search:end_search]
                 if not segment.empty:
-                    lows.append(segment['close'].idxmin())
+                    # idxmin gives the label of the minimum price
+                    local_low = segment['close'].idxmin()
+                    lows.append(local_low)
 
     # 3. Stability Detection
     df['ret_3m'] = df['close'].pct_change(periods=3).fillna(0)
     stabs = []
     for low_idx in lows:
+        # We only define stability if this low is followed by a confirmed Peak
         next_peaks = [h for h in highs if h > low_idx]
         if not next_peaks: continue
         target_peak = next_peaks[0]
+        
         segment = df.iloc[low_idx:target_peak + 1]
         if segment.empty: continue
+        
         max_3m_ret_idx = segment['ret_3m'].idxmax()
         delta = max_3m_ret_idx - low_idx
         three_quarter_idx = int(low_idx + (delta * 0.75))
         stabs.append(three_quarter_idx)
+        
     stabs = sorted(list(set(stabs)))
 
     # --- Generate Vector (State Machine) ---
-    # Events: H = Peak, L = Low, S = Stable
     events = sorted([(i, 'H') for i in highs] + [(i, 'S') for i in stabs] + [(i, 'L') for i in lows])
     vector = np.full(len(df), np.nan)
     
-    # Track current state: -1 (Red/Corr), 0 (Grey/Acc), 1 (Green/Exp)
     current_state = np.nan
     event_map = dict(events)
     
     for i in range(len(df)):
         if i in event_map:
             etype = event_map[i]
-            if etype == 'H': current_state = -1 # Start Correction
-            elif etype == 'L': current_state = 0 # Start Accumulation
-            elif etype == 'S': current_state = 1 # Start Expansion
+            if etype == 'H': current_state = -1 # Peak -> Correction
+            elif etype == 'L': current_state = 0 # Low -> Accumulation
+            elif etype == 'S': current_state = 1 # Stable -> Expansion
         vector[i] = current_state
             
     df['vector'] = vector
@@ -195,7 +201,7 @@ def generate_warped_reality(df):
     ratios = w_m['close'] / np.where(old_closes == 0, 1e-9, old_closes)
     w_m['open'] *= ratios; w_m['high'] *= ratios; w_m['low'] *= ratios
     
-    # Analyze structure on final prices (Generates Vector)
+    # Analyze structure
     w_m, _, _, _ = analyze_structure_new(w_m)
     return w_m
 
@@ -213,35 +219,22 @@ def create_plot_and_vector(df):
     ax1.set_title("Reality A: Actual Historical Data", fontweight='bold')
     ax1.legend()
 
-    # Plot 2: Random Reality (Shades + Lines)
+    # Plot 2: Random Reality
     ax2.set_facecolor('#f0f0f0') 
     w = generate_warped_reality(df)
     ax2.plot(w['time'], w['close'], color='#2980b9', linewidth=2, label='Sim Price', zorder=5)
 
-    # Background Coloring for Randomized Vector
+    # Background Coloring
     w['group'] = (w['vector'] != w['vector'].shift()).cumsum()
     w['next_t'] = w['time'].shift(-1).fillna(w['time'].iloc[-1] + timedelta(days=30))
     groups = w.groupby('group').agg({'time': 'first', 'next_t': 'last', 'vector': 'first'})
 
     for _, row in groups.iterrows():
         if not np.isnan(row['vector']):
-            # Color coding matching original logic
             color = '#f8d7da' if row['vector'] == -1 else ('#e2e3e5' if row['vector'] == 0 else '#d4edda')
             ax2.axvspan(row['time'], row['next_t'], color=color, alpha=0.6, zorder=1)
 
-    # Re-draw Markers as Lines
-    v = w['vector']
-    # Markers in analyze_structure_new aren't used for markers here, we look at the raw wh/ws/wl
-    # But for simplicity, we can just look at where the state changed
-    peak_rows = w[w['vector'].shift() != -1][w['vector'] == -1] # Start of red
-    low_rows = w[w['vector'].shift() != 0][w['vector'] == 0]    # Start of grey
-    stab_rows = w[w['vector'].shift() != 1][w['vector'] == 1]   # Start of green
-
-    for t in w.loc[w.index[w['vector'].diff() != 0], 'time']:
-        # This draws lines at every transition
-        ax2.axvline(x=t, color='black', alpha=0.1, linewidth=0.5)
-
-    ax2.set_title("Reality B: Randomized Signal Vector", fontweight='bold')
+    ax2.set_title("Reality B: Randomized Signal Vector (Trailing Low Support)", fontweight='bold')
     
     from matplotlib.patches import Patch
     from matplotlib.lines import Line2D
@@ -281,23 +274,20 @@ def index():
         .btn { display: block; width: fit-content; margin: 0 auto 20px; padding: 12px 24px; background: #6c5ce7; color: #fff; text-decoration: none; border-radius: 8px; font-weight: bold; }
     </style></head><body>
     <div class="container">
-        <h1>Bitcoin: Randomized Signal Vector</h1>
+        <h1>Bitcoin: Trailing Low Signal Warp</h1>
         <div style="background:#f8f9fa; padding:15px; border-radius:8px; border:1px solid #dee2e6; margin-bottom:20px;">
-            <strong>Reality B State Machine:</strong><br>
-            • <b>-1 (Red):</b> Correction (From ATH Peak to Cycle Low)<br>
-            • <b>0 (Grey):</b> Accumulation (From Cycle Low to 3/4 Stability Point)<br>
-            • <b>1 (Green):</b> Expansion (From 3/4 Stability Point to next ATH Peak)
+            <strong>State Progression:</strong> Following a Peak, the signal becomes <strong>Correction (-1)</strong>. 
+            If a <strong>Low</strong> is identified (even if it's the last point in the data), the signal transitions to <strong>Accumulation (0)</strong>.
         </div>
         <a href="/" class="btn">Generate New Reality</a>
         <img src="data:image/png;base64,{{p}}">
-        
         <div class="grid-container">
             <div>
-                <h3>Reality A Vector (Actual)</h3>
+                <h3>Reality A Vector</h3>
                 <div class="grid">{% for i in v_a %}<div class="c {% if i.val == -1 %}v-1{% elif i.val == 0 %}v0{% elif i.val == 1 %}v1{% endif %}">{{i.date}}<br><b>{{i.val}}</b></div>{% endfor %}</div>
             </div>
             <div>
-                <h3>Reality B Vector (Randomized)</h3>
+                <h3>Reality B Vector</h3>
                 <div class="grid">{% for i in v_b %}<div class="c {% if i.val == -1 %}v-1{% elif i.val == 0 %}v0{% elif i.val == 1 %}v1{% endif %}">{{i.date}}<br><b>{{i.val}}</b></div>{% endfor %}</div>
             </div>
         </div>
