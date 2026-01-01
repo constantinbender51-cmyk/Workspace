@@ -87,6 +87,7 @@ def create_plot(df):
 
     # Plot markers for these peaks
     if not local_peaks.empty:
+        # Plot the Peak itself (Gold Star)
         plt.scatter(
             local_peaks['open_time'], 
             local_peaks['close'], 
@@ -95,9 +96,60 @@ def create_plot(df):
             marker='*', 
             edgecolors='black', 
             linewidth=0.5, 
-            zorder=5, 
+            zorder=6, 
             label='2-Year Radius Max'
         )
+
+        # Iterate to add Offset Markers (-1 Year and +1 Year)
+        first_green = True
+        first_grey = True
+
+        for _, row in local_peaks.iterrows():
+            peak_date = row['open_time']
+            
+            # --- 1 Year Before (Green) ---
+            target_date_before = peak_date - pd.DateOffset(years=1)
+            # Find closest existing data point in the dataframe
+            dt_diff_before = (df['open_time'] - target_date_before).abs()
+            
+            # Only plot if we find a date within ~45 days (to account for varying month lengths/missing data)
+            if dt_diff_before.min() < pd.Timedelta(days=45):
+                idx_before = dt_diff_before.idxmin()
+                row_before = df.loc[idx_before]
+                
+                plt.scatter(
+                    row_before['open_time'], 
+                    row_before['close'], 
+                    color='mediumseagreen', 
+                    s=100, 
+                    marker='^', 
+                    zorder=5, 
+                    edgecolors='black', 
+                    linewidth=0.5,
+                    label='1 Year Before' if first_green else ""
+                )
+                first_green = False
+
+            # --- 1 Year After (Grey) ---
+            target_date_after = peak_date + pd.DateOffset(years=1)
+            dt_diff_after = (df['open_time'] - target_date_after).abs()
+            
+            if dt_diff_after.min() < pd.Timedelta(days=45):
+                idx_after = dt_diff_after.idxmin()
+                row_after = df.loc[idx_after]
+                
+                plt.scatter(
+                    row_after['open_time'], 
+                    row_after['close'], 
+                    color='darkgrey', 
+                    s=100, 
+                    marker='v', 
+                    zorder=5, 
+                    edgecolors='black', 
+                    linewidth=0.5,
+                    label='1 Year After' if first_grey else ""
+                )
+                first_grey = False
 
     # Configuration for Scientific Look
     plt.title(f'Historical Monthly Price Action: {SYMBOL}', fontsize=16, fontweight='bold', pad=20)
