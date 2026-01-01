@@ -98,7 +98,7 @@ def analyze_structure_new(df):
     NEW LOGIC (For Random Reality):
     1. Peak: 2yr Past / 1yr Future radius.
     2. Low: Lowest price between Peaks.
-    3. Stable: Midpoint (Index) between a Low and the month with highest 3-month return before next Peak.
+    3. Stable: 3/4 point (Time) between a Low and the month with highest 3-month return before next Peak.
     """
     if df.empty: return df, [], [], []
     df = df.copy()
@@ -126,8 +126,7 @@ def analyze_structure_new(df):
                 if not segment.empty:
                     lows.append(segment['close'].idxmin())
 
-    # 3. Stability Detection (3-Month Return Midpoint Logic)
-    # Calculate 3-month return: (Price_t - Price_{t-3}) / Price_{t-3}
+    # 3. Stability Detection (3-Month Return 3/4 Point Logic)
     df['ret_3m'] = df['close'].pct_change(periods=3).fillna(0)
     stabs = []
     
@@ -144,13 +143,16 @@ def analyze_structure_new(df):
         # Find month with highest 3-month return in this cycle
         max_3m_ret_idx = segment['ret_3m'].idxmax()
         
-        # Midpoint index between the Low and that high-return month
-        midpoint_idx = int((low_idx + max_3m_ret_idx) / 2)
-        stabs.append(midpoint_idx)
+        # 3/4 Point index calculation: 
+        # Start + (Distance * 0.75)
+        # Low_idx is the start, max_3m_ret_idx is the reference end.
+        delta = max_3m_ret_idx - low_idx
+        three_quarter_idx = int(low_idx + (delta * 0.75))
+        stabs.append(three_quarter_idx)
 
     stabs = sorted(list(set(stabs)))
 
-    # Encode for plotting (discrete markers, shades removed)
+    # Encode for plotting
     vector = np.full(len(df), np.nan)
     for h in highs: vector[h] = -1
     for l in lows: vector[l] = -2
@@ -222,7 +224,7 @@ def create_plot_and_vector(df):
     for _, row in stab_rows.iterrows():
         ax2.axvline(x=row['time'], color='black', linestyle=':', linewidth=2.0, alpha=0.9, zorder=3)
 
-    ax2.set_title("Reality B: Highest 3-Month Return Midpoint Stability", fontweight='bold')
+    ax2.set_title("Reality B: Highest 3-Month Return 3/4 Point Stability", fontweight='bold')
     
     from matplotlib.lines import Line2D
     custom_lines = [
@@ -231,7 +233,7 @@ def create_plot_and_vector(df):
         Line2D([0], [0], color='black', lw=1.5, linestyle='--'),
         Line2D([0], [0], color='black', lw=2.0, linestyle=':')
     ]
-    ax2.legend(custom_lines, ['Sim Price', 'Peak (2yr/1yr)', 'Low (Inter-Peak)', 'Stable (Midpoint Low & Max 3m-Ret)'], loc='upper left')
+    ax2.legend(custom_lines, ['Sim Price', 'Peak (2yr/1yr)', 'Low (Inter-Peak)', 'Stable (3/4 Point Low & Max 3m-Ret)'], loc='upper left')
     ax2.grid(True, alpha=0.3)
 
     plt.tight_layout()
@@ -249,7 +251,7 @@ def index():
     <!DOCTYPE html><html><head><title>BTC Reality Warp</title>
     <style>
         body { font-family: sans-serif; background: #f1f2f6; padding: 20px; }
-        .container { max-width: 1300px; margin: auto; background: white; padding: 40px; border-radius: 20px; box-shadow: 0 10px 30px rgba(0,0,0,0.1); }
+        .container { max-width: 1300px; margin: auto; background: white; padding: 40px; border-radius: 20px; box-shadow: 0 10px 30px rgba(0,0,0,0.05); }
         img { width: 100%; border-radius: 10px; margin: 20px 0; }
         .grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(90px, 1fr)); gap: 8px; height: 250px; overflow-y: scroll; background: #f8f9fa; padding: 15px; border-radius: 10px; }
         .c { padding: 10px; text-align: center; font-size: 11px; border: 1px solid #ddd; }
@@ -257,10 +259,10 @@ def index():
         .btn { display: block; width: fit-content; margin: 0 auto 20px; padding: 12px 24px; background: #6c5ce7; color: #fff; text-decoration: none; border-radius: 8px; font-weight: bold; }
     </style></head><body>
     <div class="container">
-        <h1>Bitcoin: 3-Month Return Stability</h1>
+        <h1>Bitcoin: 3/4 Return Stability</h1>
         <div style="background:#f8f9fa; padding:15px; border-radius:8px; border:1px solid #dee2e6; margin-bottom:20px;">
-            <strong>Stability Rule:</strong> For each cycle, we find the month with the highest 3-month percentage return. 
-            The stable signal is the midpoint index between the cycle's Low and that high-return month.
+            <strong>Stability Rule:</strong> For each cycle, we identify the month with the highest 3-month percentage return. 
+            The stable signal is placed at the <strong>3/4 point index</strong> between the cycle's Low and that high-return month.
         </div>
         <a href="/" class="btn">Generate New Reality</a>
         <img src="data:image/png;base64,{{p}}">
