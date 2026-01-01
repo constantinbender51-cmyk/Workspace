@@ -17,9 +17,19 @@ app = Flask(__name__)
 # --- Configuration ---
 SYMBOL = 'BTCUSDT'
 INTERVAL = '1M'  # Monthly
-START_YEAR = 2017 # Approx start of reliable binance data
+START_YEAR = 2017 
 END_YEAR = 2050
-CYCLE_MONTHS = 12 + 22 + 12 # 46 Months total
+
+# Strategy Definition
+SHORT_DURATION = 12
+FLAT_DURATION = 22
+LONG_DURATION = 12
+CYCLE_MONTHS = SHORT_DURATION + FLAT_DURATION + LONG_DURATION # 46 Months total
+
+# --- ANCHOR SETTINGS ---
+# Set this to 'YYYY-MM-DD' to force the strategy start date.
+# Set to None to let the script find the highest price automatically.
+FORCE_ANCHOR_DATE = '2025-07-01' 
 
 # Global storage for the latest plot buffer
 plot_cache = None
@@ -30,8 +40,6 @@ def fetch_binance_data():
     base_url = "https://api.binance.com/api/v3/klines"
     limit = 1000
     
-    # Get start time (Binance launched ~July 2017)
-    # We'll just fetch the max allowed which covers all history for Monthly
     params = {
         'symbol': SYMBOL,
         'interval': INTERVAL,
@@ -39,18 +47,18 @@ def fetch_binance_data():
     }
     
     try:
-        response = requests.get(base_url, params=params)
+        response = requests.get(base_url, params=params, timeout=10)
         data = response.json()
         
-        # DataFrame columns: Open Time, Open, High, Low, Close, Volume, ...
+        # DataFrame columns: Open Time, Open, High, Low, Close, Volume...
         df = pd.DataFrame(data, columns=[
             'timestamp', 'open', 'high', 'low', 'close', 'volume', 
             'close_time', 'qav', 'num_trades', 'taker_base_vol', 'taker_quote_vol', 'ignore'
         ])
         
         df['timestamp'] = pd.to_datetime(df['timestamp'], unit='ms')
-        df['close'] = df['close'].astype(float)
         df['high'] = df['high'].astype(float)
+        df['close'] = df['close'].astype(float)
         df.set_index('timestamp', inplace=True)
         return df
     except Exception as e:
@@ -58,121 +66,128 @@ def fetch_binance_data():
         return pd.DataFrame()
 
 def apply_strategy(df):
-    """
-    Applies the Peak Strategy:
-    1. Find ATH
-    2. Cycle: Short (12m) -> Flat (22m) -> Long (12m)
-    3. Project backward and forward to 2050
-    """
     if df.empty:
-        return None, None
+        return None, None, None, None
 
-    # 1. Find the Anchor (Global ATH)
-    # We assume the ATH marks the BEGINNING of the Short period
-    ath_date = df['high'].idxmax()
-    ath_price = df['high'].max()
-    
-    print(f"Anchor ATH Found: {ath_date.date()} at ${ath_price:,.2f}")
+    # 1. Determine Anchor
+    # Debugging: Print top 5 highs to see what the data actually contains
+    print("\n--- DATA DEBUG: TOP 5 MONTHLY HIGHS ---")
+    top_5 = df.sort_values(by='high', ascending=False).head(5)
+    for date, row in top_5.iterrows():
+        print(f"{date.date()}: ${row['high']:,.2f}")
+    print("---------------------------------------\n")
 
-    # 2. Create the full timeline (Start of Data -> 2050)
+    if FORCE_ANCHOR_DATE:
+        ath_date = pd.Timestamp(FORCE_ANCHOR_DATE)
+        # Try to find the exact price in data, otherwise estimate or max
+        if ath_date in df.index:
+            ath_price = df.loc[ath_date]['high']
+        else:
+            # If the forced date is outside our current data (future), use the max found
+            ath_price = df['high'].max()
+        print(f"Strategy: Using FORCED Anchor: {ath_date.date()}")
+    else:
+        ath_date = df['high'].idxmax()
+        ath_price = df['high'].max()
+        print(f"Strategy: Auto-detected Anchor: {ath_date.date()} at ${ath_price:,.2f}")
+
+    # 2. Create the full timeline
     start_date = df.index[0]
     end_date = pd.Timestamp(f"{END_YEAR}-12-31")
     
-    # Generate a monthly range for the strategy projection
-    # usage of MS (Month Start) to align cleanly
     strategy_index = pd.date_range(start=start_date, end=end_date, freq='MS')
     strategy_df = pd.DataFrame(index=strategy_index)
-    strategy_df['action'] = 'FLAT' # Default
+    strategy_df['action'] = 'FLAT' 
     strategy_df['cycle_phase'] = 0
 
     # 3. Propagate the cycle
-    # The cycle is 46 months long. 
-    # Logic: Calculate months difference from ATH. 
-    # Use modulo 46 to determine position in cycle.
-    
-    # Helper to calculate month difference
     def diff_month(d1, d2):
         return (d1.year - d2.year) * 12 + d1.month - d2.month
 
     for date in strategy_index:
         # Calculate offset from ATH
-        # If date is before ATH, offset is negative, modulo still works correctly in Python
         offset = diff_month(date, ath_date)
         
         # Normalize offset to [0, 45]
         cycle_pos = offset % CYCLE_MONTHS
         
-        if 0 <= cycle_pos < 12:
+        # 0-11: Short (12m)
+        # 12-33: Flat (22m)
+        # 34-45: Long (12m)
+        if 0 <= cycle_pos < SHORT_DURATION:
             action = 'SHORT'
-        elif 12 <= cycle_pos < 34: # 12 + 22 = 34
+        elif SHORT_DURATION <= cycle_pos < (SHORT_DURATION + FLAT_DURATION):
             action = 'FLAT'
-        else: # 34 to 46
+        else: 
             action = 'LONG'
             
         strategy_df.at[date, 'action'] = action
         strategy_df.at[date, 'cycle_phase'] = cycle_pos
 
-    return df, strategy_df
+    return df, strategy_df, ath_date, ath_price
 
 def generate_plot():
-    """Generates the Matplotlib chart and saves it to a buffer."""
     global plot_cache, last_update
     
-    # Simple caching: don't regenerate if requested frequently (e.g. < 1 hr)
-    # Since monthly data changes slowly, we can cache aggressively or just run once at startup
-    if plot_cache is not None and (time.time() - last_update) < 3600:
+    # Simple cache (optional, helpful if many requests hit at once)
+    if plot_cache is not None and (time.time() - last_update) < 60:
         return plot_cache
 
     print("Generating plot...")
-    df, strategy = fetch_binance_data(), None
+    df_raw = fetch_binance_data()
     
-    if not df.empty:
-        df, strategy = apply_strategy(df)
-
-    if strategy is None:
+    if df_raw.empty:
         return None
+        
+    df, strategy, ath_date, ath_price = apply_strategy(df_raw)
 
     # Setup Plot
-    fig, ax = plt.subplots(figsize=(15, 8))
+    fig, ax = plt.subplots(figsize=(16, 9))
     plt.style.use('dark_background')
     
-    # 1. Plot BTC Price (Log Scale for long term)
+    # 1. Plot BTC Price (Log Scale)
     ax.semilogy(df.index, df['close'], color='white', linewidth=1.5, label='BTC Price (Log)')
     
     # 2. Visualize Strategy Zones
-    # We iterate through the strategy dataframe and paint the background
-    # This can be heavy if we iterate row by row, so we group by consecutive actions
-    
-    # Resample strategy to daily for smoother filling or just use the monthly blocks
-    # Using 'step' plot style for the background colors is easier visually
-    
-    # Define colors
     colors = {'SHORT': '#ff4d4d', 'FLAT': '#404040', 'LONG': '#00cc66'}
-    alphas = {'SHORT': 0.3, 'FLAT': 0.2, 'LONG': 0.3}
+    alphas = {'SHORT': 0.25, 'FLAT': 0.15, 'LONG': 0.25}
 
-    # Identify chunks of continuous actions to create span blocks
+    # Group continuous actions to draw spans
     strategy['group'] = (strategy['action'] != strategy['action'].shift()).cumsum()
     
     for _, group in strategy.groupby('group'):
         start = group.index[0]
-        # For the end date, we add 1 month to cover the full bar width visually
+        # We want the block to cover the entire month. 
+        # Adding 1 month exactly fills the gap to the next candle.
         end = group.index[-1] + pd.DateOffset(months=1)
         action = group['action'].iloc[0]
         
         ax.axvspan(start, end, color=colors[action], alpha=alphas[action], ec=None)
 
-        # Add text labels for future cycles (optional, helps readability)
-        if start > df.index[-1] and action != 'FLAT':
-            midpoint = start + (end - start) / 2
-            ax.text(midpoint, df['close'].min(), action[0], color=colors[action], 
-                    ha='center', va='bottom', fontsize=8, alpha=0.7)
+        # Label future cycles
+        if start > df.index[-1]:
+             midpoint = start + (end - start) / 2
+             # Place text near recent price or a fixed level
+             y_pos = df['close'].iloc[-1] if not df.empty else 50000
+             ax.text(midpoint, y_pos, action[0], color=colors[action], 
+                     ha='center', va='bottom', fontsize=8, alpha=0.7, fontweight='bold')
 
-    # 3. Aesthetics
-    ax.set_title(f'BTC Peak Strategy (ATH Anchor) - Forward Projection to {END_YEAR}', fontsize=16, color='white')
+    # 3. Mark the Anchor
+    if ath_date in df.index:
+        ax.scatter([ath_date], [ath_price], color='yellow', s=150, zorder=10, label='Anchor', marker='*')
+        ax.text(ath_date, ath_price * 1.2, f'ANCHOR\n{ath_date.strftime("%Y-%m")}', color='yellow', ha='center', fontsize=10, fontweight='bold')
+    else:
+        # If anchor is forced to a date not in data (e.g. data hasn't loaded fully or future)
+        # We manually plot it if it's within X-axis range
+        pass
+
+    # 4. Aesthetics
+    ax.set_title(f'BTC Peak Strategy | Anchor: {ath_date.strftime("%Y-%m")} | Data to {END_YEAR}', fontsize=14, color='white')
     ax.set_ylabel('Price (USDT) - Log Scale')
-    ax.grid(True, which='both', linestyle='--', alpha=0.3)
+    ax.grid(True, which='major', linestyle='-', alpha=0.3)
+    ax.grid(True, which='minor', linestyle=':', alpha=0.1)
     
-    # Set X limits
+    # Set limits
     ax.set_xlim(df.index[0], pd.Timestamp(f'{END_YEAR}-01-01'))
     
     # Format dates
@@ -183,13 +198,13 @@ def generate_plot():
     from matplotlib.patches import Patch
     legend_elements = [
         matplotlib.lines.Line2D([0], [0], color='white', lw=2, label='BTC Price'),
-        Patch(facecolor=colors['SHORT'], alpha=alphas['SHORT'], label='Short (1 Yr)'),
-        Patch(facecolor=colors['FLAT'], alpha=alphas['FLAT'], label='Flat (22 Mo)'),
-        Patch(facecolor=colors['LONG'], alpha=alphas['LONG'], label='Long (1 Yr)'),
+        matplotlib.lines.Line2D([0], [0], color='yellow', marker='*', lw=0, markersize=10, label='Anchor'),
+        Patch(facecolor=colors['SHORT'], alpha=alphas['SHORT'], label=f'Short ({SHORT_DURATION}m)'),
+        Patch(facecolor=colors['FLAT'], alpha=alphas['FLAT'], label=f'Flat ({FLAT_DURATION}m)'),
+        Patch(facecolor=colors['LONG'], alpha=alphas['LONG'], label=f'Long ({LONG_DURATION}m)'),
     ]
     ax.legend(handles=legend_elements, loc='upper left')
 
-    # Save to buffer
     buf = io.BytesIO()
     plt.tight_layout()
     plt.savefig(buf, format='png', dpi=100)
@@ -211,61 +226,51 @@ def index():
         <title>BTC Peak Strategy</title>
         <style>
             body { background-color: #121212; color: #e0e0e0; font-family: sans-serif; text-align: center; margin: 0; padding: 20px; }
-            img { max-width: 100%; height: auto; border: 1px solid #333; box-shadow: 0 0 20px rgba(0,0,0,0.5); }
-            .container { max-width: 1200px; margin: 0 auto; }
-            h1 { margin-bottom: 10px; }
-            p { color: #888; margin-bottom: 30px; }
+            img { max-width: 95%; height: auto; border: 1px solid #333; box-shadow: 0 0 20px rgba(0,0,0,0.5); }
+            .container { max-width: 1400px; margin: 0 auto; }
+            h1 { margin-bottom: 5px; }
+            .note { color: #f39c12; font-size: 0.9em; margin-bottom: 20px; max-width: 800px; margin-left: auto; margin-right: auto;}
+            .meta { color: #666; font-size: 0.8em; margin-top: 20px; }
         </style>
     </head>
     <body>
         <div class="container">
             <h1>BTC Strategy Visualization</h1>
-            <p>Strategy: Peak ATH → Short (1y) → Flat (22m) → Buy (1y) | Projected to 2050</p>
+            <div class="note">
+                <strong>Strategy Configuration:</strong><br>
+                Anchor Date: <strong>{{ anchor }}</strong><br>
+                Sequence: Short (12m) → Flat (22m) → Buy (12m)
+            </div>
             <img src="/plot.png" alt="Strategy Chart" />
-            <p><small>Data source: Binance Monthly OHLCV</small></p>
+            <div class="meta">Data source: Binance Monthly OHLCV</div>
         </div>
     </body>
     </html>
     """
-    return render_template_string(html)
+    anchor_display = FORCE_ANCHOR_DATE if FORCE_ANCHOR_DATE else "Auto-Detected Highest High"
+    return render_template_string(html.replace("{{ anchor }}", str(anchor_display)))
 
 @app.route('/plot.png')
 def plot_img():
     buf = generate_plot()
     if buf:
-        # Create a new buffer from the cached bytes to avoid seeking issues on concurrent requests
         return send_file(io.BytesIO(buf.getvalue()), mimetype='image/png')
     return "Error generating plot", 500
 
 def run_web_server():
     port = int(os.environ.get('PORT', 8080))
-    # Host 0.0.0.0 is required for Docker/Railway
     app.run(host='0.0.0.0', port=port)
 
-# --- Main Application Entry Point ---
 if __name__ == "__main__":
     print("--- Starting BTC Strategy Application ---")
-    
-    # 1. Initial Data Load (Optional, but good for logs)
-    # We let the first web request trigger the plot generation or do it here
-    try:
-        generate_plot()
-        print("Initial plot generated successfully.")
-    except Exception as e:
-        print(f"Initial plot generation failed (will retry on web request): {e}")
-
-    # 2. Start Web Server in a daemon thread
-    # In a real production wsgi env this might be different, but for a 
-    # "script running like an application" this works well.
     server_thread = threading.Thread(target=run_web_server)
     server_thread.daemon = True
     server_thread.start()
 
-    # 3. Main Loop
-    # Keep the main thread alive to allow the server thread to run
-    # This is also where you would put other trading logic/scheduled tasks
     try:
+        # Generate initial plot on startup
+        generate_plot()
         while True:
-            time.sleep(60) # Sleep to save CPU, keep container alive
+            time.sleep(60)
     except KeyboardInterrupt:
         print("Shutting down...")
