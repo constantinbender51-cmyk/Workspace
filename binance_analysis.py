@@ -113,12 +113,6 @@ def analyze_structure_new(df):
     df = df.copy()
     
     # 1. High detection (2yr Past, 1yr Future)
-    # Calculation:
-    # We want Max(t-24 ... t ... t+12).
-    # Rolling(37) at index 'i' covers [i-36, i].
-    # If we shift the result backwards by 12 (shift(-12)), the value at index 't'
-    # comes from the calculation at 't+12', which covers [t+12-36, t+12] => [t-24, t+12].
-    
     df['h_max'] = df['close'].rolling(window=37, min_periods=13).max().shift(-12)
     
     # Invalidate tail (last 1 year / 12 months) as we can't see the required future
@@ -128,14 +122,10 @@ def analyze_structure_new(df):
     peak_candidates = df[df['close'] == df['h_max']].index.tolist()
     
     # --- Tie Breaking Logic ---
-    # Keep first occurrence if multiple identical peaks appear within the future radius (12 months)
     final_peaks = []
     if peak_candidates:
         final_peaks.append(peak_candidates[0])
         for p in peak_candidates[1:]:
-            # Since the window requires it to be max for 1 year future, 
-            # duplicates can only happen if prices are equal.
-            # We enforce a 12-month gap to prevent clustering of identical tops.
             if (p - final_peaks[-1]) > 12:
                 final_peaks.append(p)
     
@@ -181,10 +171,7 @@ def generate_warped_reality(df):
         'open': 'first', 'high': 'max', 'low': 'min', 'close': 'last'
     }).dropna().reset_index()
 
-    # --- Step 2: Assign Signals (New Logic) ---
-    warped_monthly, _, _, _ = analyze_structure_new(warped_monthly)
-
-    # --- Step 3: Persistent Return Randomization ---
+    # --- Step 2: Persistent Return Randomization ---
     original_returns = warped_monthly['close'].pct_change().fillna(0)
     log_multiplier = 0.0 
     new_prices = [warped_monthly['close'].iloc[0]]
@@ -207,6 +194,10 @@ def generate_warped_reality(df):
     warped_monthly['open'] *= ratios
     warped_monthly['high'] *= ratios
     warped_monthly['low'] *= ratios
+
+    # --- Step 3: Assign Signals (Using NEW Logic - Peaks Only) ---
+    # Moved to AFTER price randomization so peaks match the new reality's structure
+    warped_monthly, _, _, _ = analyze_structure_new(warped_monthly)
     
     return warped_monthly
 
@@ -282,7 +273,7 @@ def index():
         <h1>Bitcoin: Two Realities, Two Logic Sets</h1>
         <div class="desc">
             <strong>Original Reality:</strong> Standard Signal Logic.<br>
-            <strong>Random Reality:</strong> Peaks Only (Strict 1yr Rolling Max).
+            <strong>Random Reality:</strong> Peaks Only (Asymmetric 2yr Past / 1yr Future).
         </div>
         <a href="/" class="btn">Generate New Reality</a>
         <img src="data:image/png;base64,{{p}}">
