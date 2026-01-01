@@ -48,55 +48,85 @@ def fetch_kraken_data(pair, interval):
 
 def analyze_structure(df):
     """
-    Applies Market Structure Logic using a STATE MACHINE to ensure no gaps.
+    Applies the New Market Structure Logic:
+    1. Peak: Highest in ±2 years (49 months centered).
+    2. Low: Lowest in ±2 years (49 months centered).
+    3. Stable: Backscan from Peak for >60% value loss (Price <= Peak * 0.4).
     """
     if df.empty: return df, [], [], []
     df = df.copy()
     
-    # 1. High detection (2yr radius)
+    # --- 1. Identify Peaks (Highs) ---
+    # "if a local ath remains the ath for 2 years it's a peak"
+    # We use a centered window of 49 months (24 prev + 1 curr + 24 next)
     df['h_max'] = df['close'].rolling(window=49, center=True, min_periods=25).max()
+    
+    # Invalidate the last 24 months as we can't confirm the future condition
     if len(df) > 24: df.loc[df.index[-24:], 'h_max'] = np.inf
+    
     highs = df[df['close'] == df['h_max']].index.tolist()
 
-    # 2. Stability detection (3m centered window)
-    df['range_3m_centered'] = (df['high'].rolling(window=3, center=True).max() - 
-                               df['low'].rolling(window=3, center=True).min()) / \
-                              df['low'].rolling(window=3, center=True).min()
+    # --- 2. Identify Lows ---
+    # "if a low remains the lowest for 2 years it's a local low"
+    df['l_min'] = df['low'].rolling(window=49, center=True, min_periods=25).min()
+    if len(df) > 24: df.loc[df.index[-24:], 'l_min'] = -1.0 # Invalidate tail
     
-    stabs = []
-    for p in highs:
-        # Search backwards from peak for closest stability
-        for i in range(p - 1, 1, -1):
-            if i in df.index and df.loc[i, 'range_3m_centered'] <= 0.50:
-                stabs.append(i); break
-    
-    # 3. Low detection (1yr radius)
-    df['l_min'] = df['low'].rolling(window=25, center=True, min_periods=13).min()
-    if len(df) > 12: df.loc[df.index[-12:], 'l_min'] = -1.0
     lows = df[df['low'] == df['l_min']].index.tolist()
 
-    # 4. State Machine Vector Generation
+    # --- 3. Identify Stable Points ---
+    # "if a peak moving backwards loses more than 60% in value it's a stable signal"
+    # Interpretation: Find the most recent point before the peak where Price <= Peak * 0.4
+    stabs = []
+    
+    # We only look for stability points relative to confirmed peaks
+    for p_idx in highs:
+        peak_price = df.loc[p_idx, 'close']
+        threshold = peak_price * 0.40 # 60% loss threshold
+        
+        # Scan backwards from the peak index
+        for i in range(p_idx - 1, -1, -1):
+            if df.loc[i, 'close'] <= threshold:
+                stabs.append(i)
+                break # Found the closest point meeting the criteria
+    
+    stabs = sorted(list(set(stabs))) # Clean up
+
+    # --- 4. Vector State Machine ---
     # Combine all events into a time-sorted line
     events = sorted([(i, 'H') for i in highs] + [(i, 'S') for i in stabs] + [(i, 'L') for i in lows])
     
     vector = np.full(len(df), np.nan)
     
-    # Current State Tracker: Defaults to NaN until first event
-    current_state = np.nan
-    
-    # Iterate through every month in the dataframe
-    event_map = dict(events) # Map index -> Event Type
-    
-    for i in range(len(df)):
-        # Check if an event happens this month
-        if i in event_map:
-            etype = event_map[i]
-            if etype == 'H': current_state = -1 # Peak hit -> Start Correction
-            elif etype == 'L': current_state = 0 # Low hit -> Start Accumulation
-            elif etype == 'S': current_state = 1 # Stability hit -> Start Expansion
-            
-        # Assign state
-        vector[i] = current_state
+    # Iterate through events to fill the timeline
+    for i in range(len(events) - 1):
+        idx, t = events[i]
+        n_idx, n_t = events[i+1]
+        
+        val = np.nan
+        
+        # Standard Logic
+        if t == 'H' and n_t == 'L': val = -1   # Peak -> Low (Correction)
+        elif t == 'L' and n_t == 'S': val = 0  # Low -> Stable (Accumulation)
+        elif t == 'S' and n_t == 'H': val = 1  # Stable -> Peak (Expansion)
+        
+        # Fallback/Gap Logic (e.g. Peak -> Stable without a defined Low, or multiple Peaks)
+        elif t == 'H': val = -1
+        elif t == 'L': val = 0
+        elif t == 'S': val = 1
+        
+        if not np.isnan(val): 
+            vector[idx:n_idx] = val
+
+    # Fill Tail (from last confirmed event to present)
+    if events:
+        last_idx, last_type = events[-1]
+        last_val = np.nan
+        if last_type == 'H': last_val = -1
+        elif last_type == 'L': last_val = 0
+        elif last_type == 'S': last_val = 1
+        
+        if not np.isnan(last_val):
+            vector[last_idx:] = last_val
             
     df['vector'] = vector
     return df, highs, stabs, lows
@@ -105,20 +135,20 @@ def generate_warped_reality(df):
     """
     Creates an alternate reality by:
     1. Time Warp: Expanding/contracting month duration.
-    2. RE-ANALYZING STRUCTURE on the new timeline.
+    2. RE-ANALYZING STRUCTURE on the new timeline (New Logic).
     3. Persistent Return Warp: Modifying prices.
     """
     if df.empty: return pd.DataFrame()
     
     daily_stream = []
     
+    # --- Step 1: Time Warp Expansion ---
     for _, row in df.iterrows():
         # Time Warp
         time_warp = random.uniform(-1, 1)
         days_in_month = int(30 + (30 * time_warp))
         days_in_month = max(1, days_in_month)
         
-        # We NO LONGER carry the old vector. We will recalculate it.
         for _ in range(days_in_month):
             daily_stream.append({
                 'open': row['open'], 
@@ -139,10 +169,11 @@ def generate_warped_reality(df):
         'open': 'first', 'high': 'max', 'low': 'min', 'close': 'last'
     }).dropna().reset_index()
 
-    # --- NEW: Assign Signals AFTER Time Warp but BEFORE Price Warp ---
+    # --- Step 2: Assign Signals AFTER Time Warp but BEFORE Price Warp ---
+    # This ensures signals are based on the structural timing of the warped timeline
     warped_monthly, _, _, _ = analyze_structure(warped_monthly)
 
-    # Persistent Return Randomization
+    # --- Step 3: Persistent Return Randomization ---
     original_returns = warped_monthly['close'].pct_change().fillna(0)
     log_multiplier = 0.0 
     new_prices = [warped_monthly['close'].iloc[0]]
@@ -181,9 +212,9 @@ def create_plot_and_vector(df):
     # --- PLOT 1: Actual Reality ---
     ax1.set_facecolor('#e0e0e0') 
     ax1.plot(df['time'], df['close'], color='#2f3542', linewidth=2.5, label='Actual BTC Price', zorder=3)
-    ax1.scatter(df.loc[highs, 'time'], df.loc[highs, 'close'], color='#ff4757', s=120, marker='v', edgecolors='black', zorder=5)
-    ax1.scatter(df.loc[stabs, 'time'], df.loc[stabs, 'close'], color='#8e44ad', s=120, marker='d', edgecolors='white', zorder=5)
-    ax1.scatter(df.loc[lows, 'time'], df.loc[lows, 'low'], color='#2ed573', s=120, marker='^', edgecolors='black', zorder=5)
+    ax1.scatter(df.loc[highs, 'time'], df.loc[highs, 'close'], color='#ff4757', s=140, marker='v', edgecolors='black', zorder=5)
+    ax1.scatter(df.loc[stabs, 'time'], df.loc[stabs, 'close'], color='#8e44ad', s=140, marker='d', edgecolors='white', zorder=5)
+    ax1.scatter(df.loc[lows, 'time'], df.loc[lows, 'low'], color='#2ed573', s=140, marker='^', edgecolors='black', zorder=5)
     ax1.set_yscale('linear')
     ax1.set_title("Reality A: Actual Historical Data", fontsize=16, fontweight='bold')
     ax1.set_ylabel("Price (USD)")
@@ -197,7 +228,7 @@ def create_plot_and_vector(df):
     # Plot Price
     ax2.plot(w['time'], w['close'], color='#2980b9', linewidth=2, alpha=1.0, label='Simulation Alpha', zorder=5)
 
-    # Background Coloring (State Machine Logic)
+    # Background Coloring
     w['group'] = (w['vector'] != w['vector'].shift()).cumsum()
     w['next_time'] = w['time'].shift(-1)
     w.loc[w.index[-1], 'next_time'] = w.loc[w.index[-1], 'time'] + timedelta(days=30)
@@ -212,23 +243,23 @@ def create_plot_and_vector(df):
         state = row['vector']
         if not np.isnan(state): 
             face_color = None
-            if state == 1:   face_color = '#d4edda' # Green
-            elif state == -1: face_color = '#f8d7da' # Red
-            elif state == 0:  face_color = '#e2e3e5' # Grey
+            if state == 1:   face_color = '#d4edda' # Green (Stable -> Peak)
+            elif state == -1: face_color = '#f8d7da' # Red (Peak -> Low)
+            elif state == 0:  face_color = '#e2e3e5' # Grey (Low -> Stable)
             
             if face_color:
                 ax2.axvspan(row['time'], row['next_time'], color=face_color, alpha=0.6, zorder=1)
 
     ax2.set_yscale('linear')
-    ax2.set_title("Reality B: Signals Re-calculated on Warped Timeline", fontsize=16, fontweight='bold')
+    ax2.set_title("Reality B: Persistent Drift (Logic: 60% Drop Stability)", fontsize=16, fontweight='bold')
     ax2.set_ylabel("Price (USD)")
     
     from matplotlib.patches import Patch
     legend_elements = [
         plt.Line2D([0], [0], color='#2980b9', lw=2, label='Sim Price'),
-        Patch(facecolor='#d4edda', edgecolor='#c3e6cb', label='Expansion (+1)'),
-        Patch(facecolor='#f8d7da', edgecolor='#f5c6cb', label='Correction (-1)'),
-        Patch(facecolor='#e2e3e5', edgecolor='#d6d8db', label='Accumulation (0)')
+        Patch(facecolor='#d4edda', edgecolor='#c3e6cb', label='Expansion (Stable->Peak)'),
+        Patch(facecolor='#f8d7da', edgecolor='#f5c6cb', label='Correction (Peak->Low)'),
+        Patch(facecolor='#e2e3e5', edgecolor='#d6d8db', label='Accumulation (Low->Stable)')
     ]
     ax2.legend(handles=legend_elements, loc='upper left')
     ax2.grid(True, alpha=0.3, zorder=2)
@@ -262,12 +293,12 @@ def index():
         .desc { background: #fffbe6; padding: 15px; border-radius: 8px; border: 1px solid #ffe58f; margin-bottom: 20px; font-size: 0.9em; }
     </style></head><body>
     <div class="container">
-        <h1>Bitcoin: Seamless Signal Warp (Re-calculated)</h1>
+        <h1>Bitcoin: Seamless Signal Warp (New Logic)</h1>
         <div class="desc">
-            <strong>Signal Legend:</strong><br>
-            <span style="background:#d4edda; padding:2px 5px">Green (+1)</span> Expansion | 
-            <span style="background:#f8d7da; padding:2px 5px">Red (-1)</span> Correction | 
-            <span style="background:#e2e3e5; padding:2px 5px">Grey (0)</span> Accumulation
+            <strong>Signal Logic:</strong><br>
+            1. <b>Peak:</b> Highest Close in 2-year radius.<br>
+            2. <b>Low:</b> Lowest Low in 2-year radius.<br>
+            3. <b>Stable:</b> Backscan from Peak for price <= Peak * 0.4 (60% drop).
         </div>
         <a href="/" class="btn">Generate New Reality</a>
         <img src="data:image/png;base64,{{p}}">
