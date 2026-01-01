@@ -105,7 +105,8 @@ def generate_warped_reality(df):
     """
     Creates an alternate reality by:
     1. Time Warp: Expanding/contracting month duration.
-    2. Propagating the 'vector' signal.
+    2. RE-ANALYZING STRUCTURE on the new timeline.
+    3. Persistent Return Warp: Modifying prices.
     """
     if df.empty: return pd.DataFrame()
     
@@ -117,16 +118,13 @@ def generate_warped_reality(df):
         days_in_month = int(30 + (30 * time_warp))
         days_in_month = max(1, days_in_month)
         
-        # Propagate signal
-        current_vector = row['vector'] if 'vector' in row else np.nan
-        
+        # We NO LONGER carry the old vector. We will recalculate it.
         for _ in range(days_in_month):
             daily_stream.append({
                 'open': row['open'], 
                 'high': row['high'], 
                 'low': row['low'], 
-                'close': row['close'],
-                'vector': current_vector 
+                'close': row['close']
             })
             
     warped_df = pd.DataFrame(daily_stream)
@@ -136,11 +134,13 @@ def generate_warped_reality(df):
     warped_df['time'] = pd.date_range(start=start_date, periods=len(warped_df), freq='D')
     warped_df.set_index('time', inplace=True)
     
-    # Resample
+    # Resample (Re-bucket to 30 days)
     warped_monthly = warped_df.resample('30D').agg({
-        'open': 'first', 'high': 'max', 'low': 'min', 'close': 'last',
-        'vector': 'first' 
+        'open': 'first', 'high': 'max', 'low': 'min', 'close': 'last'
     }).dropna().reset_index()
+
+    # --- NEW: Assign Signals AFTER Time Warp but BEFORE Price Warp ---
+    warped_monthly, _, _, _ = analyze_structure(warped_monthly)
 
     # Persistent Return Randomization
     original_returns = warped_monthly['close'].pct_change().fillna(0)
@@ -220,7 +220,7 @@ def create_plot_and_vector(df):
                 ax2.axvspan(row['time'], row['next_time'], color=face_color, alpha=0.6, zorder=1)
 
     ax2.set_yscale('linear')
-    ax2.set_title("Reality B: Persistent Return Drift (Corrected State Machine)", fontsize=16, fontweight='bold')
+    ax2.set_title("Reality B: Signals Re-calculated on Warped Timeline", fontsize=16, fontweight='bold')
     ax2.set_ylabel("Price (USD)")
     
     from matplotlib.patches import Patch
@@ -262,7 +262,7 @@ def index():
         .desc { background: #fffbe6; padding: 15px; border-radius: 8px; border: 1px solid #ffe58f; margin-bottom: 20px; font-size: 0.9em; }
     </style></head><body>
     <div class="container">
-        <h1>Bitcoin: Seamless Signal Warp (Corrected)</h1>
+        <h1>Bitcoin: Seamless Signal Warp (Re-calculated)</h1>
         <div class="desc">
             <strong>Signal Legend:</strong><br>
             <span style="background:#d4edda; padding:2px 5px">Green (+1)</span> Expansion | 
