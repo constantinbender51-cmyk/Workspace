@@ -98,7 +98,7 @@ def analyze_structure_new(df):
     NEW LOGIC (For Random Reality):
     1. Peak: 2yr Past / 1yr Future radius, AND must be a NEW ATH.
     2. Low: Lowest price between confirmed Peaks OR between last Peak and End.
-    3. Stable: 3/4 point (Time) between a Low and the month with highest 3-month return.
+    3. Stable: 3/4 point (Time) between a Low and the month with highest ABSOLUTE 3-month return.
     """
     if df.empty: return df, [], [], []
     df = df.copy()
@@ -120,36 +120,40 @@ def analyze_structure_new(df):
             if (p - highs[-1]) > 12 and df.loc[p, 'close'] > df.loc[highs[-1], 'close']:
                 highs.append(p)
     
-    # 2. Low Detection (Including trailing low)
+    # 2. Low Detection
     lows = []
     if highs:
         for i in range(len(highs)):
             current_peak = highs[i]
             start_search = current_peak + 1
-            # Search until next peak OR end of data
             end_search = highs[i+1] if i < len(highs) - 1 else len(df)
             
             if start_search < end_search:
                 segment = df.iloc[start_search:end_search]
                 if not segment.empty:
-                    # idxmin gives the label of the minimum price
                     local_low = segment['close'].idxmin()
                     lows.append(local_low)
 
-    # 3. Stability Detection
-    df['ret_3m'] = df['close'].pct_change(periods=3).fillna(0)
+    # 3. Stability Detection (Absolute 3-Month Return 3/4 Point Logic)
+    # Absolute difference: Close_t - Close_{t-3}
+    df['abs_ret_3m'] = df['close'].diff(periods=3).fillna(0)
     stabs = []
+    
     for low_idx in lows:
-        # We only define stability if this low is followed by a confirmed Peak
+        # Find next peak
         next_peaks = [h for h in highs if h > low_idx]
         if not next_peaks: continue
         target_peak = next_peaks[0]
         
+        # Search range: Low to Peak
         segment = df.iloc[low_idx:target_peak + 1]
         if segment.empty: continue
         
-        max_3m_ret_idx = segment['ret_3m'].idxmax()
-        delta = max_3m_ret_idx - low_idx
+        # Find month with highest ABSOLUTE 3-month USD return
+        max_3m_abs_idx = segment['abs_ret_3m'].idxmax()
+        
+        # 3/4 Point calculation
+        delta = max_3m_abs_idx - low_idx
         three_quarter_idx = int(low_idx + (delta * 0.75))
         stabs.append(three_quarter_idx)
         
@@ -234,7 +238,7 @@ def create_plot_and_vector(df):
             color = '#f8d7da' if row['vector'] == -1 else ('#e2e3e5' if row['vector'] == 0 else '#d4edda')
             ax2.axvspan(row['time'], row['next_t'], color=color, alpha=0.6, zorder=1)
 
-    ax2.set_title("Reality B: Randomized Signal Vector (Trailing Low Support)", fontweight='bold')
+    ax2.set_title("Reality B: Randomized Absolute 3m Return Signal Warp", fontweight='bold')
     
     from matplotlib.patches import Patch
     from matplotlib.lines import Line2D
@@ -274,10 +278,10 @@ def index():
         .btn { display: block; width: fit-content; margin: 0 auto 20px; padding: 12px 24px; background: #6c5ce7; color: #fff; text-decoration: none; border-radius: 8px; font-weight: bold; }
     </style></head><body>
     <div class="container">
-        <h1>Bitcoin: Trailing Low Signal Warp</h1>
+        <h1>Bitcoin: Absolute Signal Reality</h1>
         <div style="background:#f8f9fa; padding:15px; border-radius:8px; border:1px solid #dee2e6; margin-bottom:20px;">
-            <strong>State Progression:</strong> Following a Peak, the signal becomes <strong>Correction (-1)</strong>. 
-            If a <strong>Low</strong> is identified (even if it's the last point in the data), the signal transitions to <strong>Accumulation (0)</strong>.
+            <strong>Stability Rule:</strong> 3/4 point index between Cycle Low and the point of <strong>highest absolute 3-month return</strong> (USD difference).<br>
+            <strong>Peak Rule:</strong> A local peak is only confirmed if it is a new <strong>All-Time High</strong>.
         </div>
         <a href="/" class="btn">Generate New Reality</a>
         <img src="data:image/png;base64,{{p}}">
