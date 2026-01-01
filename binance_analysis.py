@@ -22,7 +22,7 @@ def fetch_kraken_data(pair, interval):
     params = {'pair': pair, 'interval': interval}
     
     try:
-        response = requests.get(url, params=params)
+        response = requests.get(url, params=params, timeout=10)
         data = response.json()
         if data.get('error'): return pd.DataFrame()
 
@@ -34,24 +34,26 @@ def fetch_kraken_data(pair, interval):
         numeric = ['open','high','low','close']
         df[numeric] = df[numeric].apply(pd.to_numeric)
         
-        # Resample to Monthly for cleaner structural analysis
+        # Resample to Monthly for structural analysis
         df.set_index('time', inplace=True)
         df_m = df.resample('MS').agg({
             'open': 'first', 'high': 'max', 'low': 'min', 'close': 'last'
         }).dropna().reset_index()
         
         return df_m
-    except:
+    except Exception as e:
+        print(f"Fetch error: {e}")
         return pd.DataFrame()
 
 def create_plot(df):
     if df.empty: return None
 
-    # Setup Figure
+    # Setup Figure with Gray Background to ensure markers pop
     fig, ax = plt.subplots(figsize=(15, 8), facecolor='#f1f2f6')
     ax.set_facecolor('#e0e0e0') 
     
     # --- Pattern 1: Local High (2yr Radius) ---
+    # Window = 49 (24 pre + 1 curr + 24 post)
     df['h_max'] = df['close'].rolling(window=49, center=True, min_periods=25).max()
     if len(df) > 24: df.loc[df.index[-24:], 'h_max'] = np.inf
     
@@ -60,29 +62,29 @@ def create_plot(df):
     ax.scatter(local_highs['time'], local_highs['close'], color='#ff4757', s=160, marker='v', 
                edgecolors='black', zorder=5, label='Local High (2yr)')
 
-    # --- New Pattern: Stability Point before Peak ---
-    # Logic: For each peak, look backwards. Find the first point where the preceding 6 months 
-    # had a range (High-Low)/Low <= 50%.
+    # --- Pattern 2: Pre-Peak Stability Point ---
+    # Logic: First point preceding a peak that has no 20% move in a radius of 2 months.
+    # Radius of 2 months = 5 months centered window.
     
-    stability_points = []
-    
-    # Calculate 6-month rolling range looking backwards
-    # window=6, min_periods=6 means we need 6 full months of history
-    # Threshold increased to 50%
-    df['range_6m'] = (df['high'].rolling(window=6).max() - df['low'].rolling(window=6).min()) / df['low'].rolling(window=6).min()
+    df['range_5m_centered'] = (df['high'].rolling(window=5, center=True).max() - 
+                               df['low'].rolling(window=5, center=True).min()) / \
+                              df['low'].rolling(window=5, center=True).min()
 
+    pre_peak_points = []
     for peak_idx in local_highs.index:
-        # Search backwards from the peak index
-        search_range = range(peak_idx - 1, 5, -1) # Stop at index 5 because we need 6 months of data
-        for i in search_range:
-            if df.loc[i, 'range_6m'] <= 0.50:
-                stability_points.append(df.iloc[i])
-                break # Found the most recent stability point before this peak
-
-    if stability_points:
-        stab_df = pd.DataFrame(stability_points)
-        ax.scatter(stab_df['time'], stab_df['close'], color='#3498db', s=120, marker='o', 
-                   edgecolors='black', zorder=6, label='Pre-Peak Stability (6mo < 50%)')
+        # Search backward from the peak index
+        # We start searching from peak_idx - 1 down to the start of the data
+        found_stab = False
+        for i in range(peak_idx - 1, 2, -1):
+            if df.loc[i, 'range_5m_centered'] <= 0.20:
+                pre_peak_points.append(df.iloc[i])
+                found_stab = True
+                break # Only find the first (closest) stability point preceding the peak
+                
+    if pre_peak_points:
+        stab_df = pd.DataFrame(pre_peak_points)
+        ax.scatter(stab_df['time'], stab_df['close'], color='#8e44ad', s=150, marker='d', 
+                   edgecolors='white', zorder=7, label='Pre-Peak Stability (20% Range / 2mo Radius)')
 
     # --- Pattern 3: Local Low (1yr Radius) ---
     df['l_min'] = df['low'].rolling(window=25, center=True, min_periods=13).min()
@@ -95,12 +97,12 @@ def create_plot(df):
     # Main Price Line
     ax.plot(df['time'], df['close'], color='#2f3542', linewidth=2.5, zorder=4, label='BTC Price')
 
-    # Styling (Linear Scale)
+    # Scientific Layout (Linear Scale)
     ax.set_yscale('linear')
-    ax.set_title(f"Scientific Structural Analysis: {PAIR}", fontsize=18, fontweight='bold', pad=20)
+    ax.set_title(f"Market Structure Analysis: {PAIR} (Kraken)", fontsize=18, fontweight='bold', pad=25)
     ax.set_ylabel("Price (USD)", fontsize=12)
-    ax.grid(True, which='major', color='white', linestyle='-', alpha=0.4, zorder=2)
-    ax.legend(facecolor='white', framealpha=1, loc='upper left')
+    ax.grid(True, which='major', color='white', linestyle='-', alpha=0.5, zorder=2)
+    ax.legend(facecolor='white', framealpha=1, loc='upper left', fontsize=10)
 
     plt.tight_layout()
 
@@ -119,26 +121,28 @@ def index():
     <!DOCTYPE html>
     <html>
     <head>
-        <title>Kraken Analysis</title>
+        <title>Kraken Market Analysis</title>
         <style>
-            body {{ font-family: sans-serif; background: #f1f2f6; text-align: center; margin: 0; padding: 40px; }}
-            .container {{ background: white; display: inline-block; padding: 30px; border-radius: 20px; box-shadow: 0 10px 30px rgba(0,0,0,0.05); }}
-            .legend-box {{ text-align: left; margin: 30px auto 0; max-width: 900px; background: #fafafa; padding: 20px; border-radius: 12px; border: 1px solid #eee; }}
-            .item {{ margin: 10px 0; display: flex; align-items: center; }}
-            .box {{ width: 16px; height: 16px; margin-right: 12px; border-radius: 3px; border: 1px solid #ccc; }}
+            body {{ font-family: -apple-system, system-ui, sans-serif; background: #f1f2f6; text-align: center; padding: 40px; margin: 0; }}
+            .card {{ background: white; display: inline-block; padding: 40px; border-radius: 24px; box-shadow: 0 10px 40px rgba(0,0,0,0.06); }}
+            h1 {{ color: #2d3436; margin-bottom: 8px; }}
+            .price {{ font-size: 24px; color: #636e72; margin-bottom: 30px; font-weight: 300; }}
+            .legend {{ text-align: left; margin: 30px auto 0; max-width: 900px; background: #fafafa; padding: 20px; border-radius: 12px; border: 1px solid #eee; }}
+            .item {{ margin: 10px 0; display: flex; align-items: center; font-size: 14px; color: #2d3436; }}
+            .marker {{ width: 14px; height: 14px; margin-right: 12px; border: 1px solid #999; }}
         </style>
     </head>
     <body>
-        <div class="container">
+        <div class="card">
             <h1>Bitcoin Market Structure</h1>
-            <div style="font-size: 20px; margin-bottom: 20px;">Price: {current}</div>
-            <img src="data:image/png;base64,{plot}">
+            <div class="price">Current Price: <strong>{current}</strong></div>
+            <img src="data:image/png;base64,{plot}" alt="BTC Market Chart">
             
-            <div class="legend-box">
-                <strong>Analysis Guide:</strong>
-                <div class="item"><span class="box" style="background:#ff4757"></span> <b>Local High:</b> Highest Close within ±2 years.</div>
-                <div class="item"><span class="box" style="background:#3498db"></span> <b>Stability Point:</b> Point before peak where preceding 6 months range was &lt; 50%.</div>
-                <div class="item"><span class="box" style="background:#2ed573"></span> <b>Local Low:</b> Lowest Low within ±1 year.</div>
+            <div class="legend">
+                <strong>Analysis Legend:</strong>
+                <div class="item"><span class="marker" style="background:#ff4757; clip-path: polygon(50% 100%, 0 0, 100% 0);"></span> <b>Local High:</b> Highest Close in a 2-year radius.</div>
+                <div class="item"><span class="marker" style="background:#8e44ad; transform: rotate(45deg);"></span> <b>Pre-Peak Stability:</b> First point before a peak with &lt; 20% range in a 2-month radius.</div>
+                <div class="item"><span class="marker" style="background:#2ed573; clip-path: polygon(50% 0%, 0% 100%, 100% 100%);"></span> <b>Local Low:</b> Lowest Low in a 1-year radius.</div>
             </div>
         </div>
     </body>
@@ -147,4 +151,5 @@ def index():
     return html
 
 if __name__ == '__main__':
+    print("Server starting on http://localhost:8080")
     app.run(host='0.0.0.0', port=PORT)
