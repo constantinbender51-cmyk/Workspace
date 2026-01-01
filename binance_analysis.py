@@ -1,5 +1,6 @@
 import requests
 import pandas as pd
+import numpy as np
 import matplotlib
 matplotlib.use('Agg')  # Use non-interactive backend for server
 import matplotlib.pyplot as plt
@@ -11,156 +12,193 @@ from datetime import datetime
 app = Flask(__name__)
 
 # --- Configuration ---
-SYMBOL = 'BTCUSDT'
-INTERVAL = '1M'  # 1 Month
+PAIR = 'XBTUSD'
+# Kraken Interval: 10080 minutes = 1 week. 
+# This allows fetching ~14 years of history in one call (720 count limit * 1 week).
+INTERVAL = 10080 
 PORT = 8080
 
-def fetch_binance_data(symbol, interval):
+def fetch_kraken_data(pair, interval):
     """
-    Fetches historical kline (candlestick) data from Binance.
+    Fetches historical OHLC data from Kraken public API.
+    Uses Weekly interval to get maximum history, then resamples to Monthly.
     """
-    base_url = "https://api.binance.com/api/v3/klines"
-    
-    # Binance limit is 1000 candles. Since Bitcoin's monthly history 
-    # fits well within 1000 months (~83 years), one call is sufficient.
+    url = "https://api.kraken.com/0/public/OHLC"
     params = {
-        'symbol': symbol,
-        'interval': interval,
-        'limit': 1000 
+        'pair': pair,
+        'interval': interval
     }
     
     try:
-        response = requests.get(base_url, params=params)
+        response = requests.get(url, params=params)
         response.raise_for_status()
         data = response.json()
         
-        # DataFrame columns based on Binance API documentation
-        df = pd.DataFrame(data, columns=[
-            'open_time', 'open', 'high', 'low', 'close', 'volume',
-            'close_time', 'quote_asset_volume', 'number_of_trades',
-            'taker_buy_base_asset_volume', 'taker_buy_quote_asset_volume', 'ignore'
-        ])
+        if data.get('error'):
+            print(f"Kraken API Error: {data['error']}")
+            return pd.DataFrame()
+
+        # Kraken returns a dict with pair name as key. We need to find that key.
+        # The result keys are usually [PairName, 'last'].
+        result_data = data['result']
+        # Extract the list of candles (find the key that isn't 'last')
+        candles_key = [k for k in result_data.keys() if k != 'last'][0]
+        candles = result_data[candles_key]
+        
+        # Kraken Columns: [time, open, high, low, close, vwap, volume, count]
+        df = pd.DataFrame(candles, columns=['time', 'open', 'high', 'low', 'close', 'vwap', 'vol', 'count'])
         
         # Convert types
-        df['open_time'] = pd.to_datetime(df['open_time'], unit='ms')
-        numeric_cols = ['open', 'high', 'low', 'close', 'volume']
-        df[numeric_cols] = df[numeric_cols].apply(pd.to_numeric, axis=1)
+        df['time'] = pd.to_datetime(df['time'], unit='s')
+        numeric_cols = ['open', 'high', 'low', 'close', 'vol']
+        df[numeric_cols] = df[numeric_cols].apply(pd.to_numeric)
         
-        return df
+        # Resample to Monthly ('MS' = Month Start) to standardize
+        df.set_index('time', inplace=True)
+        
+        # Logic: 
+        # Open = first open of the month
+        # High = max high of the month
+        # Low = min low of the month
+        # Close = last close of the month
+        df_monthly = df.resample('MS').agg({
+            'open': 'first',
+            'high': 'max',
+            'low': 'min',
+            'close': 'last',
+            'vol': 'sum'
+        })
+        
+        # Drop incomplete months (if any NaN) or just the very last one if it's currently active
+        df_monthly.dropna(inplace=True)
+        
+        # Reset index to make 'time' a column again for easy plotting
+        df_monthly.reset_index(inplace=True)
+        
+        return df_monthly
+
     except Exception as e:
         print(f"Error fetching data: {e}")
         return pd.DataFrame()
 
 def create_plot(df):
-    """
-    Generates a matplotlib plot and returns it as a base64 encoded string.
-    """
     if df.empty:
         return None
 
-    # Scientific Layout Setup
-    plt.figure(figsize=(12, 6))
+    # Scientific Layout
+    plt.figure(figsize=(14, 7))
     plt.style.use('bmh')
     
-    # Plot Close Price
-    plt.plot(df['open_time'], df['close'], label='Close Price', color='#2c3e50', linewidth=2)
+    # 1. Base Plot
+    plt.plot(df['time'], df['close'], label='Close Price', color='#2c3e50', linewidth=1.5, zorder=2)
     
-    # --- Local Close Maxima Logic (2 Year Radius) ---
+    # --- Pattern 2: Consolidation (30% Range for >= 1 Year) ---
+    # Logic: Look at rolling 12-month windows.
+    # If (WindowMax - WindowMin) / WindowMin <= 0.30, mark this window.
     
-    # We want to find months where Close is the highest within a 2-year radius.
-    # Radius of 2 years = 24 months before + 24 months after.
-    # Window size = 24 + 1 (current) + 24 = 49 months.
+    indexer = pd.api.indexers.FixedForwardWindowIndexer(window_size=12)
+    df['rolling_max'] = df['high'].rolling(window=indexer).max()
+    df['rolling_min'] = df['low'].rolling(window=indexer).min()
     
-    # min_periods=25 allows the calculation to start immediately at the beginning of the data
-    # (checking the current month vs the next 24 months). 
-    # This effectively satisfies the condition "assume price before our data was always 0".
-    df['rolling_close_max'] = df['close'].rolling(window=49, center=True, min_periods=25).max()
+    # Calculate Range Percentage
+    df['range_pct'] = (df['rolling_max'] - df['rolling_min']) / df['rolling_min']
     
-    # IMPORTANT: min_periods will also calculate a max for the END of the dataframe 
-    # (ignoring the missing future). We must strictly invalidate the last 24 months 
-    # because we cannot know if those prices are local maxima without seeing the future.
-    if len(df) > 24:
-        df.loc[df.index[-24:], 'rolling_close_max'] = -1.0
+    # Identify Start of Consolidation Periods
+    consolidation_starts = df[df['range_pct'] <= 0.30]
     
-    # Filter: It is a local peak if the Close equals the rolling max.
-    local_peaks = df[df['close'] == df['rolling_close_max']]
+    # Create a mask for "In Consolidation" for filtering later
+    # We map the 12-month forward window back to the actual dates
+    consolidation_mask = pd.Series(False, index=df.index)
+    
+    # Shade the regions and build the mask
+    # We use a set to avoid re-plotting overlapping spans excessively
+    shaded_indices = set()
+    
+    for idx in consolidation_starts.index:
+        # The window starts at idx and covers 12 months (rows idx to idx+11)
+        start_date = df.loc[idx, 'time']
+        # Be careful with index out of bounds if window is near the end
+        end_idx = min(idx + 11, len(df) - 1)
+        end_date = df.loc[end_idx, 'time']
+        
+        # Mark these indices as consolidated
+        consolidation_mask.loc[idx:end_idx] = True
+        
+        # Visualize (Shading)
+        # We perform a rough visual union by just plotting rectangles
+        plt.axvspan(start_date, end_date, color='slategrey', alpha=0.1, zorder=1, edgecolor=None)
 
-    # Plot markers for these peaks
-    if not local_peaks.empty:
-        # Plot the Peak itself (Gold Star)
-        plt.scatter(
-            local_peaks['open_time'], 
-            local_peaks['close'], 
-            color='#FFD700',  # Gold
-            s=200, 
-            marker='*', 
-            edgecolors='black', 
-            linewidth=0.5, 
-            zorder=6, 
-            label='2-Year Radius Max'
-        )
+    # Label for legend
+    plt.plot([], [], color='slategrey', alpha=0.3, linewidth=10, label='Consolidation (<30% range >1yr)')
 
-        # Iterate to add Offset Markers (-1 Year and +1 Year)
-        first_green = True
-        first_grey = True
+    # --- Pattern 1: Local High (Close, 2yr radius) ---
+    # Close has not been surpassed 2 years before and 2 years after.
+    # Radius = 24 months. Window = 49.
+    df['rolling_max_close'] = df['close'].rolling(window=49, center=True, min_periods=25).max()
+    
+    # We must exclude the last 24 months from being highs because we don't know the future
+    valid_highs = df.copy()
+    if len(valid_highs) > 24:
+        valid_highs.loc[valid_highs.index[-24:], 'rolling_max_close'] = np.inf # invalidate future
 
-        for _, row in local_peaks.iterrows():
-            peak_date = row['open_time']
-            
-            # --- 1 Year Before (Green) ---
-            target_date_before = peak_date - pd.DateOffset(years=1)
-            # Find closest existing data point in the dataframe
-            dt_diff_before = (df['open_time'] - target_date_before).abs()
-            
-            # Only plot if we find a date within ~45 days (to account for varying month lengths/missing data)
-            if dt_diff_before.min() < pd.Timedelta(days=45):
-                idx_before = dt_diff_before.idxmin()
-                row_before = df.loc[idx_before]
-                
-                plt.scatter(
-                    row_before['open_time'], 
-                    row_before['close'], 
-                    color='mediumseagreen', 
-                    s=100, 
-                    marker='^', 
-                    zorder=5, 
-                    edgecolors='black', 
-                    linewidth=0.5,
-                    label='1 Year Before' if first_green else ""
-                )
-                first_green = False
+    local_highs = valid_highs[valid_highs['close'] == valid_highs['rolling_max_close']]
+    
+    plt.scatter(
+        local_highs['time'], 
+        local_highs['close'], 
+        color='#d63031', # Red
+        s=150, 
+        marker='v', 
+        zorder=5, 
+        edgecolors='white',
+        linewidth=0.8,
+        label='Local High (2yr radius)'
+    )
 
-            # --- 1 Year After (Grey) ---
-            target_date_after = peak_date + pd.DateOffset(years=1)
-            dt_diff_after = (df['open_time'] - target_date_after).abs()
-            
-            if dt_diff_after.min() < pd.Timedelta(days=45):
-                idx_after = dt_diff_after.idxmin()
-                row_after = df.loc[idx_after]
-                
-                plt.scatter(
-                    row_after['open_time'], 
-                    row_after['close'], 
-                    color='darkgrey', 
-                    s=100, 
-                    marker='v', 
-                    zorder=5, 
-                    edgecolors='black', 
-                    linewidth=0.5,
-                    label='1 Year After' if first_grey else ""
-                )
-                first_grey = False
+    # --- Pattern 3: Local Low (Low, 2yr radius, ignoring consolidation) ---
+    # "The period in which price has not moved removes the prices from analysis"
+    # We effectively treat 'Low' prices inside consolidation zones as Infinity
+    # so they cannot be the minimum of the window.
+    
+    df_lows_clean = df.copy()
+    # Apply mask: Set Low to Inf where consolidation exists
+    df_lows_clean.loc[consolidation_mask, 'low'] = np.inf
+    
+    # Find rolling min on this "cleaned" data
+    df_lows_clean['rolling_min_low'] = df_lows_clean['low'].rolling(window=49, center=True, min_periods=25).min()
+    
+    # Invalidate last 24 months for safety
+    if len(df_lows_clean) > 24:
+        df_lows_clean.loc[df_lows_clean.index[-24:], 'rolling_min_low'] = -1.0
 
-    # Configuration for Scientific Look
-    plt.title(f'Historical Monthly Price Action: {SYMBOL}', fontsize=16, fontweight='bold', pad=20)
-    plt.xlabel('Date', fontsize=12)
-    plt.ylabel('Price (USDT) - Log Scale', fontsize=12)
+    # Match condition: The original Low (if not consolidated) must match the rolling min
+    # Note: If df['low'] was set to Inf, it won't match rolling min (unless everything is Inf)
+    local_lows = df_lows_clean[df_lows_clean['low'] == df_lows_clean['rolling_min_low']]
+    
+    # We plot the Low price
+    plt.scatter(
+        local_lows['time'], 
+        local_lows['low'], 
+        color='#00b894', # Green
+        s=150, 
+        marker='^', 
+        zorder=5, 
+        edgecolors='white',
+        linewidth=0.8,
+        label='Local Low (2yr radius, clean)'
+    )
+
+    # --- Layout & Styling ---
+    plt.title(f'Market Structure Analysis: {PAIR} (Kraken)', fontsize=16, fontweight='bold', pad=20)
+    plt.xlabel('Year', fontsize=12)
+    plt.ylabel('Price (USD) - Log Scale', fontsize=12)
     plt.yscale('log')
-    plt.grid(True, which="both", ls="-", alpha=0.5)
-    plt.legend(frameon=True, loc='upper left')
+    plt.grid(True, which="major", color='#dcdde1', linestyle='-')
+    plt.grid(True, which="minor", color='#f5f6fa', linestyle=':', alpha=0.5)
+    plt.legend(frameon=True, loc='upper left', facecolor='white', framealpha=0.9)
     plt.tight_layout()
 
-    # Save to IO buffer
+    # Save
     img = io.BytesIO()
     plt.savefig(img, format='png', dpi=100)
     img.seek(0)
@@ -170,45 +208,42 @@ def create_plot(df):
 
 @app.route('/')
 def home():
-    # 1. Fetch Data
-    df = fetch_binance_data(SYMBOL, INTERVAL)
-    
-    # 2. Create Plot
+    df = fetch_kraken_data(PAIR, INTERVAL)
     plot_url = create_plot(df)
     
-    # 3. Stats for display
     if not df.empty:
         current_price = f"${df['close'].iloc[-1]:,.2f}"
         all_time_high = f"${df['high'].max():,.2f}"
-        start_date = df['open_time'].iloc[0].strftime('%Y-%m-%d')
+        start_date = df['time'].iloc[0].strftime('%Y-%m-%d')
     else:
         current_price = "N/A"
         all_time_high = "N/A"
         start_date = "N/A"
 
-    # 4. Render HTML
     html_template = """
     <!DOCTYPE html>
     <html>
     <head>
-        <title>Binance Market Data</title>
+        <title>Kraken Market Structure</title>
         <meta name="viewport" content="width=device-width, initial-scale=1">
         <style>
-            body { font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif; margin: 0; padding: 20px; background-color: #f4f4f9; color: #333; }
-            .container { max-width: 1000px; margin: 0 auto; background: white; padding: 30px; border-radius: 8px; box-shadow: 0 4px 6px rgba(0,0,0,0.1); }
-            h1 { text-align: center; color: #444; }
-            .stats { display: flex; justify-content: space-around; margin-bottom: 30px; background: #eef2f5; padding: 15px; border-radius: 5px; }
-            .stat-box { text-align: center; }
-            .stat-label { font-size: 0.9em; color: #666; text-transform: uppercase; letter-spacing: 1px; }
-            .stat-value { font-size: 1.5em; font-weight: bold; color: #2c3e50; }
-            .plot-container { text-align: center; }
-            img { max-width: 100%; height: auto; border: 1px solid #ddd; }
-            .footer { margin-top: 20px; text-align: center; font-size: 0.8em; color: #888; }
+            body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif; margin: 0; padding: 20px; background-color: #f1f2f6; color: #2f3542; }
+            .container { max-width: 1200px; margin: 0 auto; background: white; padding: 30px; border-radius: 12px; box-shadow: 0 10px 20px rgba(0,0,0,0.05); }
+            h1 { text-align: center; color: #2c3e50; margin-bottom: 10px; }
+            .subtitle { text-align: center; color: #7f8c8d; margin-bottom: 30px; font-size: 0.9em; }
+            .stats { display: flex; justify-content: center; gap: 40px; margin-bottom: 30px; flex-wrap: wrap; }
+            .stat-box { background: #f8f9fa; padding: 15px 25px; border-radius: 8px; border-left: 4px solid #3498db; min-width: 150px; text-align: center; }
+            .stat-label { font-size: 0.8em; color: #7f8c8d; text-transform: uppercase; letter-spacing: 1px; margin-bottom: 5px; }
+            .stat-value { font-size: 1.4em; font-weight: 700; color: #2c3e50; }
+            .plot-container { text-align: center; margin-bottom: 20px; }
+            img { max-width: 100%; height: auto; border-radius: 4px; border: 1px solid #dfe6e9; }
+            .legend-box { background: #fff3cd; color: #856404; padding: 15px; border-radius: 6px; font-size: 0.9em; margin-top: 20px; border: 1px solid #ffeeba; }
         </style>
     </head>
     <body>
         <div class="container">
-            <h1>Market Analysis: {{ symbol }}</h1>
+            <h1>Market Structure Analysis</h1>
+            <p class="subtitle">Data Source: Kraken Public API ({{ symbol }})</p>
             
             <div class="stats">
                 <div class="stat-box">
@@ -220,7 +255,7 @@ def home():
                     <div class="stat-value">{{ ath }}</div>
                 </div>
                 <div class="stat-box">
-                    <div class="stat-label">Data Since</div>
+                    <div class="stat-label">History Since</div>
                     <div class="stat-value">{{ start }}</div>
                 </div>
             </div>
@@ -229,12 +264,15 @@ def home():
                 {% if plot_url %}
                     <img src="data:image/png;base64,{{ plot_url }}" alt="Price Chart">
                 {% else %}
-                    <p>Error loading data from Binance.</p>
+                    <p style="color:red">Error: Could not retrieve data from Kraken.</p>
                 {% endif %}
             </div>
             
-            <div class="footer">
-                Data fetches live from Binance API | Interval: Monthly
+            <div class="legend-box">
+                <strong>Analysis Legend:</strong><br>
+                <span style="color:#d63031">▼ Red Marker:</span> Local High (Close not surpassed within ±2 years)<br>
+                <span style="color:#00b894">▲ Green Marker:</span> Local Low (Low not undercut within ±2 years, ignoring consolidations)<br>
+                <span style="color:slategrey">■ Grey Zones:</span> Consolidation (Price range < 30% for > 1 year) - Lows here are ignored.
             </div>
         </div>
     </body>
@@ -243,12 +281,11 @@ def home():
     
     return render_template_string(html_template, 
                                   plot_url=plot_url, 
-                                  symbol=SYMBOL, 
+                                  symbol=PAIR, 
                                   current=current_price, 
                                   ath=all_time_high, 
                                   start=start_date)
 
 if __name__ == '__main__':
-    # host='0.0.0.0' allows access from other devices on the network
     print(f"Starting server on port {PORT}...")
     app.run(host='0.0.0.0', port=PORT, debug=False)
