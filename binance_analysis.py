@@ -103,8 +103,10 @@ def generate_warped_reality(df):
 def create_plot_and_vector(df):
     if df.empty: return None, []
 
-    # --- Generate Alternate Reality ---
-    warped_df = generate_warped_reality(df)
+    # --- Generate 3 Alternate Realities ---
+    warped_df_1 = generate_warped_reality(df)
+    warped_df_2 = generate_warped_reality(df)
+    warped_df_3 = generate_warped_reality(df)
 
     # --- Setup Figure (2 Subplots) ---
     fig, (ax1, ax2) = plt.subplots(2, 1, figsize=(15, 14), facecolor='#f1f2f6')
@@ -165,19 +167,22 @@ def create_plot_and_vector(df):
     ax1.grid(True, which='major', color='white', alpha=0.5, zorder=1)
     ax1.legend(loc='upper left', framealpha=1)
 
-    # === PLOT 2: Time Warped Reality ===
-    ax2.set_facecolor('#dcdde1') # Slightly darker grey for alternate reality
+    # === PLOT 2: Time Warped Realities (3 Simulations) ===
+    ax2.set_facecolor('#dcdde1') 
     
-    # Draw Plot 2
-    ax2.plot(warped_df['time'], warped_df['close'], color='#2c3e50', linewidth=1.5, zorder=3, label='BTC Price (Time Warped)')
+    # Plot 3 distinct warped simulations
+    ax2.plot(warped_df_1['time'], warped_df_1['close'], color='#2980b9', linewidth=1.2, alpha=0.9, zorder=3, label='Simulation A (Blue)')
+    ax2.plot(warped_df_2['time'], warped_df_2['close'], color='#27ae60', linewidth=1.2, alpha=0.9, zorder=3, label='Simulation B (Green)')
+    ax2.plot(warped_df_3['time'], warped_df_3['close'], color='#c0392b', linewidth=1.2, alpha=0.9, zorder=3, label='Simulation C (Red)')
     
     # Style
     ax2.set_yscale('linear')
-    ax2.set_title("Reality B: Time Warped Simulation (Randomized Monthly Duration)", fontsize=16, fontweight='bold', color='#444')
+    ax2.set_title("Reality B: 3 Randomized Time Warp Simulations", fontsize=16, fontweight='bold', color='#444')
     ax2.grid(True, which='major', color='white', alpha=0.5, zorder=1)
+    ax2.legend(loc='upper left', framealpha=1)
     
     # Add annotation explaining the warp
-    ax2.text(0.02, 0.95, "Method: Monthly duration warped by [-1.0, 1.0] random factor\nResult: Accelerated or delayed market cycles", 
+    ax2.text(0.02, 0.95, "Method: 3 independent runs where monthly duration is warped by [-1.0, 1.0].\nLines diverge as random time dilations accumulate.", 
              transform=ax2.transAxes, fontsize=10, verticalalignment='top', 
              bbox=dict(boxstyle='round', facecolor='white', alpha=0.8))
 
@@ -250,7 +255,7 @@ def index():
     <body>
         <div class="container">
             <div class="header">
-                <h1>Bitcoin Market: Actual vs Time Warp</h1>
+                <h1>Bitcoin Market: Actual vs Multi-Reality Warp</h1>
                 <p>Kraken Pair: <strong>XBTUSD</strong> | Current Price: <strong>{{ current_price }}</strong></p>
                 <a href="/" class="refresh-btn">Regenerate Time Warp</a>
             </div>
