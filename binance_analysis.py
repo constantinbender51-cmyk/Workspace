@@ -50,12 +50,14 @@ def generate_warped_reality(df):
     """
     Creates an alternate reality by:
     1. Expanding/contracting each month by a random factor [-1, 1].
-    2. Randomizing price by a multiplier [1 + rand].
+    2. Resampling back to 30-day buckets.
+    3. Randomizing price of the resulting buckets by a multiplier [1 + rand].
     """
     if df.empty: return pd.DataFrame()
     
     daily_stream = []
     
+    # 1. Expand (Time Warp only first)
     for _, row in df.iterrows():
         # --- Time Warp ---
         # Random warp factor between -1 and 1
@@ -65,25 +67,18 @@ def generate_warped_reality(df):
         # Safety: Ensure at least 1 day of existence
         days_in_month = max(1, days_in_month)
         
-        # --- Price Warp ---
-        # Random multiplier factor. 
-        # Using -0.3 to 0.3 allows for a 30% variation up or down per bucket.
-        price_warp = random.uniform(-0.3, 0.3)
-        price_multiplier = 1 + price_warp
-        
-        # Create identical records for the duration, with price warped
+        # Create identical records using ORIGINAL prices
         for _ in range(days_in_month):
             daily_stream.append({
-                'open': row['open'] * price_multiplier,
-                'high': row['high'] * price_multiplier,
-                'low': row['low'] * price_multiplier,
-                'close': row['close'] * price_multiplier
+                'open': row['open'],
+                'high': row['high'],
+                'low': row['low'],
+                'close': row['close']
             })
             
-    # Reconstruct DataFrame
+    # 2. Reconstruct DataFrame & Resample
     warped_df = pd.DataFrame(daily_stream)
     
-    # Assign new Synthetic Timeline
     if not warped_df.empty:
         start_date = df['time'].iloc[0]
         warped_df['time'] = pd.date_range(start=start_date, periods=len(warped_df), freq='D')
@@ -98,7 +93,20 @@ def generate_warped_reality(df):
             'close': 'last'
         }).dropna().reset_index()
         
+        # 3. Apply Price Randomization AFTER resampling
+        # We apply a different random multiplier to each row of the resulting warped monthly data
+        # Using -0.3 to 0.3 allows for a 30% variation up or down per bucket.
+        for i, row in warped_monthly.iterrows():
+            price_warp = random.uniform(-0.3, 0.3)
+            multiplier = 1 + price_warp
+            
+            warped_monthly.at[i, 'open'] *= multiplier
+            warped_monthly.at[i, 'high'] *= multiplier
+            warped_monthly.at[i, 'low'] *= multiplier
+            warped_monthly.at[i, 'close'] *= multiplier
+            
         return warped_monthly
+        
     return pd.DataFrame()
 
 def analyze_structure(df):
@@ -215,7 +223,7 @@ def create_plot_and_vector(df):
     ax2.legend(loc='upper left', framealpha=1)
     
     # Legend Text
-    ax2.text(0.02, 0.95, "Params: Time Warp [-1.0, 1.0], Price Warp [-0.3, 0.3]\nMarkers show structure analysis on warped data.", 
+    ax2.text(0.02, 0.95, "Params: Time Warp [-1.0, 1.0], Price Warp [-0.3, 0.3]\nPrice randomized AFTER resampling to monthly buckets.", 
              transform=ax2.transAxes, fontsize=10, verticalalignment='top', 
              bbox=dict(boxstyle='round', facecolor='white', alpha=0.8))
 
@@ -301,7 +309,7 @@ def index():
             <h3>Reality A: Monthly Signal Vector [-1, 0, 1]</h3>
             <div class="vector-grid">
                 {% for item in vector_list %}
-                <div class="cell {% if item.val == -1 %}val-neg1{% elif item.val == 0 %}val-0{% elif item.val == 1 %}val-pos1{% else %}val-na{% endif %}">
+                <div class="cell {% if item.val == -1 %}val-neg1{% elif item.val == 0 %}val-0{% elif item.val == 1 %}val-pos1{% elif item.val == 'N/A' %}val-na{% endif %}">
                     {{ item.date }}<br>
                     <span style="font-size: 16px;">{{ item.val }}</span>
                 </div>
