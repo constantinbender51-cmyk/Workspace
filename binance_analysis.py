@@ -96,23 +96,29 @@ def analyze_structure_original(df):
 def analyze_structure_new(df):
     """
     NEW LOGIC (For Random Reality):
-    1. Peak: 2yr Past / 1yr Future radius.
-    2. Low: Lowest price between Peaks.
-    3. Stable: 3/4 point (Time) between a Low and the month with highest 3-month return before next Peak.
+    1. Peak: 2yr Past / 1yr Future radius, AND must be a NEW ATH.
+    2. Low: Lowest price between confirmed Peaks.
+    3. Stable: 3/4 point (Time) between a Low and the month with highest 3-month return.
     """
     if df.empty: return df, [], [], []
     df = df.copy()
     
-    # 1. Peak Detection
-    df['h_max'] = df['close'].rolling(window=37, min_periods=13).max().shift(-12)
-    if len(df) > 12: df.loc[df.index[-12:], 'h_max'] = np.inf
-    peak_candidates = df[df['close'] == df['h_max']].index.tolist()
+    # 1. Peak Detection (ATH Rule)
+    df['h_max_window'] = df['close'].rolling(window=37, min_periods=13).max().shift(-12)
+    if len(df) > 12: df.loc[df.index[-12:], 'h_max_window'] = np.inf
+    df['expanding_ath'] = df['close'].expanding().max()
+    
+    peak_candidates = df[
+        (df['close'] == df['h_max_window']) & 
+        (df['close'] >= df['expanding_ath'])
+    ].index.tolist()
     
     highs = []
     if peak_candidates:
         highs.append(peak_candidates[0])
         for p in peak_candidates[1:]:
-            if (p - highs[-1]) > 12: highs.append(p)
+            if (p - highs[-1]) > 12 and df.loc[p, 'close'] > df.loc[highs[-1], 'close']:
+                highs.append(p)
     
     # 2. Low Detection
     lows = []
@@ -126,37 +132,37 @@ def analyze_structure_new(df):
                 if not segment.empty:
                     lows.append(segment['close'].idxmin())
 
-    # 3. Stability Detection (3-Month Return 3/4 Point Logic)
+    # 3. Stability Detection
     df['ret_3m'] = df['close'].pct_change(periods=3).fillna(0)
     stabs = []
-    
     for low_idx in lows:
-        # Find next peak
         next_peaks = [h for h in highs if h > low_idx]
         if not next_peaks: continue
         target_peak = next_peaks[0]
-        
-        # Search range: from the low to the peak
         segment = df.iloc[low_idx:target_peak + 1]
         if segment.empty: continue
-        
-        # Find month with highest 3-month return in this cycle
         max_3m_ret_idx = segment['ret_3m'].idxmax()
-        
-        # 3/4 Point index calculation: 
-        # Start + (Distance * 0.75)
-        # Low_idx is the start, max_3m_ret_idx is the reference end.
         delta = max_3m_ret_idx - low_idx
         three_quarter_idx = int(low_idx + (delta * 0.75))
         stabs.append(three_quarter_idx)
-
     stabs = sorted(list(set(stabs)))
 
-    # Encode for plotting
+    # --- Generate Vector (State Machine) ---
+    # Events: H = Peak, L = Low, S = Stable
+    events = sorted([(i, 'H') for i in highs] + [(i, 'S') for i in stabs] + [(i, 'L') for i in lows])
     vector = np.full(len(df), np.nan)
-    for h in highs: vector[h] = -1
-    for l in lows: vector[l] = -2
-    for s in stabs: vector[s] = -3
+    
+    # Track current state: -1 (Red/Corr), 0 (Grey/Acc), 1 (Green/Exp)
+    current_state = np.nan
+    event_map = dict(events)
+    
+    for i in range(len(df)):
+        if i in event_map:
+            etype = event_map[i]
+            if etype == 'H': current_state = -1 # Start Correction
+            elif etype == 'L': current_state = 0 # Start Accumulation
+            elif etype == 'S': current_state = 1 # Start Expansion
+        vector[i] = current_state
             
     df['vector'] = vector
     return df, highs, stabs, lows
@@ -189,12 +195,12 @@ def generate_warped_reality(df):
     ratios = w_m['close'] / np.where(old_closes == 0, 1e-9, old_closes)
     w_m['open'] *= ratios; w_m['high'] *= ratios; w_m['low'] *= ratios
     
-    # Analyze structure on final prices
+    # Analyze structure on final prices (Generates Vector)
     w_m, _, _, _ = analyze_structure_new(w_m)
     return w_m
 
 def create_plot_and_vector(df):
-    if df.empty: return None, []
+    if df.empty: return None, [], []
     df, highs, stabs, lows = analyze_structure_original(df)
     fig, (ax1, ax2) = plt.subplots(2, 1, figsize=(15, 16), facecolor='#f1f2f6')
 
@@ -207,69 +213,96 @@ def create_plot_and_vector(df):
     ax1.set_title("Reality A: Actual Historical Data", fontweight='bold')
     ax1.legend()
 
-    # Plot 2: Random Reality (Lines Only)
+    # Plot 2: Random Reality (Shades + Lines)
     ax2.set_facecolor('#f0f0f0') 
     w = generate_warped_reality(df)
-    ax2.plot(w['time'], w['close'], color='#2980b9', linewidth=2, label='Sim Price', zorder=4)
+    ax2.plot(w['time'], w['close'], color='#2980b9', linewidth=2, label='Sim Price', zorder=5)
 
-    # Vertical Lines for structural points
-    peak_rows = w[w['vector'] == -1]
-    low_rows = w[w['vector'] == -2]
-    stab_rows = w[w['vector'] == -3]
+    # Background Coloring for Randomized Vector
+    w['group'] = (w['vector'] != w['vector'].shift()).cumsum()
+    w['next_t'] = w['time'].shift(-1).fillna(w['time'].iloc[-1] + timedelta(days=30))
+    groups = w.groupby('group').agg({'time': 'first', 'next_t': 'last', 'vector': 'first'})
 
-    for _, row in peak_rows.iterrows():
-        ax2.axvline(x=row['time'], color='black', linestyle='-', linewidth=1.5, alpha=0.8, zorder=3)
-    for _, row in low_rows.iterrows():
-        ax2.axvline(x=row['time'], color='black', linestyle='--', linewidth=1.5, alpha=0.8, zorder=3)
-    for _, row in stab_rows.iterrows():
-        ax2.axvline(x=row['time'], color='black', linestyle=':', linewidth=2.0, alpha=0.9, zorder=3)
+    for _, row in groups.iterrows():
+        if not np.isnan(row['vector']):
+            # Color coding matching original logic
+            color = '#f8d7da' if row['vector'] == -1 else ('#e2e3e5' if row['vector'] == 0 else '#d4edda')
+            ax2.axvspan(row['time'], row['next_t'], color=color, alpha=0.6, zorder=1)
 
-    ax2.set_title("Reality B: Highest 3-Month Return 3/4 Point Stability", fontweight='bold')
+    # Re-draw Markers as Lines
+    v = w['vector']
+    # Markers in analyze_structure_new aren't used for markers here, we look at the raw wh/ws/wl
+    # But for simplicity, we can just look at where the state changed
+    peak_rows = w[w['vector'].shift() != -1][w['vector'] == -1] # Start of red
+    low_rows = w[w['vector'].shift() != 0][w['vector'] == 0]    # Start of grey
+    stab_rows = w[w['vector'].shift() != 1][w['vector'] == 1]   # Start of green
+
+    for t in w.loc[w.index[w['vector'].diff() != 0], 'time']:
+        # This draws lines at every transition
+        ax2.axvline(x=t, color='black', alpha=0.1, linewidth=0.5)
+
+    ax2.set_title("Reality B: Randomized Signal Vector", fontweight='bold')
     
+    from matplotlib.patches import Patch
     from matplotlib.lines import Line2D
-    custom_lines = [
-        Line2D([0], [0], color='#2980b9', lw=2),
-        Line2D([0], [0], color='black', lw=1.5, linestyle='-'),
-        Line2D([0], [0], color='black', lw=1.5, linestyle='--'),
-        Line2D([0], [0], color='black', lw=2.0, linestyle=':')
+    legend_elements = [
+        Line2D([0], [0], color='#2980b9', lw=2, label='Sim Price'),
+        Patch(facecolor='#d4edda', label='Expansion (S -> P)'),
+        Patch(facecolor='#f8d7da', label='Correction (P -> L)'),
+        Patch(facecolor='#e2e3e5', label='Accumulation (L -> S)')
     ]
-    ax2.legend(custom_lines, ['Sim Price', 'Peak (2yr/1yr)', 'Low (Inter-Peak)', 'Stable (3/4 Point Low & Max 3m-Ret)'], loc='upper left')
-    ax2.grid(True, alpha=0.3)
+    ax2.legend(handles=legend_elements, loc='upper left')
+    ax2.grid(True, alpha=0.3, zorder=2)
 
     plt.tight_layout()
     buf = io.BytesIO()
     plt.savefig(buf, format='png', dpi=110); plt.close()
-    v = [{"date": r['time'].strftime('%Y-%m'), "val": "N/A" if np.isnan(r['vector']) else int(r['vector'])} for i, r in df.iterrows()]
-    return base64.b64encode(buf.getvalue()).decode(), v
+    
+    v_a = [{"date": r['time'].strftime('%Y-%m'), "val": "N/A" if np.isnan(r['vector']) else int(r['vector'])} for i, r in df.iterrows()]
+    v_b = [{"date": r['time'].strftime('%Y-%m'), "val": "N/A" if np.isnan(r['vector']) else int(r['vector'])} for i, r in w.iterrows()]
+    
+    return base64.b64encode(buf.getvalue()).decode(), v_a, v_b
 
 @app.route('/')
 def index():
     df = fetch_kraken_data(PAIR, INTERVAL)
     if df.empty: return "<h1>API Data Fetch Error</h1>"
-    p, v = create_plot_and_vector(df)
+    p, v_a, v_b = create_plot_and_vector(df)
     html = """
     <!DOCTYPE html><html><head><title>BTC Reality Warp</title>
     <style>
         body { font-family: sans-serif; background: #f1f2f6; padding: 20px; }
-        .container { max-width: 1300px; margin: auto; background: white; padding: 40px; border-radius: 20px; box-shadow: 0 10px 30px rgba(0,0,0,0.05); }
+        .container { max-width: 1400px; margin: auto; background: white; padding: 40px; border-radius: 20px; box-shadow: 0 10px 30px rgba(0,0,0,0.05); }
         img { width: 100%; border-radius: 10px; margin: 20px 0; }
-        .grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(90px, 1fr)); gap: 8px; height: 250px; overflow-y: scroll; background: #f8f9fa; padding: 15px; border-radius: 10px; }
-        .c { padding: 10px; text-align: center; font-size: 11px; border: 1px solid #ddd; }
+        .grid-container { display: grid; grid-template-columns: 1fr 1fr; gap: 20px; }
+        .grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(80px, 1fr)); gap: 5px; height: 200px; overflow-y: scroll; background: #f8f9fa; padding: 10px; border-radius: 8px; border: 1px solid #eee; }
+        .c { padding: 8px; text-align: center; font-size: 10px; border: 1px solid #ddd; border-radius: 4px; }
         .v-1 { background: #ff7675; color: white; } .v0 { background: #dfe6e9; color: #636e72; } .v1 { background: #55efc4; color: #006266; font-weight: bold; }
         .btn { display: block; width: fit-content; margin: 0 auto 20px; padding: 12px 24px; background: #6c5ce7; color: #fff; text-decoration: none; border-radius: 8px; font-weight: bold; }
     </style></head><body>
     <div class="container">
-        <h1>Bitcoin: 3/4 Return Stability</h1>
+        <h1>Bitcoin: Randomized Signal Vector</h1>
         <div style="background:#f8f9fa; padding:15px; border-radius:8px; border:1px solid #dee2e6; margin-bottom:20px;">
-            <strong>Stability Rule:</strong> For each cycle, we identify the month with the highest 3-month percentage return. 
-            The stable signal is placed at the <strong>3/4 point index</strong> between the cycle's Low and that high-return month.
+            <strong>Reality B State Machine:</strong><br>
+            • <b>-1 (Red):</b> Correction (From ATH Peak to Cycle Low)<br>
+            • <b>0 (Grey):</b> Accumulation (From Cycle Low to 3/4 Stability Point)<br>
+            • <b>1 (Green):</b> Expansion (From 3/4 Stability Point to next ATH Peak)
         </div>
         <a href="/" class="btn">Generate New Reality</a>
         <img src="data:image/png;base64,{{p}}">
-        <h3>Reality A Monthly Vector</h3>
-        <div class="grid">{% for i in v %}<div class="c {% if i.val == -1 %}v-1{% elif i.val == 0 %}v0{% elif i.val == 1 %}v1{% endif %}">{{i.date}}<br>{{i.val}}</div>{% endfor %}</div>
+        
+        <div class="grid-container">
+            <div>
+                <h3>Reality A Vector (Actual)</h3>
+                <div class="grid">{% for i in v_a %}<div class="c {% if i.val == -1 %}v-1{% elif i.val == 0 %}v0{% elif i.val == 1 %}v1{% endif %}">{{i.date}}<br><b>{{i.val}}</b></div>{% endfor %}</div>
+            </div>
+            <div>
+                <h3>Reality B Vector (Randomized)</h3>
+                <div class="grid">{% for i in v_b %}<div class="c {% if i.val == -1 %}v-1{% elif i.val == 0 %}v0{% elif i.val == 1 %}v1{% endif %}">{{i.date}}<br><b>{{i.val}}</b></div>{% endfor %}</div>
+            </div>
+        </div>
     </div></body></html>"""
-    return render_template_string(html, p=p, v=v)
+    return render_template_string(html, p=p, v_a=v_a, v_b=v_b)
 
 if __name__ == '__main__':
     app.run(host='0.0.0.0', port=PORT)
