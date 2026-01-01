@@ -60,61 +60,52 @@ def create_plot(df):
 
     # Scientific Layout Setup
     plt.figure(figsize=(12, 6))
-    plt.style.use('bmh')  # 'bmh' is a clean, scientific style
+    plt.style.use('bmh')
     
     # Plot Close Price
     plt.plot(df['open_time'], df['close'], label='Close Price', color='#2c3e50', linewidth=2)
     
-    # --- Custom Events Logic ---
-    # Format: (Date String, Label, Color)
-    events = [
-        ('2012-11-01', 'Buy 1 Year', 'green'),
-        ('2013-11-01', 'Sell', 'red'),
-        ('2016-12-01', 'Buy 1 Year', 'green'),
-        ('2017-12-01', 'Sell 1 Year', 'red'),
-        ('2021-10-01', 'Buy 1 Year', 'green'),
-        ('2022-10-01', 'Sell 1 Year', 'red'),
-        ('2024-08-01', 'Buy 1 Year', 'green'),
-        ('2025-07-01', 'Sell 1 Year', 'red'),
-    ]
+    # --- Local ATH Analysis Logic ---
+    
+    # Define "Local ATH" as the highest High in a centered 1-year window (approx 13 months)
+    # This checks if a month's High is the maximum of the 6 months before and 6 months after it.
+    df['rolling_max'] = df['high'].rolling(window=13, center=True).max()
+    
+    # Filter: It is a peak if the High equals the rolling max
+    peaks = df[df['high'] == df['rolling_max']]
 
-    for date_str, label, color in events:
-        target_date = pd.to_datetime(date_str)
+    # Iterate over found peaks to place markers
+    for idx, row in peaks.iterrows():
+        peak_date = row['open_time']
         
-        # Find the closest available data point to this date
-        # We look for a date within a short tolerance (e.g., matching month)
-        # Calculate time difference
-        time_diff = (df['open_time'] - target_date).abs()
+        # Calculate Target Dates
+        date_preceding = peak_date - pd.DateOffset(years=1)
+        date_following = peak_date + pd.DateOffset(years=1)
         
-        # Get the index of the minimum difference
-        if time_diff.min() < pd.Timedelta(days=32):  # Ensure we are within ~1 month
-            idx = time_diff.idxmin()
-            row = df.loc[idx]
+        targets = [
+            (date_preceding, 'green', '^'), # Green marker 1 year before
+            (date_following, 'red', 'v')    # Red marker 1 year after
+        ]
+        
+        for target_date, color, marker in targets:
+            # Find the closest actual data row to the target date
+            time_diff = (df['open_time'] - target_date).abs()
             
-            plot_date = row['open_time']
-            plot_price = row['close']
-            
-            # Plot Marker
-            marker_style = '^' if 'Buy' in label else 'v'
-            plt.scatter(plot_date, plot_price, color=color, s=120, marker=marker_style, zorder=5)
-            
-            # Add Label Annotation
-            plt.annotate(
-                label, 
-                xy=(plot_date, plot_price),
-                xytext=(0, 15 if 'Buy' in label else -25),
-                textcoords='offset points',
-                ha='center', 
-                color=color, 
-                fontweight='bold',
-                bbox=dict(boxstyle="round,pad=0.3", fc="white", ec=color, alpha=0.8)
-            )
+            # Only plot if we find a match within reasonable time (e.g. data exists)
+            if time_diff.min() < pd.Timedelta(days=40):
+                match_idx = time_diff.idxmin()
+                match_row = df.loc[match_idx]
+                
+                plot_date = match_row['open_time']
+                plot_price = match_row['close'] # Mark the Close price at that time
+                
+                plt.scatter(plot_date, plot_price, color=color, s=100, marker=marker, zorder=5, edgecolors='black', linewidth=0.5)
 
     # Configuration for Scientific Look
     plt.title(f'Historical Monthly Price Action: {SYMBOL}', fontsize=16, fontweight='bold', pad=20)
     plt.xlabel('Date', fontsize=12)
     plt.ylabel('Price (USDT) - Log Scale', fontsize=12)
-    plt.yscale('log')  # Log scale is standard for long-term crypto history
+    plt.yscale('log')
     plt.grid(True, which="both", ls="-", alpha=0.5)
     plt.legend(frameon=True, loc='upper left')
     plt.tight_layout()
