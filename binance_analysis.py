@@ -46,25 +46,82 @@ def fetch_kraken_data(pair, interval):
         print(f"Fetch error: {e}")
         return pd.DataFrame()
 
+def analyze_structure(df):
+    """
+    Applies the Market Structure Logic to the DataFrame.
+    Adds a 'vector' column [-1, 0, 1].
+    """
+    if df.empty: return df, [], [], []
+    df = df.copy()
+    
+    # 1. High detection (2yr radius)
+    df['h_max'] = df['close'].rolling(window=49, center=True, min_periods=25).max()
+    if len(df) > 24: df.loc[df.index[-24:], 'h_max'] = np.inf
+    highs = df[df['close'] == df['h_max']].index.tolist()
+
+    # 2. Stability detection (3m centered window)
+    df['range_3m_centered'] = (df['high'].rolling(window=3, center=True).max() - 
+                               df['low'].rolling(window=3, center=True).min()) / \
+                              df['low'].rolling(window=3, center=True).min()
+    
+    stabs = []
+    for p in highs:
+        # Search backwards from peak
+        for i in range(p - 1, 1, -1):
+            if i in df.index and df.loc[i, 'range_3m_centered'] <= 0.50:
+                stabs.append(i); break
+    
+    # 3. Low detection (1yr radius)
+    df['l_min'] = df['low'].rolling(window=25, center=True, min_periods=13).min()
+    if len(df) > 12: df.loc[df.index[-12:], 'l_min'] = -1.0
+    lows = df[df['low'] == df['l_min']].index.tolist()
+
+    # 4. Vector generation
+    events = sorted([(i, 'H') for i in highs] + [(i, 'S') for i in stabs] + [(i, 'L') for i in lows])
+    vector = np.full(len(df), np.nan)
+    
+    for i in range(len(events) - 1):
+        idx, t = events[i]
+        n_idx, n_t = events[i+1]
+        
+        val = np.nan
+        if t == 'H' and n_t == 'L': val = -1
+        elif t == 'L' and n_t == 'S': val = 0
+        elif t == 'S' and n_t == 'H': val = 1
+        
+        if not np.isnan(val): 
+            vector[idx:n_idx] = val
+            
+    df['vector'] = vector
+    return df, highs, stabs, lows
+
 def generate_warped_reality(df):
     """
     Creates an alternate reality by:
-    1. Time Warp: Randomly expanding/contracting month duration.
-    2. Persistent Return Warp: Symmetric random walk to avoid volatility drag.
+    1. Time Warp: Expanding/contracting month duration.
+    2. Propagating the 'vector' signal with the time warp.
+    3. Persistent Return Warp: Modifying prices.
     """
     if df.empty: return pd.DataFrame()
     
     daily_stream = []
     
-    # --- Step 1: Time Warp Expansion ---
+    # --- Step 1: Time Warp Expansion (Carrying Vector) ---
     for _, row in df.iterrows():
         time_warp = random.uniform(-1, 1)
         days_in_month = int(30 + (30 * time_warp))
         days_in_month = max(1, days_in_month)
         
+        # We propagate the vector state (e.g., 1.0, -1.0, 0.0) to the expanded days
+        current_vector = row['vector'] if 'vector' in row else np.nan
+        
         for _ in range(days_in_month):
             daily_stream.append({
-                'open': row['open'], 'high': row['high'], 'low': row['low'], 'close': row['close']
+                'open': row['open'], 
+                'high': row['high'], 
+                'low': row['low'], 
+                'close': row['close'],
+                'vector': current_vector # Carry signal
             })
             
     warped_df = pd.DataFrame(daily_stream)
@@ -74,32 +131,31 @@ def generate_warped_reality(df):
     warped_df['time'] = pd.date_range(start=start_date, periods=len(warped_df), freq='D')
     warped_df.set_index('time', inplace=True)
     
+    # Resample back to 30D buckets
+    # For price: standard OHLC aggregation
+    # For vector: take the 'first' value encountered in that bucket to maintain state continuity
     warped_monthly = warped_df.resample('30D').agg({
-        'open': 'first', 'high': 'max', 'low': 'min', 'close': 'last'
+        'open': 'first', 'high': 'max', 'low': 'min', 'close': 'last',
+        'vector': 'first' 
     }).dropna().reset_index()
 
     # --- Step 2: Persistent Return Randomization ---
     original_returns = warped_monthly['close'].pct_change().fillna(0)
-    
     log_multiplier = 0.0 
     new_prices = [warped_monthly['close'].iloc[0]]
     
     for i in range(1, len(warped_monthly)):
-        # Balanced shock to the log-multiplier
         shock = random.uniform(-0.06, 0.06) 
         log_multiplier += shock
         
         current_multiplier = np.exp(log_multiplier)
         original_r = original_returns.iloc[i]
         new_r = original_r * current_multiplier
-        
-        # Clip returns to prevent bankruptcy
         new_r = max(-0.98, new_r)
         
         new_price = new_prices[-1] * (1 + new_r)
         new_prices.append(new_price)
 
-    # Rebuild candle OHLC proportionally
     old_closes = warped_monthly['close'].values
     warped_monthly['close'] = new_prices
     old_closes[old_closes == 0] = 1e-9
@@ -111,48 +167,16 @@ def generate_warped_reality(df):
     
     return warped_monthly
 
-def analyze_structure(df):
-    if df.empty: return df, [], [], []
-    df = df.copy()
-    # High detection
-    df['h_max'] = df['close'].rolling(window=49, center=True, min_periods=25).max()
-    if len(df) > 24: df.loc[df.index[-24:], 'h_max'] = np.inf
-    highs = df[df['close'] == df['h_max']].index.tolist()
-
-    # Stability detection
-    df['range_3m_centered'] = (df['high'].rolling(window=3, center=True).max() - 
-                               df['low'].rolling(window=3, center=True).min()) / \
-                              df['low'].rolling(window=3, center=True).min()
-    
-    stabs = []
-    for p in highs:
-        for i in range(p - 1, 1, -1):
-            if i in df.index and df.loc[i, 'range_3m_centered'] <= 0.50:
-                stabs.append(i); break
-    
-    # Low detection
-    df['l_min'] = df['low'].rolling(window=25, center=True, min_periods=13).min()
-    if len(df) > 12: df.loc[df.index[-12:], 'l_min'] = -1.0
-    lows = df[df['low'] == df['l_min']].index.tolist()
-
-    # Vector generation
-    events = sorted([(i, 'H') for i in highs] + [(i, 'S') for i in stabs] + [(i, 'L') for i in lows])
-    vector = np.full(len(df), np.nan)
-    for i in range(len(events) - 1):
-        idx, t = events[i]; n_idx, n_t = events[i+1]
-        v = -1 if t=='H' and n_t=='L' else (0 if t=='L' and n_t=='S' else (1 if t=='S' and n_t=='H' else np.nan))
-        if not np.isnan(v): vector[idx:n_idx] = v
-    df['vector'] = vector
-    return df, highs, stabs, lows
-
 def create_plot_and_vector(df):
     if df.empty: return None, []
     
+    # Analyze Structure on ORIGINAL data first to get the correct vector
+    df, highs, stabs, lows = analyze_structure(df)
+    
     fig, (ax1, ax2) = plt.subplots(2, 1, figsize=(15, 16), facecolor='#f1f2f6')
 
-    # Reality A: Actual Reality
+    # --- PLOT 1: Actual Reality ---
     ax1.set_facecolor('#e0e0e0') 
-    df, highs, stabs, lows = analyze_structure(df)
     ax1.plot(df['time'], df['close'], color='#2f3542', linewidth=2.5, label='Actual BTC Price', zorder=3)
     ax1.scatter(df.loc[highs, 'time'], df.loc[highs, 'close'], color='#ff4757', s=120, marker='v', edgecolors='black', zorder=5)
     ax1.scatter(df.loc[stabs, 'time'], df.loc[stabs, 'close'], color='#8e44ad', s=120, marker='d', edgecolors='white', zorder=5)
@@ -163,22 +187,49 @@ def create_plot_and_vector(df):
     ax1.legend(loc='upper left')
     ax1.grid(True, alpha=0.3)
 
-    # Reality B: Single Alternate Reality
-    ax2.set_facecolor('#dcdde1') 
+    # --- PLOT 2: Single Alternate Reality (Background Colors) ---
+    ax2.set_facecolor('#f0f0f0') 
     
+    # Generate Warped Reality (carrying the original vector)
     w = generate_warped_reality(df)
-    w, wh, ws, wl = analyze_structure(w)
     
-    ax2.plot(w['time'], w['close'], color='#2980b9', linewidth=2, alpha=0.9, label='Simulation Alpha')
-    ax2.scatter(w.loc[wh, 'time'], w.loc[wh, 'close'], color='#2980b9', s=60, marker='v', edgecolors='black', alpha=0.7)
-    ax2.scatter(w.loc[ws, 'time'], w.loc[ws, 'close'], color='#8e44ad', s=50, marker='d', edgecolors='white', alpha=0.7)
-    ax2.scatter(w.loc[wl, 'time'], w.loc[wl, 'low'], color='#2980b9', s=60, marker='^', edgecolors='black', alpha=0.7)
+    # Plot the Price Line
+    ax2.plot(w['time'], w['close'], color='#2980b9', linewidth=2, alpha=1.0, label='Simulation Alpha', zorder=5)
+
+    # Apply Background Coloring based on Propagated Vector
+    # We iterate through the warped dataframe to draw spans
+    # To optimize, we find contiguous blocks
+    
+    w['group'] = (w['vector'] != w['vector'].shift()).cumsum()
+    
+    for _, group in w.groupby('group'):
+        state = group['vector'].iloc[0]
+        start_t = group['time'].iloc[0]
+        end_t = group['time'].iloc[-1]
+        
+        # Define Color based on state
+        face_color = None
+        if state == 1:   face_color = '#d4edda' # Light Green
+        elif state == -1: face_color = '#f8d7da' # Light Red
+        elif state == 0:  face_color = '#e2e3e5' # Light Grey
+        
+        if face_color:
+            ax2.axvspan(start_t, end_t, color=face_color, alpha=0.6, zorder=1)
 
     ax2.set_yscale('linear')
-    ax2.set_title("Reality B: Single Persistent Return Drift Reality (Linear)", fontsize=16, fontweight='bold')
+    ax2.set_title("Reality B: Persistent Return Drift (Original Signals Mapped)", fontsize=16, fontweight='bold')
     ax2.set_ylabel("Price (USD)")
-    ax2.legend(loc='upper left')
-    ax2.grid(True, alpha=0.3)
+    
+    # Legend for Backgrounds
+    from matplotlib.patches import Patch
+    legend_elements = [
+        plt.Line2D([0], [0], color='#2980b9', lw=2, label='Sim Price'),
+        Patch(facecolor='#d4edda', edgecolor='#c3e6cb', label='Expansion (+1)'),
+        Patch(facecolor='#f8d7da', edgecolor='#f5c6cb', label='Correction (-1)'),
+        Patch(facecolor='#e2e3e5', edgecolor='#d6d8db', label='Accumulation (0)')
+    ]
+    ax2.legend(handles=legend_elements, loc='upper left')
+    ax2.grid(True, alpha=0.3, zorder=2)
 
     plt.tight_layout()
     buf = io.BytesIO()
@@ -209,10 +260,13 @@ def index():
         .desc { background: #fffbe6; padding: 15px; border-radius: 8px; border: 1px solid #ffe58f; margin-bottom: 20px; font-size: 0.9em; }
     </style></head><body>
     <div class="container">
-        <h1>Bitcoin: Single Persistent Alternate Reality</h1>
+        <h1>Bitcoin: Persistent Drift & Structural Warp</h1>
         <div class="desc">
-            <strong>Simulation Logic:</strong> Each month's return is modified by a persistent multiplier. If a month receives a positive "shock", 
-            not only is that month's price higher, but <em>every subsequent return</em> in that simulation is amplified by that multiplier. 
+            <strong>Reality B:</strong> The background colors represent the <em>Original Reality's</em> structural signals, warped onto the new timeline.
+            <br>
+            <span style="background:#d4edda; padding:2px 5px">Green</span> = Expansion Phase | 
+            <span style="background:#f8d7da; padding:2px 5px">Red</span> = Correction Phase | 
+            <span style="background:#e2e3e5; padding:2px 5px">Grey</span> = Accumulation
         </div>
         <a href="/" class="btn">Generate New Reality</a>
         <img src="data:image/png;base64,{{p}}">
