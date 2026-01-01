@@ -62,29 +62,29 @@ def create_plot(df):
 
     # --- New Pattern: Stability Point before Peak ---
     # Logic: For each peak, look backwards. Find the first point where the preceding 6 months 
-    # had a range (High-Low)/Low <= 30%.
+    # had a range (High-Low)/Low <= 50%.
     
     stability_points = []
     
     # Calculate 6-month rolling range looking backwards
     # window=6, min_periods=6 means we need 6 full months of history
+    # Threshold increased to 50%
     df['range_6m'] = (df['high'].rolling(window=6).max() - df['low'].rolling(window=6).min()) / df['low'].rolling(window=6).min()
 
     for peak_idx in local_highs.index:
         # Search backwards from the peak index
         search_range = range(peak_idx - 1, 5, -1) # Stop at index 5 because we need 6 months of data
         for i in search_range:
-            if df.loc[i, 'range_6m'] <= 0.30:
+            if df.loc[i, 'range_6m'] <= 0.50:
                 stability_points.append(df.iloc[i])
                 break # Found the most recent stability point before this peak
 
     if stability_points:
         stab_df = pd.DataFrame(stability_points)
         ax.scatter(stab_df['time'], stab_df['close'], color='#3498db', s=120, marker='o', 
-                   edgecolors='black', zorder=6, label='Pre-Peak Stability (6mo < 30%)')
+                   edgecolors='black', zorder=6, label='Pre-Peak Stability (6mo < 50%)')
 
     # --- Pattern 3: Local Low (1yr Radius) ---
-    # Simplified: removing the "skipping consolidation" logic as requested
     df['l_min'] = df['low'].rolling(window=25, center=True, min_periods=13).min()
     if len(df) > 12: df.loc[df.index[-12:], 'l_min'] = -1.0
     
@@ -137,7 +137,7 @@ def index():
             <div class="legend-box">
                 <strong>Analysis Guide:</strong>
                 <div class="item"><span class="box" style="background:#ff4757"></span> <b>Local High:</b> Highest Close within ±2 years.</div>
-                <div class="item"><span class="box" style="background:#3498db"></span> <b>Stability Point:</b> Point before peak where preceding 6 months range was &lt; 30%.</div>
+                <div class="item"><span class="box" style="background:#3498db"></span> <b>Stability Point:</b> Point before peak where preceding 6 months range was &lt; 50%.</div>
                 <div class="item"><span class="box" style="background:#2ed573"></span> <b>Local Low:</b> Lowest Low within ±1 year.</div>
             </div>
         </div>
