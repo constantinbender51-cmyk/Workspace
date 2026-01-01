@@ -53,12 +53,10 @@ def analyze_structure_original(df):
     if df.empty: return df, [], [], []
     df = df.copy()
     
-    # 1. High detection (2yr radius)
     df['h_max'] = df['close'].rolling(window=49, center=True, min_periods=25).max()
     if len(df) > 24: df.loc[df.index[-24:], 'h_max'] = np.inf
     highs = df[df['close'] == df['h_max']].index.tolist()
 
-    # 2. Stability detection (Old Method: Volatility < 50% in 3mo window)
     df['range_3m_centered'] = (df['high'].rolling(window=3, center=True).max() - 
                                df['low'].rolling(window=3, center=True).min()) / \
                               df['low'].rolling(window=3, center=True).min()
@@ -69,23 +67,19 @@ def analyze_structure_original(df):
             if i in df.index and df.loc[i, 'range_3m_centered'] <= 0.50:
                 stabs.append(i); break
     
-    # 3. Low detection (Old Method: 1yr radius)
     df['l_min'] = df['low'].rolling(window=25, center=True, min_periods=13).min()
     if len(df) > 12: df.loc[df.index[-12:], 'l_min'] = -1.0
     lows = df[df['low'] == df['l_min']].index.tolist()
 
-    # 4. Vector State Machine (Gapless)
     events = sorted([(i, 'H') for i in highs] + [(i, 'S') for i in stabs] + [(i, 'L') for i in lows])
     vector = np.full(len(df), np.nan)
     
     for i in range(len(events) - 1):
-        idx, t = events[i]
-        n_idx, n_t = events[i+1]
+        idx, t = events[i]; n_idx, n_t = events[i+1]
         val = np.nan
         if t == 'H' and n_t == 'L': val = -1
         elif t == 'L' and n_t == 'S': val = 0
         elif t == 'S' and n_t == 'H': val = 1
-        # Fallbacks for sequence breaks
         elif t == 'H': val = -1
         elif t == 'L': val = 0
         elif t == 'S': val = 1
@@ -93,11 +87,8 @@ def analyze_structure_original(df):
 
     if events:
         last_idx, last_type = events[-1]
-        last_val = np.nan
-        if last_type == 'H': last_val = -1
-        elif last_type == 'L': last_val = 0
-        elif last_type == 'S': last_val = 1
-        if not np.isnan(last_val): vector[last_idx:] = last_val
+        last_val = -1 if last_type == 'H' else (0 if last_type == 'L' else 1)
+        vector[last_idx:] = last_val
             
     df['vector'] = vector
     return df, highs, stabs, lows
@@ -105,219 +96,162 @@ def analyze_structure_original(df):
 def analyze_structure_new(df):
     """
     NEW LOGIC (For Random Reality Only):
-    1. Peak: Highest Close in 2yr Past / 1yr Future.
-    2. Low: Lowest Close BETWEEN Peaks (or Peak to End).
+    1. Peak: 2yr Past / 1yr Future.
+    2. Low: Min price between Peaks.
+    3. Stable: Backscan from Peak where sum of returns for THAT + NEXT 3 months < 10%.
     """
     if df.empty: return df, [], [], []
     df = df.copy()
     
-    # --- 1. High detection (Asymmetric) ---
-    # Rolling Max (37 months: 24 past + 1 curr + 12 future)
-    # Shifted -12 to align the 'future' part of the window
+    # --- 1. Peak Detection ---
     df['h_max'] = df['close'].rolling(window=37, min_periods=13).max().shift(-12)
-    
-    # Invalidate tail (last 1 year)
     if len(df) > 12: df.loc[df.index[-12:], 'h_max'] = np.inf
-    
-    # Find initial candidates
     peak_candidates = df[df['close'] == df['h_max']].index.tolist()
     
-    # Tie Breaking (First Occurrence)
     highs = []
     if peak_candidates:
         highs.append(peak_candidates[0])
         for p in peak_candidates[1:]:
-            if (p - highs[-1]) > 12:
-                highs.append(p)
+            if (p - highs[-1]) > 12: highs.append(p)
     
-    # --- 2. Low Detection (Cycle Lows) ---
+    # --- 2. Low Detection ---
     lows = []
     if highs:
-        # Iterate through intervals defined by peaks
         for i in range(len(highs)):
             current_peak = highs[i]
-            
-            # Define search range start (month after peak)
             start_search = current_peak + 1
-            
-            # Define search range end (next peak or end of data)
-            if i < len(highs) - 1:
-                end_search = highs[i+1] # Next peak index
-            else:
-                end_search = len(df) # End of dataframe
-            
-            # Find min in this segment
+            end_search = highs[i+1] if i < len(highs) - 1 else len(df)
             if start_search < end_search:
                 segment = df.iloc[start_search:end_search]
-                if not segment.empty:
-                    # idxmin gives the index label (which matches our integer index here)
-                    local_low = segment['close'].idxmin()
-                    lows.append(local_low)
+                if not segment.empty: lows.append(segment['close'].idxmin())
 
-    stabs = [] # Not defined yet
+    # --- 3. Stability Detection ---
+    df['pct_change'] = df['close'].pct_change().fillna(0)
+    # Sum of current month and the next 3 months
+    df['sum_ret_forward_4m'] = df['pct_change'].rolling(window=4).sum().shift(-3)
+    
+    stabs = []
+    for p_idx in highs:
+        for i in range(p_idx - 1, -1, -1):
+            if i in df.index:
+                if abs(df.loc[i, 'sum_ret_forward_4m']) < 0.10:
+                    stabs.append(i)
+                    break
+    stabs = sorted(list(set(stabs)))
 
-    # Vector generation (Discrete Markers for Plotting)
-    # -1 = Peak
-    # -2 = Low
+    # State Machine for Backgrounds
+    events = sorted([(i, 'H') for i in highs] + [(i, 'S') for i in stabs] + [(i, 'L') for i in lows])
     vector = np.full(len(df), np.nan)
-    for h in highs: vector[h] = -1
-    for l in lows: vector[l] = -2
+    current_state = np.nan
+    event_map = dict(events)
+    
+    for i in range(len(df)):
+        if i in event_map:
+            etype = event_map[i]
+            if etype == 'H': current_state = -1
+            elif etype == 'L': current_state = 0
+            elif etype == 'S': current_state = 1
+        vector[i] = current_state
             
     df['vector'] = vector
     return df, highs, stabs, lows
 
 def generate_warped_reality(df):
     if df.empty: return pd.DataFrame()
-    
     daily_stream = []
-    
-    # --- Step 1: Time Warp Expansion ---
     for _, row in df.iterrows():
         time_warp = random.uniform(-1, 1)
-        days_in_month = int(30 + (30 * time_warp))
-        days_in_month = max(1, days_in_month)
-        
+        days_in_month = max(1, int(30 + (30 * time_warp)))
         for _ in range(days_in_month):
-            daily_stream.append({
-                'open': row['open'], 'high': row['high'], 'low': row['low'], 'close': row['close']
-            })
+            daily_stream.append({'open': row['open'], 'high': row['high'], 'low': row['low'], 'close': row['close']})
             
     warped_df = pd.DataFrame(daily_stream)
-    if warped_df.empty: return pd.DataFrame()
-
     start_date = df['time'].iloc[0]
     warped_df['time'] = pd.date_range(start=start_date, periods=len(warped_df), freq='D')
     warped_df.set_index('time', inplace=True)
-    
-    # Resample
-    warped_monthly = warped_df.resample('30D').agg({
-        'open': 'first', 'high': 'max', 'low': 'min', 'close': 'last'
-    }).dropna().reset_index()
+    w_m = warped_df.resample('30D').agg({'open': 'first', 'high': 'max', 'low': 'min', 'close': 'last'}).dropna().reset_index()
 
-    # --- Step 2: Assign Signals (Using NEW Logic) ---
-    warped_monthly, _, _, _ = analyze_structure_new(warped_monthly)
+    # Randomize Prices
+    original_returns = w_m['close'].pct_change().fillna(0)
+    log_multiplier, new_prices = 0.0, [w_m['close'].iloc[0]]
+    for i in range(1, len(w_m)):
+        log_multiplier += random.uniform(-0.06, 0.06)
+        new_r = max(-0.98, original_returns.iloc[i] * np.exp(log_multiplier))
+        new_prices.append(new_prices[-1] * (1 + new_r))
 
-    # --- Step 3: Persistent Return Randomization ---
-    original_returns = warped_monthly['close'].pct_change().fillna(0)
-    log_multiplier = 0.0 
-    new_prices = [warped_monthly['close'].iloc[0]]
+    old_closes = w_m['close'].values
+    w_m['close'] = new_prices
+    ratios = w_m['close'] / np.where(old_closes == 0, 1e-9, old_closes)
+    w_m['open'] *= ratios; w_m['high'] *= ratios; w_m['low'] *= ratios
     
-    for i in range(1, len(warped_monthly)):
-        shock = random.uniform(-0.06, 0.06) 
-        log_multiplier += shock
-        current_multiplier = np.exp(log_multiplier)
-        original_r = original_returns.iloc[i]
-        new_r = original_r * current_multiplier
-        new_r = max(-0.98, new_r)
-        new_price = new_prices[-1] * (1 + new_r)
-        new_prices.append(new_price)
-
-    old_closes = warped_monthly['close'].values
-    warped_monthly['close'] = new_prices
-    old_closes[old_closes == 0] = 1e-9
-    ratios = warped_monthly['close'] / old_closes
-    
-    warped_monthly['open'] *= ratios
-    warped_monthly['high'] *= ratios
-    warped_monthly['low'] *= ratios
-    
-    return warped_monthly
+    # Assign Signals AFTER randomization
+    w_m, _, _, _ = analyze_structure_new(w_m)
+    return w_m
 
 def create_plot_and_vector(df):
     if df.empty: return None, []
-    
-    # Analyze Structure on ORIGINAL data using ORIGINAL logic
     df, highs, stabs, lows = analyze_structure_original(df)
-    
     fig, (ax1, ax2) = plt.subplots(2, 1, figsize=(15, 16), facecolor='#f1f2f6')
 
-    # --- PLOT 1: Actual Reality (Original Logic) ---
+    # Plot 1: Actual
     ax1.set_facecolor('#e0e0e0') 
-    ax1.plot(df['time'], df['close'], color='#2f3542', linewidth=2.5, label='Actual BTC Price', zorder=3)
-    ax1.scatter(df.loc[highs, 'time'], df.loc[highs, 'close'], color='#ff4757', s=120, marker='v', edgecolors='black', zorder=5)
-    ax1.scatter(df.loc[stabs, 'time'], df.loc[stabs, 'close'], color='#8e44ad', s=120, marker='d', edgecolors='white', zorder=5)
-    ax1.scatter(df.loc[lows, 'time'], df.loc[lows, 'low'], color='#2ed573', s=120, marker='^', edgecolors='black', zorder=5)
-    ax1.set_yscale('linear')
-    ax1.set_title("Reality A: Actual Historical Data (Original Logic)", fontsize=16, fontweight='bold')
-    ax1.set_ylabel("Price (USD)")
-    ax1.legend(loc='upper left')
-    ax1.grid(True, alpha=0.3)
+    ax1.plot(df['time'], df['close'], color='#2f3542', linewidth=2, label='Actual Price')
+    ax1.scatter(df.loc[highs, 'time'], df.loc[highs, 'close'], color='#ff4757', s=100, marker='v', edgecolors='black', zorder=5)
+    ax1.scatter(df.loc[stabs, 'time'], df.loc[stabs, 'close'], color='#8e44ad', s=100, marker='d', edgecolors='white', zorder=5)
+    ax1.scatter(df.loc[lows, 'time'], df.loc[lows, 'low'], color='#2ed573', s=100, marker='^', edgecolors='black', zorder=5)
+    ax1.set_title("Reality A: Actual Historical Data", fontweight='bold')
+    ax1.legend()
 
-    # --- PLOT 2: Alternate Reality (Peaks & Lows) ---
+    # Plot 2: Random Reality
     ax2.set_facecolor('#f0f0f0') 
     w = generate_warped_reality(df)
-    
-    # Plot Price
-    ax2.plot(w['time'], w['close'], color='#2980b9', linewidth=2, alpha=1.0, label='Simulation Alpha', zorder=5)
+    ax2.plot(w['time'], w['close'], color='#2980b9', linewidth=2, label='Sim Price', zorder=5)
 
-    # Mark Peaks (Solid Line)
-    peak_rows = w[w['vector'] == -1]
-    for _, row in peak_rows.iterrows():
-        ax2.axvline(x=row['time'], color='black', linestyle='-', linewidth=1.5, alpha=0.8, label='Peak' if _ == 0 else "")
+    w['group'] = (w['vector'] != w['vector'].shift()).cumsum()
+    w['next_t'] = w['time'].shift(-1).fillna(w['time'].iloc[-1] + timedelta(days=30))
+    groups = w.groupby('group').agg({'time': 'first', 'next_t': 'last', 'vector': 'first'})
 
-    # Mark Lows (Dashed Line)
-    low_rows = w[w['vector'] == -2]
-    for _, row in low_rows.iterrows():
-        ax2.axvline(x=row['time'], color='black', linestyle='--', linewidth=1.5, alpha=0.8, label='Low' if _ == 0 else "")
+    for _, row in groups.iterrows():
+        if not np.isnan(row['vector']):
+            color = '#f8d7da' if row['vector'] == -1 else ('#e2e3e5' if row['vector'] == 0 else '#d4edda')
+            ax2.axvspan(row['time'], row['next_t'], color=color, alpha=0.6, zorder=1)
 
-    ax2.set_yscale('linear')
-    ax2.set_title("Reality B: Peaks (Solid) & Cycle Lows (Dashed) - Marked Black", fontsize=16, fontweight='bold')
-    ax2.set_ylabel("Price (USD)")
-    
-    # Custom Legend
-    from matplotlib.lines import Line2D
-    custom_lines = [
-        Line2D([0], [0], color='#2980b9', lw=2),
-        Line2D([0], [0], color='black', lw=1.5, linestyle='-'),
-        Line2D([0], [0], color='black', lw=1.5, linestyle='--')
-    ]
-    ax2.legend(custom_lines, ['Sim Price', 'Peak (2yr/1yr)', 'Low (Min between Peaks)'], loc='upper left')
-    ax2.grid(True, alpha=0.3, zorder=2)
+    ax2.set_title("Reality B: Random Reality (4m Forward Stability)", fontweight='bold')
+    ax2.legend()
+    ax2.grid(True, alpha=0.3)
 
     plt.tight_layout()
     buf = io.BytesIO()
-    plt.savefig(buf, format='png', dpi=110)
-    plt.close()
-    
-    clean_v = [{"date": r['time'].strftime('%Y-%m'), "val": "N/A" if np.isnan(r['vector']) else int(r['vector'])} for i, r in df.iterrows()]
-    return base64.b64encode(buf.getvalue()).decode(), clean_v
+    plt.savefig(buf, format='png', dpi=110); plt.close()
+    v = [{"date": r['time'].strftime('%Y-%m'), "val": "N/A" if np.isnan(r['vector']) else int(r['vector'])} for i, r in df.iterrows()]
+    return base64.b64encode(buf.getvalue()).decode(), v
 
 @app.route('/')
 def index():
     df = fetch_kraken_data(PAIR, INTERVAL)
     if df.empty: return "<h1>API Data Fetch Error</h1>"
     p, v = create_plot_and_vector(df)
-    
     html = """
     <!DOCTYPE html><html><head><title>BTC Reality Warp</title>
     <style>
-        body { font-family: 'Segoe UI', sans-serif; background: #f1f2f6; padding: 20px; }
+        body { font-family: sans-serif; background: #f1f2f6; padding: 20px; }
         .container { max-width: 1300px; margin: auto; background: white; padding: 40px; border-radius: 20px; box-shadow: 0 10px 30px rgba(0,0,0,0.1); }
-        h1 { text-align: center; color: #2d3436; }
-        img { width: 100%; border-radius: 10px; margin: 20px 0; border: 1px solid #ddd; }
-        .grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(90px, 1fr)); gap: 8px; height: 250px; overflow-y: scroll; background: #f8f9fa; padding: 15px; border-radius: 10px; border: 1px solid #eee; }
-        .c { padding: 10px; text-align: center; font-size: 11px; border: 1px solid #ddd; border-radius: 4px; }
+        img { width: 100%; border-radius: 10px; margin: 20px 0; }
+        .grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(90px, 1fr)); gap: 8px; height: 250px; overflow-y: scroll; background: #f8f9fa; padding: 15px; border-radius: 10px; }
+        .c { padding: 10px; text-align: center; font-size: 11px; border: 1px solid #ddd; }
         .v-1 { background: #ff7675; color: white; } .v0 { background: #dfe6e9; color: #636e72; } .v1 { background: #55efc4; color: #006266; font-weight: bold; }
-        .btn { display: block; width: fit-content; margin: 0 auto 20px; padding: 12px 24px; background: #6c5ce7; color: #fff; text-decoration: none; border-radius: 8px; font-weight: bold; transition: background 0.2s; }
-        .btn:hover { background: #5b4cc4; }
-        .desc { background: #fffbe6; padding: 15px; border-radius: 8px; border: 1px solid #ffe58f; margin-bottom: 20px; font-size: 0.9em; }
+        .btn { display: block; width: fit-content; margin: 0 auto 20px; padding: 12px 24px; background: #6c5ce7; color: #fff; text-decoration: none; border-radius: 8px; font-weight: bold; }
     </style></head><body>
     <div class="container">
-        <h1>Bitcoin: Two Realities, Two Logic Sets</h1>
-        <div class="desc">
-            <strong>Original Reality:</strong> Standard Signal Logic.<br>
-            <strong>Random Reality:</strong> 
-            <b>Peak:</b> Max in 2yr Past/1yr Future (Solid Line).<br>
-            <b>Low:</b> Min Price between two peaks (Dashed Line).
+        <h1>Bitcoin: Forward Stability Reality</h1>
+        <div style="background:#fffbe6; padding:15px; border-radius:8px; border:1px solid #ffe58f; margin-bottom:20px;">
+            <strong>Reality B Stability:</strong> Scanning backwards from Peak, finds the first month where the total return of that month and the next 3 months is < 10%.
         </div>
         <a href="/" class="btn">Generate New Reality</a>
         <img src="data:image/png;base64,{{p}}">
         <h3>Reality A Monthly Vector</h3>
-        <div class="grid">
-            {% for i in v %}<div class="c {% if i.val == -1 %}v-1{% elif i.val == 0 %}v0{% elif i.val == 1 %}v1{% endif %}">{{i.date}}<br><span style="font-size:1.2em;">{{i.val}}</span></div>{% endfor %}
-        </div>
-    </div></body></html>
-    """
+        <div class="grid">{% for i in v %}<div class="c {% if i.val == -1 %}v-1{% elif i.val == 0 %}v0{% elif i.val == 1 %}v1{% endif %}">{{i.date}}<br>{{i.val}}</div>{% endfor %}</div>
+    </div></body></html>"""
     return render_template_string(html, p=p, v=v)
 
 if __name__ == '__main__':
