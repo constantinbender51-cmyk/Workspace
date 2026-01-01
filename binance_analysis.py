@@ -56,21 +56,17 @@ def generate_warped_reality(df):
     daily_stream = []
     
     # 1. Expand and Warp
-    # We iterate through the monthly dataframe.
-    # Each row represents "1 month" of price action.
     for _, row in df.iterrows():
         # Random warp factor between -1 and 1
         warp = random.uniform(-1, 1)
         
         # Base days = 30. Calculate delta.
-        # e.g., 0.1 -> +3 days. -0.2 -> -6 days.
         days_in_month = int(30 + (30 * warp))
         
-        # Safety: Ensure at least 1 day of existence for that price period
+        # Safety: Ensure at least 1 day of existence
         days_in_month = max(1, days_in_month)
         
-        # Create 'days_in_month' identical records
-        # This simulates the price staying in that month's range for longer/shorter
+        # Create identical records for the duration
         for _ in range(days_in_month):
             daily_stream.append({
                 'open': row['open'],
@@ -83,12 +79,10 @@ def generate_warped_reality(df):
     warped_df = pd.DataFrame(daily_stream)
     
     # 3. Assign new Synthetic Timeline
-    # We start from the same start date as the original, but the end date will drift
     start_date = df['time'].iloc[0]
     warped_df['time'] = pd.date_range(start=start_date, periods=len(warped_df), freq='D')
     
     # 4. Resample back to "Monthly" (30-day buckets)
-    # This causes the "bleed" effect where Month 2 might now contain data from Month 1
     warped_df.set_index('time', inplace=True)
     
     warped_monthly = warped_df.resample('30D').agg({
@@ -100,41 +94,39 @@ def generate_warped_reality(df):
     
     return warped_monthly
 
-def create_plot_and_vector(df):
-    if df.empty: return None, []
+def analyze_structure(df):
+    """
+    Applies the Market Structure Logic to any given DataFrame (Actual or Warped).
+    Returns: df (with vector col), high_indices, stability_indices, low_indices
+    """
+    if df.empty: return df, [], [], []
 
-    # --- Generate 3 Alternate Realities ---
-    warped_df_1 = generate_warped_reality(df)
-    warped_df_2 = generate_warped_reality(df)
-    warped_df_3 = generate_warped_reality(df)
-
-    # --- Setup Figure (2 Subplots) ---
-    fig, (ax1, ax2) = plt.subplots(2, 1, figsize=(15, 14), facecolor='#f1f2f6')
-    
-    # === PLOT 1: Original Reality (Vector Analysis) ===
-    ax1.set_facecolor('#e0e0e0') 
-
-    # 1. Identify Key Points
+    # 1. Local Highs (2yr Radius)
+    # Window 49 = ±24 months
     df['h_max'] = df['close'].rolling(window=49, center=True, min_periods=25).max()
     if len(df) > 24: df.loc[df.index[-24:], 'h_max'] = np.inf
     local_high_indices = df[df['close'] == df['h_max']].index.tolist()
 
+    # 2. Pre-Peak Stability Points (50% range, 1mo radius)
     df['range_3m_centered'] = (df['high'].rolling(window=3, center=True).max() - 
                                df['low'].rolling(window=3, center=True).min()) / \
                               df['low'].rolling(window=3, center=True).min()
     
     stability_indices = []
     for peak_idx in local_high_indices:
+        # Look backwards from peak
         for i in range(peak_idx - 1, 1, -1):
             if df.loc[i, 'range_3m_centered'] <= 0.50:
                 stability_indices.append(i)
                 break
     
+    # 3. Local Lows (1yr Radius)
+    # Window 25 = ±12 months
     df['l_min'] = df['low'].rolling(window=25, center=True, min_periods=13).min()
     if len(df) > 12: df.loc[df.index[-12:], 'l_min'] = -1.0
     local_low_indices = df[df['low'] == df['l_min']].index.tolist()
 
-    # 2. Build Vector
+    # 4. Build Vector [-1, 0, 1]
     events = []
     for idx in local_high_indices: events.append((idx, 'HIGH'))
     for idx in stability_indices: events.append((idx, 'STABILITY'))
@@ -146,43 +138,77 @@ def create_plot_and_vector(df):
         curr_idx, curr_type = events[i]
         next_idx, next_type = events[i+1]
         val = np.nan
+        
+        # Vector State Logic
         if curr_type == 'HIGH' and next_type == 'LOW': val = -1
         elif curr_type == 'LOW' and next_type == 'STABILITY': val = 0
         elif curr_type == 'STABILITY' and next_type == 'HIGH': val = 1
+        
         if not np.isnan(val): vector[curr_idx:next_idx] = val
 
     df['vector'] = vector
+    return df, local_high_indices, stability_indices, local_low_indices
 
-    # 3. Draw Plot 1
+def create_plot_and_vector(df):
+    if df.empty: return None, []
+
+    # --- Setup Figure ---
+    fig, (ax1, ax2) = plt.subplots(2, 1, figsize=(15, 16), facecolor='#f1f2f6')
+
+    # ==========================================
+    # PLOT 1: Actual Reality
+    # ==========================================
+    ax1.set_facecolor('#e0e0e0') 
+    
+    # Apply Analysis to Actual Data
+    df, highs, stabs, lows = analyze_structure(df)
+
     ax1.plot(df['time'], df['close'], color='#2f3542', linewidth=2, zorder=3, label='BTC Price (Actual)')
-    ax1.scatter(df.loc[local_high_indices, 'time'], df.loc[local_high_indices, 'close'], 
-               color='#ff4757', s=140, marker='v', edgecolors='black', zorder=5, label='Local High')
-    ax1.scatter(df.loc[stability_indices, 'time'], df.loc[stability_indices, 'close'], 
-               color='#8e44ad', s=130, marker='d', edgecolors='white', zorder=5, label='Stability Point')
-    ax1.scatter(df.loc[local_low_indices, 'time'], df.loc[local_low_indices, 'low'], 
-               color='#2ed573', s=140, marker='^', edgecolors='black', zorder=5, label='Local Low')
+    ax1.scatter(df.loc[highs, 'time'], df.loc[highs, 'close'], color='#ff4757', s=140, marker='v', edgecolors='black', zorder=5, label='Local High')
+    ax1.scatter(df.loc[stabs, 'time'], df.loc[stabs, 'close'], color='#8e44ad', s=130, marker='d', edgecolors='white', zorder=5, label='Stability Point')
+    ax1.scatter(df.loc[lows, 'time'], df.loc[lows, 'low'], color='#2ed573', s=140, marker='^', edgecolors='black', zorder=5, label='Local Low')
 
     ax1.set_yscale('linear')
     ax1.set_title(f"Reality A: Actual Market Structure ({PAIR})", fontsize=16, fontweight='bold')
     ax1.grid(True, which='major', color='white', alpha=0.5, zorder=1)
     ax1.legend(loc='upper left', framealpha=1)
 
-    # === PLOT 2: Time Warped Realities (3 Simulations) ===
+    # ==========================================
+    # PLOT 2: Time Warped Realities (With Analysis)
+    # ==========================================
     ax2.set_facecolor('#dcdde1') 
     
-    # Plot 3 distinct warped simulations
-    ax2.plot(warped_df_1['time'], warped_df_1['close'], color='#2980b9', linewidth=1.2, alpha=0.9, zorder=3, label='Simulation A (Blue)')
-    ax2.plot(warped_df_2['time'], warped_df_2['close'], color='#27ae60', linewidth=1.2, alpha=0.9, zorder=3, label='Simulation B (Green)')
-    ax2.plot(warped_df_3['time'], warped_df_3['close'], color='#c0392b', linewidth=1.2, alpha=0.9, zorder=3, label='Simulation C (Red)')
-    
-    # Style
+    # Simulation 1 (Blue)
+    w1 = generate_warped_reality(df)
+    w1, h1, s1, l1 = analyze_structure(w1)
+    ax2.plot(w1['time'], w1['close'], color='#2980b9', linewidth=1, alpha=0.8, zorder=3, label='Sim A (Blue)')
+    ax2.scatter(w1.loc[h1, 'time'], w1.loc[h1, 'close'], color='#2980b9', s=40, marker='v', edgecolors='black', zorder=4)
+    ax2.scatter(w1.loc[s1, 'time'], w1.loc[s1, 'close'], color='#8e44ad', s=30, marker='d', edgecolors='white', zorder=4)
+    ax2.scatter(w1.loc[l1, 'time'], w1.loc[l1, 'low'], color='#2980b9', s=40, marker='^', edgecolors='black', zorder=4)
+
+    # Simulation 2 (Green)
+    w2 = generate_warped_reality(df)
+    w2, h2, s2, l2 = analyze_structure(w2)
+    ax2.plot(w2['time'], w2['close'], color='#27ae60', linewidth=1, alpha=0.8, zorder=3, label='Sim B (Green)')
+    ax2.scatter(w2.loc[h2, 'time'], w2.loc[h2, 'close'], color='#27ae60', s=40, marker='v', edgecolors='black', zorder=4)
+    ax2.scatter(w2.loc[s2, 'time'], w2.loc[s2, 'close'], color='#8e44ad', s=30, marker='d', edgecolors='white', zorder=4)
+    ax2.scatter(w2.loc[l2, 'time'], w2.loc[l2, 'low'], color='#27ae60', s=40, marker='^', edgecolors='black', zorder=4)
+
+    # Simulation 3 (Red)
+    w3 = generate_warped_reality(df)
+    w3, h3, s3, l3 = analyze_structure(w3)
+    ax2.plot(w3['time'], w3['close'], color='#c0392b', linewidth=1, alpha=0.8, zorder=3, label='Sim C (Red)')
+    ax2.scatter(w3.loc[h3, 'time'], w3.loc[h3, 'close'], color='#c0392b', s=40, marker='v', edgecolors='black', zorder=4)
+    ax2.scatter(w3.loc[s3, 'time'], w3.loc[s3, 'close'], color='#8e44ad', s=30, marker='d', edgecolors='white', zorder=4)
+    ax2.scatter(w3.loc[l3, 'time'], w3.loc[l3, 'low'], color='#c0392b', s=40, marker='^', edgecolors='black', zorder=4)
+
     ax2.set_yscale('linear')
-    ax2.set_title("Reality B: 3 Randomized Time Warp Simulations", fontsize=16, fontweight='bold', color='#444')
+    ax2.set_title("Reality B: 3 Warped Simulations with Assigned Vectors", fontsize=16, fontweight='bold', color='#444')
     ax2.grid(True, which='major', color='white', alpha=0.5, zorder=1)
     ax2.legend(loc='upper left', framealpha=1)
     
-    # Add annotation explaining the warp
-    ax2.text(0.02, 0.95, "Method: 3 independent runs where monthly duration is warped by [-1.0, 1.0].\nLines diverge as random time dilations accumulate.", 
+    # Legend Text
+    ax2.text(0.02, 0.95, "Markers on simulations indicate the assigned vector transitions (High -> Low -> Stability)", 
              transform=ax2.transAxes, fontsize=10, verticalalignment='top', 
              bbox=dict(boxstyle='round', facecolor='white', alpha=0.8))
 
@@ -192,6 +218,7 @@ def create_plot_and_vector(df):
     plt.savefig(buf, format='png', dpi=100)
     plt.close()
     
+    # Extract Vector for Reality A (Actual) to display in grid
     clean_vector = []
     for i, row in df.iterrows():
         v = row['vector']
@@ -214,7 +241,7 @@ def index():
     <!DOCTYPE html>
     <html>
     <head>
-        <title>BTC Time Warp Analysis</title>
+        <title>BTC Vector Analysis</title>
         <style>
             body { font-family: -apple-system, sans-serif; background: #f1f2f6; margin: 0; padding: 20px; color: #2d3436; }
             .container { max-width: 1200px; margin: 0 auto; background: white; padding: 30px; border-radius: 15px; box-shadow: 0 4px 15px rgba(0,0,0,0.05); }
