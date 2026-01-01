@@ -98,7 +98,7 @@ def analyze_structure_new(df):
     NEW LOGIC (For Random Reality):
     1. Peak: 2yr Past / 1yr Future radius.
     2. Low: Lowest price between Peaks.
-    3. Stable: Backscan from Peak for sum(abs(returns)) for month + next 3 months < 20%.
+    3. Stable: Midpoint between a Low and the highest return month before the next Peak.
     """
     if df.empty: return df, [], [], []
     df = df.copy()
@@ -119,32 +119,51 @@ def analyze_structure_new(df):
     if highs:
         for i in range(len(highs)):
             current_peak = highs[i]
-            start_search = current_peak + 1
-            end_search = highs[i+1] if i < len(highs) - 1 else len(df)
+            # Search from start of data if first peak, else previous peak
+            start_search = highs[i-1] + 1 if i > 0 else 0
+            end_search = current_peak
+            
             if start_search < end_search:
                 segment = df.iloc[start_search:end_search]
-                if not segment.empty: lows.append(segment['close'].idxmin())
+                if not segment.empty:
+                    lows.append(segment['close'].idxmin())
 
-    # 3. Stability Detection
-    # Using sum of ABSOLUTE returns for current month + next 3 months
-    df['abs_pct_change'] = df['close'].pct_change().abs().fillna(0)
-    df['abs_sum_forward_4m'] = df['abs_pct_change'].rolling(window=4).sum().shift(-3)
-    
+    # 3. Stability Detection (Midpoint Logic)
+    df['returns'] = df['close'].pct_change().fillna(0)
     stabs = []
-    for p_idx in highs:
-        for i in range(p_idx - 1, -1, -1):
-            if i in df.index:
-                # Stability threshold: Sum of absolute movements < 20% over 4 months (next 4 inclusive)
-                if df.loc[i, 'abs_sum_forward_4m'] < 0.20:
-                    stabs.append(i)
-                    break
+    
+    # We map Low -> Peak pairs
+    for low_idx in lows:
+        # Find the next peak after this low
+        next_peaks = [h for h in highs if h > low_idx]
+        if not next_peaks: continue
+        target_peak = next_peaks[0]
+        
+        # Segment from Low to Peak
+        segment = df.iloc[low_idx:target_peak + 1]
+        if segment.empty: continue
+        
+        # Find the month with the highest return in this segment
+        max_ret_idx = segment['returns'].idxmax()
+        
+        # Midpoint of Price: (Price at Low + Price at High-Return Month) / 2
+        low_price = df.loc[low_idx, 'close']
+        high_ret_price = df.loc[max_ret_idx, 'close']
+        midpoint_price = (low_price + high_ret_price) / 2
+        
+        # Stable signal: the first month in the segment where price crosses/hits this midpoint
+        for idx in range(low_idx, max_ret_idx + 1):
+            if df.loc[idx, 'close'] >= midpoint_price:
+                stabs.append(idx)
+                break
+
     stabs = sorted(list(set(stabs)))
 
     # Encode for plotting
     vector = np.full(len(df), np.nan)
-    for h in highs: vector[h] = -1 # Peak marker
-    for l in lows: vector[l] = -2  # Low marker
-    for s in stabs: vector[s] = -3 # Stable marker
+    for h in highs: vector[h] = -1
+    for l in lows: vector[l] = -2
+    for s in stabs: vector[s] = -3
             
     df['vector'] = vector
     return df, highs, stabs, lows
@@ -195,7 +214,7 @@ def create_plot_and_vector(df):
     ax1.set_title("Reality A: Actual Historical Data", fontweight='bold')
     ax1.legend()
 
-    # Plot 2: Random Reality (Lines instead of Shades)
+    # Plot 2: Random Reality
     ax2.set_facecolor('#f0f0f0') 
     w = generate_warped_reality(df)
     ax2.plot(w['time'], w['close'], color='#2980b9', linewidth=2, label='Sim Price', zorder=4)
@@ -212,7 +231,7 @@ def create_plot_and_vector(df):
     for _, row in stab_rows.iterrows():
         ax2.axvline(x=row['time'], color='black', linestyle=':', linewidth=2.0, alpha=0.9, zorder=3)
 
-    ax2.set_title("Reality B: Random Reality (Absolute Return Forward Stability < 20%)", fontweight='bold')
+    ax2.set_title("Reality B: Random Reality (Midpoint Stability Logic)", fontweight='bold')
     
     from matplotlib.lines import Line2D
     custom_lines = [
@@ -221,7 +240,7 @@ def create_plot_and_vector(df):
         Line2D([0], [0], color='black', lw=1.5, linestyle='--'),
         Line2D([0], [0], color='black', lw=2.0, linestyle=':')
     ]
-    ax2.legend(custom_lines, ['Sim Price', 'Peak (2yr/1yr)', 'Low (Inter-Peak)', 'Stable (abs_sum forward < 20%)'], loc='upper left')
+    ax2.legend(custom_lines, ['Sim Price', 'Peak (2yr/1yr)', 'Low (Inter-Peak)', 'Stable (Midpoint Price Low/Max-Ret)'], loc='upper left')
     ax2.grid(True, alpha=0.3)
 
     plt.tight_layout()
@@ -247,10 +266,11 @@ def index():
         .btn { display: block; width: fit-content; margin: 0 auto 20px; padding: 12px 24px; background: #6c5ce7; color: #fff; text-decoration: none; border-radius: 8px; font-weight: bold; }
     </style></head><body>
     <div class="container">
-        <h1>Bitcoin: Absolute Forward Stability</h1>
+        <h1>Bitcoin: Midpoint Stability Reality</h1>
         <div style="background:#f8f9fa; padding:15px; border-radius:8px; border:1px solid #dee2e6; margin-bottom:20px;">
-            <strong>Reality B Updates:</strong> Background shading removed. Structural points now marked with black lines. 
-            Stability calculation updated to 4-month forward <strong>sum of absolute returns &lt; 20%</strong>.
+            <strong>Stability Rule:</strong> For each expansion (Low to Peak), we find the month with the highest return. 
+            The stability signal is defined as the first point in that expansion where the price crosses the <strong>midpoint</strong> 
+            between the preceding Low and that high-return month.
         </div>
         <a href="/" class="btn">Generate New Reality</a>
         <img src="data:image/png;base64,{{p}}">
