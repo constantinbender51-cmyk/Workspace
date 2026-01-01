@@ -2,7 +2,7 @@ import requests
 import pandas as pd
 import numpy as np
 import matplotlib
-matplotlib.use('Agg')  # Use non-interactive backend for server
+matplotlib.use('Agg')
 import matplotlib.pyplot as plt
 import io
 import base64
@@ -12,195 +12,143 @@ from datetime import datetime
 app = Flask(__name__)
 
 # --- Configuration ---
-PAIR = 'XBTUSD'
-# Kraken Interval: 10080 minutes = 1 week.
-INTERVAL = 10080 
+PAIR = 'XBTUSD' 
+INTERVAL = 10080 # Weekly data for maximum depth
 PORT = 8080
 
 def fetch_kraken_data(pair, interval):
-    """
-    Fetches historical OHLC data from Kraken public API.
-    Uses Weekly interval to get maximum history, then resamples to Monthly.
-    """
+    """Fetches historical weekly OHLC from Kraken and resamples to Monthly."""
     url = "https://api.kraken.com/0/public/OHLC"
-    params = {
-        'pair': pair,
-        'interval': interval
-    }
+    params = {'pair': pair, 'interval': interval}
     
     try:
         response = requests.get(url, params=params)
-        response.raise_for_status()
         data = response.json()
-        
-        if data.get('error'):
-            print(f"Kraken API Error: {data['error']}")
-            return pd.DataFrame()
+        if data.get('error'): return pd.DataFrame()
 
         result_data = data['result']
-        candles_key = [k for k in result_data.keys() if k != 'last'][0]
-        candles = result_data[candles_key]
+        key = [k for k in result_data.keys() if k != 'last'][0]
+        df = pd.DataFrame(result_data[key], columns=['time','open','high','low','close','vwap','vol','count'])
         
-        df = pd.DataFrame(candles, columns=['time', 'open', 'high', 'low', 'close', 'vwap', 'vol', 'count'])
         df['time'] = pd.to_datetime(df['time'], unit='s')
-        numeric_cols = ['open', 'high', 'low', 'close', 'vol']
-        df[numeric_cols] = df[numeric_cols].apply(pd.to_numeric)
+        numeric = ['open','high','low','close']
+        df[numeric] = df[numeric].apply(pd.to_numeric)
         
+        # Resample to Monthly for cleaner structural analysis
         df.set_index('time', inplace=True)
-        df_monthly = df.resample('MS').agg({
-            'open': 'first',
-            'high': 'max',
-            'low': 'min',
-            'close': 'last',
-            'vol': 'sum'
-        })
+        df_m = df.resample('MS').agg({
+            'open': 'first', 'high': 'max', 'low': 'min', 'close': 'last'
+        }).dropna().reset_index()
         
-        df_monthly.dropna(inplace=True)
-        df_monthly.reset_index(inplace=True)
-        
-        return df_monthly
-    except Exception as e:
-        print(f"Error fetching data: {e}")
+        return df_m
+    except:
         return pd.DataFrame()
 
 def create_plot(df):
-    if df.empty:
-        return None
+    if df.empty: return None
 
-    plt.figure(figsize=(14, 7))
-    plt.style.use('bmh')
+    # Setup Figure with a GREY background
+    # We use a linear scale now, which makes the parabolic nature of BTC very evident
+    fig, ax = plt.subplots(figsize=(15, 8), facecolor='#f1f2f6')
     
-    ax = plt.gca()
-    # Set a subtle light gray background for the plotting area 
-    # This makes the "White" spans visible
-    ax.set_facecolor('#f0f2f6')
+    # Explicitly set the plotting area to grey so WHITE spans are visible
+    ax.set_facecolor('#e0e0e0') 
     
-    # Base Plot - Price line
-    plt.plot(df['time'], df['close'], label='Close Price', color='#2c3e50', linewidth=1.8, zorder=3)
-    
-    # --- Pattern 2: Consolidation (30% Range for >= 1 Year) ---
+    # --- Pattern 2: Consolidation (30% Range for 1 Year) ---
     indexer = pd.api.indexers.FixedForwardWindowIndexer(window_size=12)
-    df['rolling_max'] = df['high'].rolling(window=indexer).max()
-    df['rolling_min'] = df['low'].rolling(window=indexer).min()
-    df['range_pct'] = (df['rolling_max'] - df['rolling_min']) / df['rolling_min']
+    df['roll_max'] = df['high'].rolling(window=indexer).max()
+    df['roll_min'] = df['low'].rolling(window=indexer).min()
+    df['range_pct'] = (df['roll_max'] - df['roll_min']) / df['roll_min']
     
-    consolidation_starts = df[df['range_pct'] <= 0.30]
     consolidation_mask = pd.Series(False, index=df.index)
-    
-    for idx in consolidation_starts.index:
+    consolidation_indices = df[df['range_pct'] <= 0.30].index
+
+    for idx in consolidation_indices:
         start_date = df.loc[idx, 'time']
         end_idx = min(idx + 11, len(df) - 1)
         end_date = df.loc[end_idx, 'time']
         consolidation_mask.loc[idx:end_idx] = True
         
-        # Plotting the consolidation span in pure white
-        # zorder=0 ensures it is the bottom-most layer (behind the grid)
-        plt.axvspan(start_date, end_date, color='white', alpha=1.0, zorder=0)
+        # Mark consolidation PURE WHITE
+        ax.axvspan(start_date, end_date, color='white', alpha=1.0, zorder=1)
 
-    # Proxy for Legend
-    plt.axvspan(None, None, color='white', label='Consolidation (White Area)', ec='#ccc')
-
-    # --- Pattern 1: Local High (Close, 2yr radius) ---
-    df['rolling_max_close'] = df['close'].rolling(window=49, center=True, min_periods=25).max()
+    # --- Pattern 1: Local High (2yr Radius) ---
+    df['h_max'] = df['close'].rolling(window=49, center=True, min_periods=25).max()
+    if len(df) > 24: df.loc[df.index[-24:], 'h_max'] = np.inf
     
-    valid_highs = df.copy()
-    if len(valid_highs) > 24:
-        valid_highs.loc[valid_highs.index[-24:], 'rolling_max_close'] = np.inf
+    local_highs = df[df['close'] == df['h_max']]
+    ax.scatter(local_highs['time'], local_highs['close'], color='#ff4757', s=160, marker='v', 
+               edgecolors='black', zorder=5, label='Local High (2yr)')
 
-    local_highs = valid_highs[valid_highs['close'] == valid_highs['rolling_max_close']]
-    plt.scatter(local_highs['time'], local_highs['close'], color='#d63031', s=140, marker='v', zorder=5, edgecolors='white', label='Local High (2yr)')
-
-    # --- Pattern 3: Local Low (Low, 1yr radius, ignoring consolidation) ---
+    # --- Pattern 3: Local Low (1yr Radius, Excluding Consolidation) ---
     df_lows_clean = df.copy()
     df_lows_clean.loc[consolidation_mask, 'low'] = np.inf
+    df_lows_clean['l_min'] = df_lows_clean['low'].rolling(window=25, center=True, min_periods=13).min()
+    if len(df) > 12: df_lows_clean.loc[df_lows_clean.index[-12:], 'l_min'] = -1.0
     
-    df_lows_clean['rolling_min_low'] = df_lows_clean['low'].rolling(window=25, center=True, min_periods=13).min()
-    
-    if len(df_lows_clean) > 12:
-        df_lows_clean.loc[df_lows_clean.index[-12:], 'rolling_min_low'] = -1.0
+    local_lows = df_lows_clean[df_lows_clean['low'] == df_lows_clean['l_min']]
+    ax.scatter(local_lows['time'], local_lows['low'], color='#2ed573', s=160, marker='^', 
+               edgecolors='black', zorder=5, label='Local Low (1yr, Clean)')
 
-    local_lows = df_lows_clean[df_lows_clean['low'] == df_lows_clean['rolling_min_low']]
-    plt.scatter(local_lows['time'], local_lows['low'], color='#00b894', s=140, marker='^', zorder=5, edgecolors='white', label='Local Low (1yr)')
+    # Main Price Line
+    ax.plot(df['time'], df['close'], color='#2f3542', linewidth=2.5, zorder=4, label='BTC Price')
 
-    # Styling
-    plt.title(f'Scientific Market Analysis: {PAIR} (Kraken)', fontsize=18, fontweight='bold', pad=25)
-    plt.xlabel('Year', fontsize=12)
-    plt.ylabel('Price (USD) - Logarithmic Scale', fontsize=12)
-    plt.yscale('log')
-    
-    # Grid customization - keeping it subtle but visible
-    plt.grid(True, which="major", color='#e1e5ea', linestyle='-', alpha=0.8, zorder=1)
-    
-    plt.legend(frameon=True, loc='upper left', facecolor='white', framealpha=0.95, edgecolor='#ddd')
+    # Styling (Linear Scale)
+    ax.set_yscale('linear') # Changed from 'log' to 'linear'
+    ax.set_title(f"Scientific Structural Analysis: {PAIR} (Linear Scale)", fontsize=18, fontweight='bold', pad=20)
+    ax.set_ylabel("Price (USD)", fontsize=12)
+    ax.grid(True, which='major', color='white', linestyle='-', alpha=0.4, zorder=2)
+    ax.legend(facecolor='white', framealpha=1, loc='upper left')
+
+    # Adjust layout to fit everything
     plt.tight_layout()
 
-    img = io.BytesIO()
-    plt.savefig(img, format='png', dpi=110)
-    img.seek(0)
-    plot_url = base64.b64encode(img.getvalue()).decode()
+    # Convert to image
+    buf = io.BytesIO()
+    plt.savefig(buf, format='png', dpi=100)
     plt.close()
-    return plot_url
+    return base64.b64encode(buf.getvalue()).decode()
 
 @app.route('/')
-def home():
+def index():
     df = fetch_kraken_data(PAIR, INTERVAL)
-    plot_url = create_plot(df)
+    plot = create_plot(df)
     
-    current_price = f"${df['close'].iloc[-1]:,.2f}" if not df.empty else "N/A"
-    ath = f"${df['high'].max():,.2f}" if not df.empty else "N/A"
-    start_date = df['time'].iloc[0].strftime('%Y-%m-%d') if not df.empty else "N/A"
-
-    html_template = """
+    current = f"${df['close'].iloc[-1]:,.2f}" if not df.empty else "N/A"
+    
+    html = f"""
     <!DOCTYPE html>
     <html>
     <head>
-        <title>Kraken Market Analysis</title>
-        <meta name="viewport" content="width=device-width, initial-scale=1">
+        <title>Kraken Linear Chart</title>
         <style>
-            body { font-family: 'Inter', -apple-system, sans-serif; margin: 0; padding: 20px; background-color: #f1f2f6; color: #2f3542; }
-            .container { max-width: 1300px; margin: 0 auto; background: white; padding: 40px; border-radius: 16px; box-shadow: 0 4px 20px rgba(0,0,0,0.08); }
-            .header-info { display: flex; justify-content: center; gap: 20px; margin-bottom: 30px; }
-            .stat-box { background: #fff; padding: 15px 30px; border-radius: 10px; text-align: center; border: 1px solid #eef; box-shadow: 0 2px 5px rgba(0,0,0,0.02); }
-            .stat-label { font-size: 0.75rem; color: #747d8c; text-transform: uppercase; margin-bottom: 5px; font-weight: 600; }
-            .stat-value { font-size: 1.25rem; font-weight: 700; color: #2f3542; }
-            .chart-frame { text-align: center; background: #fafafa; border-radius: 8px; padding: 10px; border: 1px solid #eee; }
-            img { max-width: 100%; height: auto; border-radius: 4px; }
-            .legend-panel { margin-top: 30px; padding: 20px; background: #f8f9fa; border-radius: 10px; border-left: 5px solid #3498db; }
-            .legend-item { margin-bottom: 8px; font-size: 0.95rem; display: flex; align-items: center; }
-            .color-box { width: 14px; height: 14px; display: inline-block; margin-right: 10px; border-radius: 3px; border: 1px solid #ccc; }
+            body {{ font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; background: #f1f2f6; text-align: center; margin: 0; padding: 40px; }}
+            .container {{ background: white; display: inline-block; padding: 30px; border-radius: 20px; box-shadow: 0 10px 30px rgba(0,0,0,0.05); }}
+            h1 {{ color: #2f3542; margin-bottom: 5px; }}
+            .price-tag {{ font-size: 24px; font-weight: bold; color: #57606f; margin-bottom: 25px; }}
+            .legend-box {{ text-align: left; margin: 30px auto 0; max-width: 900px; background: #fafafa; padding: 20px; border-radius: 12px; border: 1px solid #eee; }}
+            .item {{ margin: 10px 0; display: flex; align-items: center; }}
+            .box {{ width: 16px; height: 16px; margin-right: 12px; border-radius: 3px; border: 1px solid #ccc; }}
         </style>
     </head>
     <body>
         <div class="container">
-            <h1 style="text-align:center; margin-bottom: 10px;">Market Structure & Pattern Analysis</h1>
-            <p style="text-align:center; color: #747d8c; margin-bottom: 30px;">Instrument: Kraken {{ symbol }} (Monthly Resolution)</p>
+            <h1>Bitcoin Market Structure</h1>
+            <div class="price-tag">Current: {current}</div>
+            <img src="data:image/png;base64,{plot}">
             
-            <div class="header-info">
-                <div class="stat-box"><div class="stat-label">Price</div><div class="stat-value">{{ current }}</div></div>
-                <div class="stat-box"><div class="stat-label">ATH</div><div class="stat-value">{{ ath }}</div></div>
-                <div class="stat-box"><div class="stat-label">Active Since</div><div class="stat-value">{{ start }}</div></div>
-            </div>
-
-            <div class="chart-frame">
-                {% if plot_url %}
-                    <img src="data:image/png;base64,{{ plot_url }}" alt="BTC Market Chart">
-                {% else %}
-                    <p style="padding: 50px;">Connection Error: Unable to fetch market data from Kraken.</p>
-                {% endif %}
-            </div>
-
-            <div class="legend-panel">
-                <h3 style="margin-top:0">Analysis Details</h3>
-                <div class="legend-item"><span class="color-box" style="background:#d63031"></span> <strong>Local High:</strong> Highest close within a 2-year forward/backward radius.</div>
-                <div class="legend-item"><span class="color-box" style="background:#00b894"></span> <strong>Local Low:</strong> Lowest low within a 1-year forward/backward radius (excluding consolidations).</div>
-                <div class="legend-item"><span class="color-box" style="background:white"></span> <strong>Consolidation:</strong> Periods where the 1-year price range was &lt; 30% (Lows ignored here).</div>
+            <div class="legend-box">
+                <strong>Analysis Guide:</strong>
+                <div class="item"><span class="box" style="background:#ff4757"></span> <b>Local High:</b> Highest Monthly Close within ±2 years.</div>
+                <div class="item"><span class="box" style="background:#2ed573"></span> <b>Local Low:</b> Lowest Monthly Low within ±1 year (skipping consolidation).</div>
+                <div class="item"><span class="box" style="background:white"></span> <b>White Span:</b> Price stayed within a 30% range for 1 year+.</div>
             </div>
         </div>
     </body>
     </html>
     """
-    return render_template_string(html_template, plot_url=plot_url, symbol=PAIR, current=current_price, ath=ath, start=start_date)
+    return html
 
 if __name__ == '__main__':
-    print("Server launching on port 8080...")
+    print(f"Starting Linear Pattern Server on port {PORT}...")
     app.run(host='0.0.0.0', port=PORT)
