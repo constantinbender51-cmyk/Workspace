@@ -13,7 +13,7 @@ app = Flask(__name__)
 
 # --- Configuration ---
 PAIR = 'XBTUSD'
-# Kraken Interval: 10080 minutes = 1 week. 
+# Kraken Interval: 10080 minutes = 1 week.
 INTERVAL = 10080 
 PORT = 8080
 
@@ -70,8 +70,13 @@ def create_plot(df):
     plt.figure(figsize=(14, 7))
     plt.style.use('bmh')
     
-    # Base Plot
-    plt.plot(df['time'], df['close'], label='Close Price', color='#2c3e50', linewidth=1.5, zorder=3)
+    ax = plt.gca()
+    # Set a subtle light gray background for the plotting area 
+    # This makes the "White" spans visible
+    ax.set_facecolor('#f0f2f6')
+    
+    # Base Plot - Price line
+    plt.plot(df['time'], df['close'], label='Close Price', color='#2c3e50', linewidth=1.8, zorder=3)
     
     # --- Pattern 2: Consolidation (30% Range for >= 1 Year) ---
     indexer = pd.api.indexers.FixedForwardWindowIndexer(window_size=12)
@@ -87,10 +92,13 @@ def create_plot(df):
         end_idx = min(idx + 11, len(df) - 1)
         end_date = df.loc[end_idx, 'time']
         consolidation_mask.loc[idx:end_idx] = True
-        # Changed highlight color to white
-        plt.axvspan(start_date, end_date, color='white', alpha=0.5, zorder=1, edgecolor=None)
+        
+        # Plotting the consolidation span in pure white
+        # zorder=0 ensures it is the bottom-most layer (behind the grid)
+        plt.axvspan(start_date, end_date, color='white', alpha=1.0, zorder=0)
 
-    plt.plot([], [], color='white', alpha=0.5, linewidth=10, label='Consolidation Area')
+    # Proxy for Legend
+    plt.axvspan(None, None, color='white', label='Consolidation (White Area)', ec='#ccc')
 
     # --- Pattern 1: Local High (Close, 2yr radius) ---
     df['rolling_max_close'] = df['close'].rolling(window=49, center=True, min_periods=25).max()
@@ -100,7 +108,7 @@ def create_plot(df):
         valid_highs.loc[valid_highs.index[-24:], 'rolling_max_close'] = np.inf
 
     local_highs = valid_highs[valid_highs['close'] == valid_highs['rolling_max_close']]
-    plt.scatter(local_highs['time'], local_highs['close'], color='#d63031', s=120, marker='v', zorder=5, edgecolors='white', label='Local High (2yr)')
+    plt.scatter(local_highs['time'], local_highs['close'], color='#d63031', s=140, marker='v', zorder=5, edgecolors='white', label='Local High (2yr)')
 
     # --- Pattern 3: Local Low (Low, 1yr radius, ignoring consolidation) ---
     df_lows_clean = df.copy()
@@ -112,19 +120,22 @@ def create_plot(df):
         df_lows_clean.loc[df_lows_clean.index[-12:], 'rolling_min_low'] = -1.0
 
     local_lows = df_lows_clean[df_lows_clean['low'] == df_lows_clean['rolling_min_low']]
-    plt.scatter(local_lows['time'], local_lows['low'], color='#00b894', s=120, marker='^', zorder=5, edgecolors='white', label='Local Low (1yr)')
+    plt.scatter(local_lows['time'], local_lows['low'], color='#00b894', s=140, marker='^', zorder=5, edgecolors='white', label='Local Low (1yr)')
 
     # Styling
-    plt.title(f'Market Structure Analysis: {PAIR} (Kraken)', fontsize=16, fontweight='bold', pad=20)
+    plt.title(f'Scientific Market Analysis: {PAIR} (Kraken)', fontsize=18, fontweight='bold', pad=25)
     plt.xlabel('Year', fontsize=12)
-    plt.ylabel('Price (USD) - Log Scale', fontsize=12)
+    plt.ylabel('Price (USD) - Logarithmic Scale', fontsize=12)
     plt.yscale('log')
-    plt.grid(True, which="major", color='#dcdde1', linestyle='-')
-    plt.legend(frameon=True, loc='upper left', facecolor='white', framealpha=0.9)
+    
+    # Grid customization - keeping it subtle but visible
+    plt.grid(True, which="major", color='#e1e5ea', linestyle='-', alpha=0.8, zorder=1)
+    
+    plt.legend(frameon=True, loc='upper left', facecolor='white', framealpha=0.95, edgecolor='#ddd')
     plt.tight_layout()
 
     img = io.BytesIO()
-    plt.savefig(img, format='png', dpi=100)
+    plt.savefig(img, format='png', dpi=110)
     img.seek(0)
     plot_url = base64.b64encode(img.getvalue()).decode()
     plt.close()
@@ -146,36 +157,50 @@ def home():
         <title>Kraken Market Analysis</title>
         <meta name="viewport" content="width=device-width, initial-scale=1">
         <style>
-            body { font-family: system-ui; margin: 0; padding: 20px; background-color: #f1f2f6; color: #2f3542; }
-            .container { max-width: 1200px; margin: 0 auto; background: white; padding: 30px; border-radius: 12px; box-shadow: 0 4px 6px rgba(0,0,0,0.1); }
-            .stats { display: flex; justify-content: center; gap: 20px; margin-bottom: 20px; }
-            .stat-box { background: #f8f9fa; padding: 10px 20px; border-radius: 8px; text-align: center; border-bottom: 3px solid #3498db; }
+            body { font-family: 'Inter', -apple-system, sans-serif; margin: 0; padding: 20px; background-color: #f1f2f6; color: #2f3542; }
+            .container { max-width: 1300px; margin: 0 auto; background: white; padding: 40px; border-radius: 16px; box-shadow: 0 4px 20px rgba(0,0,0,0.08); }
+            .header-info { display: flex; justify-content: center; gap: 20px; margin-bottom: 30px; }
+            .stat-box { background: #fff; padding: 15px 30px; border-radius: 10px; text-align: center; border: 1px solid #eef; box-shadow: 0 2px 5px rgba(0,0,0,0.02); }
+            .stat-label { font-size: 0.75rem; color: #747d8c; text-transform: uppercase; margin-bottom: 5px; font-weight: 600; }
+            .stat-value { font-size: 1.25rem; font-weight: 700; color: #2f3542; }
+            .chart-frame { text-align: center; background: #fafafa; border-radius: 8px; padding: 10px; border: 1px solid #eee; }
             img { max-width: 100%; height: auto; border-radius: 4px; }
-            .legend { font-size: 0.85em; margin-top: 20px; padding: 15px; background: #fffbe6; border-radius: 6px; }
+            .legend-panel { margin-top: 30px; padding: 20px; background: #f8f9fa; border-radius: 10px; border-left: 5px solid #3498db; }
+            .legend-item { margin-bottom: 8px; font-size: 0.95rem; display: flex; align-items: center; }
+            .color-box { width: 14px; height: 14px; display: inline-block; margin-right: 10px; border-radius: 3px; border: 1px solid #ccc; }
         </style>
     </head>
     <body>
         <div class="container">
-            <h1 style="text-align:center">Kraken Market Structure</h1>
-            <div class="stats">
-                <div class="stat-box"><strong>Price:</strong> {{ current }}</div>
-                <div class="stat-box"><strong>ATH:</strong> {{ ath }}</div>
-                <div class="stat-box"><strong>Since:</strong> {{ start }}</div>
+            <h1 style="text-align:center; margin-bottom: 10px;">Market Structure & Pattern Analysis</h1>
+            <p style="text-align:center; color: #747d8c; margin-bottom: 30px;">Instrument: Kraken {{ symbol }} (Monthly Resolution)</p>
+            
+            <div class="header-info">
+                <div class="stat-box"><div class="stat-label">Price</div><div class="stat-value">{{ current }}</div></div>
+                <div class="stat-box"><div class="stat-label">ATH</div><div class="stat-value">{{ ath }}</div></div>
+                <div class="stat-box"><div class="stat-label">Active Since</div><div class="stat-value">{{ start }}</div></div>
             </div>
-            <div style="text-align:center">
-                {% if plot_url %}<img src="data:image/png;base64,{{ plot_url }}">{% endif %}
+
+            <div class="chart-frame">
+                {% if plot_url %}
+                    <img src="data:image/png;base64,{{ plot_url }}" alt="BTC Market Chart">
+                {% else %}
+                    <p style="padding: 50px;">Connection Error: Unable to fetch market data from Kraken.</p>
+                {% endif %}
             </div>
-            <div class="legend">
-                <strong>Markers:</strong><br>
-                - <span style="color:#d63031">▼ Red:</span> Local Close High (2-year radius)<br>
-                - <span style="color:#00b894">▲ Green:</span> Local Low (1-year radius, excludes consolidation zones)<br>
-                - <span style="background:white; border: 1px solid #ccc; padding: 0 4px;">■ White:</span> 30% Price Range Consolidation (min 1-year duration)
+
+            <div class="legend-panel">
+                <h3 style="margin-top:0">Analysis Details</h3>
+                <div class="legend-item"><span class="color-box" style="background:#d63031"></span> <strong>Local High:</strong> Highest close within a 2-year forward/backward radius.</div>
+                <div class="legend-item"><span class="color-box" style="background:#00b894"></span> <strong>Local Low:</strong> Lowest low within a 1-year forward/backward radius (excluding consolidations).</div>
+                <div class="legend-item"><span class="color-box" style="background:white"></span> <strong>Consolidation:</strong> Periods where the 1-year price range was &lt; 30% (Lows ignored here).</div>
             </div>
         </div>
     </body>
     </html>
     """
-    return render_template_string(html_template, plot_url=plot_url, current=current_price, ath=ath, start=start_date)
+    return render_template_string(html_template, plot_url=plot_url, symbol=PAIR, current=current_price, ath=ath, start=start_date)
 
 if __name__ == '__main__':
+    print("Server launching on port 8080...")
     app.run(host='0.0.0.0', port=PORT)
