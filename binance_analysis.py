@@ -65,16 +65,24 @@ def create_plot(df):
     # Plot Close Price
     plt.plot(df['open_time'], df['close'], label='Close Price', color='#2c3e50', linewidth=2)
     
-    # --- Local Close Maxima Logic (1 Year Radius) ---
+    # --- Local Close Maxima Logic (2 Year Radius) ---
     
-    # We want to find months where Close is the highest within a 1-year radius.
-    # Radius of 1 year = 12 months before + 12 months after.
-    # Window size = 12 + 1 (current) + 12 = 25 months.
-    df['rolling_close_max'] = df['close'].rolling(window=25, center=True).max()
+    # We want to find months where Close is the highest within a 2-year radius.
+    # Radius of 2 years = 24 months before + 24 months after.
+    # Window size = 24 + 1 (current) + 24 = 49 months.
+    
+    # min_periods=25 allows the calculation to start immediately at the beginning of the data
+    # (checking the current month vs the next 24 months). 
+    # This effectively satisfies the condition "assume price before our data was always 0".
+    df['rolling_close_max'] = df['close'].rolling(window=49, center=True, min_periods=25).max()
+    
+    # IMPORTANT: min_periods will also calculate a max for the END of the dataframe 
+    # (ignoring the missing future). We must strictly invalidate the last 24 months 
+    # because we cannot know if those prices are local maxima without seeing the future.
+    if len(df) > 24:
+        df.loc[df.index[-24:], 'rolling_close_max'] = -1.0
     
     # Filter: It is a local peak if the Close equals the rolling max.
-    # Note: This logic naturally leaves out the first 12 and last 12 months of the dataset
-    # because the rolling window cannot be fully satisfied (radius extends into non-existent data).
     local_peaks = df[df['close'] == df['rolling_close_max']]
 
     # Plot markers for these peaks
@@ -88,7 +96,7 @@ def create_plot(df):
             edgecolors='black', 
             linewidth=0.5, 
             zorder=5, 
-            label='1-Year Radius Max'
+            label='2-Year Radius Max'
         )
 
     # Configuration for Scientific Look
