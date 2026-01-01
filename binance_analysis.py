@@ -49,7 +49,7 @@ def fetch_kraken_data(pair, interval):
 def analyze_structure(df):
     """
     Applies the Market Structure Logic.
-    Values: -1 (Correction), 0 (Accumulation), 1 (Expansion), 2 (Undefined)
+    Values: -1 (Correction), 0 (Accumulation), 1 (Expansion).
     """
     if df.empty: return df, [], [], []
     df = df.copy()
@@ -79,30 +79,33 @@ def analyze_structure(df):
     # 4. Vector generation
     events = sorted([(i, 'H') for i in highs] + [(i, 'S') for i in stabs] + [(i, 'L') for i in lows])
     
-    # Initialize with 2 (Undefined)
-    vector = np.full(len(df), 2.0)
+    # Initialize with NaN
+    vector = np.full(len(df), np.nan)
     
     # Fill between known events
     for i in range(len(events) - 1):
         idx, t = events[i]
         n_idx, n_t = events[i+1]
         
-        val = 2 # Default to Undefined
+        val = np.nan
         if t == 'H' and n_t == 'L': val = -1
         elif t == 'L' and n_t == 'S': val = 0
         elif t == 'S' and n_t == 'H': val = 1
         
         # Fill the range
-        vector[idx:n_idx] = val
+        if not np.isnan(val):
+            vector[idx:n_idx] = val
 
     # Fill tail (from last event to end)
     if events:
         last_idx, last_type = events[-1]
-        last_val = 2
+        last_val = np.nan
         if last_type == 'H': last_val = -1
         elif last_type == 'L': last_val = 0
         elif last_type == 'S': last_val = 1
-        vector[last_idx:] = last_val
+        
+        if not np.isnan(last_val):
+            vector[last_idx:] = last_val
             
     df['vector'] = vector
     return df, highs, stabs, lows
@@ -118,14 +121,14 @@ def generate_warped_reality(df):
     
     daily_stream = []
     
-    # --- Step 1: Time Warp Expansion ---
+    # --- Step 1: Time Warp Expansion (Carrying Vector) ---
     for _, row in df.iterrows():
         time_warp = random.uniform(-1, 1)
         days_in_month = int(30 + (30 * time_warp))
         days_in_month = max(1, days_in_month)
         
         # Propagate signal
-        current_vector = row['vector'] if 'vector' in row else 2.0
+        current_vector = row['vector'] if 'vector' in row else np.nan
         
         for _ in range(days_in_month):
             daily_stream.append({
@@ -133,7 +136,7 @@ def generate_warped_reality(df):
                 'high': row['high'], 
                 'low': row['low'], 
                 'close': row['close'],
-                'vector': current_vector
+                'vector': current_vector # Carry signal
             })
             
     warped_df = pd.DataFrame(daily_stream)
@@ -146,7 +149,7 @@ def generate_warped_reality(df):
     # Resample back to 30D buckets
     warped_monthly = warped_df.resample('30D').agg({
         'open': 'first', 'high': 'max', 'low': 'min', 'close': 'last',
-        'vector': 'first' # Use first value to maintain start-of-month state
+        'vector': 'first' 
     }).dropna().reset_index()
 
     # --- Step 2: Persistent Return Randomization ---
@@ -197,27 +200,20 @@ def create_plot_and_vector(df):
     ax1.legend(loc='upper left')
     ax1.grid(True, alpha=0.3)
 
-    # --- PLOT 2: Alternate Reality (Fixed Gaps) ---
+    # --- PLOT 2: Alternate Reality ---
     ax2.set_facecolor('#f0f0f0') 
     
     w = generate_warped_reality(df)
     
-    # Plot Price
     ax2.plot(w['time'], w['close'], color='#2980b9', linewidth=2, alpha=1.0, label='Simulation Alpha', zorder=5)
 
-    # --- Background Coloring Logic (Fixing Gaps) ---
-    # We iterate indices rather than groups to ensure full coverage
-    
-    # Create segments based on vector changes
+    # --- Background Coloring Logic ---
     w['group'] = (w['vector'] != w['vector'].shift()).cumsum()
     
-    # Get the time of the *next* row to fill the gap
-    # We create a 'next_time' column
+    # Calculate next_time for gapless plotting
     w['next_time'] = w['time'].shift(-1)
-    # Fill the last next_time with a dummy delta (e.g. +30 days)
     w.loc[w.index[-1], 'next_time'] = w.loc[w.index[-1], 'time'] + timedelta(days=30)
 
-    # Aggregate start and end times for each group
     groups = w.groupby('group').agg({
         'time': 'first',
         'next_time': 'last',
@@ -226,20 +222,20 @@ def create_plot_and_vector(df):
 
     for _, row in groups.iterrows():
         state = row['vector']
-        start_t = row['time']
-        end_t = row['next_time'] # Connects to start of next block
-        
-        face_color = None
-        if state == 1:   face_color = '#d4edda' # Green
-        elif state == -1: face_color = '#f8d7da' # Red
-        elif state == 0:  face_color = '#e2e3e5' # Grey
-        elif state == 2:  face_color = '#fff3cd' # Yellow (Undefined)
-        
-        if face_color:
-            ax2.axvspan(start_t, end_t, color=face_color, alpha=0.6, zorder=1)
+        if not np.isnan(state): # Ignore initial NaNs
+            start_t = row['time']
+            end_t = row['next_time']
+            
+            face_color = None
+            if state == 1:   face_color = '#d4edda' # Green
+            elif state == -1: face_color = '#f8d7da' # Red
+            elif state == 0:  face_color = '#e2e3e5' # Grey
+            
+            if face_color:
+                ax2.axvspan(start_t, end_t, color=face_color, alpha=0.6, zorder=1)
 
     ax2.set_yscale('linear')
-    ax2.set_title("Reality B: Persistent Drift (Seamless Signal Mapping)", fontsize=16, fontweight='bold')
+    ax2.set_title("Reality B: Persistent Return Drift", fontsize=16, fontweight='bold')
     ax2.set_ylabel("Price (USD)")
     
     from matplotlib.patches import Patch
@@ -247,8 +243,7 @@ def create_plot_and_vector(df):
         plt.Line2D([0], [0], color='#2980b9', lw=2, label='Sim Price'),
         Patch(facecolor='#d4edda', edgecolor='#c3e6cb', label='Expansion (+1)'),
         Patch(facecolor='#f8d7da', edgecolor='#f5c6cb', label='Correction (-1)'),
-        Patch(facecolor='#e2e3e5', edgecolor='#d6d8db', label='Accumulation (0)'),
-        Patch(facecolor='#fff3cd', edgecolor='#ffeeba', label='Undefined (2)')
+        Patch(facecolor='#e2e3e5', edgecolor='#d6d8db', label='Accumulation (0)')
     ]
     ax2.legend(handles=legend_elements, loc='upper left')
     ax2.grid(True, alpha=0.3, zorder=2)
@@ -258,7 +253,7 @@ def create_plot_and_vector(df):
     plt.savefig(buf, format='png', dpi=110)
     plt.close()
     
-    clean_v = [{"date": r['time'].strftime('%Y-%m'), "val": int(r['vector'])} for i, r in df.iterrows()]
+    clean_v = [{"date": r['time'].strftime('%Y-%m'), "val": "N/A" if np.isnan(r['vector']) else int(r['vector'])} for i, r in df.iterrows()]
     return base64.b64encode(buf.getvalue()).decode(), clean_v
 
 @app.route('/')
@@ -277,7 +272,6 @@ def index():
         .grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(90px, 1fr)); gap: 8px; height: 250px; overflow-y: scroll; background: #f8f9fa; padding: 15px; border-radius: 10px; border: 1px solid #eee; }
         .c { padding: 10px; text-align: center; font-size: 11px; border: 1px solid #ddd; border-radius: 4px; }
         .v-1 { background: #ff7675; color: white; } .v0 { background: #dfe6e9; color: #636e72; } .v1 { background: #55efc4; color: #006266; font-weight: bold; }
-        .v2 { background: #ffeaa7; color: #d35400; border-color: #fdcb6e; }
         .btn { display: block; width: fit-content; margin: 0 auto 20px; padding: 12px 24px; background: #6c5ce7; color: #fff; text-decoration: none; border-radius: 8px; font-weight: bold; transition: background 0.2s; }
         .btn:hover { background: #5b4cc4; }
         .desc { background: #fffbe6; padding: 15px; border-radius: 8px; border: 1px solid #ffe58f; margin-bottom: 20px; font-size: 0.9em; }
@@ -288,14 +282,13 @@ def index():
             <strong>Signal Legend:</strong><br>
             <span style="background:#d4edda; padding:2px 5px">Green (+1)</span> Expansion | 
             <span style="background:#f8d7da; padding:2px 5px">Red (-1)</span> Correction | 
-            <span style="background:#e2e3e5; padding:2px 5px">Grey (0)</span> Accumulation |
-            <span style="background:#fff3cd; padding:2px 5px">Yellow (2)</span> Undefined
+            <span style="background:#e2e3e5; padding:2px 5px">Grey (0)</span> Accumulation
         </div>
         <a href="/" class="btn">Generate New Reality</a>
         <img src="data:image/png;base64,{{p}}">
         <h3>Reality A Monthly Vector</h3>
         <div class="grid">
-            {% for i in v %}<div class="c {% if i.val == -1 %}v-1{% elif i.val == 0 %}v0{% elif i.val == 1 %}v1{% elif i.val == 2 %}v2{% endif %}">{{i.date}}<br><span style="font-size:1.2em;">{{i.val}}</span></div>{% endfor %}
+            {% for i in v %}<div class="c {% if i.val == -1 %}v-1{% elif i.val == 0 %}v0{% elif i.val == 1 %}v1{% endif %}">{{i.date}}<br><span style="font-size:1.2em;">{{i.val}}</span></div>{% endfor %}
         </div>
     </div></body></html>
     """
