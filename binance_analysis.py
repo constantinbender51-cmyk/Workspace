@@ -48,8 +48,7 @@ def fetch_kraken_data(pair, interval):
 
 def analyze_structure(df):
     """
-    Applies the Market Structure Logic.
-    Values: -1 (Correction), 0 (Accumulation), 1 (Expansion).
+    Applies Market Structure Logic using a STATE MACHINE to ensure no gaps.
     """
     if df.empty: return df, [], [], []
     df = df.copy()
@@ -66,7 +65,7 @@ def analyze_structure(df):
     
     stabs = []
     for p in highs:
-        # Search backwards from peak
+        # Search backwards from peak for closest stability
         for i in range(p - 1, 1, -1):
             if i in df.index and df.loc[i, 'range_3m_centered'] <= 0.50:
                 stabs.append(i); break
@@ -76,36 +75,28 @@ def analyze_structure(df):
     if len(df) > 12: df.loc[df.index[-12:], 'l_min'] = -1.0
     lows = df[df['low'] == df['l_min']].index.tolist()
 
-    # 4. Vector generation
+    # 4. State Machine Vector Generation
+    # Combine all events into a time-sorted line
     events = sorted([(i, 'H') for i in highs] + [(i, 'S') for i in stabs] + [(i, 'L') for i in lows])
     
-    # Initialize with NaN
     vector = np.full(len(df), np.nan)
     
-    # Fill between known events
-    for i in range(len(events) - 1):
-        idx, t = events[i]
-        n_idx, n_t = events[i+1]
-        
-        val = np.nan
-        if t == 'H' and n_t == 'L': val = -1
-        elif t == 'L' and n_t == 'S': val = 0
-        elif t == 'S' and n_t == 'H': val = 1
-        
-        # Fill the range
-        if not np.isnan(val):
-            vector[idx:n_idx] = val
-
-    # Fill tail (from last event to end)
-    if events:
-        last_idx, last_type = events[-1]
-        last_val = np.nan
-        if last_type == 'H': last_val = -1
-        elif last_type == 'L': last_val = 0
-        elif last_type == 'S': last_val = 1
-        
-        if not np.isnan(last_val):
-            vector[last_idx:] = last_val
+    # Current State Tracker: Defaults to NaN until first event
+    current_state = np.nan
+    
+    # Iterate through every month in the dataframe
+    event_map = dict(events) # Map index -> Event Type
+    
+    for i in range(len(df)):
+        # Check if an event happens this month
+        if i in event_map:
+            etype = event_map[i]
+            if etype == 'H': current_state = -1 # Peak hit -> Start Correction
+            elif etype == 'L': current_state = 0 # Low hit -> Start Accumulation
+            elif etype == 'S': current_state = 1 # Stability hit -> Start Expansion
+            
+        # Assign state
+        vector[i] = current_state
             
     df['vector'] = vector
     return df, highs, stabs, lows
@@ -115,14 +106,13 @@ def generate_warped_reality(df):
     Creates an alternate reality by:
     1. Time Warp: Expanding/contracting month duration.
     2. Propagating the 'vector' signal.
-    3. Persistent Return Warp: Modifying prices.
     """
     if df.empty: return pd.DataFrame()
     
     daily_stream = []
     
-    # --- Step 1: Time Warp Expansion (Carrying Vector) ---
     for _, row in df.iterrows():
+        # Time Warp
         time_warp = random.uniform(-1, 1)
         days_in_month = int(30 + (30 * time_warp))
         days_in_month = max(1, days_in_month)
@@ -136,7 +126,7 @@ def generate_warped_reality(df):
                 'high': row['high'], 
                 'low': row['low'], 
                 'close': row['close'],
-                'vector': current_vector # Carry signal
+                'vector': current_vector 
             })
             
     warped_df = pd.DataFrame(daily_stream)
@@ -146,13 +136,13 @@ def generate_warped_reality(df):
     warped_df['time'] = pd.date_range(start=start_date, periods=len(warped_df), freq='D')
     warped_df.set_index('time', inplace=True)
     
-    # Resample back to 30D buckets
+    # Resample
     warped_monthly = warped_df.resample('30D').agg({
         'open': 'first', 'high': 'max', 'low': 'min', 'close': 'last',
         'vector': 'first' 
     }).dropna().reset_index()
 
-    # --- Step 2: Persistent Return Randomization ---
+    # Persistent Return Randomization
     original_returns = warped_monthly['close'].pct_change().fillna(0)
     log_multiplier = 0.0 
     new_prices = [warped_monthly['close'].iloc[0]]
@@ -202,15 +192,13 @@ def create_plot_and_vector(df):
 
     # --- PLOT 2: Alternate Reality ---
     ax2.set_facecolor('#f0f0f0') 
-    
     w = generate_warped_reality(df)
     
+    # Plot Price
     ax2.plot(w['time'], w['close'], color='#2980b9', linewidth=2, alpha=1.0, label='Simulation Alpha', zorder=5)
 
-    # --- Background Coloring Logic ---
+    # Background Coloring (State Machine Logic)
     w['group'] = (w['vector'] != w['vector'].shift()).cumsum()
-    
-    # Calculate next_time for gapless plotting
     w['next_time'] = w['time'].shift(-1)
     w.loc[w.index[-1], 'next_time'] = w.loc[w.index[-1], 'time'] + timedelta(days=30)
 
@@ -222,20 +210,17 @@ def create_plot_and_vector(df):
 
     for _, row in groups.iterrows():
         state = row['vector']
-        if not np.isnan(state): # Ignore initial NaNs
-            start_t = row['time']
-            end_t = row['next_time']
-            
+        if not np.isnan(state): 
             face_color = None
             if state == 1:   face_color = '#d4edda' # Green
             elif state == -1: face_color = '#f8d7da' # Red
             elif state == 0:  face_color = '#e2e3e5' # Grey
             
             if face_color:
-                ax2.axvspan(start_t, end_t, color=face_color, alpha=0.6, zorder=1)
+                ax2.axvspan(row['time'], row['next_time'], color=face_color, alpha=0.6, zorder=1)
 
     ax2.set_yscale('linear')
-    ax2.set_title("Reality B: Persistent Return Drift", fontsize=16, fontweight='bold')
+    ax2.set_title("Reality B: Persistent Return Drift (Corrected State Machine)", fontsize=16, fontweight='bold')
     ax2.set_ylabel("Price (USD)")
     
     from matplotlib.patches import Patch
@@ -277,7 +262,7 @@ def index():
         .desc { background: #fffbe6; padding: 15px; border-radius: 8px; border: 1px solid #ffe58f; margin-bottom: 20px; font-size: 0.9em; }
     </style></head><body>
     <div class="container">
-        <h1>Bitcoin: Seamless Signal Warp</h1>
+        <h1>Bitcoin: Seamless Signal Warp (Corrected)</h1>
         <div class="desc">
             <strong>Signal Legend:</strong><br>
             <span style="background:#d4edda; padding:2px 5px">Green (+1)</span> Expansion | 
