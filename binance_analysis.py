@@ -49,7 +49,7 @@ def fetch_kraken_data(pair, interval):
 
 # --- ORIGINAL LOGIC (Reality A) ---
 def analyze_structure_original(df):
-    if df.empty: return df
+    if df.empty: return df, [], [], []
     df = df.copy()
     
     # 1. High (2yr radius)
@@ -98,7 +98,7 @@ def analyze_structure_original(df):
 
 # --- NEW LOGIC (Reality B) ---
 def analyze_structure_new(df):
-    if df.empty: return df
+    if df.empty: return df, [], [], []
     df = df.copy()
     
     # 1. Peak Detection (ATH Rule)
@@ -179,16 +179,12 @@ def generate_warped_reality_optimized(df):
     if df.empty: return pd.DataFrame()
     
     # 1. Vectorized Time Warp
-    # Generate random factors for all rows at once
     n_rows = len(df)
     time_warps = np.random.uniform(-1, 1, n_rows)
-    # Calculate days per month: 30 + 30*warp, min 1
     days_counts = np.maximum(1, (30 + 30 * time_warps).astype(int))
     
-    # Repeat indices to create the daily stream without loop
     indices = np.repeat(np.arange(n_rows), days_counts)
     
-    # Construct daily DataFrame using repeated indices
     daily_open = df['open'].values[indices]
     daily_high = df['high'].values[indices]
     daily_low = df['low'].values[indices]
@@ -207,7 +203,6 @@ def generate_warped_reality_optimized(df):
     })
     warped_df.set_index('time', inplace=True)
     
-    # Resample to Monthly
     w_m = warped_df.resample('30D').agg({
         'open': 'first', 
         'high': 'max', 
@@ -216,38 +211,23 @@ def generate_warped_reality_optimized(df):
     }).dropna().reset_index()
 
     # 2. Vectorized Price Randomization
-    # We can't fully vectorize the cumulative product dependency easily with random shocks per step
-    # but we can do it faster than a pure loop if we use numba or cumprod on arrays.
-    # Since n_months is small (~130), a loop is fine here, but let's use numpy cumprod logic.
-    
     n_w = len(w_m)
     pct_changes = w_m['close'].pct_change().fillna(0).values
     
-    # Log multipliers: random walk
     shocks = np.random.uniform(-0.06, 0.06, n_w)
-    # First item has no shock accumulation
     shocks[0] = 0 
     log_multipliers = np.cumsum(shocks)
     multipliers = np.exp(log_multipliers)
     
-    # Adjusted returns
-    # Clip returns to -0.98 to avoid zero/negatives
     adjusted_returns = np.maximum(-0.98, pct_changes * multipliers)
     
-    # Reconstruct Price Path
-    # Price_t = Price_0 * product(1 + r_i)
-    # We can use cumprod
     price_0 = w_m['close'].iloc[0]
-    
-    # Force first return to 0 for cumprod base
     adjusted_returns[0] = 0 
     growth_factors = 1 + adjusted_returns
     cumulative_growth = np.cumprod(growth_factors)
     new_closes = price_0 * cumulative_growth
     
-    # Apply to dataframe
     old_closes = w_m['close'].values
-    # Avoid div by zero
     old_closes[old_closes == 0] = 1e-9
     ratios = new_closes / old_closes
     
@@ -256,10 +236,8 @@ def generate_warped_reality_optimized(df):
     w_m['low'] *= ratios
     w_m['close'] = new_closes
     
-    # Analyze Structure (New Logic)
     w_m, _, _, _ = analyze_structure_new(w_m)
     
-    # Return minimal DF for CSV
     return w_m[['close', 'signal']]
 
 def create_plot_and_vector(df):
@@ -280,9 +258,7 @@ def create_plot_and_vector(df):
 
     # Plot 2: Random Reality
     ax2.set_facecolor('#f0f0f0') 
-    w_display = generate_warped_reality_optimized(df) # Generate one for display
-    # We need time column for plotting, but optimized returns only close/signal. 
-    # Let's quickly rebuild time for plotting purposes (just index)
+    w_display = generate_warped_reality_optimized(df) 
     w_display['time'] = pd.date_range(start=df['time'].iloc[0], periods=len(w_display), freq='30D')
     
     ax2.plot(w_display['time'], w_display['close'], color='#2980b9', linewidth=2, label='Sim Price', zorder=5)
@@ -308,8 +284,9 @@ def create_plot_and_vector(df):
     buf = io.BytesIO()
     plt.savefig(buf, format='png', dpi=110); plt.close()
     
-    v_a = [{"date": r['time'].strftime('%Y-%m'), "val": "N/A" if np.isnan(r['signal']) else int(r['signal'])} for i, r in df.iterrows()]
-    v_b = [{"date": r['time'].strftime('%Y-%m'), "val": "N/A" if np.isnan(r['signal']) else int(r['signal'])} for i, r in w_display.iterrows()]
+    # FIX: Use pd.isna() instead of np.isnan() to handle potential None/mixed types gracefully
+    v_a = [{"date": r['time'].strftime('%Y-%m'), "val": "N/A" if pd.isna(r['signal']) else int(r['signal'])} for i, r in df.iterrows()]
+    v_b = [{"date": r['time'].strftime('%Y-%m'), "val": "N/A" if pd.isna(r['signal']) else int(r['signal'])} for i, r in w_display.iterrows()]
     
     return base64.b64encode(buf.getvalue()).decode(), v_a, v_b
 
