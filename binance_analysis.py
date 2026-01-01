@@ -48,10 +48,7 @@ def fetch_kraken_data(pair, interval):
 
 def analyze_structure_original(df):
     """
-    ORIGINAL LOGIC (Reverted):
-    1. Peak: 2yr radius.
-    2. Low: 1yr radius.
-    3. Stable: 50% range in 3-month window.
+    ORIGINAL LOGIC: 2yr Peak, 1yr Low, Volatility Stability.
     """
     if df.empty: return df, [], [], []
     df = df.copy()
@@ -109,7 +106,8 @@ def analyze_structure_new(df):
     """
     NEW LOGIC (For Random Reality Only):
     1. Peak: 1yr radius (Highest Close in ±12 months).
-    * Only finding peaks for now, marked with black lines.
+       - Simplified Logic: Strict Rolling Max.
+       - Tie-Breaking: Keep first occurrence only.
     """
     if df.empty: return df, [], [], []
     df = df.copy()
@@ -118,19 +116,37 @@ def analyze_structure_new(df):
     # Highest Close in ±1 year (25 months centered: 12 prev + 1 curr + 12 next)
     df['h_max'] = df['close'].rolling(window=25, center=True, min_periods=13).max()
     
-    # Invalidate tail (last 1 year) as we can't see the future
+    # Invalidate tail (last 1 year)
     if len(df) > 12: df.loc[df.index[-12:], 'h_max'] = np.inf
     
-    highs = df[df['close'] == df['h_max']].index.tolist()
+    # Find Peaks
+    peak_candidates = df[df['close'] == df['h_max']].index.tolist()
+    
+    # --- Tie Breaking Logic ---
+    # Since we define a peak as the max in a 1-year radius, any "clashes" must be
+    # due to identical prices. We simply iterate and drop any peak that is too close 
+    # (within radius) to a previous one we've already accepted.
+    # Since the list is sorted chronologically by default (index order), keeping the 
+    # first one encountered effectively implements "Take the first" for ties.
+    
+    final_peaks = []
+    if peak_candidates:
+        final_peaks.append(peak_candidates[0])
+        for p in peak_candidates[1:]:
+            # Only add if it's more than 12 months away from the last accepted peak
+            # Note: A true rolling max shouldn't have higher neighbors, but identical
+            # neighbors are possible.
+            if (p - final_peaks[-1]) > 12:
+                final_peaks.append(p)
+    
+    highs = final_peaks
 
     # Disable Lows and Stabs for now
     lows = []
     stabs = []
 
-    # Vector generation (Will be sparse/empty without other signals)
+    # Vector generation (Peaks marked as -1)
     vector = np.full(len(df), np.nan)
-    
-    # Just mark peaks as -1 for reference in vector
     for h in highs:
         vector[h] = -1
             
@@ -165,7 +181,7 @@ def generate_warped_reality(df):
         'open': 'first', 'high': 'max', 'low': 'min', 'close': 'last'
     }).dropna().reset_index()
 
-    # --- Step 2: Assign Signals (Using NEW Logic - Peaks Only) ---
+    # --- Step 2: Assign Signals (New Logic) ---
     warped_monthly, _, _, _ = analyze_structure_new(warped_monthly)
 
     # --- Step 3: Persistent Return Randomization ---
@@ -222,14 +238,13 @@ def create_plot_and_vector(df):
     ax2.plot(w['time'], w['close'], color='#2980b9', linewidth=2, alpha=1.0, label='Simulation Alpha', zorder=5)
 
     # Mark Peaks (Where vector == -1)
-    # These are peaks found on the Time-Warped data (before price randomization)
     peak_rows = w[w['vector'] == -1]
     
     for _, row in peak_rows.iterrows():
         ax2.axvline(x=row['time'], color='black', linestyle='-', linewidth=1.5, alpha=0.8)
 
     ax2.set_yscale('linear')
-    ax2.set_title("Reality B: Peaks Only (1yr Radius) - Marked Black", fontsize=16, fontweight='bold')
+    ax2.set_title("Reality B: Peaks Only (Strict Rolling Max, 1yr Radius)", fontsize=16, fontweight='bold')
     ax2.set_ylabel("Price (USD)")
     
     ax2.legend(loc='upper left')
@@ -267,7 +282,7 @@ def index():
         <h1>Bitcoin: Two Realities, Two Logic Sets</h1>
         <div class="desc">
             <strong>Original Reality:</strong> Standard Signal Logic.<br>
-            <strong>Random Reality:</strong> <span style="font-weight:bold">Peaks Only (1yr Radius)</span> marked with Black Lines.
+            <strong>Random Reality:</strong> Peaks Only (Strict 1yr Rolling Max).
         </div>
         <a href="/" class="btn">Generate New Reality</a>
         <img src="data:image/png;base64,{{p}}">
