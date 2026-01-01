@@ -53,42 +53,33 @@ def create_plot_and_vector(df):
     # Local Highs (2yr Radius)
     df['h_max'] = df['close'].rolling(window=49, center=True, min_periods=25).max()
     if len(df) > 24: df.loc[df.index[-24:], 'h_max'] = np.inf
-    local_highs = df[df['close'] == df['h_max']].index.tolist()
+    local_high_indices = df[df['close'] == df['h_max']].index.tolist()
 
-    # Pre-Peak Stability Points
+    # Pre-Peak Stability Points (50% range, 1mo radius)
     df['range_3m_centered'] = (df['high'].rolling(window=3, center=True).max() - 
                                df['low'].rolling(window=3, center=True).min()) / \
                               df['low'].rolling(window=3, center=True).min()
     
-    stability_points = []
-    for peak_idx in local_highs:
+    stability_indices = []
+    for peak_idx in local_high_indices:
         for i in range(peak_idx - 1, 1, -1):
             if df.loc[i, 'range_3m_centered'] <= 0.50:
-                stability_points.append(i)
+                stability_indices.append(i)
                 break
     
     # Local Lows (1yr Radius)
     df['l_min'] = df['low'].rolling(window=25, center=True, min_periods=13).min()
     if len(df) > 12: df.loc[df.index[-12:], 'l_min'] = -1.0
-    local_lows = df[df['low'] == df['l_min']].index.tolist()
+    local_low_indices = df[df['low'] == df['l_min']].index.tolist()
 
     # --- Step 2: Build the Vector ---
-    # Create an ordered list of events: (index, type)
     events = []
-    for idx in local_highs: events.append((idx, 'HIGH'))
-    for idx in stability_points: events.append((idx, 'STABILITY'))
-    for idx in local_lows: events.append((idx, 'LOW'))
-    
-    # Sort events by time index
+    for idx in local_high_indices: events.append((idx, 'HIGH'))
+    for idx in stability_indices: events.append((idx, 'STABILITY'))
+    for idx in local_low_indices: events.append((idx, 'LOW'))
     events.sort()
 
-    # Vector initialization
     vector = np.full(len(df), np.nan)
-    
-    # Fill logic:
-    # HIGH -> LOW: -1
-    # LOW -> STABILITY: 0
-    # STABILITY -> HIGH: 1
     for i in range(len(events) - 1):
         curr_idx, curr_type = events[i]
         next_idx, next_type = events[i+1]
@@ -104,100 +95,109 @@ def create_plot_and_vector(df):
     df['vector'] = vector
 
     # --- Step 3: Plotting ---
-    fig, ax = plt.subplots(figsize=(15, 8), facecolor='#f1f2f6')
+    fig, ax = plt.subplots(figsize=(15, 7), facecolor='#f1f2f6')
     ax.set_facecolor('#e0e0e0') 
 
-    # Plot markers
-    ax.scatter(df.loc[local_highs, 'time'], df.loc[local_highs, 'close'], 
-               color='#ff4757', s=160, marker='v', edgecolors='black', zorder=5, label='Local High')
-    ax.scatter(df.loc[stability_points, 'time'], df.loc[stability_points, 'close'], 
-               color='#8e44ad', s=150, marker='d', edgecolors='white', zorder=7, label='Stability Point')
-    ax.scatter(df.loc[local_lows, 'time'], df.loc[local_lows, 'low'], 
-               color='#2ed573', s=160, marker='^', edgecolors='black', zorder=5, label='Local Low')
-
-    # Main Price Line
-    ax.plot(df['time'], df['close'], color='#2f3542', linewidth=2.5, zorder=4, label='BTC Price')
+    ax.plot(df['time'], df['close'], color='#2f3542', linewidth=2, zorder=3, label='BTC Price')
+    
+    ax.scatter(df.loc[local_high_indices, 'time'], df.loc[local_high_indices, 'close'], 
+               color='#ff4757', s=140, marker='v', edgecolors='black', zorder=5, label='Local High')
+    ax.scatter(df.loc[stability_indices, 'time'], df.loc[stability_indices, 'close'], 
+               color='#8e44ad', s=130, marker='d', edgecolors='white', zorder=5, label='Stability Point')
+    ax.scatter(df.loc[local_low_indices, 'time'], df.loc[local_low_indices, 'low'], 
+               color='#2ed573', s=140, marker='^', edgecolors='black', zorder=5, label='Local Low')
 
     ax.set_yscale('linear')
-    ax.set_title(f"Market Structure & State Vector: {PAIR}", fontsize=18, fontweight='bold', pad=25)
-    ax.set_ylabel("Price (USD)", fontsize=12)
-    ax.grid(True, which='major', color='white', linestyle='-', alpha=0.5, zorder=2)
-    ax.legend(facecolor='white', framealpha=1, loc='upper left')
-
+    ax.set_title(f"Kraken Market Analysis: {PAIR}", fontsize=16, fontweight='bold')
+    ax.grid(True, which='major', color='white', alpha=0.5, zorder=1)
+    ax.legend(loc='upper left', framealpha=1)
     plt.tight_layout()
 
     buf = io.BytesIO()
     plt.savefig(buf, format='png', dpi=100)
     plt.close()
     
-    # Extract the vector as a clean list for the UI
     clean_vector = []
-    for i, val in enumerate(df['vector']):
-        date_str = df.loc[i, 'time'].strftime('%Y-%m')
-        v_val = "N/A" if np.isnan(val) else int(val)
-        clean_vector.append({"date": date_str, "val": v_val})
+    for i, row in df.iterrows():
+        v = row['vector']
+        clean_vector.append({
+            "date": row['time'].strftime('%Y-%m'),
+            "val": "N/A" if np.isnan(v) else int(v)
+        })
 
     return base64.b64encode(buf.getvalue()).decode(), clean_vector
 
 @app.route('/')
 def index():
     df = fetch_kraken_data(PAIR, INTERVAL)
-    plot_data, vector_data = create_plot_and_vector(df)
-    current = f"${df['close'].iloc[-1]:,.2f}" if not df.empty else "N/A"
+    if df.empty:
+        return "<h1>Error fetching data from Kraken API.</h1>"
+        
+    plot_base64, vector_list = create_plot_and_vector(df)
+    current_price = f"${df['close'].iloc[-1]:,.2f}"
     
-    html = f"""
+    # Pass current_price and the vector to the template
+    html_template = """
     <!DOCTYPE html>
     <html>
     <head>
-        <title>Kraken Vector Analysis</title>
+        <title>BTC Vector Analysis</title>
         <style>
-            body {{ font-family: -apple-system, sans-serif; background: #f1f2f6; margin: 0; padding: 40px; color: #2d3436; }}
-            .container {{ max-width: 1200px; margin: 0 auto; background: white; padding: 40px; border-radius: 24px; box-shadow: 0 10px 40px rgba(0,0,0,0.06); }}
-            .price {{ font-size: 24px; text-align: center; margin-bottom: 30px; }}
-            .chart-box {{ text-align: center; }}
-            img {{ max-width: 100%; height: auto; border-radius: 12px; }}
+            body { font-family: -apple-system, sans-serif; background: #f1f2f6; margin: 0; padding: 20px; color: #2d3436; }
+            .container { max-width: 1200px; margin: 0 auto; background: white; padding: 30px; border-radius: 15px; box-shadow: 0 4px 15px rgba(0,0,0,0.05); }
+            .header { text-align: center; margin-bottom: 30px; }
+            .chart-box { text-align: center; margin-bottom: 30px; }
+            img { max-width: 100%; border-radius: 8px; border: 1px solid #eee; }
             
-            .vector-display {{ 
-                margin-top: 40px; 
+            .vector-grid { 
                 display: grid; 
-                grid-template-columns: repeat(auto-fill, minmax(80px, 1fr)); 
-                gap: 10px; 
-                max-height: 300px; 
+                grid-template-columns: repeat(auto-fill, minmax(85px, 1fr)); 
+                gap: 8px; 
+                max-height: 400px; 
                 overflow-y: auto; 
-                padding: 20px;
-                background: #fafafa;
-                border-radius: 12px;
+                padding: 15px;
+                background: #f8f9fa;
+                border-radius: 10px;
                 border: 1px solid #eee;
-            }}
-            .vec-item {{ padding: 8px; border-radius: 6px; text-align: center; font-size: 11px; font-weight: bold; border: 1px solid #ddd; }}
-            .val-1 {{ background: #ff7675; color: white; }}
-            .val-0 {{ background: #dfe6e9; color: #636e72; }}
-            .val-plus1 {{ background: #55efc4; color: #00b894; }}
+            }
+            .cell { padding: 8px; border-radius: 6px; text-align: center; font-size: 11px; border: 1px solid #ddd; }
+            .val-neg1 { background: #ff7675; color: white; border-color: #d63031; }
+            .val-0 { background: #dfe6e9; color: #636e72; border-color: #b2bec3; }
+            .val-pos1 { background: #55efc4; color: #006266; border-color: #00b894; font-weight: bold; }
+            .val-na { background: white; color: #ccc; }
         </style>
     </head>
     <body>
         <div class="container">
-            <h1 style="text-align:center">Market State Vector [1, 0, -1]</h1>
-            <div class="price">Current BTC: <strong>{current}</strong></div>
+            <div class="header">
+                <h1>Bitcoin Market State Analysis</h1>
+                <p>Kraken Pair: <strong>XBTUSD</strong> | Current Price: <strong>{{ current_price }}</strong></p>
+            </div>
             
             <div class="chart-box">
-                <img src="data:image/png;base64,{plot_data}">
+                <img src="data:image/png;base64,{{ plot_base64 }}">
             </div>
 
-            <h3>Monthly Signal Vector</h3>
-            <div class="vector-display">
-                {{% for item in vector_data %}}
-                <div class="vec-item {{ 'val-1' if item.val == -1 else ('val-0' if item.val == 0 else ('val-plus1' if item.val == 1 else '')) }}">
+            <h3>Monthly Signal Vector [-1, 0, 1]</h3>
+            <p style="font-size: 0.9em; color: #666; margin-bottom: 10px;">
+                <b>-1:</b> High to Low | <b>0:</b> Low to Stability | <b>1:</b> Stability to High
+            </p>
+            <div class="vector-grid">
+                {% for item in vector_list %}
+                <div class="cell {% if item.val == -1 %}val-neg1{% elif item.val == 0 %}val-0{% elif item.val == 1 %}val-pos1{% else %}val-na{% endif %}">
                     {{ item.date }}<br>
                     <span style="font-size: 16px;">{{ item.val }}</span>
                 </div>
-                {{% endfor %}}
+                {% endfor %}
             </div>
         </div>
     </body>
     </html>
     """
-    return render_template_string(html, vector_data=vector_data)
+    return render_template_string(html_template, 
+                                  plot_base64=plot_base64, 
+                                  vector_list=vector_list, 
+                                  current_price=current_price)
 
 if __name__ == '__main__':
     app.run(host='0.0.0.0', port=PORT)
