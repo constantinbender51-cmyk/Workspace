@@ -98,7 +98,7 @@ def analyze_structure_new(df):
     NEW LOGIC (For Random Reality):
     1. Peak: 2yr Past / 1yr Future radius.
     2. Low: Lowest price between Peaks.
-    3. Stable: Midpoint (Time/Index) between a Low and the highest return month before the Peak.
+    3. Stable: Midpoint (Index) between a Low and the month with highest 3-month return before next Peak.
     """
     if df.empty: return df, [], [], []
     df = df.copy()
@@ -126,8 +126,9 @@ def analyze_structure_new(df):
                 if not segment.empty:
                     lows.append(segment['close'].idxmin())
 
-    # 3. Stability Detection (Midpoint of Area Index Logic)
-    df['returns'] = df['close'].pct_change().fillna(0)
+    # 3. Stability Detection (3-Month Return Midpoint Logic)
+    # Calculate 3-month return: (Price_t - Price_{t-3}) / Price_{t-3}
+    df['ret_3m'] = df['close'].pct_change(periods=3).fillna(0)
     stabs = []
     
     for low_idx in lows:
@@ -136,21 +137,20 @@ def analyze_structure_new(df):
         if not next_peaks: continue
         target_peak = next_peaks[0]
         
-        # Expansion Window
+        # Search range: from the low to the peak
         segment = df.iloc[low_idx:target_peak + 1]
         if segment.empty: continue
         
-        # Month with highest return
-        max_ret_idx = segment['returns'].idxmax()
+        # Find month with highest 3-month return in this cycle
+        max_3m_ret_idx = segment['ret_3m'].idxmax()
         
-        # Midpoint between the Low index and the Max Return index
-        # We use integer division to pick a specific month index
-        midpoint_idx = int((low_idx + max_ret_idx) / 2)
+        # Midpoint index between the Low and that high-return month
+        midpoint_idx = int((low_idx + max_3m_ret_idx) / 2)
         stabs.append(midpoint_idx)
 
     stabs = sorted(list(set(stabs)))
 
-    # Encode for plotting
+    # Encode for plotting (discrete markers, shades removed)
     vector = np.full(len(df), np.nan)
     for h in highs: vector[h] = -1
     for l in lows: vector[l] = -2
@@ -205,12 +205,12 @@ def create_plot_and_vector(df):
     ax1.set_title("Reality A: Actual Historical Data", fontweight='bold')
     ax1.legend()
 
-    # Plot 2: Random Reality
+    # Plot 2: Random Reality (Lines Only)
     ax2.set_facecolor('#f0f0f0') 
     w = generate_warped_reality(df)
     ax2.plot(w['time'], w['close'], color='#2980b9', linewidth=2, label='Sim Price', zorder=4)
 
-    # Markers for structural points
+    # Vertical Lines for structural points
     peak_rows = w[w['vector'] == -1]
     low_rows = w[w['vector'] == -2]
     stab_rows = w[w['vector'] == -3]
@@ -222,7 +222,7 @@ def create_plot_and_vector(df):
     for _, row in stab_rows.iterrows():
         ax2.axvline(x=row['time'], color='black', linestyle=':', linewidth=2.0, alpha=0.9, zorder=3)
 
-    ax2.set_title("Reality B: Random Reality (Index Midpoint Stability)", fontweight='bold')
+    ax2.set_title("Reality B: Highest 3-Month Return Midpoint Stability", fontweight='bold')
     
     from matplotlib.lines import Line2D
     custom_lines = [
@@ -231,7 +231,7 @@ def create_plot_and_vector(df):
         Line2D([0], [0], color='black', lw=1.5, linestyle='--'),
         Line2D([0], [0], color='black', lw=2.0, linestyle=':')
     ]
-    ax2.legend(custom_lines, ['Sim Price', 'Peak (2yr/1yr)', 'Low (Inter-Peak)', 'Stable (Midpoint Low & Max-Ret)'], loc='upper left')
+    ax2.legend(custom_lines, ['Sim Price', 'Peak (2yr/1yr)', 'Low (Inter-Peak)', 'Stable (Midpoint Low & Max 3m-Ret)'], loc='upper left')
     ax2.grid(True, alpha=0.3)
 
     plt.tight_layout()
@@ -257,10 +257,10 @@ def index():
         .btn { display: block; width: fit-content; margin: 0 auto 20px; padding: 12px 24px; background: #6c5ce7; color: #fff; text-decoration: none; border-radius: 8px; font-weight: bold; }
     </style></head><body>
     <div class="container">
-        <h1>Bitcoin: Index Midpoint Stability</h1>
+        <h1>Bitcoin: 3-Month Return Stability</h1>
         <div style="background:#f8f9fa; padding:15px; border-radius:8px; border:1px solid #dee2e6; margin-bottom:20px;">
-            <strong>Stability Rule:</strong> For each expansion (Low to Peak), the stable signal is defined as the 
-            <strong>time midpoint</strong> (index midpoint) between the preceding Low and the month with the highest return.
+            <strong>Stability Rule:</strong> For each cycle, we find the month with the highest 3-month percentage return. 
+            The stable signal is the midpoint index between the cycle's Low and that high-return month.
         </div>
         <a href="/" class="btn">Generate New Reality</a>
         <img src="data:image/png;base64,{{p}}">
