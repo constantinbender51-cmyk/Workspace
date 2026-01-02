@@ -50,32 +50,46 @@ def fetch_kraken_data(pair, interval):
 # --- ORIGINAL LOGIC (Reality A) ---
 def analyze_structure_original(df):
     if df.empty: return df, [], [], []
-    df = df.copy()
+    
+    # --- Bearish Extension Logic ---
+    # To avoid 'future blindness', we extend the dataframe with a price crash.
+    # Radius is 24 months (window 49 = 24 past + 24 future).
+    # We append 24 months of 0 price.
+    orig_len = len(df)
+    last_date = df['time'].iloc[-1]
+    
+    extension_dates = [last_date + timedelta(days=30*(i+1)) for i in range(24)]
+    extension = pd.DataFrame({
+        'time': extension_dates,
+        'open': 0.0, 'high': 0.0, 'low': 0.0, 'close': 0.0
+    })
+    
+    df_ext = pd.concat([df, extension], ignore_index=True)
     
     # 1. High (2yr radius)
-    df['h_max'] = df['close'].rolling(window=49, center=True, min_periods=25).max()
-    if len(df) > 24: df.loc[df.index[-24:], 'h_max'] = np.inf
-    highs = df[df['close'] == df['h_max']].index.tolist()
+    df_ext['h_max'] = df_ext['close'].rolling(window=49, center=True, min_periods=25).max()
+    # Note: No tail invalidation needed because we have the dummy future
+    
+    highs = df_ext[df_ext['close'] == df_ext['h_max']].index.tolist()
 
     # 2. Stability (Volatility < 50% in 3mo window)
-    df['range_3m_centered'] = (df['high'].rolling(window=3, center=True).max() - 
-                               df['low'].rolling(window=3, center=True).min()) / \
-                              df['low'].rolling(window=3, center=True).min()
+    df_ext['range_3m_centered'] = (df_ext['high'].rolling(window=3, center=True).max() - 
+                                   df_ext['low'].rolling(window=3, center=True).min()) / \
+                                  df_ext['low'].rolling(window=3, center=True).min()
     
     stabs = []
     for p in highs:
         for i in range(p - 1, 1, -1):
-            if i in df.index and df.loc[i, 'range_3m_centered'] <= 0.50:
+            if i in df_ext.index and df_ext.loc[i, 'range_3m_centered'] <= 0.50:
                 stabs.append(i); break
     
     # 3. Low (1yr radius)
-    df['l_min'] = df['low'].rolling(window=25, center=True, min_periods=13).min()
-    if len(df) > 12: df.loc[df.index[-12:], 'l_min'] = -1.0
-    lows = df[df['low'] == df['l_min']].index.tolist()
+    df_ext['l_min'] = df_ext['low'].rolling(window=25, center=True, min_periods=13).min()
+    lows = df_ext[df_ext['low'] == df_ext['l_min']].index.tolist()
 
     # 4. Vector State Machine
     events = sorted([(i, 'H') for i in highs] + [(i, 'S') for i in stabs] + [(i, 'L') for i in lows])
-    vector = np.full(len(df), np.nan)
+    vector = np.full(len(df_ext), np.nan)
     
     for i in range(len(events) - 1):
         idx, t = events[i]; n_idx, n_t = events[i+1]
@@ -93,29 +107,60 @@ def analyze_structure_original(df):
         last_val = -1 if last_type == 'H' else (0 if last_type == 'L' else 1)
         vector[last_idx:] = last_val
             
-    df['signal'] = vector
+    # Slice back to original length
+    df = df.copy()
+    df['signal'] = vector[:orig_len]
+    
+    # Filter indices to be within range
+    highs = [x for x in highs if x < orig_len]
+    stabs = [x for x in stabs if x < orig_len]
+    lows = [x for x in lows if x < orig_len]
+    
     return df, highs, stabs, lows
 
 # --- NEW LOGIC (Reality B) ---
 def analyze_structure_new(df):
     if df.empty: return df, [], [], []
-    df = df.copy()
+    
+    # --- Bearish Extension Logic ---
+    # Radius is 1 year future (window 37 = 24 past + 12 future).
+    # We append 12 months of 0 price.
+    orig_len = len(df)
+    
+    # Handle cases where df might not have 'time' column (e.g. from vectorized gen)
+    # If no time, we just make up indices
+    if 'time' in df.columns:
+        last_date = df['time'].iloc[-1]
+        extension_dates = [last_date + timedelta(days=30*(i+1)) for i in range(12)]
+    else:
+        extension_dates = [i for i in range(12)] # Dummy
+        
+    extension = pd.DataFrame({
+        'open': 0.0, 'high': 0.0, 'low': 0.0, 'close': 0.0
+    }, index=range(orig_len, orig_len+12))
+    
+    if 'time' in df.columns:
+        extension['time'] = extension_dates
+        
+    df_ext = pd.concat([df, extension], ignore_index=True)
     
     # 1. Peak Detection (ATH Rule)
-    df['h_max_window'] = df['close'].rolling(window=37, min_periods=13).max().shift(-12)
-    if len(df) > 12: df.loc[df.index[-12:], 'h_max_window'] = np.inf
-    df['expanding_ath'] = df['close'].expanding().max()
+    # Window 37 shifted -12 looks 12 months ahead.
+    df_ext['h_max_window'] = df_ext['close'].rolling(window=37, min_periods=13).max().shift(-12)
+    # No tail invalidation needed
     
-    peak_candidates = df[
-        (df['close'] == df['h_max_window']) & 
-        (df['close'] >= df['expanding_ath'])
+    df_ext['expanding_ath'] = df_ext['close'].expanding().max()
+    
+    peak_candidates = df_ext[
+        (df_ext['close'] == df_ext['h_max_window']) & 
+        (df_ext['close'] >= df_ext['expanding_ath'])
     ].index.tolist()
     
     highs = []
     if peak_candidates:
         highs.append(peak_candidates[0])
         for p in peak_candidates[1:]:
-            if (p - highs[-1]) > 12 and df.loc[p, 'close'] > df.loc[highs[-1], 'close']:
+            if (p - highs[-1]) > 12 and df_ext.loc[p, 'close'] > df_ext.loc[highs[-1], 'close']:
                 highs.append(p)
     
     # 2. Low Detection
@@ -124,16 +169,16 @@ def analyze_structure_new(df):
         for i in range(len(highs)):
             current_peak = highs[i]
             start_search = current_peak + 1
-            end_search = highs[i+1] if i < len(highs) - 1 else len(df)
+            # Search until next peak OR end of EXTENDED data
+            end_search = highs[i+1] if i < len(highs) - 1 else len(df_ext)
             
             if start_search < end_search:
-                segment = df.iloc[start_search:end_search]
+                segment = df_ext.iloc[start_search:end_search]
                 if not segment.empty:
                     lows.append(segment['close'].idxmin())
 
     # 3. Stability Detection (Abs 3-Month Return 3/4 Point)
-    # diff(3) gives Close_t - Close_{t-3}
-    df['abs_ret_3m'] = df['close'].diff(periods=3).abs().fillna(0)
+    df_ext['abs_ret_3m'] = df_ext['close'].diff(periods=3).abs().fillna(0)
     stabs = []
     
     for low_idx in lows:
@@ -141,13 +186,10 @@ def analyze_structure_new(df):
         if not next_peaks: continue
         target_peak = next_peaks[0]
         
-        segment = df.iloc[low_idx:target_peak + 1]
+        segment = df_ext.iloc[low_idx:target_peak + 1]
         if segment.empty: continue
         
-        # Max absolute 3-month return index
         max_3m_abs_idx = segment['abs_ret_3m'].idxmax()
-        
-        # 3/4 Point
         delta = max_3m_abs_idx - low_idx
         three_quarter_idx = int(low_idx + (delta * 0.75))
         stabs.append(three_quarter_idx)
@@ -156,12 +198,12 @@ def analyze_structure_new(df):
 
     # --- Vector State Machine ---
     events = sorted([(i, 'H') for i in highs] + [(i, 'S') for i in stabs] + [(i, 'L') for i in lows])
-    vector = np.full(len(df), np.nan)
+    vector = np.full(len(df_ext), np.nan)
     
     current_state = np.nan
     event_map = dict(events)
     
-    for i in range(len(df)):
+    for i in range(len(df_ext)):
         if i in event_map:
             etype = event_map[i]
             if etype == 'H': current_state = -1
@@ -169,7 +211,14 @@ def analyze_structure_new(df):
             elif etype == 'S': current_state = 1
         vector[i] = current_state
             
-    df['signal'] = vector
+    # Slice back
+    df = df.copy()
+    df['signal'] = vector[:orig_len]
+    
+    highs = [x for x in highs if x < orig_len]
+    stabs = [x for x in stabs if x < orig_len]
+    lows = [x for x in lows if x < orig_len]
+    
     return df, highs, stabs, lows
 
 def generate_warped_reality_optimized(df):
@@ -236,6 +285,7 @@ def generate_warped_reality_optimized(df):
     w_m['low'] *= ratios
     w_m['close'] = new_closes
     
+    # New Logic: Analyze structure with bearish future assumption
     w_m, _, _, _ = analyze_structure_new(w_m)
     
     return w_m[['close', 'signal']]
@@ -269,7 +319,7 @@ def create_plot_and_vector(df):
     groups = w_display.groupby('group').agg({'time': 'first', 'next_t': 'last', 'signal': 'first'})
 
     for _, row in groups.iterrows():
-        if not np.isnan(row['signal']):
+        if not pd.isna(row['signal']):
             color = '#f8d7da' if row['signal'] == -1 else ('#e2e3e5' if row['signal'] == 0 else '#d4edda')
             ax2.axvspan(row['time'], row['next_t'], color=color, alpha=0.6, zorder=1)
 
@@ -284,7 +334,6 @@ def create_plot_and_vector(df):
     buf = io.BytesIO()
     plt.savefig(buf, format='png', dpi=110); plt.close()
     
-    # FIX: Use pd.isna() instead of np.isnan() to handle potential None/mixed types gracefully
     v_a = [{"date": r['time'].strftime('%Y-%m'), "val": "N/A" if pd.isna(r['signal']) else int(r['signal'])} for i, r in df.iterrows()]
     v_b = [{"date": r['time'].strftime('%Y-%m'), "val": "N/A" if pd.isna(r['signal']) else int(r['signal'])} for i, r in w_display.iterrows()]
     
@@ -312,7 +361,7 @@ def index():
     <div class="container">
         <h1>Bitcoin: Mass Reality Generation</h1>
         <div style="background:#f8f9fa; padding:15px; border-radius:8px; border:1px solid #dee2e6; margin-bottom:20px;">
-            <strong>Dataset Generator:</strong> Use the button below to generate a CSV containing the Original Reality data followed by 1,000 distinct Randomized Realities.
+            <strong>Assumption:</strong> The price crashes to zero immediately after the data ends. This forces the algorithm to confirm any recent highs as Peaks.
         </div>
         <a href="/" class="btn">Visualize New Reality</a>
         <a href="/download_csv" class="btn btn-dl">Download Training Data (1000 Realities)</a>
