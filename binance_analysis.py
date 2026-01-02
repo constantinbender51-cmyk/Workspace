@@ -47,15 +47,16 @@ def fetch_kraken_data(pair, interval):
         numeric = ['open','high','low','close']
         df[numeric] = df[numeric].apply(pd.to_numeric)
         df.set_index('time', inplace=True)
+        # Monthly Resample
         df_m = df.resample('MS').agg({
             'open': 'first', 'high': 'max', 'low': 'min', 'close': 'last'
         }).dropna().reset_index()
         return df_m
-    except Exception as e:
-        print(f"Fetch error: {e}")
+    except Exception:
         return pd.DataFrame()
 
 def optimize_segment_vectorized(segment_prices, last_action=None):
+    """Brute-force optimization for a price segment."""
     n_intervals = len(segment_prices) - 1
     if n_intervals <= 0: return []
     price_diffs = np.diff(segment_prices)
@@ -65,8 +66,8 @@ def optimize_segment_vectorized(segment_prices, last_action=None):
         multipliers = np.array(sequence)
         strategy_returns = price_diffs * multipliers
         total_return = np.sum(strategy_returns)
-        std_dev = np.std(strategy_returns)
-        risk_adj_return = total_return / (std_dev + 1e-9)
+        std_dev = np.std(strategy_returns) + 1e-9
+        risk_adj_return = total_return / std_dev
         
         switches = 0
         if last_action is not None and sequence[0] != last_action: switches += 1
@@ -81,13 +82,16 @@ def optimize_segment_vectorized(segment_prices, last_action=None):
     return list(best_seq)
 
 def apply_optimized_signals(df):
+    """Calculates optimal signal vector using sliding windows."""
     prices = df['close'].values
     if len(prices) < 2:
         df['signal'] = 0
         return df
+    
     full_sequence = []
     last_action = None
     step_size = WINDOW_SIZE - 1
+    
     for i in range(0, len(prices) - 1, step_size):
         end_idx = min(i + WINDOW_SIZE, len(prices))
         segment = prices[i:end_idx]
@@ -95,22 +99,29 @@ def apply_optimized_signals(df):
         window_best_seq = optimize_segment_vectorized(segment, last_action)
         full_sequence.extend(window_best_seq)
         if window_best_seq: last_action = window_best_seq[-1]
+    
+    # Simple pad for the very last data point
     signals = full_sequence[:len(df)]
     while len(signals) < len(df):
         signals.append(signals[-1] if signals else 0)
+    
     df = df.copy()
     df['signal'] = signals
     return df
 
 def generate_warped_reality(df):
+    """Creates a time-warped and price-shocked alternative reality."""
     n_rows = len(df)
+    # Warping monthly frequency randomly
     time_warps = np.random.uniform(-0.8, 0.8, n_rows)
     days_counts = np.maximum(1, (30 + 30 * time_warps).astype(int))
     indices = np.repeat(np.arange(n_rows), days_counts)
+    
     daily_close = df['close'].values[indices]
     dates = pd.date_range(start=df['time'].iloc[0], periods=len(daily_close), freq='D')
     w_m = pd.DataFrame({'close': daily_close, 'time': dates}).set_index('time').resample('30D').agg({'close': 'last'}).dropna().reset_index()
     
+    # Introduce cumulative price shocks
     n_w = len(w_m)
     pct_changes = w_m['close'].pct_change().fillna(0).values
     shocks = np.random.uniform(-0.06, 0.06, n_w)
@@ -123,135 +134,121 @@ def generate_warped_reality(df):
     return w_m
 
 def precompute_worker():
-    """Background task to compute realities and update progress."""
-    CACHED_DATA["status"] = "Fetching Data..."
+    """Startup routine: fetch, generate, optimize, and plot."""
+    CACHED_DATA["status"] = "Connecting to Kraken..."
     CACHED_DATA["progress"] = 5
     
     df_raw = fetch_kraken_data(PAIR, INTERVAL)
     if df_raw.empty:
-        CACHED_DATA["status"] = "Error: Data Fetch Failed"
+        CACHED_DATA["status"] = "Critical Error: API Unavailable"
         return
 
     CACHED_DATA["status"] = "Optimizing Reality A..."
-    CACHED_DATA["progress"] = 10
+    CACHED_DATA["progress"] = 15
     df_a = apply_optimized_signals(df_raw)
     CACHED_DATA["reality_a"] = df_a
 
-    CACHED_DATA["status"] = "Generating 100 Realities..."
-    total_b = 100
-    for i in range(total_b):
+    CACHED_DATA["status"] = "Generating 100 Optimizations..."
+    for i in range(100):
         CACHED_DATA["realities_b"].append(generate_warped_reality(df_raw))
-        # Update progress from 10% to 90%
-        CACHED_DATA["progress"] = int(10 + (i / total_b) * 80)
+        CACHED_DATA["progress"] = int(15 + (i / 100) * 75)
     
-    CACHED_DATA["status"] = "Rendering Spaghetti Plot..."
+    CACHED_DATA["status"] = "Finalizing Graphics..."
     CACHED_DATA["progress"] = 95
     
-    fig, (ax1, ax2) = plt.subplots(2, 1, figsize=(15, 14), facecolor='#f1f2f6')
+    fig, (ax1, ax2) = plt.subplots(2, 1, figsize=(15, 14), facecolor='#f8f9fa')
     
-    ax1.plot(df_a['time'], df_a['close'], color='#2d3436', linewidth=2, alpha=0.7, label='Actual Price')
+    # Reality A Plot
+    ax1.plot(df_a['time'], df_a['close'], color='#2d3436', linewidth=2, alpha=0.6)
     for i, row in df_a.iterrows():
-        color = '#00b894' if row['signal'] == 1 else ('#d63031' if row['signal'] == -1 else '#636e72')
+        color = '#00b894' if row['signal'] == 1 else ('#d63031' if row['signal'] == -1 else '#b2bec3')
         marker = '^' if row['signal'] == 1 else ('v' if row['signal'] == -1 else 'o')
         ax1.scatter(row['time'], row['close'], color=color, marker=marker, s=50, zorder=5)
-    ax1.set_title(f"Reality A: Kraken {PAIR} Optimized Signals", fontsize=14, fontweight='bold')
-    ax1.grid(True, linestyle=':', alpha=0.6)
+    ax1.set_title(f"Reality A: Kraken {PAIR} (Optimized Strategy Markers)", fontsize=14, fontweight='bold')
+    ax1.grid(True, linestyle=':', alpha=0.5)
 
+    # Reality B Spaghetti Plot
     for i, w_df in enumerate(CACHED_DATA["realities_b"]):
-        alpha = 0.25 if i == 0 else 0.08
-        color = '#0984e3' if i % 2 == 0 else '#6c5ce7'
-        ax2.plot(w_df['month'], w_df['close'], color=color, alpha=alpha, linewidth=1)
+        # Highlight first few, fade out the rest
+        alpha = 0.3 if i < 3 else 0.06
+        ax2.plot(w_df['month'], w_df['close'], color='#6c5ce7', alpha=alpha, linewidth=1)
     
     ax2.set_yscale('log')
-    ax2.set_title("Reality B: 100 Optimized Random Realities (Log Scale Overlay)", fontsize=14, fontweight='bold')
-    ax2.grid(True, which="both", linestyle=':', alpha=0.4)
+    ax2.set_title("Reality B: 100 Parallel Optimized Simulations (Log Scale)", fontsize=14, fontweight='bold')
+    ax2.set_xlabel("Months Elapsed")
+    ax2.grid(True, which="both", linestyle=':', alpha=0.3)
 
     plt.tight_layout()
     buf = io.BytesIO()
-    plt.savefig(buf, format='png', dpi=110)
+    plt.savefig(buf, format='png', dpi=100)
     CACHED_DATA["plot_b64"] = base64.b64encode(buf.getvalue()).decode()
     plt.close()
     
     CACHED_DATA["progress"] = 100
-    CACHED_DATA["status"] = "Ready"
+    CACHED_DATA["status"] = "Engine Ready"
     CACHED_DATA["ready"] = True
-    print("Precomputation complete.")
 
 @app.route('/progress')
 def progress():
     def generate():
         while True:
-            data = json.dumps({
-                "progress": CACHED_DATA["progress"],
-                "status": CACHED_DATA["status"],
-                "ready": CACHED_DATA["ready"]
-            })
-            yield f"data: {data}\n\n"
-            if CACHED_DATA["ready"]:
-                break
-            time.sleep(0.5)
+            yield f"data: {json.dumps({'progress': CACHED_DATA['progress'], 'status': CACHED_DATA['status'], 'ready': CACHED_DATA['ready']})}\n\n"
+            if CACHED_DATA["ready"]: break
+            time.sleep(0.4)
     return Response(stream_with_context(generate()), mimetype='text/event-stream')
 
 @app.route('/')
 def index():
-    # If ready, show full UI. If not, show loading UI.
     if not CACHED_DATA["ready"]:
         return render_template_string("""
-        <!DOCTYPE html><html><head><title>Loading Reality Engine</title>
+        <!DOCTYPE html><html><head><title>Reality Engine Loading</title>
         <style>
-            body { font-family: sans-serif; display: flex; align-items: center; justify-content: center; height: 100vh; background: #f0f2f5; margin: 0; }
-            .loader-card { background: white; padding: 40px; border-radius: 12px; box-shadow: 0 10px 25px rgba(0,0,0,0.1); width: 400px; text-align: center; }
-            .progress-bg { background: #eee; height: 10px; border-radius: 5px; margin: 20px 0; overflow: hidden; }
-            .progress-fill { background: #6c5ce7; height: 100%; width: 0%; transition: width 0.3s; }
-            .status { color: #636e72; font-size: 0.9em; margin-bottom: 5px; }
+            body { font-family: sans-serif; display: flex; align-items: center; justify-content: center; height: 100vh; background: #f1f2f6; margin: 0; }
+            .card { background: white; padding: 40px; border-radius: 16px; box-shadow: 0 10px 30px rgba(0,0,0,0.08); width: 450px; text-align: center; }
+            .p-bar { background: #dfe6e9; height: 12px; border-radius: 6px; margin: 25px 0; overflow: hidden; }
+            .p-fill { background: linear-gradient(90deg, #6c5ce7, #a29bfe); height: 100%; width: 0%; transition: width 0.4s ease; }
+            .status { color: #636e72; font-weight: bold; margin-bottom: 5px; }
         </style></head><body>
-        <div class="loader-card">
-            <h2>Warming Up Engine...</h2>
+        <div class="card">
+            <h2 style="margin-top:0">Reality Engine Startup</h2>
             <div class="status" id="status">Initializing...</div>
-            <div class="progress-bg"><div class="progress-fill" id="fill"></div></div>
-            <div id="percent">0%</div>
+            <div class="p-bar"><div class="p-fill" id="fill"></div></div>
+            <div id="pct" style="font-weight:bold; color:#6c5ce7">0%</div>
         </div>
         <script>
             const source = new EventSource('/progress');
-            source.onmessage = function(event) {
-                const data = JSON.parse(event.data);
-                document.getElementById('fill').style.width = data.progress + '%';
-                document.getElementById('percent').innerText = data.progress + '%';
-                document.getElementById('status').innerText = data.status;
-                if (data.ready) {
-                    setTimeout(() => window.location.reload(), 500);
-                }
+            source.onmessage = (e) => {
+                const d = JSON.parse(e.data);
+                document.getElementById('fill').style.width = d.progress + '%';
+                document.getElementById('pct').innerText = d.progress + '%';
+                document.getElementById('status').innerText = d.status;
+                if (d.ready) setTimeout(() => window.location.reload(), 600);
             };
-        </script>
-        </body></html>
+        </script></body></html>
         """)
 
-    df_a = CACHED_DATA["reality_a"]
-    v_a = [{"date": r['time'].strftime('%Y-%m'), "val": int(r['signal'])} for i, r in df_a.iterrows()]
+    v_a = [{"date": r['time'].strftime('%Y-%m'), "val": int(r['signal'])} for i, r in CACHED_DATA["reality_a"].iterrows()]
     
     html = """
-    <!DOCTYPE html><html><head><title>BTC Reality Engine</title>
+    <!DOCTYPE html><html><head><title>BTC Reality Dashboard</title>
     <style>
-        body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica; background: #f0f2f5; padding: 20px; color: #2d3436; }
-        .container { max-width: 1300px; margin: auto; background: white; padding: 30px; border-radius: 12px; box-shadow: 0 10px 30px rgba(0,0,0,0.1); }
-        .header { border-bottom: 2px solid #eee; margin-bottom: 20px; padding-bottom: 10px; display: flex; justify-content: space-between; align-items: center; }
-        .btn { display: inline-block; padding: 10px 18px; background: #00b894; color: white; text-decoration: none; border-radius: 6px; font-weight: bold; }
-        .grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(80px, 1fr)); gap: 5px; height: 180px; overflow-y: auto; background: #fafafa; border: 1px solid #eee; padding: 10px; margin-top: 10px; }
-        .c { padding: 6px; text-align: center; font-size: 10px; border-radius: 4px; border: 1px solid #eee; }
+        body { font-family: -apple-system, sans-serif; background: #f1f2f6; padding: 25px; color: #2d3436; }
+        .container { max-width: 1400px; margin: auto; background: white; padding: 35px; border-radius: 12px; box-shadow: 0 8px 25px rgba(0,0,0,0.05); }
+        .header { display: flex; justify-content: space-between; align-items: center; border-bottom: 1px solid #eee; margin-bottom: 25px; padding-bottom: 15px; }
+        .btn { padding: 12px 20px; background: #00b894; color: white; text-decoration: none; border-radius: 8px; font-weight: bold; }
+        .grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(85px, 1fr)); gap: 6px; height: 200px; overflow-y: auto; background: #fdfdfd; border: 1px solid #eee; padding: 12px; }
+        .cell { padding: 8px; text-align: center; font-size: 11px; border-radius: 5px; border: 1px solid #eee; }
         .s1 { background: #55efc4; color: #006266; font-weight: bold; } .s-1 { background: #ff7675; color: white; } .s0 { background: #dfe6e9; color: #636e72; }
     </style></head><body>
     <div class="container">
         <div class="header">
-            <div>
-                <h1>Bitcoin Reality Engine</h1>
-                <p>Optimization Model: Window=12, Penalty=35. Precomputed on Startup.</p>
-            </div>
-            <a href="/download" class="btn">Download All 100 Realities (CSV)</a>
+            <div><h1>Bitcoin Parallel Strategy Dashboard</h1><p>Precomputed Optimized Realities (n=100)</p></div>
+            <a href="/download" class="btn">Export CSV Dataset</a>
         </div>
-        <img src="data:image/png;base64,{{p}}" style="width:100%; border-radius:8px; border: 1px solid #ddd;">
-        <h3>Reality A: Signal Vector (Latest Kraken Data)</h3>
+        <img src="data:image/png;base64,{{p}}" style="width:100%; border-radius:10px; border: 1px solid #eee;">
+        <h3 style="margin-top:30px">Reality A: Optimized Strategy History</h3>
         <div class="grid">
-            {% for i in v_a %}<div class="c s{{i.val}}">{{i.date}}<br>{{i.val}}</div>{% endfor %}
+            {% for i in v_a %}<div class="cell s{{i.val}}">{{i.date}}<br><b>{{i.val}}</b></div>{% endfor %}
         </div>
     </div></body></html>
     """
@@ -259,16 +256,12 @@ def index():
 
 @app.route('/download')
 def download():
-    if not CACHED_DATA["realities_b"]: return "No data cached."
-    export_list = []
+    if not CACHED_DATA["realities_b"]: return "No data."
+    dfs = []
     for i, df in enumerate(CACHED_DATA["realities_b"]):
-        temp = df.copy()
-        temp['reality_id'] = i
-        export_list.append(temp)
-    final_df = pd.concat(export_list)
-    return Response(final_df.to_csv(index=False), mimetype="text/csv", headers={"Content-disposition": "attachment; filename=100_optimized_realities.csv"})
+        d = df.copy(); d['reality_id'] = i; dfs.append(d)
+    return Response(pd.concat(dfs).to_csv(index=False), mimetype="text/csv", headers={"Content-disposition": "attachment; filename=realities_export.csv"})
 
 if __name__ == '__main__':
-    # Start precomputation in a separate thread so the server can start immediately
     Thread(target=precompute_worker, daemon=True).start()
     app.run(host='0.0.0.0', port=PORT)
