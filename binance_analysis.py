@@ -71,7 +71,7 @@ def fetch_kraken_data(pair, interval):
         numeric = ['open','high','low','close']
         df[numeric] = df[numeric].apply(pd.to_numeric)
         df.set_index('time', inplace=True)
-        # Resample to Weekly (using Friday as anchor to align with crypto weeks roughly or just generic W)
+        # Resample to Weekly
         df_w = df.resample('W').agg({'open': 'first', 'high': 'max', 'low': 'min', 'close': 'last'}).dropna().reset_index()
         df_w['pair'] = pair
         return df_w
@@ -146,19 +146,12 @@ def train_logistic_regression(df):
     based on lagged close prices and month index.
     """
     # 1. Feature Engineering
-    # Create lag features for close prices
     feature_cols = ['month_idx']
-    
-    # We create normalized lag features (price relative to current price) 
-    # to help the model generalize better than raw absolute numbers
     for i in range(1, N_LAGS + 1):
         col_name = f'close_lag_{i}'
-        # Using pct_change or log returns is usually better, but request was "n periods close"
-        # We will use raw lag close, but StandardScaling later helps.
         df[col_name] = df['close'].shift(i)
         feature_cols.append(col_name)
 
-    # Drop NaNs created by shifting
     df_clean = df.dropna().copy()
     
     if len(df_clean) < 50:
@@ -167,8 +160,7 @@ def train_logistic_regression(df):
     X = df_clean[feature_cols]
     y = df_clean['ideal_signal']
 
-    # 2. Split Data
-    # We train on the first 80%, test on the last 20% to see if it learned the pattern
+    # 2. Split Data (80/20)
     split_idx = int(len(df_clean) * 0.8)
     X_train, X_test = X.iloc[:split_idx], X.iloc[split_idx:]
     y_train, y_test = y.iloc[:split_idx], y.iloc[split_idx:]
@@ -182,7 +174,7 @@ def train_logistic_regression(df):
     model = LogisticRegression(multi_class='multinomial', solver='lbfgs', max_iter=1000)
     model.fit(X_train_scaled, y_train)
 
-    # 5. Predict (on whole dataset for visualization)
+    # 5. Predict (on whole dataset)
     X_all_scaled = scaler.transform(X)
     predictions = model.predict(X_all_scaled)
     df_clean['predicted_signal'] = predictions
@@ -201,6 +193,28 @@ def train_logistic_regression(df):
     
     return df_clean, stats
 
+def calculate_equity_curves(df):
+    """Computes cumulative returns for Ideal, Model, and Buy/Hold."""
+    df = df.copy()
+    
+    # Calculate simple percentage returns for the underlying asset
+    df['market_ret'] = df['close'].pct_change().fillna(0)
+    
+    # --- Ideal Strategy ---
+    # Shift signal by 1: Signal at T affects Return at T+1
+    df['ideal_strat_ret'] = df['ideal_signal'].shift(1).fillna(0) * df['market_ret']
+    # Cumulative Product (Geometric Growth)
+    df['ideal_equity'] = (1 + df['ideal_strat_ret']).cumprod()
+    
+    # --- Model Strategy ---
+    df['model_strat_ret'] = df['predicted_signal'].shift(1).fillna(0) * df['market_ret']
+    df['model_equity'] = (1 + df['model_strat_ret']).cumprod()
+    
+    # --- Buy & Hold ---
+    df['buy_hold_equity'] = (1 + df['market_ret']).cumprod()
+    
+    return df
+
 def processing_pipeline():
     precompute_search_space()
 
@@ -213,53 +227,67 @@ def processing_pipeline():
         CACHED_DATA["status"] = "API Error"
         return
 
-    # 2. Generate Labels (The "Teacher")
+    # 2. Generate Labels
     CACHED_DATA["status"] = "Calculating Ideal Trajectory..."
     CACHED_DATA["progress"] = 30
     df_labeled = generate_ideal_signals(df_raw)
 
-    # 3. Train Model (The "Student")
+    # 3. Train Model
     CACHED_DATA["status"] = "Training Logistic Regression..."
     CACHED_DATA["progress"] = 60
-    df_final, stats = train_logistic_regression(df_labeled)
+    df_model, stats = train_logistic_regression(df_labeled)
+    
+    # 4. Calculate Return Curves
+    CACHED_DATA["status"] = "Simulating Trading Returns..."
+    CACHED_DATA["progress"] = 75
+    df_final = calculate_equity_curves(df_model)
+    
     CACHED_DATA["df"] = df_final
     CACHED_DATA["model_stats"] = stats
 
-    # 4. Visualization
+    # 5. Visualization
     CACHED_DATA["status"] = "Generating Plot..."
     CACHED_DATA["progress"] = 90
     
-    fig, (ax1, ax2) = plt.subplots(2, 1, figsize=(12, 10), facecolor='#f8f9fa', sharex=True)
+    fig, (ax1, ax2, ax3) = plt.subplots(3, 1, figsize=(12, 16), facecolor='#f8f9fa', sharex=True)
     
-    # Plot 1: Price and Ideal Signals
+    # --- Plot 1: Price and Ideal Signals ---
     ax1.plot(df_final['time'], df_final['close'], color='#2d3436', linewidth=1.5, alpha=0.7, label='Price')
-    
-    # Color points based on Ideal Signal
     ideal = df_final['ideal_signal'].values
     colors_ideal = np.where(ideal == 1, '#00b894', np.where(ideal == -1, '#d63031', '#b2bec3'))
     ax1.scatter(df_final['time'], df_final['close'], c=colors_ideal, s=30, zorder=5, label='Ideal Entry')
-    ax1.set_title(f"Ground Truth: Optimized Ideal Trajectory ({PAIR})", fontsize=12, fontweight='bold')
+    ax1.set_title(f"Ground Truth: Optimized Ideal Trajectory", fontsize=12, fontweight='bold')
     ax1.legend(loc='upper left')
     ax1.grid(True, linestyle=':', alpha=0.5)
 
-    # Plot 2: Price and Predicted Signals
+    # --- Plot 2: Price and Predicted Signals ---
     ax2.plot(df_final['time'], df_final['close'], color='#2d3436', linewidth=1.5, alpha=0.3)
-    
     pred = df_final['predicted_signal'].values
     colors_pred = np.where(pred == 1, '#0984e3', np.where(pred == -1, '#e17055', '#b2bec3'))
-    
-    # Offset markers slightly to distinguish from line
     ax2.scatter(df_final['time'], df_final['close'], c=colors_pred, s=30, zorder=5, marker='s')
     
-    # Highlight Test Set Area
     split_idx = int(len(df_final) * 0.8)
     if split_idx < len(df_final):
         split_date = df_final['time'].iloc[split_idx]
         ax2.axvline(x=split_date, color='#636e72', linestyle='--')
         ax2.text(split_date, df_final['close'].min(), ' Test Data Start \u2192', color='#636e72', fontsize=9, verticalalignment='bottom')
-
-    ax2.set_title(f"Model Prediction: Logistic Regression (Accuracy: {stats['accuracy']}%)", fontsize=12, fontweight='bold')
+    ax2.set_title(f"Model Prediction (Acc: {stats['accuracy']}%)", fontsize=12, fontweight='bold')
     ax2.grid(True, linestyle=':', alpha=0.5)
+
+    # --- Plot 3: Equity Curves (Return Curves) ---
+    ax3.plot(df_final['time'], df_final['ideal_equity'], color='#00b894', linewidth=2, label='Optimal (Theoretical)')
+    ax3.plot(df_final['time'], df_final['model_equity'], color='#0984e3', linewidth=2, label='Model (Actual)')
+    ax3.plot(df_final['time'], df_final['buy_hold_equity'], color='#636e72', linewidth=1, linestyle='--', label='Buy & Hold')
+    
+    ax3.set_yscale('log')
+    ax3.set_title("Performance: Cumulative Return Curves (Log Scale)", fontsize=12, fontweight='bold')
+    ax3.set_ylabel("Growth Factor (1.0 = Start)")
+    ax3.legend(loc='upper left')
+    ax3.grid(True, which="both", linestyle=':', alpha=0.3)
+    
+    # Highlight Test Set Area on Equity Curve too
+    if split_idx < len(df_final):
+        ax3.axvline(x=split_date, color='#636e72', linestyle='--')
 
     plt.tight_layout()
     buf = io.BytesIO()
@@ -268,7 +296,7 @@ def processing_pipeline():
     plt.close()
     
     CACHED_DATA["progress"] = 100
-    CACHED_DATA["status"] = "Training Complete"
+    CACHED_DATA["status"] = "Calculations Complete"
     CACHED_DATA["ready"] = True
 
 @app.route('/progress')
