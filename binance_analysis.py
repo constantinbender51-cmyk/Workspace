@@ -179,16 +179,17 @@ def precompute_worker():
     # Remove main pair if present
     if MAIN_PAIR in all_pairs: all_pairs.remove(MAIN_PAIR)
     
-    # Slice to 100 (after shuffling inside get_tradable_pairs)
-    target_pairs = all_pairs[:100] 
-    
-    total_assets = len(target_pairs)
+    # Fetch until we have 100 valid assets or run out of pairs
+    TARGET_COUNT = 100
     processed_assets = []
     
-    for i, pair in enumerate(target_pairs):
-        pct = 10 + int((i / total_assets) * 85)
+    for i, pair in enumerate(all_pairs):
+        if len(processed_assets) >= TARGET_COUNT:
+            break
+            
+        pct = 10 + int((len(processed_assets) / TARGET_COUNT) * 85)
         CACHED_DATA["progress"] = pct
-        CACHED_DATA["status"] = f"Mining {pair} ({i+1}/{total_assets})..."
+        CACHED_DATA["status"] = f"Mining {pair} (Found {len(processed_assets)}/{TARGET_COUNT})..."
         
         df = fetch_kraken_data(pair, INTERVAL)
         if not df.empty and len(df) > 15: 
