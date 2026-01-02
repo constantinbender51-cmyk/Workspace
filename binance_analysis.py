@@ -6,10 +6,9 @@ matplotlib.use('Agg')
 import matplotlib.pyplot as plt
 import io
 import base64
-import random
-import time
+import itertools
 from flask import Flask, render_template_string, Response
-from datetime import datetime, timedelta
+from datetime import timedelta
 
 app = Flask(__name__)
 
@@ -17,358 +16,152 @@ app = Flask(__name__)
 PAIR = 'XBTUSD' 
 INTERVAL = 10080 # Weekly data
 PORT = 8080
+WINDOW_SIZE = 10 # Keep small for performance (3^10 combinations)
+SWITCHING_PENALTY_WEIGHT = 35
+ACTIONS = ['Long', 'Hold', 'Short']
 
 def fetch_kraken_data(pair, interval):
-    """Fetches historical weekly OHLC from Kraken and resamples to Monthly."""
     url = "https://api.kraken.com/0/public/OHLC"
     params = {'pair': pair, 'interval': interval}
-    
     try:
         response = requests.get(url, params=params, timeout=10)
         data = response.json()
         if data.get('error'): return pd.DataFrame()
-
         result_data = data['result']
         key = [k for k in result_data.keys() if k != 'last'][0]
         df = pd.DataFrame(result_data[key], columns=['time','open','high','low','close','vwap','vol','count'])
-        
         df['time'] = pd.to_datetime(df['time'], unit='s')
-        numeric = ['open','high','low','close']
-        df[numeric] = df[numeric].apply(pd.to_numeric)
-        
-        # Resample to Monthly
-        df.set_index('time', inplace=True)
-        df_m = df.resample('MS').agg({
-            'open': 'first', 'high': 'max', 'low': 'min', 'close': 'last'
-        }).dropna().reset_index()
-        
+        df['close'] = pd.to_numeric(df['close'])
+        df_m = df.resample('MS', on='time').agg({'close': 'last'}).dropna().reset_index()
         return df_m
     except Exception as e:
         print(f"Fetch error: {e}")
         return pd.DataFrame()
 
-def analyze_market_structure(df):
-    """
-    Unified Logic for BOTH Original and Random Realities.
-    1. Peak: 2yr Past / 1yr Future radius, AND must be a NEW ATH.
-    2. Low: 
-       - Standard: Lowest price between confirmed Peaks.
-       - Last Segment (>1yr from Peak): Point maximizing Short Sharpe ((Peak-Price)/Peak / StdDev).
-       - Last Segment (<=1yr from Peak): Standard Lowest Price (often Bearish Future 0).
-    3. Stable: The point between Prev Low and Peak that maximizes (Return / StdDev) when selling at Peak.
-    4. Bearish Future Assumption: Appends 0s to force signal confirmation at the edge.
-    """
-    if df.empty: return df, [], [], []
+def optimize_segment(segment_prices, last_action=None):
+    """Brute-force optimization for a price segment."""
+    n_intervals = len(segment_prices) - 1
+    if n_intervals <= 0: return []
     
-    # --- Bearish Extension Logic ---
-    orig_len = len(df)
+    price_diffs = np.diff(segment_prices)
+    best_score, best_seq = -float('inf'), None
     
-    if 'time' in df.columns:
-        last_date = df['time'].iloc[-1]
-        extension_dates = [last_date + timedelta(days=30*(i+1)) for i in range(12)]
-    else:
-        extension_dates = [i for i in range(12)]
+    # Generate all possible move combinations (3^N)
+    for sequence in itertools.product(ACTIONS, repeat=n_intervals):
+        multipliers = np.array([1 if a == 'Long' else (-1 if a == 'Short' else 0) for a in sequence])
+        strategy_returns = price_diffs * multipliers
         
-    extension = pd.DataFrame({
-        'open': 0.0, 'high': 0.0, 'low': 0.0, 'close': 0.0
-    }, index=range(orig_len, orig_len+12))
-    
-    if 'time' in df.columns:
-        extension['time'] = extension_dates
+        total_return = np.sum(strategy_returns)
+        std_dev = np.std(strategy_returns)
+        risk_adj_return = total_return / (std_dev + 1e-9)
         
-    df_ext = pd.concat([df, extension], ignore_index=True)
-    
-    # 1. Peak Detection (ATH Rule)
-    df_ext['h_max_window'] = df_ext['close'].rolling(window=37, min_periods=13).max().shift(-12)
-    df_ext['expanding_ath'] = df_ext['close'].expanding().max()
-    
-    # Candidates must be local max AND >= current ATH
-    peak_candidates = df_ext[
-        (df_ext['close'] == df_ext['h_max_window']) & 
-        (df_ext['close'] >= df_ext['expanding_ath'])
-    ].index.tolist()
-    
-    highs = []
-    if peak_candidates:
-        highs.append(peak_candidates[0])
-        for p in peak_candidates[1:]:
-            if (p - highs[-1]) > 12 and df_ext.loc[p, 'close'] > df_ext.loc[highs[-1], 'close']:
-                highs.append(p)
-    
-    # 2. Low Detection
-    lows = []
-    if highs:
-        for i in range(len(highs)):
-            current_peak = highs[i]
-            start_search = current_peak + 1
-            
-            # Check if this is the last peak (Last segment)
-            is_last_segment = (i == len(highs) - 1)
-            
-            end_search = highs[i+1] if not is_last_segment else len(df_ext)
-            
-            if start_search < end_search:
-                # Define limits of actual data (ignoring 0-extension)
-                search_limit = min(end_search, orig_len)
-                
-                # Trigger Max Sharpe Logic ONLY if last segment AND > 1 year (12 months) of data after peak
-                use_short_sharpe = is_last_segment and ((search_limit - current_peak) > 12)
+        # Penalize frequent switching
+        switches = 0
+        if last_action and sequence[0] != last_action: switches += 1
+        for i in range(1, n_intervals):
+            if sequence[i] != sequence[i-1]: switches += 1
+        
+        penalty_score = (switches * SWITCHING_PENALTY_WEIGHT) / n_intervals
+        current_score = risk_adj_return - penalty_score
+        
+        if current_score > best_score:
+            best_score, best_seq = current_score, sequence
+    return best_seq
 
-                if use_short_sharpe:
-                    # --- Max Short Sharpe for Last Segment ---
-                    candidates = range(start_search, search_limit)
-                    
-                    best_score = -999.0
-                    best_t = -1
-                    peak_price = df_ext.loc[current_peak, 'close']
-                    
-                    if not candidates:
-                         if start_search < len(df_ext):
-                             lows.append(start_search)
-                    else:
-                        for t in candidates:
-                            # Path: From Peak to potential Low t
-                            price_path = df_ext.loc[current_peak : t, 'close']
-                            if len(price_path) < 2: continue
-                            
-                            current_price = df_ext.loc[t, 'close']
-                            
-                            # Short Return: (Sell High - Buy Low) / Sell High
-                            ret = (peak_price - current_price) / peak_price
-                            
-                            # Volatility
-                            pct_changes = price_path.pct_change().dropna()
-                            vol = pct_changes.std()
-                            
-                            if pd.isna(vol) or vol == 0:
-                                score = 0 
-                            else:
-                                score = ret / vol
-                            
-                            if score > best_score:
-                                best_score = score
-                                best_t = t
-                        
-                        if best_t != -1:
-                            lows.append(best_t)
-                        else:
-                            lows.append(df_ext.iloc[start_search:search_limit]['close'].idxmin())
-
-                else:
-                    # --- STANDARD LOGIC: Absolute Min ---
-                    segment = df_ext.iloc[start_search:end_search]
-                    if not segment.empty:
-                        lows.append(segment['close'].idxmin())
-
-    # 3. Stability Detection (Max Sharpe Logic)
-    stabs = []
-    sorted_highs = sorted(highs)
-    sorted_lows = sorted(lows)
+def get_optimized_signals(df):
+    """Applies the segment optimizer across the entire dataframe."""
+    prices = df['close'].values
+    full_sequence = []
+    last_action = None
+    step_size = WINDOW_SIZE - 1
     
-    for h_idx in sorted_highs:
-        prev_lows = [l for l in sorted_lows if l < h_idx]
-        start_search_idx = prev_lows[-1] if prev_lows else 0
+    for i in range(0, len(prices) - 1, step_size):
+        end_idx = min(i + WINDOW_SIZE, len(prices))
+        segment = prices[i:end_idx]
+        if len(segment) < 2: break
         
-        if start_search_idx == 0:
-            candidates = range(0, h_idx - 2)
-        else:
-            candidates = range(start_search_idx + 1, h_idx - 2)
-            
-        best_sharpe = -1.0
-        best_t = -1
-        sell_price = df_ext.loc[h_idx, 'close']
-        
-        for t in candidates:
-            if t >= h_idx: continue
-            price_path = df_ext.loc[t : h_idx, 'close']
-            if len(price_path) < 3: continue 
-            
-            buy_price = df_ext.loc[t, 'close']
-            if buy_price == 0: continue
-            
-            total_return = (sell_price - buy_price) / buy_price
-            pct_changes = price_path.pct_change().dropna()
-            volatility = pct_changes.std()
-            
-            if pd.isna(volatility) or volatility == 0:
-                sharpe = 99999.0 if total_return > 0 else 0.0
-            else:
-                sharpe = total_return / volatility
-                
-            if sharpe > best_sharpe:
-                best_sharpe = sharpe
-                best_t = t
-        
-        if best_t != -1:
-            stabs.append(best_t)
-            
-    stabs = sorted(list(set(stabs)))
+        window_best_seq = optimize_segment(segment, last_action)
+        full_sequence.extend(window_best_seq)
+        if window_best_seq:
+            last_action = window_best_seq[-1]
 
-    # --- Vector State Machine ---
-    events = sorted([(i, 'H') for i in highs] + [(i, 'S') for i in stabs] + [(i, 'L') for i in lows])
-    vector = np.full(len(df_ext), np.nan)
+    # Map signals to numeric values for the dataframe
+    mapping = {'Long': 1, 'Hold': 0, 'Short': -1}
+    # Pad the sequence to match df length (last signal persists)
+    signals = [mapping[s] for s in full_sequence]
+    while len(signals) < len(df):
+        signals.append(signals[-1] if signals else 0)
     
-    current_state = np.nan
-    event_map = dict(events)
-    
-    for i in range(len(df_ext)):
-        if i in event_map:
-            etype = event_map[i]
-            if etype == 'H': current_state = -1
-            elif etype == 'L': current_state = 0
-            elif etype == 'S': current_state = 1
-        vector[i] = current_state
-            
-    # Slice back to original length
     df = df.copy()
-    df['signal'] = vector[:orig_len]
-    
-    # Filter indices
-    highs = [x for x in highs if x < orig_len]
-    stabs = [x for x in stabs if x < orig_len]
-    lows = [x for x in lows if x < orig_len]
-    
-    return df, highs, stabs, lows
+    df['signal'] = signals[:len(df)]
+    return df
 
-def generate_warped_reality_optimized(df, randomize_returns=True):
-    """Vectorized version of warped reality generation."""
-    if df.empty: return pd.DataFrame()
-    
-    n_rows = len(df)
-    time_warps = np.random.uniform(-1, 1, n_rows)
-    days_counts = np.maximum(1, (30 + 30 * time_warps).astype(int))
-    
-    indices = np.repeat(np.arange(n_rows), days_counts)
-    
-    daily_close = df['close'].values[indices]
-    total_days = len(daily_close)
-    dates = pd.date_range(start=df['time'].iloc[0], periods=total_days, freq='D')
-    
-    warped_df = pd.DataFrame({'close': daily_close}, index=dates)
-    
-    # Resample to simulated months
-    w_m = warped_df.resample('30D').agg({'close': 'last'}).dropna().reset_index()
 
-    if randomize_returns:
-        n_w = len(w_m)
-        pct_changes = w_m['close'].pct_change().fillna(0).values
-        shocks = np.random.uniform(-0.06, 0.06, n_w)
-        shocks[0] = 0 
-        log_multipliers = np.cumsum(shocks)
-        multipliers = np.exp(log_multipliers)
-        adjusted_returns = np.maximum(-0.98, pct_changes * multipliers)
-        
-        price_0 = w_m['close'].iloc[0]
-        cumulative_growth = np.cumprod(1 + adjusted_returns)
-        w_m['close'] = price_0 * cumulative_growth
-    
-    # Unified Analysis
-    w_m, _, _, _ = analyze_market_structure(w_m)
-    
-    # Create the month index (1..N)
-    w_m['month'] = np.arange(1, len(w_m) + 1)
-    
-    return w_m[['close', 'signal', 'month']]
 
 def create_plot_and_vector(df):
     if df.empty: return None, [], []
-    df, highs, stabs, lows = analyze_market_structure(df)
     
-    fig, (ax1, ax2) = plt.subplots(2, 1, figsize=(15, 16), facecolor='#f1f2f6')
+    # Process Reality A
+    df = get_optimized_signals(df)
+    
+    # Prepare Plot
+    fig, (ax1, ax2) = plt.subplots(2, 1, figsize=(15, 12), facecolor='#f1f2f6')
+    
+    # Plot Reality A
+    ax1.plot(df['time'], df['close'], color='#2f3542', alpha=0.5)
+    for i in range(len(df)-1):
+        color = '#d4edda' if df['signal'].iloc[i] == 1 else ('#f8d7da' if df['signal'].iloc[i] == -1 else '#e2e3e5')
+        ax1.axvspan(df['time'].iloc[i], df['time'].iloc[i+1], color=color, alpha=0.5)
+    ax1.set_title("Reality A: Optimized Brute-Force Strategy")
 
-    # Reality A
-    ax1.set_facecolor('#e0e0e0') 
-    ax1.plot(df['time'], df['close'], color='#2f3542', linewidth=2)
-    ax1.scatter(df.loc[highs, 'time'], df.loc[highs, 'close'], color='#ff4757', s=100, marker='v')
-    ax1.scatter(df.loc[stabs, 'time'], df.loc[stabs, 'close'], color='#8e44ad', s=100, marker='d')
-    ax1.scatter(df.loc[lows, 'time'], df.loc[lows, 'low'], color='#2ed573', s=100, marker='^')
-    ax1.set_title("Reality A: Actual Data (Double Sharpe Logic)")
+    # Generate Reality B (Warped)
+    # Using a simple warp for this example
+    w_df = df.sample(frac=1).reset_index(drop=True)
+    w_df['time'] = pd.date_range(start=df['time'].iloc[0], periods=len(w_df), freq='30D')
+    w_df = get_optimized_signals(w_df)
+    
+    ax2.plot(w_df['time'], w_df['close'], color='#2980b9', alpha=0.5)
+    for i in range(len(w_df)-1):
+        color = '#d4edda' if w_df['signal'].iloc[i] == 1 else ('#f8d7da' if w_df['signal'].iloc[i] == -1 else '#e2e3e5')
+        ax2.axvspan(w_df['time'].iloc[i], w_df['time'].iloc[i+1], color=color, alpha=0.5)
+    ax2.set_title("Reality B: Warped & Re-Optimized")
 
-    # Reality B
-    ax2.set_facecolor('#f0f0f0') 
-    w_display = generate_warped_reality_optimized(df, randomize_returns=True) 
-    w_display['time'] = pd.date_range(start=df['time'].iloc[0], periods=len(w_display), freq='30D')
-    ax2.plot(w_display['time'], w_display['close'], color='#2980b9', linewidth=2)
-
-    # Background Coloring
-    w_display['group'] = (w_display['signal'] != w_display['signal'].shift()).cumsum()
-    w_display['next_t'] = w_display['time'].shift(-1).fillna(w_display['time'].iloc[-1] + timedelta(days=30))
-    groups = w_display.groupby('group').agg({'time': 'first', 'next_t': 'last', 'signal': 'first'})
-    for _, row in groups.iterrows():
-        if not pd.isna(row['signal']):
-            color = '#f8d7da' if row['signal'] == -1 else ('#e2e3e5' if row['signal'] == 0 else '#d4edda')
-            ax2.axvspan(row['time'], row['next_t'], color=color, alpha=0.6)
-
-    ax2.set_title("Reality B: Randomized Reality")
     plt.tight_layout()
     buf = io.BytesIO()
-    plt.savefig(buf, format='png', dpi=110); plt.close()
+    plt.savefig(buf, format='png', dpi=100); plt.close()
     
-    v_a = [{"date": r['time'].strftime('%Y-%m'), "val": "N/A" if pd.isna(r['signal']) else int(r['signal'])} for i, r in df.iterrows()]
-    v_b = [{"date": r['time'].strftime('%Y-%m'), "val": "N/A" if pd.isna(r['signal']) else int(r['signal'])} for i, r in w_display.iterrows()]
+    v_a = [{"date": r['time'].strftime('%Y-%m'), "val": int(r['signal'])} for _, r in df.iterrows()]
+    v_b = [{"date": r['time'].strftime('%Y-%m'), "val": int(r['signal'])} for _, r in w_df.iterrows()]
+    
     return base64.b64encode(buf.getvalue()).decode(), v_a, v_b
-
-def generate_csv_response(randomize):
-    df = fetch_kraken_data(PAIR, INTERVAL)
-    if df.empty: return "Error"
-    
-    # 1. Generate 100 Realities
-    realities = []
-    for _ in range(100):
-        realities.append(generate_warped_reality_optimized(df, randomize_returns=randomize))
-    
-    # 2. Original Data LAST
-    df_orig, _, _, _ = analyze_market_structure(df)
-    df_orig['month'] = np.arange(1, len(df_orig) + 1)
-    output_df_orig = df_orig[['close', 'signal', 'month']].copy()
-    
-    # 3. Concatenate
-    final_df = pd.concat(realities + [output_df_orig])
-    csv_data = final_df.to_csv(index=False)
-    
-    fname = "bitcoin_100_randomized.csv" if randomize else "bitcoin_100_warped_only.csv"
-    return Response(csv_data, mimetype="text/csv", headers={"Content-disposition": f"attachment; filename={fname}"})
 
 @app.route('/')
 def index():
     df = fetch_kraken_data(PAIR, INTERVAL)
-    if df.empty: return "<h1>API Data Fetch Error</h1>"
+    if df.empty: return "<h1>Data Error</h1>"
     p, v_a, v_b = create_plot_and_vector(df)
+    
     html = """
-    <!DOCTYPE html><html><head><title>BTC Reality Warp</title>
+    <!DOCTYPE html><html><head><title>Itertools Optimizer</title>
     <style>
         body { font-family: sans-serif; background: #f1f2f6; padding: 20px; }
-        .container { max-width: 1400px; margin: auto; background: white; padding: 40px; border-radius: 20px; box-shadow: 0 10px 30px rgba(0,0,0,0.05); }
-        img { width: 100%; border-radius: 10px; margin: 20px 0; }
-        .grid-container { display: grid; grid-template-columns: 1fr 1fr; gap: 20px; }
-        .grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(80px, 1fr)); gap: 5px; height: 200px; overflow-y: scroll; background: #f8f9fa; padding: 10px; border-radius: 8px; border: 1px solid #eee; }
-        .c { padding: 8px; text-align: center; font-size: 10px; border: 1px solid #ddd; border-radius: 4px; }
-        .v-1 { background: #ff7675; color: white; } .v0 { background: #dfe6e9; color: #636e72; } .v1 { background: #55efc4; color: #006266; font-weight: bold; }
-        .btn { display: inline-block; margin: 10px 10px 20px 0; padding: 12px 24px; background: #6c5ce7; color: #fff; text-decoration: none; border-radius: 8px; font-weight: bold; }
-        .btn-dl { background: #00b894; } .btn-dl-alt { background: #0984e3; }
+        .container { max-width: 1200px; margin: auto; background: white; padding: 30px; border-radius: 15px; }
+        img { width: 100%; border-radius: 10px; }
+        .grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(70px, 1fr)); gap: 5px; height: 150px; overflow-y: auto; background: #eee; padding: 10px; }
+        .v1 { background: #c3e6cb; } .v-1 { background: #f5c6cb; } .v0 { background: #e2e3e5; }
+        .c { font-size: 10px; padding: 5px; text-align: center; border-radius: 3px; }
     </style></head><body>
     <div class="container">
-        <h1>Bitcoin: Mass Reality Generation</h1>
-        <div style="background:#f8f9fa; padding:15px; border-radius:8px; border:1px solid #dee2e6; margin-bottom:20px;">
-            <strong>CSV Update:</strong> Added 'month' column (1...N per reality).
-        </div>
-        <div class="btn-group">
-            <a href="/" class="btn">Visualize New Reality</a>
-            <a href="/download_csv_random" class="btn btn-dl">Download 100 (Warp + Random + Month)</a>
-            <a href="/download_csv_warped" class="btn btn-dl-alt">Download 100 (Warp Only + Month)</a>
-        </div>
+        <h1>Itertools Brute-Force Backtest</h1>
+        <p>Window Size: {{ws}} | Switching Penalty: {{sp}}</p>
         <img src="data:image/png;base64,{{p}}">
-        <div class="grid-container">
-            <div><h3>Reality A Vector</h3><div class="grid">{% for i in v_a %}<div class="c {% if i.val == -1 %}v-1{% elif i.val == 0 %}v0{% elif i.val == 1 %}v1{% endif %}">{{i.date}}<br><b>{{i.val}}</b></div>{% endfor %}</div></div>
-            <div><h3>Reality B Vector (Preview)</h3><div class="grid">{% for i in v_b %}<div class="c {% if i.val == -1 %}v-1{% elif i.val == 0 %}v0{% elif i.val == 1 %}v1{% endif %}">{{i.date}}<br><b>{{i.val}}</b></div>{% endfor %}</div></div>
+        <div style="display:grid; grid-template-columns: 1fr 1fr; gap: 20px; margin-top: 20px;">
+            <div><h4>Reality A Signals</h4><div class="grid">{% for i in v_a %}<div class="c v{{i.val}}">{{i.date}}<br>{{i.val}}</div>{% endfor %}</div></div>
+            <div><h4>Reality B Signals</h4><div class="grid">{% for i in v_b %}<div class="c v{{i.val}}">{{i.date}}<br>{{i.val}}</div>{% endfor %}</div></div>
         </div>
-    </div></body></html>"""
-    return render_template_string(html, p=p, v_a=v_a, v_b=v_b)
+    </div></body></html>
+    """
+    return render_template_string(html, p=p, v_a=v_a, v_b=v_b, ws=WINDOW_SIZE, sp=SWITCHING_PENALTY_WEIGHT)
 
-@app.route('/download_csv_random')
-def download_csv_random(): return generate_csv_response(randomize=True)
-
-@app.route('/download_csv_warped')
-def download_csv_warped(): return generate_csv_response(randomize=False)
-
-if __name__ == '__main__': app.run(host='0.0.0.0', port=PORT)
+if __name__ == '__main__':
+    app.run(host='0.0.0.0', port=PORT)
