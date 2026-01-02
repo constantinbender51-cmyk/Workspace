@@ -16,7 +16,7 @@ app = Flask(__name__)
 PAIR = 'XBTUSD' 
 INTERVAL = 10080 
 PORT = 8080
-WINDOW_SIZE = 12
+WINDOW_SIZE = 6
 SWITCHING_PENALTY_WEIGHT = 35
 ACTIONS = [-1, 0, 1] # Short, Hold, Long
 
