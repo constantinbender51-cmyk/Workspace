@@ -51,8 +51,10 @@ def analyze_market_structure(df):
     """
     Unified Logic for BOTH Original and Random Realities.
     1. Peak: 2yr Past / 1yr Future radius, AND must be a NEW ATH.
-    2. Low: Lowest price between confirmed Peaks OR between last Peak and End.
-    3. Stable (NEW): The point between Prev Low and Peak that maximizes (Return / StdDev) when selling at Peak.
+    2. Low: 
+       - Standard: Lowest price between confirmed Peaks.
+       - Last Segment (Peak to End): Point maximizing Short Sharpe ((Peak-Price)/Peak / StdDev).
+    3. Stable: The point between Prev Low and Peak that maximizes (Return / StdDev) when selling at Peak.
     4. Bearish Future Assumption: Appends 0s to force signal confirmation at the edge.
     """
     if df.empty: return df, [], [], []
@@ -98,12 +100,63 @@ def analyze_market_structure(df):
         for i in range(len(highs)):
             current_peak = highs[i]
             start_search = current_peak + 1
-            end_search = highs[i+1] if i < len(highs) - 1 else len(df_ext)
+            
+            # Check if this is the last peak (Last segment)
+            is_last_segment = (i == len(highs) - 1)
+            
+            end_search = highs[i+1] if not is_last_segment else len(df_ext)
             
             if start_search < end_search:
-                segment = df_ext.iloc[start_search:end_search]
-                if not segment.empty:
-                    lows.append(segment['close'].idxmin())
+                if is_last_segment:
+                    # --- NEW LOGIC: Max Short Sharpe for Last Segment ---
+                    # We search up to the end of actual data to avoid 0-extension artifacts
+                    search_limit = min(end_search, orig_len)
+                    candidates = range(start_search, search_limit)
+                    
+                    best_score = -999.0
+                    best_t = -1
+                    peak_price = df_ext.loc[current_peak, 'close']
+                    
+                    if not candidates:
+                         # Fallback if start_search is already at the end
+                         if start_search < len(df_ext):
+                             lows.append(start_search)
+                    else:
+                        for t in candidates:
+                            # Path: From Peak to potential Low t
+                            price_path = df_ext.loc[current_peak : t, 'close']
+                            if len(price_path) < 2: continue
+                            
+                            current_price = df_ext.loc[t, 'close']
+                            
+                            # Short Return: (Sell High - Buy Low) / Sell High
+                            # Higher positive value is better for a short
+                            ret = (peak_price - current_price) / peak_price
+                            
+                            # Volatility of the path
+                            pct_changes = price_path.pct_change().dropna()
+                            vol = pct_changes.std()
+                            
+                            if pd.isna(vol) or vol == 0:
+                                score = 0 
+                            else:
+                                score = ret / vol
+                            
+                            if score > best_score:
+                                best_score = score
+                                best_t = t
+                        
+                        if best_t != -1:
+                            lows.append(best_t)
+                        else:
+                            # Fallback to absolute min if calc fails
+                            lows.append(df_ext.iloc[start_search:search_limit]['close'].idxmin())
+
+                else:
+                    # --- STANDARD LOGIC: Absolute Min ---
+                    segment = df_ext.iloc[start_search:end_search]
+                    if not segment.empty:
+                        lows.append(segment['close'].idxmin())
 
     # 3. Stability Detection (Max Sharpe Logic)
     # Definition: Point 't' between [Prev_Low, Peak) where (Price_Peak - Price_t)/Price_t / StdDev(t..Peak) is maximized.
@@ -277,7 +330,7 @@ def create_plot_and_vector(df):
     ax1.scatter(df.loc[highs, 'time'], df.loc[highs, 'close'], color='#ff4757', s=100, marker='v', zorder=5)
     ax1.scatter(df.loc[stabs, 'time'], df.loc[stabs, 'close'], color='#8e44ad', s=100, marker='d', zorder=5)
     ax1.scatter(df.loc[lows, 'time'], df.loc[lows, 'low'], color='#2ed573', s=100, marker='^', zorder=5)
-    ax1.set_title("Reality A: Actual Data (Max Sharpe Stability)", fontweight='bold')
+    ax1.set_title("Reality A: Actual Data (Double Sharpe Logic)", fontweight='bold')
     ax1.legend()
 
     # Plot 2: Random Reality
@@ -368,7 +421,9 @@ def index():
         <h1>Bitcoin: Mass Reality Generation</h1>
         <div style="background:#f8f9fa; padding:15px; border-radius:8px; border:1px solid #dee2e6; margin-bottom:20px;">
             <strong>Assumption:</strong> The price crashes to zero immediately after the data ends (Bearish Future).<br>
-            <strong>Stable Point Definition:</strong> The point between the previous Low and the Peak where (Return / Volatility) is highest (Max Sharpe).
+            <strong>Logic Updates:</strong><br>
+            1. <strong>Stable (State 1):</strong> Max Sharpe for Buying at Stable and Selling at Peak.<br>
+            2. <strong>Low (State 0, Last Segment Only):</strong> Max Sharpe for Shorting at Peak and Covering at Low (before end of data).
         </div>
         <div class="btn-group">
             <a href="/" class="btn">Visualize New Reality</a>
