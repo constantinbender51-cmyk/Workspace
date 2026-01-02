@@ -47,93 +47,25 @@ def fetch_kraken_data(pair, interval):
         print(f"Fetch error: {e}")
         return pd.DataFrame()
 
-# --- ORIGINAL LOGIC (Reality A) ---
-def analyze_structure_original(df):
+def analyze_market_structure(df):
+    """
+    Unified Logic for BOTH Original and Random Realities.
+    1. Peak: 2yr Past / 1yr Future radius, AND must be a NEW ATH.
+    2. Low: Lowest price between confirmed Peaks OR between last Peak and End.
+    3. Stable: 3/4 point (Time) between a Low and the month with highest 3-month return.
+    4. Bearish Future Assumption: Appends 0s to force signal confirmation at the edge.
+    """
     if df.empty: return df, [], [], []
     
     # --- Bearish Extension Logic ---
-    # To avoid 'future blindness', we extend the dataframe with a price crash.
-    # Radius is 24 months (window 49 = 24 past + 24 future).
-    # We append 24 months of 0 price.
-    orig_len = len(df)
-    last_date = df['time'].iloc[-1]
-    
-    extension_dates = [last_date + timedelta(days=30*(i+1)) for i in range(24)]
-    extension = pd.DataFrame({
-        'time': extension_dates,
-        'open': 0.0, 'high': 0.0, 'low': 0.0, 'close': 0.0
-    })
-    
-    df_ext = pd.concat([df, extension], ignore_index=True)
-    
-    # 1. High (2yr radius)
-    df_ext['h_max'] = df_ext['close'].rolling(window=49, center=True, min_periods=25).max()
-    # Note: No tail invalidation needed because we have the dummy future
-    
-    highs = df_ext[df_ext['close'] == df_ext['h_max']].index.tolist()
-
-    # 2. Stability (Volatility < 50% in 3mo window)
-    df_ext['range_3m_centered'] = (df_ext['high'].rolling(window=3, center=True).max() - 
-                                   df_ext['low'].rolling(window=3, center=True).min()) / \
-                                  df_ext['low'].rolling(window=3, center=True).min()
-    
-    stabs = []
-    for p in highs:
-        for i in range(p - 1, 1, -1):
-            if i in df_ext.index and df_ext.loc[i, 'range_3m_centered'] <= 0.50:
-                stabs.append(i); break
-    
-    # 3. Low (1yr radius)
-    df_ext['l_min'] = df_ext['low'].rolling(window=25, center=True, min_periods=13).min()
-    lows = df_ext[df_ext['low'] == df_ext['l_min']].index.tolist()
-
-    # 4. Vector State Machine
-    events = sorted([(i, 'H') for i in highs] + [(i, 'S') for i in stabs] + [(i, 'L') for i in lows])
-    vector = np.full(len(df_ext), np.nan)
-    
-    for i in range(len(events) - 1):
-        idx, t = events[i]; n_idx, n_t = events[i+1]
-        val = np.nan
-        if t == 'H' and n_t == 'L': val = -1
-        elif t == 'L' and n_t == 'S': val = 0
-        elif t == 'S' and n_t == 'H': val = 1
-        elif t == 'H': val = -1
-        elif t == 'L': val = 0
-        elif t == 'S': val = 1
-        if not np.isnan(val): vector[idx:n_idx] = val
-
-    if events:
-        last_idx, last_type = events[-1]
-        last_val = -1 if last_type == 'H' else (0 if last_type == 'L' else 1)
-        vector[last_idx:] = last_val
-            
-    # Slice back to original length
-    df = df.copy()
-    df['signal'] = vector[:orig_len]
-    
-    # Filter indices to be within range
-    highs = [x for x in highs if x < orig_len]
-    stabs = [x for x in stabs if x < orig_len]
-    lows = [x for x in lows if x < orig_len]
-    
-    return df, highs, stabs, lows
-
-# --- NEW LOGIC (Reality B) ---
-def analyze_structure_new(df):
-    if df.empty: return df, [], [], []
-    
-    # --- Bearish Extension Logic ---
-    # Radius is 1 year future (window 37 = 24 past + 12 future).
-    # We append 12 months of 0 price.
+    # Append 12 months of 0 price to force peak confirmation.
     orig_len = len(df)
     
-    # Handle cases where df might not have 'time' column (e.g. from vectorized gen)
-    # If no time, we just make up indices
     if 'time' in df.columns:
         last_date = df['time'].iloc[-1]
         extension_dates = [last_date + timedelta(days=30*(i+1)) for i in range(12)]
     else:
-        extension_dates = [i for i in range(12)] # Dummy
+        extension_dates = [i for i in range(12)]
         
     extension = pd.DataFrame({
         'open': 0.0, 'high': 0.0, 'low': 0.0, 'close': 0.0
@@ -145,12 +77,10 @@ def analyze_structure_new(df):
     df_ext = pd.concat([df, extension], ignore_index=True)
     
     # 1. Peak Detection (ATH Rule)
-    # Window 37 shifted -12 looks 12 months ahead.
     df_ext['h_max_window'] = df_ext['close'].rolling(window=37, min_periods=13).max().shift(-12)
-    # No tail invalidation needed
-    
     df_ext['expanding_ath'] = df_ext['close'].expanding().max()
     
+    # Candidates must be local max AND >= current ATH
     peak_candidates = df_ext[
         (df_ext['close'] == df_ext['h_max_window']) & 
         (df_ext['close'] >= df_ext['expanding_ath'])
@@ -160,6 +90,7 @@ def analyze_structure_new(df):
     if peak_candidates:
         highs.append(peak_candidates[0])
         for p in peak_candidates[1:]:
+            # Ensure peaks are separated and strictly increasing (ATH logic implies increasing, but filtering for noise)
             if (p - highs[-1]) > 12 and df_ext.loc[p, 'close'] > df_ext.loc[highs[-1], 'close']:
                 highs.append(p)
     
@@ -177,7 +108,7 @@ def analyze_structure_new(df):
                 if not segment.empty:
                     lows.append(segment['close'].idxmin())
 
-    # 3. Stability Detection (Abs 3-Month Return 3/4 Point)
+    # 3. Stability Detection (3/4 Point Logic)
     df_ext['abs_ret_3m'] = df_ext['close'].diff(periods=3).abs().fillna(0)
     stabs = []
     
@@ -189,7 +120,10 @@ def analyze_structure_new(df):
         segment = df_ext.iloc[low_idx:target_peak + 1]
         if segment.empty: continue
         
+        # Month with highest absolute 3-month return
         max_3m_abs_idx = segment['abs_ret_3m'].idxmax()
+        
+        # 3/4 Point
         delta = max_3m_abs_idx - low_idx
         three_quarter_idx = int(low_idx + (delta * 0.75))
         stabs.append(three_quarter_idx)
@@ -211,10 +145,11 @@ def analyze_structure_new(df):
             elif etype == 'S': current_state = 1
         vector[i] = current_state
             
-    # Slice back
+    # Slice back to original length
     df = df.copy()
     df['signal'] = vector[:orig_len]
     
+    # Filter indices to ensure they exist in the original data
     highs = [x for x in highs if x < orig_len]
     stabs = [x for x in stabs if x < orig_len]
     lows = [x for x in lows if x < orig_len]
@@ -285,15 +220,16 @@ def generate_warped_reality_optimized(df):
     w_m['low'] *= ratios
     w_m['close'] = new_closes
     
-    # New Logic: Analyze structure with bearish future assumption
-    w_m, _, _, _ = analyze_structure_new(w_m)
+    # Unified Analysis
+    w_m, _, _, _ = analyze_market_structure(w_m)
     
     return w_m[['close', 'signal']]
 
 def create_plot_and_vector(df):
     if df.empty: return None, [], []
-    # Reality A Analysis
-    df, highs, stabs, lows = analyze_structure_original(df)
+    
+    # Reality A: Now using the UNIFIED logic (same as Random)
+    df, highs, stabs, lows = analyze_market_structure(df)
     
     fig, (ax1, ax2) = plt.subplots(2, 1, figsize=(15, 16), facecolor='#f1f2f6')
 
@@ -303,11 +239,12 @@ def create_plot_and_vector(df):
     ax1.scatter(df.loc[highs, 'time'], df.loc[highs, 'close'], color='#ff4757', s=100, marker='v', zorder=5)
     ax1.scatter(df.loc[stabs, 'time'], df.loc[stabs, 'close'], color='#8e44ad', s=100, marker='d', zorder=5)
     ax1.scatter(df.loc[lows, 'time'], df.loc[lows, 'low'], color='#2ed573', s=100, marker='^', zorder=5)
-    ax1.set_title("Reality A: Actual Historical Data", fontweight='bold')
+    ax1.set_title("Reality A: Actual Data (Unified Logic)", fontweight='bold')
     ax1.legend()
 
     # Plot 2: Random Reality
     ax2.set_facecolor('#f0f0f0') 
+    # Use optimized gen for display too, rebuilding time axis
     w_display = generate_warped_reality_optimized(df) 
     w_display['time'] = pd.date_range(start=df['time'].iloc[0], periods=len(w_display), freq='30D')
     
@@ -323,10 +260,11 @@ def create_plot_and_vector(df):
             color = '#f8d7da' if row['signal'] == -1 else ('#e2e3e5' if row['signal'] == 0 else '#d4edda')
             ax2.axvspan(row['time'], row['next_t'], color=color, alpha=0.6, zorder=1)
 
+    # Lines at transitions
     for t in w_display.loc[w_display.index[w_display['signal'].diff() != 0], 'time']:
         ax2.axvline(x=t, color='black', alpha=0.1, linewidth=0.5)
 
-    ax2.set_title("Reality B: Randomized Reality (Optimized Gen)", fontweight='bold')
+    ax2.set_title("Reality B: Randomized Reality", fontweight='bold')
     ax2.legend(loc='upper left')
     ax2.grid(True, alpha=0.3, zorder=2)
 
@@ -361,7 +299,8 @@ def index():
     <div class="container">
         <h1>Bitcoin: Mass Reality Generation</h1>
         <div style="background:#f8f9fa; padding:15px; border-radius:8px; border:1px solid #dee2e6; margin-bottom:20px;">
-            <strong>Assumption:</strong> The price crashes to zero immediately after the data ends. This forces the algorithm to confirm any recent highs as Peaks.
+            <strong>Assumption:</strong> The price crashes to zero immediately after the data ends (Bearish Future).<br>
+            <strong>Logic:</strong> New ATH Peak (2yr past/1yr future) &rarr; Correction &rarr; Low &rarr; Accumulation &rarr; 3/4 Point Stable &rarr; Expansion.
         </div>
         <a href="/" class="btn">Visualize New Reality</a>
         <a href="/download_csv" class="btn btn-dl">Download Training Data (1000 Realities)</a>
@@ -385,22 +324,21 @@ def download_csv():
     df = fetch_kraken_data(PAIR, INTERVAL)
     if df.empty: return "Error"
     
-    # 1. Original Data
-    df_orig, _, _, _ = analyze_structure_original(df)
-    output_df = df_orig[['close', 'signal']].copy()
-    
-    # 2. Generate 1000 Realities
+    # 1. Generate 1000 Realities FIRST
     realities = []
-    # We append to list then concat once for performance
     for _ in range(1000):
         w_df = generate_warped_reality_optimized(df)
         realities.append(w_df)
     
-    # Concat all
     all_randoms = pd.concat(realities)
-    final_df = pd.concat([output_df, all_randoms])
     
-    # Convert to CSV
+    # 2. Original Data LAST
+    df_orig, _, _, _ = analyze_market_structure(df)
+    output_df_orig = df_orig[['close', 'signal']].copy()
+    
+    # 3. Concatenate (Randoms top, Original bottom)
+    final_df = pd.concat([all_randoms, output_df_orig])
+    
     csv_data = final_df.to_csv(index=False)
     
     return Response(
