@@ -156,15 +156,21 @@ def analyze_market_structure(df):
     
     return df, highs, stabs, lows
 
-def generate_warped_reality_optimized(df):
+def generate_warped_reality_optimized(df, randomize_returns=True):
     """
     Vectorized version of warped reality generation for speed.
+    Args:
+        df: Input dataframe
+        randomize_returns: If True, adds random shocks to price returns. 
+                           If False, only warps time (speed of market).
     """
     if df.empty: return pd.DataFrame()
     
     # 1. Vectorized Time Warp
     n_rows = len(df)
     time_warps = np.random.uniform(-1, 1, n_rows)
+    # Days to repeat each monthly data point (roughly converting months to variable days)
+    # Original logic used 30 days base + random variance
     days_counts = np.maximum(1, (30 + 30 * time_warps).astype(int))
     
     indices = np.repeat(np.arange(n_rows), days_counts)
@@ -187,6 +193,7 @@ def generate_warped_reality_optimized(df):
     })
     warped_df.set_index('time', inplace=True)
     
+    # Resample back to 30D blocks (simulated months)
     w_m = warped_df.resample('30D').agg({
         'open': 'first', 
         'high': 'max', 
@@ -194,31 +201,32 @@ def generate_warped_reality_optimized(df):
         'close': 'last'
     }).dropna().reset_index()
 
-    # 2. Vectorized Price Randomization
-    n_w = len(w_m)
-    pct_changes = w_m['close'].pct_change().fillna(0).values
-    
-    shocks = np.random.uniform(-0.06, 0.06, n_w)
-    shocks[0] = 0 
-    log_multipliers = np.cumsum(shocks)
-    multipliers = np.exp(log_multipliers)
-    
-    adjusted_returns = np.maximum(-0.98, pct_changes * multipliers)
-    
-    price_0 = w_m['close'].iloc[0]
-    adjusted_returns[0] = 0 
-    growth_factors = 1 + adjusted_returns
-    cumulative_growth = np.cumprod(growth_factors)
-    new_closes = price_0 * cumulative_growth
-    
-    old_closes = w_m['close'].values
-    old_closes[old_closes == 0] = 1e-9
-    ratios = new_closes / old_closes
-    
-    w_m['open'] *= ratios
-    w_m['high'] *= ratios
-    w_m['low'] *= ratios
-    w_m['close'] = new_closes
+    # 2. Vectorized Price Randomization (Optional)
+    if randomize_returns:
+        n_w = len(w_m)
+        pct_changes = w_m['close'].pct_change().fillna(0).values
+        
+        shocks = np.random.uniform(-0.06, 0.06, n_w)
+        shocks[0] = 0 
+        log_multipliers = np.cumsum(shocks)
+        multipliers = np.exp(log_multipliers)
+        
+        adjusted_returns = np.maximum(-0.98, pct_changes * multipliers)
+        
+        price_0 = w_m['close'].iloc[0]
+        adjusted_returns[0] = 0 
+        growth_factors = 1 + adjusted_returns
+        cumulative_growth = np.cumprod(growth_factors)
+        new_closes = price_0 * cumulative_growth
+        
+        old_closes = w_m['close'].values
+        old_closes[old_closes == 0] = 1e-9
+        ratios = new_closes / old_closes
+        
+        w_m['open'] *= ratios
+        w_m['high'] *= ratios
+        w_m['low'] *= ratios
+        w_m['close'] = new_closes
     
     # Unified Analysis
     w_m, _, _, _ = analyze_market_structure(w_m)
@@ -242,10 +250,9 @@ def create_plot_and_vector(df):
     ax1.set_title("Reality A: Actual Data (Unified Logic)", fontweight='bold')
     ax1.legend()
 
-    # Plot 2: Random Reality
+    # Plot 2: Random Reality (Always Randomized Returns for Visual Impact)
     ax2.set_facecolor('#f0f0f0') 
-    # Use optimized gen for display too, rebuilding time axis
-    w_display = generate_warped_reality_optimized(df) 
+    w_display = generate_warped_reality_optimized(df, randomize_returns=True) 
     w_display['time'] = pd.date_range(start=df['time'].iloc[0], periods=len(w_display), freq='30D')
     
     ax2.plot(w_display['time'], w_display['close'], color='#2980b9', linewidth=2, label='Sim Price', zorder=5)
@@ -264,7 +271,7 @@ def create_plot_and_vector(df):
     for t in w_display.loc[w_display.index[w_display['signal'].diff() != 0], 'time']:
         ax2.axvline(x=t, color='black', alpha=0.1, linewidth=0.5)
 
-    ax2.set_title("Reality B: Randomized Reality", fontweight='bold')
+    ax2.set_title("Reality B: Randomized Reality (Time Warp + Price Shocks)", fontweight='bold')
     ax2.legend(loc='upper left')
     ax2.grid(True, alpha=0.3, zorder=2)
 
@@ -295,6 +302,8 @@ def index():
         .v-1 { background: #ff7675; color: white; } .v0 { background: #dfe6e9; color: #636e72; } .v1 { background: #55efc4; color: #006266; font-weight: bold; }
         .btn { display: inline-block; margin: 10px 10px 20px 0; padding: 12px 24px; background: #6c5ce7; color: #fff; text-decoration: none; border-radius: 8px; font-weight: bold; }
         .btn-dl { background: #00b894; }
+        .btn-dl-alt { background: #0984e3; }
+        .btn-group { margin-bottom: 20px; }
     </style></head><body>
     <div class="container">
         <h1>Bitcoin: Mass Reality Generation</h1>
@@ -302,8 +311,11 @@ def index():
             <strong>Assumption:</strong> The price crashes to zero immediately after the data ends (Bearish Future).<br>
             <strong>Logic:</strong> New ATH Peak (2yr past/1yr future) &rarr; Correction &rarr; Low &rarr; Accumulation &rarr; 3/4 Point Stable &rarr; Expansion.
         </div>
-        <a href="/" class="btn">Visualize New Reality</a>
-        <a href="/download_csv" class="btn btn-dl">Download Training Data (1000 Realities)</a>
+        <div class="btn-group">
+            <a href="/" class="btn">Visualize New Reality</a>
+            <a href="/download_csv_random" class="btn btn-dl">Download 100 (Time Warp + Price Random)</a>
+            <a href="/download_csv_warped" class="btn btn-dl-alt">Download 100 (Time Warp Only)</a>
+        </div>
         
         <img src="data:image/png;base64,{{p}}">
         <div class="grid-container">
@@ -319,15 +331,14 @@ def index():
     </div></body></html>"""
     return render_template_string(html, p=p, v_a=v_a, v_b=v_b)
 
-@app.route('/download_csv')
-def download_csv():
+def generate_csv_response(randomize):
     df = fetch_kraken_data(PAIR, INTERVAL)
     if df.empty: return "Error"
     
-    # 1. Generate 1000 Realities FIRST
+    # 1. Generate 100 Realities
     realities = []
-    for _ in range(1000):
-        w_df = generate_warped_reality_optimized(df)
+    for _ in range(100):
+        w_df = generate_warped_reality_optimized(df, randomize_returns=randomize)
         realities.append(w_df)
     
     all_randoms = pd.concat(realities)
@@ -336,16 +347,26 @@ def download_csv():
     df_orig, _, _, _ = analyze_market_structure(df)
     output_df_orig = df_orig[['close', 'signal']].copy()
     
-    # 3. Concatenate (Randoms top, Original bottom)
+    # 3. Concatenate
     final_df = pd.concat([all_randoms, output_df_orig])
     
     csv_data = final_df.to_csv(index=False)
     
+    fname = "bitcoin_100_randomized.csv" if randomize else "bitcoin_100_warped_only.csv"
+    
     return Response(
         csv_data,
         mimetype="text/csv",
-        headers={"Content-disposition": "attachment; filename=bitcoin_1000_realities.csv"}
+        headers={"Content-disposition": f"attachment; filename={fname}"}
     )
+
+@app.route('/download_csv_random')
+def download_csv_random():
+    return generate_csv_response(randomize=True)
+
+@app.route('/download_csv_warped')
+def download_csv_warped():
+    return generate_csv_response(randomize=False)
 
 if __name__ == '__main__':
     app.run(host='0.0.0.0', port=PORT)
