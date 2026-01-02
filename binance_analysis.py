@@ -34,7 +34,6 @@ CACHED_DATA = {
 }
 
 # --- Vectorization Cache ---
-# We pre-compute the search space to avoid iterating 3^9 loops in Python
 SEARCH_SPACE = {
     "matrix": None,           # shape (19683, 9)
     "internal_switches": None, # shape (19683,)
@@ -44,12 +43,9 @@ SEARCH_SPACE = {
 def precompute_search_space():
     """Generates the strategy matrix once at startup."""
     n_intervals = WINDOW_SIZE - 1
-    # Generate all permutations (approx 19,683 for window 10)
     all_seqs = list(itertools.product(ACTIONS, repeat=n_intervals))
     matrix = np.array(all_seqs, dtype=np.int8)
     
-    # Pre-calculate internal switch costs (switches within the sequence)
-    # diff checks neighbor changes, != 0 means a switch occurred, sum counts them
     internal_switches = np.sum(np.diff(matrix, axis=1) != 0, axis=1)
     
     SEARCH_SPACE["matrix"] = matrix
@@ -58,6 +54,7 @@ def precompute_search_space():
     print(f"Search space optimized: {len(matrix)} permutations loaded into memory.")
 
 def get_tradable_pairs():
+    """Fetches a broad list of USD/USDT/USDC pairs."""
     url = "https://api.kraken.com/0/public/AssetPairs"
     try:
         resp = requests.get(url, timeout=10)
@@ -65,9 +62,17 @@ def get_tradable_pairs():
         if data.get('error'): return []
         pairs = []
         for name, details in data['result'].items():
+            # broader check for USD-denominated pairs
+            altname = details.get('altname', '')
+            quote = details.get('quote', '')
             wsname = details.get('wsname', '')
-            if wsname.endswith('/USD'):
+            
+            # Accept if it trades against USD, ZUSD, USDT, or USDC
+            if 'USD' in quote or 'USD' in altname or 'USD' in wsname:
                 pairs.append(name)
+                
+        # Shuffle to avoid alphabetical bias (getting only 'A' and 'B' assets)
+        random.shuffle(pairs)
         return pairs
     except Exception:
         return []
@@ -94,28 +99,18 @@ def fetch_kraken_data(pair, interval):
         return pd.DataFrame()
 
 def optimize_segment_matrix(segment_prices, last_action=None):
-    """
-    Highly optimized vectorized solver.
-    Replaces 20,000 python iterations with single numpy matrix operations.
-    """
     n_intervals = len(segment_prices) - 1
     if n_intervals != (WINDOW_SIZE - 1):
-        # Fallback for end-of-array segments that don't fit the matrix shape
         return [0] * n_intervals
 
     price_diffs = np.diff(segment_prices) # Shape (9,)
     
-    # 1. Calculate Returns for all 19,683 strategies at once
-    # (19683, 9) * (9,) broadcasting -> (19683, 9)
     strategy_returns = SEARCH_SPACE["matrix"] * price_diffs
     
-    # 2. Vectorized Statistics
     total_returns = np.sum(strategy_returns, axis=1)
     std_devs = np.std(strategy_returns, axis=1) + 1e-9
     risk_adj = total_returns / std_devs
     
-    # 3. Vectorized Penalty Calculation
-    # internal switches + (1 if start != last else 0)
     if last_action is not None:
         start_switch_cost = (SEARCH_SPACE["first_actions"] != last_action).astype(int)
     else:
@@ -124,7 +119,6 @@ def optimize_segment_matrix(segment_prices, last_action=None):
     total_switches = SEARCH_SPACE["internal_switches"] + start_switch_cost
     penalty = (total_switches * SWITCHING_PENALTY_WEIGHT) / n_intervals
     
-    # 4. Score and Argmax
     final_scores = risk_adj - penalty
     best_idx = np.argmax(final_scores)
     
@@ -141,17 +135,13 @@ def apply_optimized_signals(df):
     last_action = None
     step_size = WINDOW_SIZE - 1
     
-    # Sliding window
     for i in range(0, len(prices) - 1, step_size):
         end_idx = min(i + WINDOW_SIZE, len(prices))
         segment = prices[i:end_idx]
         
-        # If segment matches window size, use the fast matrix engine
-        # Otherwise (tail end), just fill with 0s or handle gracefully
         if len(segment) == WINDOW_SIZE:
             window_best_seq = optimize_segment_matrix(segment, last_action)
         else:
-            # Handle remainder
             window_best_seq = [0] * (len(segment)-1)
             
         full_sequence.extend(window_best_seq)
@@ -167,7 +157,6 @@ def apply_optimized_signals(df):
     return df
 
 def precompute_worker():
-    # 0. Init Math
     precompute_search_space()
 
     # 1. Fetch Main Reality
@@ -184,10 +173,14 @@ def precompute_worker():
     CACHED_DATA["reality_a"] = apply_optimized_signals(df_raw)
 
     # 2. Fetch List of Real Assets
-    CACHED_DATA["status"] = "Scanning Market..."
+    CACHED_DATA["status"] = "Scanning Market Pairs..."
     all_pairs = get_tradable_pairs()
+    
+    # Remove main pair if present
     if MAIN_PAIR in all_pairs: all_pairs.remove(MAIN_PAIR)
-    target_pairs = all_pairs[:100] # Limit to 100 for time considerations
+    
+    # Slice to 100 (after shuffling inside get_tradable_pairs)
+    target_pairs = all_pairs[:100] 
     
     total_assets = len(target_pairs)
     processed_assets = []
@@ -198,12 +191,10 @@ def precompute_worker():
         CACHED_DATA["status"] = f"Mining {pair} ({i+1}/{total_assets})..."
         
         df = fetch_kraken_data(pair, INTERVAL)
-        if not df.empty and len(df) > 15: # Need enough history
-            # The apply_optimized_signals is now extremely fast
+        if not df.empty and len(df) > 15: 
             df_opt = apply_optimized_signals(df)
             processed_assets.append(df_opt)
         
-        # We still sleep for API rate limits, but the CPU work is instant
         time.sleep(0.4) 
 
     CACHED_DATA["real_assets"] = processed_assets
@@ -213,27 +204,23 @@ def precompute_worker():
     # --- Visualization ---
     fig, (ax1, ax2) = plt.subplots(2, 1, figsize=(15, 14), facecolor='#f8f9fa')
     
-    # Reality A (Main)
+    # Reality A
     df_a = CACHED_DATA["reality_a"]
     ax1.plot(df_a['time'], df_a['close'], color='#2d3436', linewidth=2, alpha=0.6)
     
-    # Scatter points for signals
-    # Filter to reduce SVG size if needed, but matplotlib png is raster so it's fine
     sigs = df_a['signal'].values
     colors = np.where(sigs == 1, '#00b894', np.where(sigs == -1, '#d63031', '#b2bec3'))
     ax1.scatter(df_a['time'], df_a['close'], c=colors, s=50, zorder=5)
     
-    ax1.set_title(f"Target Reality: {MAIN_PAIR} (Matrix Optimized)", fontsize=14, fontweight='bold')
+    ax1.set_title(f"Target Reality: {MAIN_PAIR}", fontsize=14, fontweight='bold')
     ax1.grid(True, linestyle=':', alpha=0.5)
 
-    # Reality B (Universe)
+    # Reality B
     for i, asset_df in enumerate(processed_assets):
         if not asset_df.empty:
-            # Normalize to start at 100
             start_price = asset_df['close'].iloc[0]
             if start_price > 0:
                 normalized_price = (asset_df['close'] / start_price) * 100
-                # Color code based on if it ended positive or negative relative to start
                 final_val = normalized_price.iloc[-1]
                 line_col = '#6c5ce7' if final_val > 100 else '#a29bfe'
                 alpha = 0.4 if i < 10 else 0.15
@@ -330,13 +317,22 @@ def index():
 def download_all():
     if not CACHED_DATA["real_assets"]: return "No data."
     dfs = []
+    
+    # Process Reality A
     df_a = CACHED_DATA["reality_a"].copy()
-    df_a['asset_id'] = "BTC_MAIN"
+    df_a = df_a[['month_idx', 'close', 'signal']]
+    df_a.columns = ['month', 'value', 'signal']
     dfs.append(df_a)
-    for i, df in enumerate(CACHED_DATA["real_assets"]):
+    
+    # Process Other Assets
+    for df in CACHED_DATA["real_assets"]:
         d = df.copy()
-        d['asset_id'] = d['pair'] if 'pair' in d.columns else f"ASSET_{i}"
-        dfs.append(d)
+        # Ensure columns exist before selection
+        if 'month_idx' in d.columns and 'close' in d.columns and 'signal' in d.columns:
+            d = d[['month_idx', 'close', 'signal']]
+            d.columns = ['month', 'value', 'signal']
+            dfs.append(d)
+        
     filename = f"vectorized_market_data_{int(time.time())}.csv"
     return Response(pd.concat(dfs).to_csv(index=False), mimetype="text/csv", headers={"Content-disposition": f"attachment; filename={filename}"})
 
