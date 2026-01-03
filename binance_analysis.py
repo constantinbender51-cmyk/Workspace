@@ -8,17 +8,17 @@ import time
 # Configuration
 PORT = 8080
 PAIR = "XBTUSD"  # Bitcoin/USD
-INTERVAL = 1440  # 1440 minutes = 1 day (Kraken's API is reliable with daily; we can visualize monthly trends from this)
+# Kraken API Interval in minutes: 10080 = 1 week
+INTERVAL = 10080 
 
-def fetch_kraken_data():
+def fetch_and_resample_data():
     """
-    Fetches OHLC data from Kraken public API using standard urllib.
-    Returns lists of labels (dates) and data (close prices).
+    Fetches Weekly OHLC data from Kraken and resamples it to Monthly Close.
     """
     url = f"https://api.kraken.com/0/public/OHLC?pair={PAIR}&interval={INTERVAL}"
     
     try:
-        print(f"Fetching data from {url}...")
+        print(f"Fetching weekly data from {url}...")
         with urllib.request.urlopen(url) as response:
             data = json.loads(response.read().decode())
             
@@ -26,101 +26,120 @@ def fetch_kraken_data():
             print(f"API Error: {data['error']}")
             return [], []
 
-        # Kraken returns a dictionary where keys are pair names. 
-        # We find the result key that matches our pair (e.g., XXBTZUSD)
+        # Get the result list (key is dynamic, e.g., XXBTZUSD)
         result_key = list(data['result'].keys())[0]
         ohlc_data = data['result'][result_key]
 
-        # OHLC Structure: [time, open, high, low, close, vwap, volume, count]
-        # We need Time (0) and Close (4)
-        labels = []
-        prices = []
+        # Resampling Logic: Weekly -> Monthly
+        # Dictionary to store { 'YYYY-MM': close_price }
+        monthly_map = {}
 
         for entry in ohlc_data:
-            # Convert timestamp to readable date
-            dt = datetime.datetime.fromtimestamp(entry[0])
-            # Format as YYYY-MM-DD
-            date_str = dt.strftime('%Y-%m-%d')
+            # Entry: [time, open, high, low, close, vwap, volume, count]
+            timestamp = entry[0]
+            close_price = float(entry[4])
             
-            labels.append(date_str)
-            prices.append(float(entry[4]))
+            # Convert timestamp to date object
+            dt = datetime.datetime.fromtimestamp(timestamp)
+            
+            # Create a key for the month (e.g., "2023-10")
+            month_key = dt.strftime('%Y-%m')
+            
+            # Since data is chronological, writing to the map repeatedly 
+            # ensures the *last* weekly entry for a month becomes the representative close.
+            monthly_map[month_key] = close_price
+
+        # Extract sorted lists for the chart
+        labels = list(monthly_map.keys())
+        prices = list(monthly_map.values())
 
         return labels, prices
 
     except Exception as e:
-        print(f"Failed to fetch data: {e}")
+        print(f"Failed to process data: {e}")
         return [], []
 
 class ChartHandler(http.server.SimpleHTTPRequestHandler):
     def do_GET(self):
-        # We only handle the root path
         if self.path == '/':
             self.send_response(200)
             self.send_header("Content-type", "text/html")
             self.end_headers()
 
-            # Fetch fresh data on every request
-            labels, data = fetch_kraken_data()
+            labels, data = fetch_and_resample_data()
 
-            # HTML Template with Chart.js
             html = f"""
             <!DOCTYPE html>
             <html>
             <head>
-                <title>Kraken {PAIR} OHLC</title>
+                <title>Kraken {PAIR} Monthly Resample</title>
                 <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
                 <style>
-                    body {{ font-family: sans-serif; background: #1e1e1e; color: #ddd; margin: 0; padding: 20px; }}
+                    body {{ font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif; background: #121212; color: #e0e0e0; margin: 0; padding: 20px; }}
                     .container {{ max-width: 1000px; margin: 0 auto; }}
-                    h1 {{ text-align: center; color: #fff; }}
+                    h1 {{ text-align: center; color: #fff; font-weight: 300; letter-spacing: 1px; }}
+                    .subtitle {{ text-align: center; color: #888; font-size: 0.9em; margin-bottom: 20px; }}
+                    .chart-wrapper {{ background: #1e1e1e; padding: 20px; border-radius: 8px; box-shadow: 0 4px 6px rgba(0,0,0,0.3); }}
                     .chart-container {{ position: relative; height: 60vh; width: 100%; }}
                 </style>
             </head>
             <body>
                 <div class="container">
-                    <h1>{PAIR} Close Prices (Daily/Monthly Trend)</h1>
-                    <div class="chart-container">
-                        <canvas id="myChart"></canvas>
+                    <h1>{PAIR} Monthly Close</h1>
+                    <div class="subtitle">Source: Kraken API (Weekly Data Resampled)</div>
+                    <div class="chart-wrapper">
+                        <div class="chart-container">
+                            <canvas id="myChart"></canvas>
+                        </div>
                     </div>
                 </div>
 
                 <script>
                     const ctx = document.getElementById('myChart').getContext('2d');
+                    
+                    // Create gradient
+                    const gradient = ctx.createLinearGradient(0, 0, 0, 400);
+                    gradient.addColorStop(0, 'rgba(54, 162, 235, 0.5)');
+                    gradient.addColorStop(1, 'rgba(54, 162, 235, 0.0)');
+
                     const myChart = new Chart(ctx, {{
                         type: 'line',
                         data: {{
                             labels: {json.dumps(labels)},
                             datasets: [{{
-                                label: 'Close Price (USD)',
+                                label: 'Monthly Close (USD)',
                                 data: {json.dumps(data)},
-                                borderColor: 'rgba(75, 192, 192, 1)',
-                                backgroundColor: 'rgba(75, 192, 192, 0.2)',
+                                borderColor: '#36a2eb',
+                                backgroundColor: gradient,
                                 borderWidth: 2,
-                                pointRadius: 0, // Hide points for cleaner look on large datasets
-                                pointHoverRadius: 5,
+                                pointRadius: 3,
+                                pointBackgroundColor: '#36a2eb',
                                 fill: true,
-                                tension: 0.1
+                                tension: 0.3
                             }}]
                         }},
                         options: {{
                             responsive: true,
                             maintainAspectRatio: false,
-                            interaction: {{
-                                mode: 'index',
-                                intersect: false,
+                            plugins: {{
+                                legend: {{ labels: {{ color: '#ccc' }} }},
+                                tooltip: {{
+                                    mode: 'index',
+                                    intersect: false,
+                                    backgroundColor: 'rgba(0,0,0,0.8)',
+                                    titleColor: '#fff',
+                                    bodyColor: '#fff'
+                                }}
                             }},
                             scales: {{
                                 x: {{
                                     grid: {{ color: '#333' }},
-                                    ticks: {{ color: '#aaa' }}
+                                    ticks: {{ color: '#888' }}
                                 }},
                                 y: {{
                                     grid: {{ color: '#333' }},
-                                    ticks: {{ color: '#aaa' }}
+                                    ticks: {{ color: '#888' }}
                                 }}
-                            }},
-                            plugins: {{
-                                legend: {{ labels: {{ color: '#fff' }} }}
                             }}
                         }}
                     }});
@@ -130,23 +149,20 @@ class ChartHandler(http.server.SimpleHTTPRequestHandler):
             """
             self.wfile.write(html.encode('utf-8'))
         else:
-            # 404 for anything else
             self.send_response(404)
             self.end_headers()
-            self.wfile.write(b"404 Not Found")
+            self.wfile.write(b"Not Found")
 
 def run_server():
-    # Allow reuse of address to prevent "Address already in use" errors on restart
     socketserver.TCPServer.allow_reuse_address = True
-    
     with socketserver.TCPServer(("", PORT), ChartHandler) as httpd:
-        print(f"Serving Kraken OHLC chart at http://localhost:{PORT}")
-        print("Press Ctrl+C to stop.")
+        print(f"Serving Resampled Kraken Chart at http://localhost:{PORT}")
         try:
             httpd.serve_forever()
         except KeyboardInterrupt:
-            print("\nShutting down server...")
-            httpd.shutdown()
+            pass
+        finally:
+            httpd.server_close()
 
 if __name__ == "__main__":
     run_server()
