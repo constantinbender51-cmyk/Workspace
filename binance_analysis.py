@@ -2,20 +2,22 @@ import ccxt
 import pandas as pd
 import numpy as np
 import matplotlib
-matplotlib.use('Agg') # Force non-interactive backend
+matplotlib.use('Agg') 
 import matplotlib.pyplot as plt
 import http.server
 import socketserver
 import time
+import os
+import glob
 from datetime import datetime
 
 # --- CONFIGURATION ---
 PORT = 8080
 SEQ_LENGTH = 5
 
-# LOG_STEP_SIZE = 0.05  (5% steps - Normal)
-# LOG_STEP_SIZE = 10.0  (1000% steps - Should be a flat line)
-LOG_STEP_SIZE = 0.05 
+# Set this to 0.10 (10%) to see VERY clear, blocky steps.
+# If you set this to 1000000.0, the red chart MUST be a flat line.
+LOG_STEP_SIZE = 0.10  
 
 def fetch_binance_data(symbol='ETH/USDT', timeframe='4h', start_date='2020-01-01T00:00:00Z', end_date='2026-01-01T00:00:00Z'):
     print(f"Fetching {symbol}...")
@@ -43,7 +45,7 @@ def fetch_binance_data(symbol='ETH/USDT', timeframe='4h', start_date='2020-01-01
     end_dt = pd.Timestamp(end_date, tz='UTC')
     return df.loc[(df['timestamp'] >= start_dt) & (df['timestamp'] < end_dt)].reset_index(drop=True)
 
-def prepare_arrays(df):
+def prepare_arrays(df, step_size):
     close_array = df['close'].to_numpy()
     
     # 1. Percentage Change
@@ -54,16 +56,33 @@ def prepare_arrays(df):
     multipliers = 1.0 + pct_change
     abs_price_raw = np.cumprod(multipliers)
     
-    # 3. Logarithmic Rounding
-    # We take the log, floor it to the nearest STEP, then exponentiate back.
+    # 3. Logarithmic Rounding (Explicit Debugging)
+    # Take Log
     abs_price_log = np.log(abs_price_raw)
-    abs_price_log_rounded = np.floor(abs_price_log / LOG_STEP_SIZE) * LOG_STEP_SIZE
+    
+    # Quantize Log
+    abs_price_log_rounded = np.floor(abs_price_log / step_size) * step_size
+    
+    # Exponentiate back
     abs_price_rounded = np.exp(abs_price_log_rounded)
     
+    # --- CRITICAL DEBUG PRINT ---
+    unique_levels = len(np.unique(abs_price_rounded))
+    print(f"\n[DEBUG] Step Size: {step_size}")
+    print(f"[DEBUG] Raw Price Points: {len(abs_price_raw)}")
+    print(f"[DEBUG] Unique 'Rounded' Levels: {unique_levels}")
+    
+    if unique_levels == 1:
+        print("[DEBUG] WARNING: Result is a flat line (expected if step size is huge).")
+    elif unique_levels == len(abs_price_raw):
+        print("[DEBUG] WARNING: Rounding did nothing! (Step size too small?)")
+    else:
+        print(f"[DEBUG] SUCCESS: Rounding created {unique_levels} distinct steps.")
+        
     return df['timestamp'], close_array, pct_change, abs_price_raw, abs_price_rounded
 
-def generate_plots(timestamps, close, pct, abs_raw, abs_rounded):
-    print("\nGenerating plots...")
+def generate_plots(timestamps, close, pct, abs_raw, abs_rounded, filename):
+    print(f"Generating plot: {filename}...")
     
     fig, axs = plt.subplots(4, 1, figsize=(12, 18), sharex=True)
     plt.subplots_adjust(hspace=0.3)
@@ -85,19 +104,25 @@ def generate_plots(timestamps, close, pct, abs_raw, abs_rounded):
     axs[2].grid(True, alpha=0.3)
     
     # 4. Absolute Price (Log Rounded)
+    # Using 'step' plot specifically to show flat segments
     axs[3].step(timestamps, abs_rounded, color='red', linewidth=1.5, where='mid')
     axs[3].set_title(f'4. Absolute Price Index (Log-Rounded: {LOG_STEP_SIZE*100}% steps)')
     axs[3].grid(True, alpha=0.3)
     
     plt.xlabel('Date')
-    plt.savefig('analysis_plot.png', dpi=100, bbox_inches='tight')
+    plt.savefig(filename, dpi=100, bbox_inches='tight')
     plt.close()
-    print("Plot saved to 'analysis_plot.png'")
+    print(f"Plot saved to '{filename}'")
 
-def start_server():
-    # CACHE BUSTER: We generate a unique timestamp
-    timestamp = int(time.time())
-    
+def start_server(image_filename):
+    # CLEANUP: Delete old plot files to keep directory clean
+    for f in glob.glob("analysis_plot_*.png"):
+        if f != image_filename:
+            try:
+                os.remove(f)
+            except:
+                pass
+
     html_content = f"""
     <html>
     <head>
@@ -115,7 +140,8 @@ def start_server():
         <div class="container">
             <h1>Logarithmic Price Analysis</h1>
             <p><strong>Step Mode:</strong> Logarithmic | <strong>Step Size:</strong> {LOG_STEP_SIZE*100}%</p>
-            <img src="analysis_plot.png?t={timestamp}" alt="Plots">
+            <p><small>Debug: Loaded image {image_filename}</small></p>
+            <img src="{image_filename}" alt="Plots">
         </div>
     </body>
     </html>
@@ -127,21 +153,30 @@ def start_server():
     Handler = http.server.SimpleHTTPRequestHandler
     socketserver.TCPServer.allow_reuse_address = True
     
-    with socketserver.TCPServer(("", PORT), Handler) as httpd:
-        print(f"\n--- SERVER STARTED ---")
-        print(f"View at: http://localhost:{PORT}")
-        print(f"Press Ctrl+C to stop")
-        httpd.serve_forever()
+    try:
+        with socketserver.TCPServer(("", PORT), Handler) as httpd:
+            print(f"\n--- SERVER STARTED ---")
+            print(f"View at: http://localhost:{PORT}")
+            print(f"Press Ctrl+C to stop")
+            httpd.serve_forever()
+    except OSError:
+        print(f"\nERROR: Port {PORT} is busy. Please stop the previous script or change the port.")
 
 def run_analysis():
+    # 1. Fetch
     df = fetch_binance_data()
     if df.empty: return
     
-    timestamps, close, pct, abs_raw, abs_rounded = prepare_arrays(df)
+    # 2. Process with Explicit Step Size
+    timestamps, close, pct, abs_raw, abs_rounded = prepare_arrays(df, step_size=LOG_STEP_SIZE)
     
-    # Plot & Serve
-    generate_plots(timestamps, close, pct, abs_raw, abs_rounded)
-    start_server()
+    # 3. Generate Unique Filename (Beats Cache)
+    unique_id = int(time.time())
+    filename = f"analysis_plot_{unique_id}.png"
+    
+    # 4. Plot & Serve
+    generate_plots(timestamps, close, pct, abs_raw, abs_rounded, filename)
+    start_server(filename)
 
 if __name__ == "__main__":
     run_analysis()
