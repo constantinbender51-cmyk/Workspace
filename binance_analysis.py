@@ -20,7 +20,7 @@ from github import Github
 
 # --- CONFIGURATION ---
 PORT = 8080
-SEQ_LENGTH = 5
+SEQ_LENGTHS = [5, 6, 7, 8, 9, 10]  # Grid search over these lengths
 MODEL_FILENAME = "/app/data/eth.pkl"
 
 # GitHub Configuration
@@ -30,8 +30,8 @@ GITHUB_BRANCH = "main"
 
 # Grid Search Parameters
 GRID_MIN = 0.005
-GRID_MAX = 0.1
-GRID_STEPS = 100
+GRID_MAX = 0.05
+GRID_STEPS = 20 # Reduced slightly for speed since we added a 2nd dimension (Seq Length)
 
 # Ensemble Threshold
 ENSEMBLE_ACC_THRESHOLD = 70.0
@@ -96,7 +96,10 @@ def get_grid_indices(df, step_size):
     grid_indices = np.floor(abs_price_log / step_size).astype(int)
     return grid_indices
 
-def train_and_evaluate(df, step_size):
+def train_and_evaluate(df, step_size, seq_len):
+    """
+    Trains a pattern matcher for a specific step_size AND sequence length.
+    """
     grid_indices = get_grid_indices(df, step_size)
     total_len = len(grid_indices)
     idx_80 = int(total_len * 0.80)
@@ -106,19 +109,22 @@ def train_and_evaluate(df, step_size):
     val_seq = grid_indices[idx_80:idx_90]
     
     patterns = {}
-    for i in range(len(train_seq) - SEQ_LENGTH):
-        seq = tuple(train_seq[i : i + SEQ_LENGTH])
-        target = train_seq[i + SEQ_LENGTH]
+    
+    # Train
+    for i in range(len(train_seq) - seq_len):
+        seq = tuple(train_seq[i : i + seq_len])
+        target = train_seq[i + seq_len]
         if seq not in patterns: patterns[seq] = []
         patterns[seq].append(target)
         
     move_correct = 0
     move_total_valid = 0
     
-    for i in range(len(val_seq) - SEQ_LENGTH):
-        current_seq = tuple(val_seq[i : i + SEQ_LENGTH])
+    # Validate
+    for i in range(len(val_seq) - seq_len):
+        current_seq = tuple(val_seq[i : i + seq_len])
         current_level = current_seq[-1]
-        actual_next_level = val_seq[i + SEQ_LENGTH]
+        actual_next_level = val_seq[i + seq_len]
         
         if current_seq in patterns:
             history = patterns[current_seq]
@@ -135,6 +141,7 @@ def train_and_evaluate(df, step_size):
     
     return {
         'step_size': step_size,
+        'seq_len': seq_len,
         'accuracy': accuracy,
         'trade_count': move_total_valid,
         'patterns': patterns,
@@ -143,43 +150,70 @@ def train_and_evaluate(df, step_size):
 
 def run_combined_metric(high_acc_configs):
     if not high_acc_configs: return 0.0, 0
-    ref_seq_len = len(high_acc_configs[0]['val_seq'])
+    
+    # All val_seqs have the same timestamps length, but different integer values.
+    ref_len = len(high_acc_configs[0]['val_seq'])
+    
+    # We must start prediction at an index where ALL models have enough history.
+    max_seq_len = max(cfg['seq_len'] for cfg in high_acc_configs)
+    
     combined_correct = 0
     combined_total = 0
     
-    for i in range(ref_seq_len - SEQ_LENGTH):
+    # Iterate through time by TARGET index
+    for target_idx in range(max_seq_len, ref_len):
         up_votes = []
         down_votes = []
+        
         for cfg in high_acc_configs:
+            s_len = cfg['seq_len']
             val_seq = cfg['val_seq']
-            current_seq = tuple(val_seq[i : i + SEQ_LENGTH])
+            
+            # Extract the sequence ending right before target_idx
+            # Input: [target_idx - s_len ... target_idx - 1] -> Predicts: target_idx
+            current_seq = tuple(val_seq[target_idx - s_len : target_idx])
+            current_level = current_seq[-1] # The level at target_idx - 1
+            
             if current_seq in cfg['patterns']:
                 history = cfg['patterns'][current_seq]
                 predicted_level = Counter(history).most_common(1)[0][0]
-                diff = predicted_level - current_seq[-1]
+                diff = predicted_level - current_level
+                
                 if diff > 0: up_votes.append(cfg)
                 elif diff < 0: down_votes.append(cfg)
         
+        # Ensemble Voting Logic (Unanimity of active voters)
         if len(up_votes) > 0 and len(down_votes) == 0:
+            # Check correctness using the "best" config's grid (highest step size typically filters noise)
             best_cfg = max(up_votes, key=lambda x: x['step_size'])
             chosen_val_seq = best_cfg['val_seq']
-            curr_lvl = chosen_val_seq[i + SEQ_LENGTH - 1]
-            next_lvl = chosen_val_seq[i + SEQ_LENGTH]
+            
+            curr_lvl = chosen_val_seq[target_idx - 1]
+            next_lvl = chosen_val_seq[target_idx]
             actual_diff = next_lvl - curr_lvl
+            
             if actual_diff != 0:
                 combined_total += 1
                 if actual_diff > 0: combined_correct += 1
-                    
+        
+        elif len(down_votes) > 0 and len(up_votes) == 0:
+            # Check correctness for Short
+            best_cfg = max(down_votes, key=lambda x: x['step_size'])
+            chosen_val_seq = best_cfg['val_seq']
+            
+            curr_lvl = chosen_val_seq[target_idx - 1]
+            next_lvl = chosen_val_seq[target_idx]
+            actual_diff = next_lvl - curr_lvl
+            
+            if actual_diff != 0:
+                combined_total += 1
+                if actual_diff < 0: combined_correct += 1
+
     acc = (combined_correct / combined_total * 100) if combined_total > 0 else 0.0
     return acc, combined_total
 
 def upload_to_github(filename):
-    """
-    Uploads the specified file to the configured GitHub Repo and Folder.
-    """
     print(f"\n--- GITHUB UPLOAD ---")
-    
-    # 1. Load Environment Variables
     load_dotenv()
     pat = os.getenv("PAT")
     
@@ -188,25 +222,17 @@ def upload_to_github(filename):
         return
 
     try:
-        # 2. Authenticate
         g = Github(pat)
         repo = g.get_repo(GITHUB_REPO)
-        
-        # 3. Read the binary file
         with open(filename, 'rb') as f:
             content = f.read()
-        
-        # 4. Define Target Path (e.g., model2x/grid_ensemble_model.pkl)
         target_path = f"{GITHUB_FOLDER}/{filename}"
         
-        # 5. Check if file exists (Update) or Create new
         try:
             contents = repo.get_contents(target_path, ref=GITHUB_BRANCH)
-            print(f"File exists. Updating {target_path}...")
             repo.update_file(contents.path, f"Update model {datetime.now()}", content, contents.sha, branch=GITHUB_BRANCH)
             print("[SUCCESS] File Updated on GitHub.")
         except Exception:
-            print(f"File does not exist. Creating {target_path}...")
             repo.create_file(target_path, f"Create model {datetime.now()}", content, branch=GITHUB_BRANCH)
             print("[SUCCESS] File Created on GitHub.")
             
@@ -222,6 +248,7 @@ def save_ensemble_model(high_acc_configs, initial_reference_price):
     for cfg in high_acc_configs:
         lean_configs.append({
             'step_size': cfg['step_size'],
+            'seq_len': cfg['seq_len'],
             'patterns': cfg['patterns'],
             'accuracy': cfg['accuracy']
         })
@@ -234,14 +261,10 @@ def save_ensemble_model(high_acc_configs, initial_reference_price):
     }
 
     try:
-        # Save Locally
         with open(MODEL_FILENAME, 'wb') as f:
             pickle.dump(model_payload, f)
         print(f"\n[SUCCESS] Model saved locally to '{MODEL_FILENAME}'")
-        
-        # Upload to GitHub
         upload_to_github(MODEL_FILENAME)
-        
     except Exception as e:
         print(f"\n[ERROR] Failed to save model: {e}")
 
@@ -253,16 +276,22 @@ def run_grid_search():
     step_sizes = np.linspace(GRID_MIN, GRID_MAX, GRID_STEPS)
     results = []
     
-    print(f"\n\n--- STARTING GRID SEARCH ({GRID_STEPS} Steps) ---")
-    for step in step_sizes:
-        print(f"Testing Step Size: {step:.5f}...", end=" ")
-        res = train_and_evaluate(df, step)
-        results.append(res)
-        print(f"Acc: {res['accuracy']:.2f}% | Trades: {res['trade_count']}")
+    print(f"\n\n--- STARTING GRID SEARCH (Steps: {GRID_STEPS}, SeqLens: {SEQ_LENGTHS}) ---")
+    
+    # Nested Grid Search: Step Size x Sequence Length
+    for s_len in SEQ_LENGTHS:
+        print(f"\nTesting Sequence Length: {s_len}")
+        for step in step_sizes:
+            res = train_and_evaluate(df, step, s_len)
+            results.append(res)
+            # Minimal logging to avoid console spam
+            if res['accuracy'] > 60:
+                print(f"  > Step: {step:.4f} | Acc: {res['accuracy']:.2f}% | Trades: {res['trade_count']}")
         
     print(f"\n--- CALCULATING COMBINED PREDICTOR ---")
     high_acc_configs = [r for r in results if r['accuracy'] > ENSEMBLE_ACC_THRESHOLD]
     
+    print(f"Found {len(high_acc_configs)} configurations above {ENSEMBLE_ACC_THRESHOLD}% accuracy.")
     cmb_acc, cmb_count = run_combined_metric(high_acc_configs)
     print(f"Combined Accuracy: {cmb_acc:.2f}% | Trades: {cmb_count}")
 
@@ -272,58 +301,69 @@ def run_grid_search():
     unique_id = int(time.time())
     filename = f"grid_search_{unique_id}.png"
     
-    accuracies = [r['accuracy'] for r in results]
-    trade_counts = [r['trade_count'] for r in results]
+    fig, ax1 = plt.subplots(figsize=(12, 7))
+    ax1.set_xlabel('Step Size (Log Scale Proxy)')
+    ax1.set_ylabel('Accuracy (%)')
+    ax1.axhline(y=ENSEMBLE_ACC_THRESHOLD, color='r', linestyle=':', label='Threshold')
+
+    # Color map for different sequence lengths
+    colors = plt.cm.viridis(np.linspace(0, 1, len(SEQ_LENGTHS)))
     
-    fig, ax1 = plt.subplots(figsize=(10, 6))
-    ax1.set_xlabel('Log Step Size')
-    ax1.set_ylabel('Accuracy (%)', color='tab:blue')
-    ax1.plot(step_sizes, accuracies, marker='o', markersize=3, color='tab:blue')
-    ax1.axhline(y=ENSEMBLE_ACC_THRESHOLD, color='r', linestyle=':')
-    ax1.tick_params(axis='y', labelcolor='tab:blue')
+    for idx, s_len in enumerate(SEQ_LENGTHS):
+        # Filter results for this sequence length
+        subset = [r for r in results if r['seq_len'] == s_len]
+        if not subset: continue
+        
+        steps_sub = [r['step_size'] for r in subset]
+        accs_sub = [r['accuracy'] for r in subset]
+        
+        ax1.plot(steps_sub, accs_sub, marker='o', markersize=3, label=f'Seq Len {s_len}', color=colors[idx], alpha=0.8)
+
+    ax1.legend(loc='lower right')
     ax1.grid(True, linestyle='--', alpha=0.3)
     
-    ax2 = ax1.twinx() 
-    ax2.set_ylabel('Trades', color='tab:orange')
-    ax2.plot(step_sizes, trade_counts, marker='x', markersize=3, linestyle='--', color='tab:orange')
-    ax2.tick_params(axis='y', labelcolor='tab:orange')
-    
-    plt.title(f'Accuracy vs. Trade Volume\nCombined: {cmb_acc:.2f}% ({cmb_count} trades)')
+    plt.title(f'Accuracy vs. Step Size per Sequence Length\nEnsemble (All Lens): {cmb_acc:.2f}% ({cmb_count} trades)')
     fig.tight_layout()
     plt.savefig(filename)
     plt.close()
     
-    start_server(filename, step_sizes, accuracies, trade_counts, cmb_acc, cmb_count)
+    start_server(filename, results, cmb_acc, cmb_count)
 
-def start_server(image_filename, steps, accs, counts, cmb_acc, cmb_count):
+def start_server(image_filename, results, cmb_acc, cmb_count):
     for f in glob.glob("grid_search_*.png"):
         if f != image_filename:
             try: os.remove(f)
             except: pass
 
+    # Sort results by Accuracy Descending for the table
+    sorted_results = sorted(results, key=lambda x: x['accuracy'], reverse=True)
+    top_results = sorted_results[:50] # Show top 50
+
     table_rows = ""
-    for s, a, c in zip(steps, accs, counts):
-        bg = "background-color: #e6fffa;" if a > ENSEMBLE_ACC_THRESHOLD else ""
-        wt = "font-weight: bold;" if a > ENSEMBLE_ACC_THRESHOLD else ""
-        table_rows += f"<tr style='{bg} {wt}'><td>{s:.5f}</td><td>{a:.2f}%</td><td>{c}</td></tr>"
+    for r in top_results:
+        bg = "background-color: #e6fffa;" if r['accuracy'] > ENSEMBLE_ACC_THRESHOLD else ""
+        wt = "font-weight: bold;" if r['accuracy'] > ENSEMBLE_ACC_THRESHOLD else ""
+        table_rows += f"<tr style='{bg} {wt}'><td>{r['seq_len']}</td><td>{r['step_size']:.5f}</td><td>{r['accuracy']:.2f}%</td><td>{r['trade_count']}</td></tr>"
 
     html_content = f"""
     <html>
     <head><title>Results</title>
     <style>
         body {{ font-family: sans-serif; text-align: center; padding: 20px; background: #f4f4f4; }}
-        .container {{ background: white; padding: 30px; border-radius: 12px; margin: 0 auto; max-width: 900px; }}
-        table {{ margin: 20px auto; border-collapse: collapse; width: 100%; }}
-        th {{ background: #4a5568; color: white; padding: 12px; }}
-        td {{ padding: 10px; border-bottom: 1px solid #ddd; }}
+        .container {{ background: white; padding: 30px; border-radius: 12px; margin: 0 auto; max-width: 1000px; }}
+        table {{ margin: 20px auto; border-collapse: collapse; width: 100%; font-size: 14px; }}
+        th {{ background: #4a5568; color: white; padding: 10px; }}
+        td {{ padding: 8px; border-bottom: 1px solid #ddd; }}
+        .stats {{ font-size: 1.2em; margin-bottom: 20px; color: #2d3748; }}
     </style>
     </head>
     <body>
         <div class="container">
-            <h1>Grid Strategy Results</h1>
-            <h2>Ensemble: {cmb_acc:.2f}% ({cmb_count} trades)</h2>
-            <img src="{image_filename}" style="max-width:100%">
-            <table><tr><th>Step</th><th>Acc</th><th>Trades</th></tr>{table_rows}</table>
+            <h1>Grid & Sequence Search Results</h1>
+            <div class="stats"><strong>Ensemble Performance:</strong> {cmb_acc:.2f}% Accuracy | {cmb_count} Trades</div>
+            <img src="{image_filename}" style="max-width:100%; border: 1px solid #ddd; margin-bottom: 20px;">
+            <h3>Top 50 Configurations</h3>
+            <table><tr><th>Seq Len</th><th>Step Size</th><th>Accuracy</th><th>Trades</th></tr>{table_rows}</table>
         </div>
     </body>
     </html>
