@@ -20,8 +20,10 @@ from huggingface_hub import HfApi
 
 # --- CONFIGURATION ---
 PORT = 8080
-ASSETS = ['BTC/USDT', 'ETH/USDT', 'BNB/USDT', 'SOL/USDT', 'XRP/USDT']
 SEQ_LENGTHS = [5, 6, 7, 8, 9, 10]
+ASSETS = ['BTC/USDT', 'ETH/USDT', 'BNB/USDT', 'SOL/USDT', 'XRP/USDT']
+
+# Hugging Face Configuration
 HF_REPO_ID = "Llama26051996/Models" 
 HF_FOLDER = "model2x"
 
@@ -29,10 +31,12 @@ HF_FOLDER = "model2x"
 GRID_MIN = 0.005
 GRID_MAX = 0.05
 GRID_STEPS = 20 
-ENSEMBLE_ACC_THRESHOLD = 70.0 # Slightly lowered to ensure we get models for more volatile assets
+
+# Ensemble Threshold
+ENSEMBLE_ACC_THRESHOLD = 70.0
 
 def fetch_binance_data(symbol, timeframe='30m', start_date='2020-01-01T00:00:00Z', end_date='2026-01-01T00:00:00Z'):
-    print(f"Fetching {symbol}...")
+    print(f"\n--- Fetching Data for {symbol} ---")
     exchange = ccxt.binance({
         'enableRateLimit': True,
     })
@@ -43,24 +47,23 @@ def fetch_binance_data(symbol, timeframe='30m', start_date='2020-01-01T00:00:00Z
     
     while since < end_ts:
         try:
-            # Pass the specific symbol here
             ohlcv = exchange.fetch_ohlcv(symbol, timeframe, since, limit=1000)
             
             if not ohlcv:
-                print(f"No more data received for {symbol}.")
+                print("No more data received.")
                 break
             
             all_ohlcv.extend(ohlcv)
             since = ohlcv[-1][0] + 1
-            print(f"Fetched {symbol} up to {datetime.fromtimestamp(ohlcv[-1][0]/1000, tz=None)}...", end='\r')
+            print(f"Fetched up to {datetime.fromtimestamp(ohlcv[-1][0]/1000, tz=None)}...", end='\r')
             
             if since >= end_ts:
                 break
                 
             time.sleep(exchange.rateLimit / 1000 * 1.1)
 
-        except (ccxt.RateLimitExceeded, ccxt.DDoSProtection):
-            print(f"\nCRITICAL: Rate Limit Exceeded. Sleeping 60s...")
+        except (ccxt.RateLimitExceeded, ccxt.DDoSProtection) as e:
+            print(f"\nCRITICAL: Rate Limit Exceeded. Sleeping 60s.")
             time.sleep(60)
             
         except ccxt.NetworkError as e:
@@ -68,7 +71,7 @@ def fetch_binance_data(symbol, timeframe='30m', start_date='2020-01-01T00:00:00Z
             time.sleep(10)
             
         except Exception as e:
-            print(f"\nUnexpected Error on {symbol}: {e}")
+            print(f"\nUnexpected Error: {e}")
             break
             
     print(f"\n{symbol} Data fetch complete. Total rows: {len(all_ohlcv)}")
@@ -206,7 +209,8 @@ def upload_to_huggingface(filename):
     try:
         api = HfApi()
         path_in_repo = f"{HF_FOLDER}/{os.path.basename(filename)}"
-        print(f"Uploading to {HF_REPO_ID} at {path_in_repo}...")
+        
+        print(f"Uploading {filename} to {HF_REPO_ID} at {path_in_repo}...")
         
         api.upload_file(
             path_or_fileobj=filename,
@@ -216,7 +220,7 @@ def upload_to_huggingface(filename):
             token=token,
             commit_message=f"Update model {os.path.basename(filename)} {datetime.now()}"
         )
-        print("[SUCCESS] Upload Complete.")
+        print("[SUCCESS] File Updated on Hugging Face.")
             
     except Exception as e:
         print(f"[ERROR] Hugging Face Upload Failed: {e}")
@@ -250,21 +254,14 @@ def save_ensemble_model(high_acc_configs, initial_reference_price, model_filenam
     except Exception as e:
         print(f"[ERROR] Failed to save model: {e}")
 
-def process_asset(symbol):
+def run_analysis_for_asset(symbol):
     """
-    Runs the entire pipeline for a single asset.
-    Returns a dict with summary stats for the final report.
+    Runs the full analysis pipeline for a single asset and returns the results for the report.
     """
-    clean_name = symbol.replace('/', '').lower() # e.g., 'ethusdt'
-    # Short alias for files e.g. 'eth' from 'ETH/USDT'
-    short_name = symbol.split('/')[0].lower() 
-    
-    model_filename = f"{short_name}_model.pkl"
-    plot_filename = f"{short_name}_grid_search.png"
-    
-    print(f"\n\n{'='*60}")
-    print(f"PROCESSING ASSET: {symbol}")
-    print(f"{'='*60}")
+    # Create filenames based on symbol (e.g., BTC/USDT -> btc.pkl)
+    clean_name = symbol.split('/')[0].lower()
+    model_filename = f"{clean_name}.pkl"
+    image_filename = f"grid_{clean_name}_{int(time.time())}.png"
 
     df = fetch_binance_data(symbol)
     if df.empty:
@@ -275,20 +272,20 @@ def process_asset(symbol):
     step_sizes = np.linspace(GRID_MIN, GRID_MAX, GRID_STEPS)
     results = []
     
-    print(f"Starting Grid Search for {symbol}...")
+    print(f"--- PROCESSING {symbol} (Steps: {GRID_STEPS}, SeqLens: {SEQ_LENGTHS}) ---")
     
     for s_len in SEQ_LENGTHS:
         for step in step_sizes:
             res = train_and_evaluate(df, step, s_len)
             results.append(res)
-
+        
     high_acc_configs = [r for r in results if r['accuracy'] > ENSEMBLE_ACC_THRESHOLD]
-    print(f"Found {len(high_acc_configs)} configurations > {ENSEMBLE_ACC_THRESHOLD}% acc.")
     
+    print(f"Found {len(high_acc_configs)} configurations above {ENSEMBLE_ACC_THRESHOLD}% for {symbol}.")
     cmb_acc, cmb_count = run_combined_metric(high_acc_configs)
-    print(f"[{symbol}] Combined Accuracy: {cmb_acc:.2f}% | Trades: {cmb_count}")
+    print(f"{symbol} Ensemble: {cmb_acc:.2f}% | Trades: {cmb_count}")
 
-    # Save Model
+    # Save Model & Upload
     save_ensemble_model(high_acc_configs, initial_price, model_filename)
 
     # Generate Plot
@@ -296,13 +293,11 @@ def process_asset(symbol):
     ax1.set_xlabel('Step Size')
     ax1.set_ylabel('Accuracy (%)')
     ax1.axhline(y=ENSEMBLE_ACC_THRESHOLD, color='r', linestyle=':', label='Threshold')
-
-    colors = plt.cm.viridis(np.linspace(0, 1, len(SEQ_LENGTHS)))
     
+    colors = plt.cm.viridis(np.linspace(0, 1, len(SEQ_LENGTHS)))
     for idx, s_len in enumerate(SEQ_LENGTHS):
         subset = [r for r in results if r['seq_len'] == s_len]
         if not subset: continue
-        
         steps_sub = [r['step_size'] for r in subset]
         accs_sub = [r['accuracy'] for r in subset]
         ax1.plot(steps_sub, accs_sub, marker='o', markersize=3, label=f'Seq {s_len}', color=colors[idx], alpha=0.8)
@@ -311,64 +306,74 @@ def process_asset(symbol):
     ax1.grid(True, linestyle='--', alpha=0.3)
     plt.title(f'{symbol} - Accuracy vs Step Size\nEnsemble: {cmb_acc:.2f}% ({cmb_count} trades)')
     fig.tight_layout()
-    plt.savefig(plot_filename)
+    plt.savefig(image_filename)
     plt.close()
     
     return {
         'symbol': symbol,
-        'short_name': short_name,
-        'accuracy': cmb_acc,
-        'trades': cmb_count,
-        'plot_file': plot_filename,
-        'top_configs': sorted(results, key=lambda x: x['accuracy'], reverse=True)[:10]
+        'image': image_filename,
+        'results': results,
+        'cmb_acc': cmb_acc,
+        'cmb_count': cmb_count
     }
 
-def generate_dashboard(all_summaries):
-    # Sort summaries by accuracy desc
-    all_summaries.sort(key=lambda x: x['accuracy'], reverse=True)
+def start_server_combined(all_asset_data):
+    # Clean up old pngs not in the current list
+    current_images = [d['image'] for d in all_asset_data]
+    for f in glob.glob("grid_*.png"):
+        if f not in current_images:
+            try: os.remove(f)
+            except: pass
+
+    # Build HTML sections
+    sections_html = ""
     
-    html_cards = ""
-    for s in all_summaries:
-        html_cards += f"""
-        <div class="card">
-            <h2>{s['symbol']}</h2>
-            <div class="stats">
-                <span class="acc">{s['accuracy']:.2f}%</span> Accuracy<br>
-                <small>{s['trades']} Trades Simulated</small>
-            </div>
-            <img src="{s['plot_file']}" alt="{s['symbol']} Plot">
-            <details>
-                <summary>View Top 10 Configs</summary>
+    for data in all_asset_data:
+        sorted_results = sorted(data['results'], key=lambda x: x['accuracy'], reverse=True)
+        top_results = sorted_results[:20] # Top 20 per asset to save space
+        
+        table_rows = ""
+        for r in top_results:
+            bg = "background-color: #e6fffa;" if r['accuracy'] > ENSEMBLE_ACC_THRESHOLD else ""
+            wt = "font-weight: bold;" if r['accuracy'] > ENSEMBLE_ACC_THRESHOLD else ""
+            table_rows += f"<tr style='{bg} {wt}'><td>{r['seq_len']}</td><td>{r['step_size']:.5f}</td><td>{r['accuracy']:.2f}%</td><td>{r['trade_count']}</td></tr>"
+
+        sections_html += f"""
+        <div class="asset-section">
+            <h2>{data['symbol']}</h2>
+            <div class="stats"><strong>Ensemble:</strong> {data['cmb_acc']:.2f}% Accuracy | {data['cmb_count']} Trades</div>
+            <img src="{data['image']}" class="chart">
+            <div class="table-container">
                 <table>
-                    <tr><th>Seq</th><th>Step</th><th>Acc</th></tr>
-                    {''.join([f"<tr><td>{c['seq_len']}</td><td>{c['step_size']:.4f}</td><td>{c['accuracy']:.1f}%</td></tr>" for c in s['top_configs']])}
+                    <tr><th>Seq Len</th><th>Step Size</th><th>Accuracy</th><th>Trades</th></tr>
+                    {table_rows}
                 </table>
-            </details>
+            </div>
         </div>
+        <hr>
         """
 
     html_content = f"""
     <html>
-    <head>
-        <title>Crypto Multi-Asset Analysis</title>
-        <style>
-            body {{ font-family: 'Segoe UI', sans-serif; background: #f0f2f5; padding: 20px; text-align: center; }}
-            .container {{ max-width: 1200px; margin: 0 auto; display: flex; flex-wrap: wrap; justify-content: center; gap: 20px; }}
-            .card {{ background: white; padding: 20px; border-radius: 15px; box-shadow: 0 4px 6px rgba(0,0,0,0.1); width: 45%; min-width: 350px; text-align: left; }}
-            .stats {{ margin: 10px 0; font-size: 1.1em; color: #4a5568; }}
-            .acc {{ font-weight: bold; color: #38a169; font-size: 1.4em; }}
-            img {{ width: 100%; border-radius: 8px; border: 1px solid #e2e8f0; margin-top: 10px; }}
-            h1 {{ color: #2d3748; margin-bottom: 30px; }}
-            table {{ width: 100%; margin-top: 10px; font-size: 0.9em; border-collapse: collapse; }}
-            th {{ text-align: left; background: #edf2f7; padding: 5px; }}
-            td {{ padding: 5px; border-bottom: 1px solid #eee; }}
-            summary {{ cursor: pointer; color: #3182ce; margin-top: 10px; font-weight: 500; outline: none; }}
-        </style>
+    <head><title>Multi-Asset Grid Search Results</title>
+    <style>
+        body {{ font-family: 'Segoe UI', sans-serif; text-align: center; padding: 20px; background: #f0f2f5; color: #333; }}
+        .container {{ background: white; padding: 40px; border-radius: 15px; margin: 0 auto; max-width: 1100px; box-shadow: 0 4px 6px rgba(0,0,0,0.1); }}
+        .asset-section {{ margin-bottom: 40px; }}
+        h1 {{ color: #1a202c; margin-bottom: 30px; }}
+        h2 {{ color: #2d3748; border-left: 5px solid #3182ce; padding-left: 10px; text-align: left; margin-left: 5%; }}
+        table {{ margin: 10px auto; border-collapse: collapse; width: 90%; font-size: 13px; }}
+        th {{ background: #4a5568; color: white; padding: 10px; }}
+        td {{ padding: 8px; border-bottom: 1px solid #ddd; }}
+        .stats {{ font-size: 1.1em; margin-bottom: 15px; color: #2b6cb0; font-weight: bold; }}
+        .chart {{ max-width: 90%; border: 1px solid #e2e8f0; border-radius: 8px; margin-bottom: 20px; }}
+        hr {{ border: 0; height: 1px; background: #cbd5e0; margin: 40px 0; }}
+    </style>
     </head>
     <body>
-        <h1>Crypto Grid Search Ensemble Results</h1>
         <div class="container">
-            {html_cards}
+            <h1>Crypto Pattern Matcher Dashboard</h1>
+            {sections_html}
         </div>
     </body>
     </html>
@@ -376,42 +381,39 @@ def generate_dashboard(all_summaries):
     
     with open("index.html", "w") as f:
         f.write(html_content)
-    print("\n[SUCCESS] Dashboard generated at 'index.html'")
-
-def main():
-    # Remove old PNGs to avoid confusion
-    for f in glob.glob("*_grid_search.png"):
-        try: os.remove(f)
-        except: pass
-
-    all_summaries = []
-    
-    # --- BATCH PROCESSING LOOP ---
-    for asset in ASSETS:
-        summary = process_asset(asset)
-        if summary:
-            all_summaries.append(summary)
-            
-    # --- REPORTING ---
-    if not all_summaries:
-        print("No assets were successfully processed.")
-        return
-
-    generate_dashboard(all_summaries)
-    
-    # --- SERVER ---
-    print(f"\nStarting local server on port {PORT}...")
+        
     Handler = http.server.SimpleHTTPRequestHandler
     socketserver.TCPServer.allow_reuse_address = True
     try:
         with socketserver.TCPServer(("", PORT), Handler) as httpd:
-            print(f"View dashboard at: http://localhost:{PORT}")
-            print("(Press Ctrl+C to stop)")
+            print(f"\n\n=================================================")
+            print(f"All assets processed.")
+            print(f"Server active at: http://localhost:{PORT}")
+            print(f"=================================================")
             httpd.serve_forever()
-    except KeyboardInterrupt:
-        print("\nServer stopped.")
     except Exception as e:
         print(f"Server error: {e}")
 
+def run_multi_asset_search():
+    final_report_data = []
+    
+    print(f"Starting Multi-Asset Analysis for: {ASSETS}")
+    
+    for symbol in ASSETS:
+        try:
+            asset_data = run_analysis_for_asset(symbol)
+            if asset_data:
+                final_report_data.append(asset_data)
+        except Exception as e:
+            print(f"CRITICAL ERROR processing {symbol}: {e}")
+            
+    if final_report_data:
+        start_server_combined(final_report_data)
+    else:
+        print("No results generated.")
+
 if __name__ == "__main__":
-    main()
+    try:
+        run_multi_asset_search()
+    except KeyboardInterrupt:
+        print("\nStopped.")
