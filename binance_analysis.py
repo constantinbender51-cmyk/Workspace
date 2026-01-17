@@ -21,7 +21,7 @@ from huggingface_hub import HfApi
 # --- CONFIGURATION ---
 PORT = 8080
 SEQ_LENGTHS = [5, 6, 7, 8, 9, 10]  # Grid search over these lengths
-MODEL_FILENAME = "/app/data/eth.pkl"
+MODEL_FILENAME = "eth.pkl"
 
 # Hugging Face Configuration
 # IMPORTANT: Change this to your actual Hugging Face "username/repo_name"
