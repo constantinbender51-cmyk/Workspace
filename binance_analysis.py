@@ -16,8 +16,6 @@ from collections import Counter
 # --- CONFIGURATION ---
 PORT = 8080
 SEQ_LENGTH = 5
-SYMBOL = 'ETH/USDT'
-TIMEFRAME = '30m'
 
 # Grid Search Parameters
 GRID_MIN = 0.005
@@ -27,45 +25,36 @@ GRID_STEPS = 100
 # Ensemble Threshold
 ENSEMBLE_ACC_THRESHOLD = 70.0
 
-# Global State for Server
-SERVER_DATA = {
-    'image': '',
-    'steps': [],
-    'accs': [],
-    'counts': [],
-    'cmb_acc': 0,
-    'cmb_count': 0,
-    'last_update': 'Initializing...',
-    'prediction': 'Waiting for next candle...',
-    'next_check': 'Calculating...'
-}
+# Global storage for live updates
+GLOBAL_REF_PRICE = None
+GLOBAL_HIGH_ACC_CONFIGS = []
+LATEST_LIVE_RESULT = "Initializing..."
 
-def fetch_initial_data(start_date='2020-01-01T00:00:00Z'):
-    print(f"Fetching initial history for {SYMBOL}...")
+def fetch_binance_data(symbol='ETH/USDT', timeframe='30m', start_date='2020-01-01T00:00:00Z', end_date='2026-01-01T00:00:00Z'):
+    print(f"Fetching {symbol}...")
     exchange = ccxt.binance()
     since = exchange.parse8601(start_date)
+    end_ts = exchange.parse8601(end_date)
     all_ohlcv = []
     
-    # Fetch up to "now"
-    while True:
+    while since < end_ts:
         try:
-            ohlcv = exchange.fetch_ohlcv(SYMBOL, TIMEFRAME, since, limit=1000)
+            ohlcv = exchange.fetch_ohlcv(symbol, timeframe, since, limit=1000)
             if not ohlcv: break
             all_ohlcv.extend(ohlcv)
             since = ohlcv[-1][0] + 1
-            
-            # Stop if we reached close to current time
-            if len(ohlcv) < 1000: break
-            
             print(f"Fetched up to {datetime.fromtimestamp(ohlcv[-1][0]/1000)}...", end='\r')
+            if since >= end_ts: break
             time.sleep(exchange.rateLimit / 1000)
         except Exception as e:
-            print(f"Error fetching data: {e}")
+            print(f"Error: {e}")
             break
             
     df = pd.DataFrame(all_ohlcv, columns=['timestamp', 'open', 'high', 'low', 'close', 'volume'])
     df['timestamp'] = pd.to_datetime(df['timestamp'], unit='ms', utc=True)
-    return df.drop_duplicates(subset='timestamp').reset_index(drop=True)
+    start_dt = pd.Timestamp(start_date, tz='UTC')
+    end_dt = pd.Timestamp(end_date, tz='UTC')
+    return df.loc[(df['timestamp'] >= start_dt) & (df['timestamp'] < end_dt)].reset_index(drop=True)
 
 def get_grid_indices(df, step_size):
     """Converts price series to log-integer grid indices."""
@@ -82,327 +71,257 @@ def get_grid_indices(df, step_size):
     grid_indices = np.floor(abs_price_log / step_size).astype(int)
     return grid_indices
 
-class LiveProcessor:
-    def __init__(self):
-        self.df = fetch_initial_data()
-        self.high_acc_configs = [] # Stores {step_size, patterns, accuracy}
-        self.exchange = ccxt.binance()
+def train_and_evaluate(df, step_size):
+    """
+    Returns dictionary containing metrics and model data needed for the ensemble.
+    """
+    grid_indices = get_grid_indices(df, step_size)
+    
+    # Split
+    total_len = len(grid_indices)
+    idx_80 = int(total_len * 0.80)
+    idx_90 = int(total_len * 0.90)
+    
+    train_seq = grid_indices[:idx_80]
+    val_seq = grid_indices[idx_80:idx_90]
+    
+    # Train (Build Patterns)
+    patterns = {}
+    for i in range(len(train_seq) - SEQ_LENGTH):
+        seq = tuple(train_seq[i : i + SEQ_LENGTH])
+        target = train_seq[i + SEQ_LENGTH]
+        if seq not in patterns: patterns[seq] = []
+        patterns[seq].append(target)
         
-    def run_training(self):
-        print(f"\n\n--- RUNNING INITIAL GRID SEARCH ({GRID_STEPS} Steps) ---")
-        step_sizes = np.linspace(GRID_MIN, GRID_MAX, GRID_STEPS)
-        results = []
+    # Evaluate on Validation Set
+    move_correct = 0
+    move_total_valid = 0
+    
+    for i in range(len(val_seq) - SEQ_LENGTH):
+        current_seq = tuple(val_seq[i : i + SEQ_LENGTH])
+        current_level = current_seq[-1]
+        actual_next_level = val_seq[i + SEQ_LENGTH]
         
-        # We define a helper to train on the current DF
-        # Note: We use the *entire* DF for training initially to get best patterns
-        # In a real rigorous backtest you might split train/test, but here we 
-        # follow the user's logic to find the best 'current' configurations.
-        
-        for step in step_sizes:
-            res = self.evaluate_config(step)
-            results.append(res)
+        if current_seq in patterns:
+            history = patterns[current_seq]
+            predicted_level = Counter(history).most_common(1)[0][0]
             
-        # Filter best configs
-        self.high_acc_configs = [r for r in results if r['accuracy'] > ENSEMBLE_ACC_THRESHOLD]
-        print(f"Qualifying Configs (> {ENSEMBLE_ACC_THRESHOLD}%): {len(self.high_acc_configs)}")
-        
-        # Calculate Backtest Metrics
-        cmb_acc, cmb_count = self.calculate_combined_metric(self.high_acc_configs)
-        
-        # Update Server Data
-        unique_id = int(time.time())
-        filename = f"grid_search_{unique_id}.png"
-        self.generate_plot(results, cmb_acc, cmb_count, step_sizes, filename)
-        
-        SERVER_DATA.update({
-            'image': filename,
-            'steps': step_sizes,
-            'accs': [r['accuracy'] for r in results],
-            'counts': [r['trade_count'] for r in results],
-            'cmb_acc': cmb_acc,
-            'cmb_count': cmb_count
-        })
-        generate_html()
-
-    def evaluate_config(self, step_size):
-        grid_indices = get_grid_indices(self.df, step_size)
-        
-        # 90/10 Split for validation
-        total_len = len(grid_indices)
-        idx_split = int(total_len * 0.90)
-        
-        train_seq = grid_indices[:idx_split]
-        val_seq = grid_indices[idx_split:]
-        
-        # Build Patterns
-        patterns = {}
-        for i in range(len(train_seq) - SEQ_LENGTH):
-            seq = tuple(train_seq[i : i + SEQ_LENGTH])
-            target = train_seq[i + SEQ_LENGTH]
-            if seq not in patterns: patterns[seq] = []
-            patterns[seq].append(target)
+            pred_diff = predicted_level - current_level
+            actual_diff = actual_next_level - current_level
             
-        # Evaluate
-        move_correct = 0
-        move_total_valid = 0
-        
-        for i in range(len(val_seq) - SEQ_LENGTH):
-            current_seq = tuple(val_seq[i : i + SEQ_LENGTH])
-            current_level = current_seq[-1]
-            actual_next_level = val_seq[i + SEQ_LENGTH]
-            
-            if current_seq in patterns:
-                history = patterns[current_seq]
-                predicted_level = Counter(history).most_common(1)[0][0]
-                pred_diff = predicted_level - current_level
-                actual_diff = actual_next_level - current_level
-                
-                if pred_diff != 0 and actual_diff != 0:
-                    move_total_valid += 1
-                    same_direction = (pred_diff > 0 and actual_diff > 0) or \
-                                     (pred_diff < 0 and actual_diff < 0)
-                    if same_direction:
-                        move_correct += 1
-        
-        accuracy = (move_correct / move_total_valid * 100) if move_total_valid > 0 else 0.0
-        
-        return {
-            'step_size': step_size,
-            'accuracy': accuracy,
-            'trade_count': move_total_valid,
-            'patterns': patterns,
-            'val_seq': val_seq # stored for combined backtest
-        }
-
-    def calculate_combined_metric(self, configs):
-        # Simply run the logic over the validation set of the first config 
-        # (assuming time alignment is identical, which it is)
-        if not configs: return 0.0, 0
-        
-        # Use indices from the first config to iterate time
-        ref_seq_len = len(configs[0]['val_seq'])
-        combined_correct = 0
-        combined_total = 0
-        
-        for i in range(ref_seq_len - SEQ_LENGTH):
-            up_votes = 0
-            down_votes = 0
-            
-            # Gather Votes
-            for cfg in configs:
-                val_seq = cfg['val_seq']
-                current_seq = tuple(val_seq[i : i + SEQ_LENGTH])
-                
-                if current_seq in cfg['patterns']:
-                    history = cfg['patterns'][current_seq]
-                    pred_lvl = Counter(history).most_common(1)[0][0]
-                    curr_lvl = current_seq[-1]
-                    diff = pred_lvl - curr_lvl
+            if pred_diff != 0 and actual_diff != 0:
+                move_total_valid += 1
+                same_direction = (pred_diff > 0 and actual_diff > 0) or \
+                                 (pred_diff < 0 and actual_diff < 0)
+                if same_direction:
+                    move_correct += 1
                     
-                    if diff > 0: up_votes += 1
-                    elif diff < 0: down_votes += 1
-            
-            # Logic: At least 1 UP, 0 DOWN -> Trade UP (and vice versa)
-            prediction = 0 # 0: None, 1: UP, -1: DOWN
-            if up_votes > 0 and down_votes == 0:
-                prediction = 1
-            elif down_votes > 0 and up_votes == 0:
-                prediction = -1
-                
-            if prediction != 0:
-                # Check outcome using the first config as reference for direction
-                # (Direction is universal across step sizes)
-                ref_seq = configs[0]['val_seq']
-                actual_move = ref_seq[i + SEQ_LENGTH] - ref_seq[i + SEQ_LENGTH - 1]
-                
-                if actual_move != 0:
-                    combined_total += 1
-                    if (prediction == 1 and actual_move > 0) or \
-                       (prediction == -1 and actual_move < 0):
-                        combined_correct += 1
-                        
-        acc = (combined_correct / combined_total * 100) if combined_total > 0 else 0.0
-        return acc, combined_total
+    accuracy = (move_correct / move_total_valid * 100) if move_total_valid > 0 else 0.0
+    
+    return {
+        'step_size': step_size,
+        'accuracy': accuracy,
+        'trade_count': move_total_valid,
+        'patterns': patterns,
+        'val_seq': val_seq 
+    }
 
-    def generate_plot(self, results, cmb_acc, cmb_count, step_sizes, filename):
-        accuracies = [r['accuracy'] for r in results]
-        trade_counts = [r['trade_count'] for r in results]
+def run_combined_metric(high_acc_configs):
+    """
+    Calculates the accuracy of the Ensemble Logic.
+    Logic: If Any(>70% configs) says UP and None says DOWN -> Trade UP.
+    Verification: Uses the Maximum Step Size among the voters to verify the move.
+    """
+    if not high_acc_configs:
+        return 0.0, 0
+
+    ref_seq_len = len(high_acc_configs[0]['val_seq'])
+    
+    combined_correct = 0
+    combined_total = 0
+    
+    for i in range(ref_seq_len - SEQ_LENGTH):
+        up_votes = []
+        down_votes = []
         
-        fig, ax1 = plt.subplots(figsize=(10, 6))
-        ax1.set_xlabel('Log Step Size')
-        ax1.set_ylabel('Directional Accuracy (%)', color='tab:blue')
-        ax1.plot(step_sizes, accuracies, marker='o', color='tab:blue', label='Accuracy')
-        ax1.axhline(y=ENSEMBLE_ACC_THRESHOLD, color='r', linestyle=':', label='Threshold')
-        
-        ax2 = ax1.twinx() 
-        ax2.set_ylabel('Number of Trades', color='tab:orange')
-        ax2.plot(step_sizes, trade_counts, marker='x', linestyle='--', color='tab:orange', label='Trades')
-        
-        plt.title(f'Ensemble Accuracy: {cmb_acc:.2f}% ({cmb_count} trades)')
-        fig.tight_layout()
-        plt.savefig(filename)
-        plt.close()
-
-    def update_live_candle(self):
-        """Fetches only the most recent completed candle."""
-        print("Fetching new candle...")
-        try:
-            # Fetch last 3 candles to be safe, but we only need the latest closed one
-            ohlcv = self.exchange.fetch_ohlcv(SYMBOL, TIMEFRAME, limit=3)
-            new_df = pd.DataFrame(ohlcv, columns=['timestamp', 'open', 'high', 'low', 'close', 'volume'])
-            new_df['timestamp'] = pd.to_datetime(new_df['timestamp'], unit='ms', utc=True)
-            
-            # Filter for new data only
-            last_known_time = self.df['timestamp'].iloc[-1]
-            new_rows = new_df[new_df['timestamp'] > last_known_time]
-            
-            if not new_rows.empty:
-                print(f"Added {len(new_rows)} new candle(s). Last: {new_rows['timestamp'].iloc[-1]}")
-                self.df = pd.concat([self.df, new_rows]).reset_index(drop=True)
-                return True
-            else:
-                print("No new candles found yet.")
-                return False
-        except Exception as e:
-            print(f"Update failed: {e}")
-            return False
-
-    def make_prediction(self):
-        if not self.high_acc_configs:
-            return "Not enough high-accuracy configs found."
-
-        up_votes = 0
-        down_votes = 0
-        details = []
-
-        # We must regenerate indices on the full updated dataframe to ensure consistency
-        # However, we only need the tails for prediction
-        
-        for cfg in self.high_acc_configs:
-            step = cfg['step_size']
-            # Get fresh indices for the whole history
-            indices = get_grid_indices(self.df, step)
-            
-            # Get the very last sequence (representing "Now")
-            if len(indices) < SEQ_LENGTH: continue
-            
-            current_seq = tuple(indices[-SEQ_LENGTH:])
-            current_level = current_seq[-1]
+        # Gather predictions from all qualified configs
+        for cfg in high_acc_configs:
+            val_seq = cfg['val_seq']
+            current_seq = tuple(val_seq[i : i + SEQ_LENGTH])
             
             if current_seq in cfg['patterns']:
                 history = cfg['patterns'][current_seq]
-                predicted_lvl = Counter(history).most_common(1)[0][0]
-                diff = predicted_lvl - current_level
+                predicted_level = Counter(history).most_common(1)[0][0]
+                current_level = current_seq[-1]
+                diff = predicted_level - current_level
                 
-                if diff > 0: 
-                    up_votes += 1
-                elif diff < 0: 
-                    down_votes += 1
-                    
-        # Combined Logic
-        decision = "NEUTRAL / NO TRADE"
-        color = "gray"
+                if diff > 0:
+                    up_votes.append(cfg)
+                elif diff < 0:
+                    down_votes.append(cfg)
         
-        if up_votes > 0 and down_votes == 0:
-            decision = "BULLISH (UP)"
-            color = "green"
-        elif down_votes > 0 and up_votes == 0:
-            decision = "BEARISH (DOWN)"
-            color = "red"
+        if len(up_votes) > 0 and len(down_votes) == 0:
+            # Tie-breaker: Pick Maximum Step Size
+            best_cfg = max(up_votes, key=lambda x: x['step_size'])
             
-        return decision, up_votes, down_votes, color
+            chosen_val_seq = best_cfg['val_seq']
+            
+            curr_lvl = chosen_val_seq[i + SEQ_LENGTH - 1] 
+            next_lvl = chosen_val_seq[i + SEQ_LENGTH]     
+            
+            actual_diff = next_lvl - curr_lvl
+            
+            if actual_diff != 0:
+                combined_total += 1
+                if actual_diff > 0: 
+                    combined_correct += 1
+                    
+    acc = (combined_correct / combined_total * 100) if combined_total > 0 else 0.0
+    return acc, combined_total
 
-    def live_loop(self):
-        while True:
-            # 1. Calculate time to next 30m mark
-            now = datetime.utcnow()
-            minutes = now.minute
-            seconds = now.second
-            
-            # Find next 00 or 30
-            if minutes < 30:
-                wait_min = 30 - minutes
-            else:
-                wait_min = 60 - minutes
-            
-            # Target time
-            wait_seconds = (wait_min * 60) - seconds + 10 # +10s buffer for exchange
-            
-            next_check_time = now + timedelta(seconds=wait_seconds)
-            SERVER_DATA['next_check'] = next_check_time.strftime('%H:%M:%S UTC')
-            generate_html()
-            
-            print(f"Waiting {wait_seconds:.0f}s for next candle close ({SERVER_DATA['next_check']})...")
-            time.sleep(wait_seconds)
-            
-            # 2. Update Data
-            if self.update_live_candle():
-                # 3. Predict
-                decision, ups, downs, color = self.make_prediction()
-                
-                timestamp_str = self.df['timestamp'].iloc[-1].strftime('%Y-%m-%d %H:%M UTC')
-                pred_str = f"<span style='color:{color}; font-weight:bold; font-size:1.5em'>{decision}</span><br>"
-                pred_str += f"(Based on candle: {timestamp_str})<br>"
-                pred_str += f"Votes: <span style='color:green'>{ups} UP</span> vs <span style='color:red'>{downs} DOWN</span>"
-                
-                SERVER_DATA['prediction'] = pred_str
-                SERVER_DATA['last_update'] = datetime.utcnow().strftime('%H:%M:%S UTC')
-                generate_html()
-            else:
-                print("Skipping prediction (no new data).")
+# --- LIVE PREDICTION LOGIC ---
 
-def generate_html():
-    # Helper to clean old images
-    for f in glob.glob("grid_search_*.png"):
-        if f != SERVER_DATA['image']:
-            try: os.remove(f)
-            except: pass
-
-    # Build Table
-    table_rows = ""
-    # Sort by accuracy for display
-    sorted_metrics = sorted(zip(SERVER_DATA['steps'], SERVER_DATA['accs'], SERVER_DATA['counts']), key=lambda x: x[1], reverse=True)
+def live_prediction_loop(filename, step_sizes, accuracies, trade_counts, cmb_acc, cmb_count):
+    """Background thread that fetches fresh data and updates HTML every 30 mins."""
+    global LATEST_LIVE_RESULT
     
-    for s, a, c in sorted_metrics:
+    exchange = ccxt.binance()
+    
+    while True:
+        try:
+            print(f"\n[LIVE] Fetching fresh candles for prediction...")
+            
+            # Fetch slightly more than needed to ensure we catch the 30m boundary
+            # 1. Fetch recent data
+            ohlcv = exchange.fetch_ohlcv('ETH/USDT', '30m', limit=20)
+            
+            # 2. Convert to DataFrame
+            live_df = pd.DataFrame(ohlcv, columns=['timestamp', 'open', 'high', 'low', 'close', 'volume'])
+            live_df['timestamp'] = pd.to_datetime(live_df['timestamp'], unit='ms', utc=True)
+            
+            # 3. Filter: Exclude incomplete candle
+            # We want candles up to the last completed 30m mark.
+            # E.g. if now is 14:45, we want candles up to 14:30 (exclusive of 14:30 open if it's still forming? 
+            # Actually, standard OHLCV: last one is forming. Second to last is completed.)
+            # But strictly:
+            now = datetime.now(pd.Timestamp.now().tz).timestamp() * 1000
+            # Get the timestamp of the last candle in list
+            last_ts = ohlcv[-1][0]
+            
+            # If the last candle started less than 30m ago, it is incomplete.
+            if (now - last_ts) < (30 * 60 * 1000):
+                completed_df = live_df.iloc[:-1].copy() # Exclude the forming candle
+            else:
+                completed_df = live_df.copy() # Last candle is essentially done or data is slightly delayed
+            
+            # We need the last SEQ_LENGTH (5) candles
+            if len(completed_df) < SEQ_LENGTH:
+                LATEST_LIVE_RESULT = "Not enough data fetched."
+            else:
+                target_df = completed_df.tail(SEQ_LENGTH).reset_index(drop=True)
+                last_ts_str = target_df['timestamp'].iloc[-1].strftime('%Y-%m-%d %H:%M UTC')
+                current_price = target_df['close'].iloc[-1]
+                
+                # --- ENSEMBLE VOTING ---
+                up_votes = 0
+                down_votes = 0
+                
+                if GLOBAL_REF_PRICE is None:
+                    LATEST_LIVE_RESULT = "Error: Reference Price not set."
+                else:
+                    # Logic: Normalize live prices relative to the 2020 Start Price (GLOBAL_REF_PRICE)
+                    # Training Logic: log(price / start_price) / step
+                    live_prices = target_df['close'].to_numpy()
+                    
+                    # Iterate through qualified configs
+                    qualified_configs = GLOBAL_HIGH_ACC_CONFIGS
+                    
+                    for cfg in qualified_configs:
+                        step = cfg['step_size']
+                        
+                        # Calculate indices using the GLOBAL reference
+                        # (live_prices / GLOBAL_REF_PRICE) mimics the cumprod normalization from start
+                        # because cumprod is effectively price_i / price_0
+                        abs_price_log = np.log(live_prices / GLOBAL_REF_PRICE)
+                        live_indices = np.floor(abs_price_log / step).astype(int)
+                        
+                        current_seq = tuple(live_indices)
+                        
+                        if current_seq in cfg['patterns']:
+                            history = cfg['patterns'][current_seq]
+                            predicted_level = Counter(history).most_common(1)[0][0]
+                            current_level = current_seq[-1]
+                            diff = predicted_level - current_level
+                            
+                            if diff > 0:
+                                up_votes += 1
+                            elif diff < 0:
+                                down_votes += 1
+                    
+                    # Ensemble Decision
+                    decision = "NEUTRAL"
+                    color = "gray"
+                    if up_votes > 0 and down_votes == 0:
+                        decision = "BULLISH (UP)"
+                        color = "green"
+                    elif down_votes > 0 and up_votes == 0:
+                        decision = "BEARISH (DOWN)"
+                        color = "red"
+                    
+                    LATEST_LIVE_RESULT = f"""
+                    <div style="border: 2px solid {color}; padding: 15px; border-radius: 8px; background: #fff;">
+                        <h2 style="color: {color}; margin-top: 0;">LIVE SIGNAL: {decision}</h2>
+                        <p><strong>Last Candle Close:</strong> {last_ts_str} @ ${current_price:.2f}</p>
+                        <p><strong>Voters:</strong> {up_votes} UP / {down_votes} DOWN (Total High-Acc Configs: {len(qualified_configs)})</p>
+                        <small>Ref Price (2020): ${GLOBAL_REF_PRICE:.2f}</small>
+                    </div>
+                    """
+            
+            # Regenerate HTML
+            generate_html(filename, step_sizes, accuracies, trade_counts, cmb_acc, cmb_count)
+            
+        except Exception as e:
+            print(f"Live Loop Error: {e}")
+            LATEST_LIVE_RESULT = f"Error in live loop: {e}"
+        
+        # Sleep 30 minutes
+        time.sleep(30 * 60)
+
+def generate_html(image_filename, steps, accs, counts, cmb_acc, cmb_count):
+    """Generates the HTML file with current stats and live prediction."""
+    table_rows = ""
+    for s, a, c in zip(steps, accs, counts):
         bg_style = "background-color: #e6fffa;" if a > ENSEMBLE_ACC_THRESHOLD else ""
         table_rows += f"<tr style='{bg_style}'><td>{s:.5f}</td><td>{a:.2f}%</td><td>{c}</td></tr>"
 
-    html = f"""
+    html_content = f"""
     <html>
     <head>
-        <title>Crypto Grid Ensemble</title>
-        <meta http-equiv="refresh" content="60">
-        <style>
-            body {{ font-family: 'Segoe UI', sans-serif; text-align: center; padding: 20px; background: #f0f2f5; }}
-            .container {{ background: white; padding: 30px; display: inline-block; border-radius: 12px; box-shadow: 0 4px 15px rgba(0,0,0,0.1); max-width: 900px; }}
-            .live-box {{ background: #2d3748; color: white; padding: 20px; border-radius: 8px; margin-bottom: 20px; border: 2px solid #4a5568; }}
-            .metric-box {{ background: #ebf8ff; color: #2c5282; padding: 15px; border-radius: 8px; margin: 10px 0; }}
-            table {{ margin: 20px auto; border-collapse: collapse; width: 100%; font-size: 0.9em; }}
-            th {{ background: #4a5568; color: white; padding: 12px; }}
-            td {{ padding: 10px; border-bottom: 1px solid #ddd; }}
-            img {{ max-width: 100%; border-radius: 8px; margin-top: 20px; border: 1px solid #ddd; }}
-            .status {{ font-size: 0.8em; color: #cbd5e0; margin-top: 10px; }}
+        <title>Grid Search & Live Prediction</title>
+        <meta http-equiv="refresh" content="300"> <style>
+            body {{ font-family: sans-serif; text-align: center; padding: 20px; background: #f4f4f4; }}
+            .container {{ background: white; padding: 20px; display: inline-block; border-radius: 8px; box-shadow: 0 4px 6px rgba(0,0,0,0.1); max-width: 900px; }}
+            .metric-box {{ background: #2d3748; color: white; padding: 15px; border-radius: 8px; margin: 20px 0; }}
+            table {{ margin: 0 auto; border-collapse: collapse; width: 80%; }}
+            th, td {{ padding: 8px; border-bottom: 1px solid #ddd; }}
+            img {{ max-width: 100%; height: auto; margin-top: 20px; border: 1px solid #ddd; }}
         </style>
     </head>
     <body>
         <div class="container">
-            <div class="live-box">
-                <h2>LIVE SIGNAL: {SYMBOL}</h2>
-                <div>{SERVER_DATA['prediction']}</div>
-                <div class="status">
-                    Last Update: {SERVER_DATA['last_update']} <br>
-                    Next Check: {SERVER_DATA['next_check']}
-                </div>
-            </div>
-
+            <h1>Crypto Ensemble System</h1>
+            
+            {LATEST_LIVE_RESULT}
+            
             <div class="metric-box">
-                <h3>Backtest Performance (Combined)</h3>
-                <p style="font-size: 1.2em; margin: 5px;">Accuracy: <strong>{SERVER_DATA['cmb_acc']:.2f}%</strong> | Trades: {SERVER_DATA['cmb_count']}</p>
+                <h2>Historical Combined Performance</h2>
+                <p style="font-size: 24px; margin: 5px;">Accuracy: <strong>{cmb_acc:.2f}%</strong></p>
+                <p>Total Trades: {cmb_count} | Threshold: >{ENSEMBLE_ACC_THRESHOLD}%</p>
             </div>
             
-            <img src="{SERVER_DATA['image']}" alt="Analysis Plot">
+            <img src="{image_filename}" alt="Grid Search Plot">
             
-            <h3>Individual Grid Configs</h3>
+            <h3>Individual Configs</h3>
             <table>
                 <tr><th>Step Size</th><th>Accuracy</th><th>Trades</th></tr>
                 {table_rows}
@@ -413,32 +332,97 @@ def generate_html():
     """
     
     with open("index.html", "w") as f:
-        f.write(html)
+        f.write(html_content)
 
-class ThreadedHTTPServer(object):
-    def __init__(self, host, port):
-        self.server = socketserver.TCPServer((host, port), http.server.SimpleHTTPRequestHandler)
-        self.server_thread = threading.Thread(target=self.server.serve_forever)
-        self.server_thread.daemon = True
+def run_grid_search():
+    global GLOBAL_REF_PRICE, GLOBAL_HIGH_ACC_CONFIGS
+    
+    df = fetch_binance_data()
+    if df.empty: return
 
-    def start(self):
-        self.server_thread.start()
-        print(f"Server running at http://localhost:{PORT}")
+    # CAPTURE REFERENCE PRICE (First candle of 2020)
+    GLOBAL_REF_PRICE = df['close'].iloc[0]
+    print(f"\nTraining Reference Price (Jan 2020): {GLOBAL_REF_PRICE}")
+
+    step_sizes = np.linspace(GRID_MIN, GRID_MAX, GRID_STEPS)
+    
+    results = []
+    print(f"\n\n--- STARTING GRID SEARCH ({GRID_STEPS} Steps) ---")
+    
+    for step in step_sizes:
+        print(f"Testing Step Size: {step:.5f}...", end=" ")
+        res = train_and_evaluate(df, step)
+        results.append(res)
+        print(f"Acc: {res['accuracy']:.2f}% | Trades: {res['trade_count']}")
+        
+    # --- COMBINED PREDICTOR ---
+    print(f"\n--- CALCULATING COMBINED PREDICTOR ---")
+    high_acc_configs = [r for r in results if r['accuracy'] > ENSEMBLE_ACC_THRESHOLD]
+    GLOBAL_HIGH_ACC_CONFIGS = high_acc_configs # Store for live loop
+    
+    print(f"Qualifying Configs (> {ENSEMBLE_ACC_THRESHOLD}%): {len(high_acc_configs)}")
+    
+    cmb_acc, cmb_count = run_combined_metric(high_acc_configs)
+    print(f"Combined Predictor Accuracy: {cmb_acc:.2f}%")
+    print(f"Combined Predictor Trades:   {cmb_count}")
+
+    # --- PLOTTING ---
+    unique_id = int(time.time())
+    filename = f"grid_search_{unique_id}.png"
+    
+    accuracies = [r['accuracy'] for r in results]
+    trade_counts = [r['trade_count'] for r in results]
+    
+    fig, ax1 = plt.subplots(figsize=(10, 6))
+    
+    ax1.set_xlabel('Log Step Size')
+    ax1.set_ylabel('Directional Accuracy (%)', color='tab:blue')
+    ax1.plot(step_sizes, accuracies, marker='o', color='tab:blue', label='Accuracy')
+    ax1.axhline(y=ENSEMBLE_ACC_THRESHOLD, color='r', linestyle=':', label='Threshold (70%)')
+    ax1.tick_params(axis='y', labelcolor='tab:blue')
+    ax1.grid(True, linestyle='--', alpha=0.3)
+    
+    ax2 = ax1.twinx() 
+    ax2.set_ylabel('Number of Trades', color='tab:orange')
+    ax2.plot(step_sizes, trade_counts, marker='x', linestyle='--', color='tab:orange', label='Trades')
+    ax2.tick_params(axis='y', labelcolor='tab:orange')
+    
+    plt.title(f'Accuracy vs. Trade Volume\nCombined Predictor: {cmb_acc:.2f}% ({cmb_count} trades)')
+    fig.tight_layout()
+    plt.savefig(filename)
+    plt.close()
+    
+    print(f"\nGrid search complete. Plot saved to {filename}")
+    
+    # Start Live Prediction Loop in background
+    live_thread = threading.Thread(
+        target=live_prediction_loop, 
+        args=(filename, step_sizes, accuracies, trade_counts, cmb_acc, cmb_count),
+        daemon=True
+    )
+    live_thread.start()
+    
+    # Generate initial HTML
+    generate_html(filename, step_sizes, accuracies, trade_counts, cmb_acc, cmb_count)
+    
+    start_server()
+
+def start_server():
+    # Clean up old images
+    current_imgs = glob.glob("grid_search_*.png")
+    # Note: we need to keep the one currently used, but simpler logic is fine for dev
+    
+    Handler = http.server.SimpleHTTPRequestHandler
+    socketserver.TCPServer.allow_reuse_address = True
+    
+    try:
+        with socketserver.TCPServer(("", PORT), Handler) as httpd:
+            print(f"\n--- SERVER STARTED ---")
+            print(f"View at: http://localhost:{PORT}")
+            print(f"Press Ctrl+C to stop")
+            httpd.serve_forever()
+    except OSError:
+        print(f"\nERROR: Port {PORT} is busy.")
 
 if __name__ == "__main__":
-    # 1. Start Web Server
-    try:
-        server = ThreadedHTTPServer("", PORT)
-        server.start()
-    except OSError:
-        print(f"Port {PORT} is busy. Server not started, but script will run.")
-
-    # 2. Init Processor & Train
-    processor = LiveProcessor()
-    processor.run_training()
-    
-    # 3. Enter Live Loop
-    try:
-        processor.live_loop()
-    except KeyboardInterrupt:
-        print("Stopping...")
+    run_grid_search()
