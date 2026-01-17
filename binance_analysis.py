@@ -14,24 +14,24 @@ import pickle
 from datetime import datetime
 from collections import Counter
 
-# --- NEW IMPORTS FOR GITHUB ---
+# --- NEW IMPORTS FOR HUGGING FACE ---
 from dotenv import load_dotenv
-from github import Github
+from huggingface_hub import HfApi
 
 # --- CONFIGURATION ---
 PORT = 8080
 SEQ_LENGTHS = [5, 6, 7, 8, 9, 10]  # Grid search over these lengths
 MODEL_FILENAME = "/app/data/eth.pkl"
 
-# GitHub Configuration
-GITHUB_REPO = "constantinbender51-cmyk/Models"
-GITHUB_FOLDER = "model2x"
-GITHUB_BRANCH = "main"
+# Hugging Face Configuration
+# IMPORTANT: Change this to your actual Hugging Face "username/repo_name"
+HF_REPO_ID = "constantinbender51/Models" 
+HF_FOLDER = "model2x"
 
 # Grid Search Parameters
 GRID_MIN = 0.005
 GRID_MAX = 0.05
-GRID_STEPS = 20 # Reduced slightly for speed since we added a 2nd dimension (Seq Length)
+GRID_STEPS = 20 
 
 # Ensemble Threshold
 ENSEMBLE_ACC_THRESHOLD = 70.0
@@ -212,32 +212,36 @@ def run_combined_metric(high_acc_configs):
     acc = (combined_correct / combined_total * 100) if combined_total > 0 else 0.0
     return acc, combined_total
 
-def upload_to_github(filename):
-    print(f"\n--- GITHUB UPLOAD ---")
+def upload_to_huggingface(filename):
+    print(f"\n--- HUGGING FACE UPLOAD ---")
     load_dotenv()
-    pat = os.getenv("PAT")
+    # Looking for 'HFT' in .env
+    token = os.getenv("HFT")
     
-    if not pat:
-        print("[ERROR] 'PAT' not found in .env file. Skipping upload.")
+    if not token:
+        print("[ERROR] 'HFT' token not found in .env file. Skipping upload.")
         return
 
     try:
-        g = Github(pat)
-        repo = g.get_repo(GITHUB_REPO)
-        with open(filename, 'rb') as f:
-            content = f.read()
-        target_path = f"{GITHUB_FOLDER}/{filename}"
+        api = HfApi()
+        # path_in_repo keeps the folder structure or just the filename if you prefer
+        # Here we use the global GITHUB_FOLDER (now acting as HF_FOLDER)
+        path_in_repo = f"{HF_FOLDER}/{os.path.basename(filename)}"
         
-        try:
-            contents = repo.get_contents(target_path, ref=GITHUB_BRANCH)
-            repo.update_file(contents.path, f"Update model {datetime.now()}", content, contents.sha, branch=GITHUB_BRANCH)
-            print("[SUCCESS] File Updated on GitHub.")
-        except Exception:
-            repo.create_file(target_path, f"Create model {datetime.now()}", content, branch=GITHUB_BRANCH)
-            print("[SUCCESS] File Created on GitHub.")
+        print(f"Uploading {filename} to {HF_REPO_ID} at {path_in_repo}...")
+        
+        api.upload_file(
+            path_or_fileobj=filename,
+            path_in_repo=path_in_repo,
+            repo_id=HF_REPO_ID,
+            repo_type="model",
+            token=token,
+            commit_message=f"Update model {datetime.now()}"
+        )
+        print("[SUCCESS] File Updated on Hugging Face.")
             
     except Exception as e:
-        print(f"[ERROR] GitHub Upload Failed: {e}")
+        print(f"[ERROR] Hugging Face Upload Failed: {e}")
 
 def save_ensemble_model(high_acc_configs, initial_reference_price):
     if not high_acc_configs:
@@ -264,7 +268,7 @@ def save_ensemble_model(high_acc_configs, initial_reference_price):
         with open(MODEL_FILENAME, 'wb') as f:
             pickle.dump(model_payload, f)
         print(f"\n[SUCCESS] Model saved locally to '{MODEL_FILENAME}'")
-        upload_to_github(MODEL_FILENAME)
+        upload_to_huggingface(MODEL_FILENAME)
     except Exception as e:
         print(f"\n[ERROR] Failed to save model: {e}")
 
