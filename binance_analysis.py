@@ -7,6 +7,7 @@ import time
 def fetch_binance_data(symbol='ETH/USDT', timeframe='4h', start_date='2020-01-01T00:00:00Z', end_date='2026-01-01T00:00:00Z'):
     """
     Fetches historical OHLC data from Binance using CCXT with pagination.
+    Fixes TypeError by ensuring all dates are UTC-aware.
     """
     print(f"Fetching {symbol} {timeframe} data from {start_date} to {end_date}...")
     exchange = ccxt.binance()
@@ -31,7 +32,7 @@ def fetch_binance_data(symbol='ETH/USDT', timeframe='4h', start_date='2020-01-01
             if since >= end_ts:
                 break
                 
-            time.sleep(exchange.rateLimit / 1000) # Respect rate limits
+            time.sleep(exchange.rateLimit / 1000) 
             
         except Exception as e:
             print(f"\nError fetching data: {e}")
@@ -40,10 +41,15 @@ def fetch_binance_data(symbol='ETH/USDT', timeframe='4h', start_date='2020-01-01
     print(f"\nTotal candles fetched: {len(all_ohlcv)}")
     
     df = pd.DataFrame(all_ohlcv, columns=['timestamp', 'open', 'high', 'low', 'close', 'volume'])
-    df['timestamp'] = pd.to_datetime(df['timestamp'], unit='ms')
     
-    # Filter strictly within range (in case fetch overshot)
-    mask = (df['timestamp'] >= start_date) & (df['timestamp'] < end_date)
+    # FIX: Add utc=True to make the column timezone-aware
+    df['timestamp'] = pd.to_datetime(df['timestamp'], unit='ms', utc=True)
+    
+    # Filter using pd.Timestamp to ensure consistent timezone handling
+    start_dt = pd.Timestamp(start_date, tz='UTC')
+    end_dt = pd.Timestamp(end_date, tz='UTC')
+    
+    mask = (df['timestamp'] >= start_dt) & (df['timestamp'] < end_dt)
     df = df.loc[mask].reset_index(drop=True)
     
     return df
