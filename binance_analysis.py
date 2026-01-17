@@ -29,7 +29,7 @@ HF_FOLDER = "model2x"
 GRID_MIN = 0.005
 GRID_MAX = 0.05
 GRID_STEPS = 20 
-ENSEMBLE_ACC_THRESHOLD = 65.0 # Slightly lowered to ensure we get models for more volatile assets
+ENSEMBLE_ACC_THRESHOLD = 70.0 # Slightly lowered to ensure we get models for more volatile assets
 
 def fetch_binance_data(symbol, timeframe='30m', start_date='2020-01-01T00:00:00Z', end_date='2026-01-01T00:00:00Z'):
     print(f"Fetching {symbol}...")
