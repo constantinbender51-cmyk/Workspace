@@ -6,7 +6,7 @@ import time
 from collections import Counter
 
 # --- CONFIGURATION ---
-STEP_SIZE = 0.5   # Step size for rounding (e.g., 0.5 means 1.0, 1.5, 2.0...)
+STEP_SIZE = 0.005   # Step size for rounding (e.g., 0.5 means 1.0, 1.5, 2.0...)
 SEQ_LENGTH = 5    # Length of the sequence to analyze
 
 def fetch_binance_data(symbol='ETH/USDT', timeframe='4h', start_date='2020-01-01T00:00:00Z', end_date='2026-01-01T00:00:00Z'):
