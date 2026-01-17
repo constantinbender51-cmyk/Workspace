@@ -11,7 +11,8 @@ import os
 import glob
 import threading
 import sys
-from datetime import datetime, timedelta
+# --- FIXED IMPORT BELOW ---
+from datetime import datetime, timedelta, timezone
 from collections import Counter
 
 # --- CONFIGURATION ---
@@ -41,25 +42,19 @@ def fetch_and_process_github_data():
     """
     print(f"Downloading data from GitHub: {GITHUB_CSV_URL}...")
     try:
-        # 1. Read CSV
-        # We assume no header if it's just raw numbers, but pandas might infer.
-        # Safe bet: Read it, check shape.
         df = pd.read_csv(GITHUB_CSV_URL, header=None)
         
-        # 2. Handle Columns
         if len(df.columns) == 2:
             print("Detected 2-column CSV (Timestamp, Close)")
             df.columns = ['timestamp', 'close']
         elif len(df.columns) >= 5:
-            # Maybe it has headers? Reload with headers
             df = pd.read_csv(GITHUB_CSV_URL)
             df.columns = df.columns.str.strip().str.lower()
         else:
-            print(f"Unknown CSV format with {len(df.columns)} columns. Defaulting to first 2 as ts, close.")
+            print(f"Unknown CSV format. Defaulting to first 2 columns.")
             df = df.iloc[:, :2]
             df.columns = ['timestamp', 'close']
 
-        # 3. Handle Timestamp
         first_val = df['timestamp'].iloc[0]
         try:
             if isinstance(first_val, (int, float, np.number)):
@@ -71,32 +66,14 @@ def fetch_and_process_github_data():
             print(f"Timestamp parsing error: {e}")
             return pd.DataFrame()
 
-        # 4. Set Index
         df = df.sort_values('timestamp').set_index('timestamp')
         
-        # 5. Resample to 30m
-        print(f"Resampling from inferred interval to {TARGET_TIMEFRAME}...")
-        
-        # Since we only have 'close', we construct a synthetic OHLC for the new timeframe
-        # High = Max of 15m closes
-        # Low = Min of 15m closes
-        # Close = Last 15m close
-        agg_dict = {
-            'close': 'last'
-        }
-        
-        # If we want to be fancy and approximate High/Low from the closes:
-        # df['high'] = df['close']
-        # df['low'] = df['close']
-        # agg_dict['high'] = 'max'
-        # agg_dict['low'] = 'min'
-        
+        print(f"Resampling to {TARGET_TIMEFRAME}...")
+        agg_dict = {'close': 'last'}
         df_resampled = df.resample(TARGET_TIMEFRAME).agg(agg_dict)
         df_resampled = df_resampled.dropna().reset_index()
         
         print(f"Processing complete. Rows: {len(df)} -> {len(df_resampled)}")
-        print(f"Date Range: {df_resampled['timestamp'].iloc[0]} to {df_resampled['timestamp'].iloc[-1]}")
-        
         return df_resampled
 
     except Exception as e:
@@ -104,21 +81,17 @@ def fetch_and_process_github_data():
         return pd.DataFrame()
 
 def get_grid_indices(df, step_size):
-    """Converts price series to log-integer grid indices."""
     close_array = df['close'].to_numpy()
-    
     pct_change = np.zeros(len(close_array))
     pct_change[1:] = np.diff(close_array) / close_array[:-1]
     multipliers = 1.0 + pct_change
     abs_price_raw = np.cumprod(multipliers)
-    
     abs_price_log = np.log(abs_price_raw)
     grid_indices = np.floor(abs_price_log / step_size).astype(int)
     return grid_indices
 
 def train_and_evaluate(df, step_size):
     grid_indices = get_grid_indices(df, step_size)
-    
     total_len = len(grid_indices)
     idx_80 = int(total_len * 0.80)
     idx_90 = int(total_len * 0.90)
@@ -144,15 +117,12 @@ def train_and_evaluate(df, step_size):
         if current_seq in patterns:
             history = patterns[current_seq]
             predicted_level = Counter(history).most_common(1)[0][0]
-            
             pred_diff = predicted_level - current_level
             actual_diff = actual_next_level - current_level
             
             if pred_diff != 0 and actual_diff != 0:
                 move_total_valid += 1
-                same_direction = (pred_diff > 0 and actual_diff > 0) or \
-                                 (pred_diff < 0 and actual_diff < 0)
-                if same_direction:
+                if (pred_diff > 0 and actual_diff > 0) or (pred_diff < 0 and actual_diff < 0):
                     move_correct += 1
                     
     accuracy = (move_correct / move_total_valid * 100) if move_total_valid > 0 else 0.0
@@ -207,72 +177,65 @@ def kraken_live_loop(filename, step_sizes, accuracies, trade_counts, cmb_acc, cm
     
     while True:
         try:
-            # 1. SYNC WITH CLOCK
-            # Calculate time until next 30m candle closes
-            now = datetime.now(timezone.utc)
-            # Find the start of the NEXT 30m interval
-            # Logic: floor minutes to 0 or 30, then add 30m
-            if now.minute < 30:
-                next_run_minute = 30
-            else:
-                next_run_minute = 0
-            
-            # Create the target time for the next run
-            # If next_run is 0, it means the next hour, so we add 1 hour to 'now' logic if needed
-            # Simpler approach using timestamps:
+            # 1. SYNC WITH CLOCK (Wait for next 30m candle close)
+            # Use pandas for easier time floor/ceil
             curr_ts = pd.Timestamp.now(tz='UTC')
-            # Floor to current 30m start
+            
+            # Floor to current 30m start (e.g., 14:12 -> 14:00)
             current_candle_start = curr_ts.floor('30min') 
-            # The next candle close is 30 mins after current start
+            
+            # The next candle *close* is 30 mins after the current start (e.g., 14:00 -> 14:30)
             next_candle_close = current_candle_start + pd.Timedelta('30min')
             
             # Seconds to wait + 15 seconds buffer to ensure Kraken has the data
             sleep_seconds = (next_candle_close - curr_ts).total_seconds() + 15
             
-            # If we are somehow "behind" (negative sleep), just run immediately (set sleep to 0)
-            if sleep_seconds < 0:
-                sleep_seconds = 0
+            # Sanity check: if negative, we are slightly behind, just run now
+            if sleep_seconds < 0: sleep_seconds = 0
             
             if sleep_seconds > 0:
-                # Update status to show we are waiting
-                next_run_str = (curr_ts + pd.Timedelta(seconds=sleep_seconds)).strftime('%H:%M:%S')
-                print(f"[KRAKEN LIVE] Waiting {sleep_seconds:.0f}s for next candle close (Next run: {next_run_str})...")
+                next_run_str = (curr_ts + pd.Timedelta(seconds=sleep_seconds)).strftime('%H:%M:%S UTC')
+                print(f"[KRAKEN LIVE] Waiting {sleep_seconds:.0f}s for next candle close. (Next run: {next_run_str})")
                 
-                # We can't block the HTML updates entirely, so we sleep in chunks or just update status
-                # For this script, a simple sleep is fine, but we might want to update the HTML to say "Waiting"
-                # To keep it simple, we just sleep.
+                # Update HTML to show we are waiting
+                LATEST_LIVE_RESULT = f"""
+                <div style="border: 2px solid orange; padding: 15px; border-radius: 8px; background: #fff;">
+                    <h2 style="color: orange; margin-top: 0;">WAITING FOR CANDLE CLOSE</h2>
+                    <p><strong>Status:</strong> Sleeping until next 30m candle closes.</p>
+                    <p><strong>Next Check:</strong> {next_run_str}</p>
+                </div>
+                """
+                generate_html(filename, step_sizes, accuracies, trade_counts, cmb_acc, cmb_count)
                 time.sleep(sleep_seconds)
 
             print(f"\n[KRAKEN LIVE] Fetching new completed candle...")
             
             # 2. FETCH DATA
-            # We fetch limit=5 enough to cover our SEQ_LENGTH
             ohlcv = kraken.fetch_ohlcv(symbol, timeframe, limit=10)
             live_df = pd.DataFrame(ohlcv, columns=['timestamp', 'open', 'high', 'low', 'close', 'volume'])
             live_df['timestamp'] = pd.to_datetime(live_df['timestamp'], unit='ms', utc=True)
             
-            # 3. STRICT FILTERING (The Fix)
+            # 3. STRICT FILTERING
             # Recalculate time just to be sure
             now_check = pd.Timestamp.now(tz='UTC')
             current_forming_candle_start = now_check.floor('30min')
+            
             # The last COMPLETED candle must have started 30 mins before the current forming one
             last_completed_candle_start = current_forming_candle_start - pd.Timedelta('30min')
             
-            # Filter the DF to include ONLY candles up to the last completed one
-            # This ignores any "open" candle that Kraken might return at the end of the list
+            # Filter: Include only candles UP TO (and including) the last completed start time
             completed_df = live_df[live_df['timestamp'] <= last_completed_candle_start].copy()
             
-            # Verify we have enough data
             if len(completed_df) < SEQ_LENGTH:
                 LATEST_LIVE_RESULT = f"Waiting for more data... (Have {len(completed_df)}/{SEQ_LENGTH} candles)"
             else:
                 # 4. RUN PREDICTION
                 target_df = completed_df.tail(SEQ_LENGTH).reset_index(drop=True)
                 
-                # Validation: Ensure the last candle is actually the one we expect
+                # Check timestamps
                 last_candle_ts = target_df['timestamp'].iloc[-1]
                 if last_candle_ts != last_completed_candle_start:
-                    print(f"Warning: Expected last candle {last_completed_candle_start}, got {last_candle_ts}")
+                    print(f"Warning: Expected last candle {last_completed_candle_start}, got {last_candle_ts}. Using latest available.")
                 
                 last_ts_str = last_candle_ts.strftime('%Y-%m-%d %H:%M UTC')
                 current_price = target_df['close'].iloc[-1]
@@ -288,8 +251,10 @@ def kraken_live_loop(filename, step_sizes, accuracies, trade_counts, cmb_acc, cm
                     
                     for cfg in qualified_configs:
                         step = cfg['step_size']
+                        # Normalize relative to start
                         abs_price_log = np.log(live_prices / GLOBAL_REF_PRICE)
                         live_indices = np.floor(abs_price_log / step).astype(int)
+                        
                         current_seq = tuple(live_indices)
                         
                         if current_seq in cfg['patterns']:
@@ -314,16 +279,13 @@ def kraken_live_loop(filename, step_sizes, accuracies, trade_counts, cmb_acc, cm
                         <p><strong>Source:</strong> Kraken Public API</p>
                         <p><strong>Last Closed Candle:</strong> {last_ts_str} @ ${current_price:.2f}</p>
                         <p><strong>Voters:</strong> {up_votes} UP / {down_votes} DOWN</p>
-                        <p style="font-size:0.8em; color:#666;">Next check in ~30m</p>
                     </div>
                     """
-            
             generate_html(filename, step_sizes, accuracies, trade_counts, cmb_acc, cmb_count)
             
         except Exception as e:
             print(f"Kraken Error: {e}")
             LATEST_LIVE_RESULT = f"Kraken API Error: {e}"
-            # On error, sleep a bit before retrying, usually 60s is safe
             time.sleep(60)
 
 def generate_html(image_filename, steps, accs, counts, cmb_acc, cmb_count):
