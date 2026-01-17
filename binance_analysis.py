@@ -25,7 +25,7 @@ MODEL_FILENAME = "eth.pkl"
 
 # Hugging Face Configuration
 # IMPORTANT: Change this to your actual Hugging Face "username/repo_name"
-HF_REPO_ID = "constantinbender51/Models" 
+HF_REPO_ID = "Llama26051996/Models" 
 HF_FOLDER = "model2x"
 
 # Grid Search Parameters
