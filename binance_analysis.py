@@ -10,13 +10,14 @@ import time
 import os
 import glob
 from datetime import datetime
+from collections import Counter
 
 # --- CONFIGURATION ---
 PORT = 8080
 SEQ_LENGTH = 5
 
-# Step Size (0.10 = 10% steps)
-# Try changing this to 0.05 or 0.20 to see the grid lines shift
+# Step Size (0.10 = 10% log-steps).
+# Defines the "Absolute Levels" we are matching.
 LOG_STEP_SIZE = 0.10  
 
 def fetch_binance_data(symbol='ETH/USDT', timeframe='4h', start_date='2020-01-01T00:00:00Z', end_date='2026-01-01T00:00:00Z'):
@@ -56,17 +57,91 @@ def prepare_arrays(df, step_size):
     multipliers = 1.0 + pct_change
     abs_price_raw = np.cumprod(multipliers)
     
-    # 3. Logarithmic Rounding
+    # 3. Logarithmic Rounding (The Grid)
     abs_price_log = np.log(abs_price_raw)
-    abs_price_log_rounded = np.floor(abs_price_log / step_size) * step_size
-    abs_price_rounded = np.exp(abs_price_log_rounded)
     
-    # Debug info
-    unique_levels = len(np.unique(abs_price_rounded))
-    print(f"\n[DEBUG] Step Size: {step_size}")
-    print(f"[DEBUG] Unique Steps Found: {unique_levels}")
+    # ABSOLUTE GRID INDICES (Integers representing the "Floor" level)
+    # e.g., 0, 1, 2, ... 50, 51
+    grid_indices = np.floor(abs_price_log / step_size).astype(int)
+    
+    # Convert back to float price for plotting
+    abs_price_rounded = np.exp(grid_indices * step_size)
+    
+    return df['timestamp'], close_array, pct_change, abs_price_raw, abs_price_rounded, grid_indices
+
+def run_prediction_logic(grid_indices):
+    print("\n\n--- RUNNING PREDICTION ALGORITHM (ABSOLUTE SEQUENCES) ---")
+    
+    # NOTE: We are using 'grid_indices' DIRECTLY.
+    # We are NOT using np.diff().
+    # Matches will only occur if the Price Level (Height) matches exactly.
+    
+    # Split Data (80/10/10)
+    total_len = len(grid_indices)
+    idx_80 = int(total_len * 0.80)
+    idx_90 = int(total_len * 0.90)
+    
+    # Training: 80 Set
+    train_seq = grid_indices[:idx_80]
+    # Validation: 10 Set 1
+    val_seq = grid_indices[idx_80:idx_90]
+    
+    # Debug: Check Range Overlap
+    train_min, train_max = np.min(train_seq), np.max(train_seq)
+    val_min, val_max = np.min(val_seq), np.max(val_seq)
+    
+    print(f"Training Range (Grid Levels): {train_min} to {train_max}")
+    print(f"Validation Range (Grid Levels): {val_min} to {val_max}")
+    
+    # 1. Build Model from 80 Set
+    # Map: Absolute Sequence of 5 Levels -> Next Absolute Level
+    patterns = {}
+    for i in range(len(train_seq) - SEQ_LENGTH):
+        seq = tuple(train_seq[i : i + SEQ_LENGTH]) # e.g. (10, 10, 11, 11, 12)
+        target = train_seq[i + SEQ_LENGTH]         # e.g. 12
         
-    return df['timestamp'], close_array, pct_change, abs_price_raw, abs_price_rounded
+        if seq not in patterns:
+            patterns[seq] = []
+        patterns[seq].append(target)
+        
+    print(f"Unique Absolute Patterns Learned: {len(patterns)}")
+    
+    # 2. Test on 10 Set 1
+    correct = 0
+    matches_found = 0
+    total_scanned = 0
+    
+    for i in range(len(val_seq) - SEQ_LENGTH):
+        total_scanned += 1
+        
+        # Current Sequence (Validation)
+        current_seq = tuple(val_seq[i : i + SEQ_LENGTH])
+        actual_next_level = val_seq[i + SEQ_LENGTH]
+        
+        if current_seq in patterns:
+            matches_found += 1
+            
+            # Find most probable next LEVEL (Mode)
+            history = patterns[current_seq]
+            predicted_level = Counter(history).most_common(1)[0][0]
+            
+            # Check Exact Match
+            if predicted_level == actual_next_level:
+                correct += 1
+                
+    # 3. Print Accuracy
+    print("\n--- PREDICTION RESULTS ---")
+    print(f"Total Sequences in Validation: {total_scanned}")
+    print(f"Sequences Matched in History: {matches_found}")
+    
+    if matches_found > 0:
+        accuracy = (correct / matches_found) * 100
+        print(f"Correct Predictions: {correct}")
+        print(f"Accuracy (on matched patterns): {accuracy:.2f}%")
+    else:
+        print("Accuracy: N/A (0 matches found)")
+        print("(Reason: Validation prices are at absolute levels never seen in Training set)")
+    print("--------------------------------\n")
 
 def generate_plots(timestamps, close, pct, abs_raw, abs_rounded, step_size, filename):
     print(f"Generating plot: {filename}...")
@@ -74,52 +149,35 @@ def generate_plots(timestamps, close, pct, abs_raw, abs_rounded, step_size, file
     fig, axs = plt.subplots(4, 1, figsize=(12, 18), sharex=True)
     plt.subplots_adjust(hspace=0.3)
     
-    # 1. Close Price
     axs[0].plot(timestamps, close, color='blue', linewidth=1)
     axs[0].set_title('1. Raw Close Price (USDT)')
     axs[0].grid(True, alpha=0.3)
     
-    # 2. Percentage Changes
     axs[1].plot(timestamps, pct, color='gray', linewidth=0.5, alpha=0.8)
     axs[1].set_title('2. Percentage Changes (Unrounded)')
     axs[1].set_ylim(-0.10, 0.10)
     axs[1].grid(True, alpha=0.3)
     
-    # 3. Absolute Price (Raw)
     axs[2].plot(timestamps, abs_raw, color='green', linewidth=1)
     axs[2].set_title('3. Absolute Price Index (High Precision)')
     axs[2].grid(True, alpha=0.3)
     
-    # 4. Absolute Price (Log Rounded) + Horizontal Lines
     axs[3].step(timestamps, abs_rounded, color='red', linewidth=1.5, where='mid')
     axs[3].set_title(f'4. Absolute Price Index (Log-Rounded: {step_size*100}% steps)')
     axs[3].grid(True, alpha=0.3)
     
-    # --- DRAW HORIZONTAL LINES EVERY 10 STEPS ---
-    # We calculate the levels in Log space, then convert to linear for plotting
-    min_log = np.log(np.min(abs_rounded[abs_rounded > 0])) # avoid log(0)
+    # Horizontal Lines Logic
+    min_log = np.log(np.min(abs_rounded[abs_rounded > 0])) 
     max_log = np.log(np.max(abs_rounded))
-    
-    # Start from the nearest "10th step" below the minimum
-    # "10 steps" means a jump of 10 * step_size
     grid_interval = 10 * step_size
-    
     start_level = np.floor(min_log / grid_interval) * grid_interval
     current_level = start_level
     
     while current_level < max_log + grid_interval:
-        # Convert back to linear price for the plot
         y_val = np.exp(current_level)
-        
-        # Draw the line
-        axs[3].axhline(y=y_val, color='black', linestyle='--', linewidth=1, alpha=0.6)
-        
-        # Add a text label to identify the line
-        axs[3].text(timestamps.iloc[0], y_val, f' 10-Step Level', 
-                    color='black', fontsize=8, verticalalignment='bottom')
-        
+        axs[3].axhline(y=y_val, color='black', linestyle='--', linewidth=0.8, alpha=0.5)
+        axs[3].text(timestamps.iloc[0], y_val, ' 10-Step', fontsize=8, va='bottom', color='black', alpha=0.7)
         current_level += grid_interval
-    # --------------------------------------------
 
     plt.xlabel('Date')
     plt.savefig(filename, dpi=100, bbox_inches='tight')
@@ -127,7 +185,6 @@ def generate_plots(timestamps, close, pct, abs_raw, abs_rounded, step_size, file
     print(f"Plot saved to '{filename}'")
 
 def start_server(image_filename):
-    # Cleanup old images
     for f in glob.glob("analysis_plot_*.png"):
         if f != image_filename:
             try:
@@ -150,9 +207,9 @@ def start_server(image_filename):
     </head>
     <body>
         <div class="container">
-            <h1>Logarithmic Price Analysis</h1>
-            <p><strong>Step Mode:</strong> Logarithmic | <strong>Step Size:</strong> {LOG_STEP_SIZE*100}%</p>
-            <p><strong>Grid Lines:</strong> Every 10 steps ({LOG_STEP_SIZE*1000}% change)</p>
+            <h1>Absolute Sequence Analysis</h1>
+            <p><strong>Method:</strong> Matching Absolute Grid Levels (Not Differences)</p>
+            <p><strong>Step Size:</strong> {LOG_STEP_SIZE*100}%</p>
             <p><small>Image ID: {image_filename}</small></p>
             <img src="{image_filename}" alt="Plots">
         </div>
@@ -173,13 +230,16 @@ def start_server(image_filename):
             print(f"Press Ctrl+C to stop")
             httpd.serve_forever()
     except OSError:
-        print(f"\nERROR: Port {PORT} is busy. Stop previous script.")
+        print(f"\nERROR: Port {PORT} is busy.")
 
 def run_analysis():
     df = fetch_binance_data()
     if df.empty: return
     
-    timestamps, close, pct, abs_raw, abs_rounded = prepare_arrays(df, step_size=LOG_STEP_SIZE)
+    timestamps, close, pct, abs_raw, abs_rounded, grid_indices = prepare_arrays(df, step_size=LOG_STEP_SIZE)
+    
+    # Run Prediction Logic (Absolute Sequence)
+    run_prediction_logic(grid_indices)
     
     unique_id = int(time.time())
     filename = f"analysis_plot_{unique_id}.png"
