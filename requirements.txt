@@ -6,3 +6,6 @@ matplotlib
 ccxt
 pandas
 numpy
+numba
+pyarrow
+aiohttp
