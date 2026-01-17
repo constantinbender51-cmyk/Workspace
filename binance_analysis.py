@@ -21,7 +21,7 @@ from github import Github
 # --- CONFIGURATION ---
 PORT = 8080
 SEQ_LENGTH = 5
-MODEL_FILENAME = "grid_ensemble_model.pkl"
+MODEL_FILENAME = "/app/data/eth.pkl"
 
 # GitHub Configuration
 GITHUB_REPO = "constantinbender51-cmyk/Models"
