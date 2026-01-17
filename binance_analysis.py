@@ -22,6 +22,7 @@ from huggingface_hub import HfApi
 PORT = 8080
 SEQ_LENGTHS = [5, 6, 7, 8, 9, 10]
 ASSETS = ['BTC/USDT', 'ETH/USDT', 'BNB/USDT', 'SOL/USDT', 'XRP/USDT']
+TIMEFRAMES = ['1m', '5m', '15m', '30m', '1h', '4h', '1d'] # Updated Timeframes
 DATA_DIR = "/app/data/"  # Local cache directory
 
 # Hugging Face Configuration
@@ -37,7 +38,7 @@ GRID_STEPS = 20
 ENSEMBLE_ACC_THRESHOLD = 70.0
 
 def fetch_binance_data(symbol, timeframe='30m', start_date='2020-01-01T00:00:00Z', end_date='2026-01-01T00:00:00Z'):
-    print(f"\n--- Processing Data for {symbol} ---")
+    print(f"\n--- Processing Data for {symbol} [{timeframe}] ---")
     
     # 1. Construct Cache Path
     safe_symbol = symbol.replace('/', '_')
@@ -96,7 +97,7 @@ def fetch_binance_data(symbol, timeframe='30m', start_date='2020-01-01T00:00:00Z
                 print(f"\nUnexpected Error: {e}")
                 break
                 
-        print(f"\n{symbol} Data fetch complete. Total rows: {len(all_ohlcv)}")
+        print(f"\n{symbol} [{timeframe}] Data fetch complete. Total rows: {len(all_ohlcv)}")
         
         if not all_ohlcv:
             return pd.DataFrame()
@@ -291,25 +292,21 @@ def save_ensemble_model(high_acc_configs, initial_reference_price, model_filenam
     except Exception as e:
         print(f"[ERROR] Failed to save model: {e}")
 
-def run_analysis_for_asset(symbol):
+def calculate_timeframe_metrics(symbol, timeframe):
     """
-    Runs the full analysis pipeline for a single asset and returns the results for the report.
+    Calculates metrics for a specific asset and timeframe without generating side effects yet.
+    Returns a dictionary of results.
     """
-    # Create filenames based on symbol (e.g., BTC/USDT -> btc.pkl)
-    clean_name = symbol.split('/')[0].lower()
-    model_filename = f"{clean_name}.pkl"
-    image_filename = f"grid_{clean_name}_{int(time.time())}.png"
-
-    df = fetch_binance_data(symbol)
+    df = fetch_binance_data(symbol, timeframe=timeframe)
     if df.empty:
-        print(f"Skipping {symbol} due to empty data.")
+        print(f"Skipping {symbol} {timeframe} due to empty data.")
         return None
     
     initial_price = df['close'].iloc[0]
     step_sizes = np.linspace(GRID_MIN, GRID_MAX, GRID_STEPS)
     results = []
     
-    print(f"--- PROCESSING {symbol} (Steps: {GRID_STEPS}, SeqLens: {SEQ_LENGTHS}) ---")
+    print(f"--- ANALYZING {symbol} [{timeframe}] ---")
     
     for s_len in SEQ_LENGTHS:
         for step in step_sizes:
@@ -318,12 +315,39 @@ def run_analysis_for_asset(symbol):
         
     high_acc_configs = [r for r in results if r['accuracy'] > ENSEMBLE_ACC_THRESHOLD]
     
-    print(f"Found {len(high_acc_configs)} configurations above {ENSEMBLE_ACC_THRESHOLD}% for {symbol}.")
     cmb_acc, cmb_count = run_combined_metric(high_acc_configs)
-    print(f"{symbol} Ensemble: {cmb_acc:.2f}% | Trades: {cmb_count}")
+    
+    # Calculate Scoring Metric: (Accuracy_Probability - 0.5) * Trades
+    # cmb_acc is percentage (0-100), so we divide by 100
+    metric_score = ((cmb_acc / 100.0) - 0.5) * cmb_count
+    
+    return {
+        'symbol': symbol,
+        'timeframe': timeframe,
+        'initial_price': initial_price,
+        'results': results,
+        'high_acc_configs': high_acc_configs,
+        'cmb_acc': cmb_acc,
+        'cmb_count': cmb_count,
+        'metric_score': metric_score
+    }
+
+def process_winning_timeframe(best_result):
+    """
+    Takes the winning result, saves the model, generates plot, and returns report data.
+    """
+    symbol = best_result['symbol']
+    timeframe = best_result['timeframe']
+    
+    clean_name = symbol.split('/')[0].lower()
+    model_filename = f"{clean_name}.pkl"
+    image_filename = f"grid_{clean_name}_{int(time.time())}.png"
+    
+    print(f"\n>>> WINNER for {symbol}: {timeframe} (Score: {best_result['metric_score']:.4f})")
+    print(f"Ensemble: {best_result['cmb_acc']:.2f}% | Trades: {best_result['cmb_count']}")
 
     # Save Model & Upload
-    save_ensemble_model(high_acc_configs, initial_price, model_filename)
+    save_ensemble_model(best_result['high_acc_configs'], best_result['initial_price'], model_filename)
 
     # Generate Plot
     fig, ax1 = plt.subplots(figsize=(12, 7))
@@ -333,7 +357,7 @@ def run_analysis_for_asset(symbol):
     
     colors = plt.cm.viridis(np.linspace(0, 1, len(SEQ_LENGTHS)))
     for idx, s_len in enumerate(SEQ_LENGTHS):
-        subset = [r for r in results if r['seq_len'] == s_len]
+        subset = [r for r in best_result['results'] if r['seq_len'] == s_len]
         if not subset: continue
         steps_sub = [r['step_size'] for r in subset]
         accs_sub = [r['accuracy'] for r in subset]
@@ -341,17 +365,18 @@ def run_analysis_for_asset(symbol):
 
     ax1.legend(loc='lower right')
     ax1.grid(True, linestyle='--', alpha=0.3)
-    plt.title(f'{symbol} - Accuracy vs Step Size\nEnsemble: {cmb_acc:.2f}% ({cmb_count} trades)')
+    plt.title(f'{symbol} ({timeframe}) - Accuracy vs Step Size\nEnsemble: {best_result["cmb_acc"]:.2f}% ({best_result["cmb_count"]} trades)')
     fig.tight_layout()
     plt.savefig(image_filename)
     plt.close()
     
     return {
         'symbol': symbol,
+        'timeframe': timeframe,
         'image': image_filename,
-        'results': results,
-        'cmb_acc': cmb_acc,
-        'cmb_count': cmb_count
+        'results': best_result['results'],
+        'cmb_acc': best_result['cmb_acc'],
+        'cmb_count': best_result['cmb_count']
     }
 
 def start_server_combined(all_asset_data):
@@ -377,7 +402,7 @@ def start_server_combined(all_asset_data):
 
         sections_html += f"""
         <div class="asset-section">
-            <h2>{data['symbol']}</h2>
+            <h2>{data['symbol']} <span style="font-size:0.8em; color:#666;">({data['timeframe']})</span></h2>
             <div class="stats"><strong>Ensemble:</strong> {data['cmb_acc']:.2f}% Accuracy | {data['cmb_count']} Trades</div>
             <img src="{data['image']}" class="chart">
             <div class="table-container">
@@ -434,15 +459,40 @@ def start_server_combined(all_asset_data):
 def run_multi_asset_search():
     final_report_data = []
     
-    print(f"Starting Multi-Asset Analysis for: {ASSETS}")
+    print(f"Starting Multi-Asset Analysis.")
+    print(f"Assets: {ASSETS}")
+    print(f"Timeframes: {TIMEFRAMES}")
     
     for symbol in ASSETS:
-        try:
-            asset_data = run_analysis_for_asset(symbol)
-            if asset_data:
-                final_report_data.append(asset_data)
-        except Exception as e:
-            print(f"CRITICAL ERROR processing {symbol}: {e}")
+        best_metric_score = -float('inf')
+        best_timeframe_result = None
+        
+        print(f"\n=== Evaluating Timeframes for {symbol} ===")
+        
+        # Iterate all timeframes for the current asset
+        for tf in TIMEFRAMES:
+            try:
+                tf_result = calculate_timeframe_metrics(symbol, tf)
+                if tf_result is not None:
+                    # Metric: (accuracy_prob - 0.5) * trades
+                    score = tf_result['metric_score']
+                    print(f"-> {tf}: Acc={tf_result['cmb_acc']:.2f}%, Trades={tf_result['cmb_count']} | Score={score:.4f}")
+                    
+                    if score > best_metric_score:
+                        best_metric_score = score
+                        best_timeframe_result = tf_result
+            except Exception as e:
+                print(f"Error processing {symbol} {tf}: {e}")
+        
+        # Process the winner for this asset
+        if best_timeframe_result:
+            try:
+                asset_report_data = process_winning_timeframe(best_timeframe_result)
+                final_report_data.append(asset_report_data)
+            except Exception as e:
+                print(f"CRITICAL ERROR saving {symbol}: {e}")
+        else:
+            print(f"No valid data found for {symbol} across any timeframe.")
             
     if final_report_data:
         start_server_combined(final_report_data)
