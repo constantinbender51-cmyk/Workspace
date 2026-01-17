@@ -21,6 +21,9 @@ GRID_MIN = 0.005
 GRID_MAX = 0.1
 GRID_STEPS = 100
 
+# Ensemble Threshold
+ENSEMBLE_ACC_THRESHOLD = 70.0
+
 def fetch_binance_data(symbol='ETH/USDT', timeframe='30m', start_date='2020-01-01T00:00:00Z', end_date='2026-01-01T00:00:00Z'):
     print(f"Fetching {symbol}...")
     exchange = ccxt.binance()
@@ -47,23 +50,28 @@ def fetch_binance_data(symbol='ETH/USDT', timeframe='30m', start_date='2020-01-0
     end_dt = pd.Timestamp(end_date, tz='UTC')
     return df.loc[(df['timestamp'] >= start_dt) & (df['timestamp'] < end_dt)].reset_index(drop=True)
 
-def calculate_metrics(df, step_size):
-    """
-    Returns (Accuracy %, Trade Count)
-    """
+def get_grid_indices(df, step_size):
+    """Converts price series to log-integer grid indices."""
     close_array = df['close'].to_numpy()
     
-    # 1. Absolute Price Index
+    # Absolute Price Index calculation
     pct_change = np.zeros(len(close_array))
     pct_change[1:] = np.diff(close_array) / close_array[:-1]
     multipliers = 1.0 + pct_change
     abs_price_raw = np.cumprod(multipliers)
     
-    # 2. Log Rounding
+    # Log Rounding
     abs_price_log = np.log(abs_price_raw)
     grid_indices = np.floor(abs_price_log / step_size).astype(int)
+    return grid_indices
+
+def train_and_evaluate(df, step_size):
+    """
+    Returns dictionary containing metrics and model data needed for the ensemble.
+    """
+    grid_indices = get_grid_indices(df, step_size)
     
-    # 3. Split
+    # Split
     total_len = len(grid_indices)
     idx_80 = int(total_len * 0.80)
     idx_90 = int(total_len * 0.90)
@@ -71,7 +79,7 @@ def calculate_metrics(df, step_size):
     train_seq = grid_indices[:idx_80]
     val_seq = grid_indices[idx_80:idx_90]
     
-    # 4. Train
+    # Train (Build Patterns)
     patterns = {}
     for i in range(len(train_seq) - SEQ_LENGTH):
         seq = tuple(train_seq[i : i + SEQ_LENGTH])
@@ -79,9 +87,12 @@ def calculate_metrics(df, step_size):
         if seq not in patterns: patterns[seq] = []
         patterns[seq].append(target)
         
-    # 5. Test
+    # Evaluate on Validation Set
     move_correct = 0
     move_total_valid = 0
+    
+    # We store predictions to verify the "Combined" logic later without re-running everything
+    # But for memory efficiency, we just return the patterns and let the ensemble re-predict.
     
     for i in range(len(val_seq) - SEQ_LENGTH):
         current_seq = tuple(val_seq[i : i + SEQ_LENGTH])
@@ -92,11 +103,9 @@ def calculate_metrics(df, step_size):
             history = patterns[current_seq]
             predicted_level = Counter(history).most_common(1)[0][0]
             
-            # Check Move
             pred_diff = predicted_level - current_level
             actual_diff = actual_next_level - current_level
             
-            # Ignore Flats
             if pred_diff != 0 and actual_diff != 0:
                 move_total_valid += 1
                 same_direction = (pred_diff > 0 and actual_diff > 0) or \
@@ -105,73 +114,155 @@ def calculate_metrics(df, step_size):
                     move_correct += 1
                     
     accuracy = (move_correct / move_total_valid * 100) if move_total_valid > 0 else 0.0
-    return accuracy, move_total_valid
+    
+    return {
+        'step_size': step_size,
+        'accuracy': accuracy,
+        'trade_count': move_total_valid,
+        'patterns': patterns,
+        'val_seq': val_seq  # Needed for ensemble alignment
+    }
+
+def run_combined_metric(high_acc_configs):
+    """
+    Calculates the accuracy of the Ensemble Logic.
+    Logic: If Any(>70% configs) says UP and None says DOWN -> Trade UP.
+    Verification: Uses the Maximum Step Size among the voters to verify the move.
+    """
+    if not high_acc_configs:
+        return 0.0, 0
+
+    # All configs align on the same time axis, so we can iterate by index
+    # using the validation sequence length of the first config.
+    ref_seq_len = len(high_acc_configs[0]['val_seq'])
+    
+    combined_correct = 0
+    combined_total = 0
+    
+    for i in range(ref_seq_len - SEQ_LENGTH):
+        up_votes = []
+        down_votes = []
+        
+        # Gather predictions from all qualified configs
+        for cfg in high_acc_configs:
+            val_seq = cfg['val_seq']
+            current_seq = tuple(val_seq[i : i + SEQ_LENGTH])
+            
+            if current_seq in cfg['patterns']:
+                history = cfg['patterns'][current_seq]
+                predicted_level = Counter(history).most_common(1)[0][0]
+                current_level = current_seq[-1]
+                diff = predicted_level - current_level
+                
+                if diff > 0:
+                    up_votes.append(cfg)
+                elif diff < 0:
+                    down_votes.append(cfg)
+        
+        # Apply Ensemble Logic: 
+        # 1. At least one UP
+        # 2. NO objects (DOWN)
+        if len(up_votes) > 0 and len(down_votes) == 0:
+            # Tie-breaker: Pick Maximum Step Size
+            best_cfg = max(up_votes, key=lambda x: x['step_size'])
+            
+            # Verify using the Chosen Config's Grid
+            # We look at the actual movement in the chosen config's validation sequence
+            chosen_val_seq = best_cfg['val_seq']
+            
+            curr_lvl = chosen_val_seq[i + SEQ_LENGTH - 1] # The end of the input sequence
+            next_lvl = chosen_val_seq[i + SEQ_LENGTH]     # The actual target
+            
+            actual_diff = next_lvl - curr_lvl
+            
+            # We only count it if the price actually moved on this grid
+            if actual_diff != 0:
+                combined_total += 1
+                if actual_diff > 0: # We predicted UP
+                    combined_correct += 1
+                    
+    acc = (combined_correct / combined_total * 100) if combined_total > 0 else 0.0
+    return acc, combined_total
 
 def run_grid_search():
     df = fetch_binance_data()
     if df.empty: return
 
     step_sizes = np.linspace(GRID_MIN, GRID_MAX, GRID_STEPS)
-    accuracies = []
-    trade_counts = []
     
+    results = []
     print(f"\n\n--- STARTING GRID SEARCH ({GRID_STEPS} Steps) ---")
+    
+    # 
     
     for step in step_sizes:
         print(f"Testing Step Size: {step:.5f}...", end=" ")
-        acc, count = calculate_metrics(df, step)
-        accuracies.append(acc)
-        trade_counts.append(count)
-        print(f"Acc: {acc:.2f}% | Trades: {count}")
+        res = train_and_evaluate(df, step)
+        results.append(res)
+        print(f"Acc: {res['accuracy']:.2f}% | Trades: {res['trade_count']}")
         
-    # --- PLOTTING (Dual Axis) ---
+    # --- COMBINED PREDICTOR ---
+    print(f"\n--- CALCULATING COMBINED PREDICTOR ---")
+    high_acc_configs = [r for r in results if r['accuracy'] > ENSEMBLE_ACC_THRESHOLD]
+    print(f"Qualifying Configs (> {ENSEMBLE_ACC_THRESHOLD}%): {len(high_acc_configs)}")
+    
+    cmb_acc, cmb_count = run_combined_metric(high_acc_configs)
+    print(f"Combined Predictor Accuracy: {cmb_acc:.2f}%")
+    print(f"Combined Predictor Trades:   {cmb_count}")
+
+    # --- PLOTTING ---
     unique_id = int(time.time())
     filename = f"grid_search_{unique_id}.png"
     
+    accuracies = [r['accuracy'] for r in results]
+    trade_counts = [r['trade_count'] for r in results]
+    
     fig, ax1 = plt.subplots(figsize=(10, 6))
     
-    # Axis 1: Accuracy (Blue)
     ax1.set_xlabel('Log Step Size')
     ax1.set_ylabel('Directional Accuracy (%)', color='tab:blue')
     ax1.plot(step_sizes, accuracies, marker='o', color='tab:blue', label='Accuracy')
+    ax1.axhline(y=ENSEMBLE_ACC_THRESHOLD, color='r', linestyle=':', label='Threshold (70%)')
     ax1.tick_params(axis='y', labelcolor='tab:blue')
     ax1.grid(True, linestyle='--', alpha=0.3)
     
-    # Axis 2: Trade Count (Orange)
     ax2 = ax1.twinx() 
     ax2.set_ylabel('Number of Trades', color='tab:orange')
     ax2.plot(step_sizes, trade_counts, marker='x', linestyle='--', color='tab:orange', label='Trades')
     ax2.tick_params(axis='y', labelcolor='tab:orange')
     
-    plt.title(f'Accuracy vs. Trade Volume\n(Range: {GRID_MIN} - {GRID_MAX})')
+    plt.title(f'Accuracy vs. Trade Volume\nCombined Predictor: {cmb_acc:.2f}% ({cmb_count} trades)')
     fig.tight_layout()
     plt.savefig(filename)
     plt.close()
     
     print(f"\nGrid search complete. Plot saved to {filename}")
-    start_server(filename, step_sizes, accuracies, trade_counts)
+    
+    # Pass combined stats to server to display in HTML
+    start_server(filename, step_sizes, accuracies, trade_counts, cmb_acc, cmb_count)
 
-def start_server(image_filename, steps, accs, counts):
+def start_server(image_filename, steps, accs, counts, cmb_acc, cmb_count):
     for f in glob.glob("grid_search_*.png"):
         if f != image_filename:
             try: os.remove(f)
             except: pass
 
-    # Build Table with Extra Column
     table_rows = ""
     for s, a, c in zip(steps, accs, counts):
-        table_rows += f"<tr><td>{s:.5f}</td><td>{a:.2f}%</td><td>{c}</td></tr>"
+        bg_style = "background-color: #e6fffa;" if a > ENSEMBLE_ACC_THRESHOLD else ""
+        table_rows += f"<tr style='{bg_style}'><td>{s:.5f}</td><td>{a:.2f}%</td><td>{c}</td></tr>"
 
     html_content = f"""
     <html>
     <head>
-        <title>Grid Search Results</title>
+        <title>Grid Search & Ensemble Results</title>
         <meta http-equiv="Cache-Control" content="no-cache, no-store, must-revalidate" />
         <meta http-equiv="Pragma" content="no-cache" />
         <meta http-equiv="Expires" content="0" />
         <style>
             body {{ font-family: sans-serif; text-align: center; padding: 20px; background: #f4f4f4; }}
             .container {{ background: white; padding: 20px; display: inline-block; border-radius: 8px; box-shadow: 0 4px 6px rgba(0,0,0,0.1); }}
+            .metric-box {{ background: #2d3748; color: white; padding: 15px; border-radius: 8px; margin: 20px 0; }}
             table {{ margin: 0 auto; border-collapse: collapse; width: 80%; }}
             th, td {{ padding: 8px; border-bottom: 1px solid #ddd; }}
             img {{ max-width: 100%; height: auto; margin-top: 20px; border: 1px solid #ddd; }}
@@ -180,11 +271,16 @@ def start_server(image_filename, steps, accs, counts):
     <body>
         <div class="container">
             <h1>Grid Search Results</h1>
-            <p><strong>Config:</strong> 10 Steps between {GRID_MIN} and {GRID_MAX}</p>
+            
+            <div class="metric-box">
+                <h2>Combined Predictor</h2>
+                <p style="font-size: 24px; margin: 5px;">Accuracy: <strong>{cmb_acc:.2f}%</strong></p>
+                <p>Total Trades: {cmb_count} | Threshold: >{ENSEMBLE_ACC_THRESHOLD}%</p>
+            </div>
             
             <img src="{image_filename}" alt="Grid Search Plot">
             
-            <h3>Data Points</h3>
+            <h3>Individual Configs</h3>
             <table>
                 <tr><th>Step Size</th><th>Accuracy</th><th>Trades</th></tr>
                 {table_rows}
