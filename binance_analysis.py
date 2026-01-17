@@ -21,7 +21,7 @@ GRID_MIN = 0.005
 GRID_MAX = 0.1
 GRID_STEPS = 100
 
-def fetch_binance_data(symbol='ETH/USDT', timeframe='4h', start_date='2020-01-01T00:00:00Z', end_date='2026-01-01T00:00:00Z'):
+def fetch_binance_data(symbol='ETH/USDT', timeframe='1h', start_date='2020-01-01T00:00:00Z', end_date='2026-01-01T00:00:00Z'):
     print(f"Fetching {symbol}...")
     exchange = ccxt.binance()
     since = exchange.parse8601(start_date)
