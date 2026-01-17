@@ -22,8 +22,9 @@ from huggingface_hub import HfApi
 PORT = 8080
 SEQ_LENGTHS = [5, 6, 7, 8, 9, 10]
 ASSETS = ['BTC/USDT', 'ETH/USDT', 'BNB/USDT', 'SOL/USDT', 'XRP/USDT']
-# We fetch '1m' ONLY, then derive the rest locally
-TIMEFRAMES = ['1m', '5m', '15m', '30m', '1h', '4h', '1d'] 
+
+# UPDATED: Fetch '15m' ONLY, then derive 30m and 1h locally
+TIMEFRAMES = ['15m', '30m', '1h'] 
 DATA_DIR = "/app/data/"
 MAX_WORKERS = os.cpu_count()
 
@@ -91,10 +92,10 @@ def evaluate_patterns_optimized(grid_indices, patterns, seq_len, train_end_idx, 
 
 def resample_data(df, timeframe_str):
     """
-    Resamples 1m data to target timeframe.
-    Timeframe mapping: '5m'->'5T', '1h'->'1H', '1d'->'1D'
+    Resamples 15m base data to target timeframe.
     """
-    if timeframe_str == '1m':
+    # If the target is the same as base (15m), return copy
+    if timeframe_str == '15m':
         return df.copy()
 
     # Convert common CCXT timeframe strings to Pandas aliases
@@ -109,7 +110,7 @@ def resample_data(df, timeframe_str):
         print(f"Unknown timeframe format {timeframe_str}, returning original.")
         return df
 
-    print(f"   -> Resampling 1m data to {timeframe_str}...")
+    print(f"   -> Resampling 15m data to {timeframe_str}...")
     
     # Ensure index is datetime
     df_res = df.set_index('timestamp').copy()
@@ -129,10 +130,11 @@ def resample_data(df, timeframe_str):
 
 async def fetch_base_data(symbol, start_date, end_date):
     """
-    Fetches ONLY the 1m data (Base Data).
+    Fetches ONLY the 15m data (Base Data).
     """
-    timeframe = '1m'
-    print(f"\n--- Fetching BASE DATA (1m) for {symbol} ---")
+    # UPDATED: Base resolution is now 15m
+    timeframe = '15m'
+    print(f"\n--- Fetching BASE DATA (15m) for {symbol} ---")
     
     safe_symbol = symbol.replace('/', '_')
     # Using Parquet for speed
@@ -140,7 +142,7 @@ async def fetch_base_data(symbol, start_date, end_date):
     
     # 1. Try Cache
     if os.path.exists(file_path):
-        print(f"Loading cached 1m parquet from {file_path}...")
+        print(f"Loading cached 15m parquet from {file_path}...")
         try:
             df = pd.read_parquet(file_path)
             df['timestamp'] = pd.to_datetime(df['timestamp'], utc=True)
@@ -152,7 +154,7 @@ async def fetch_base_data(symbol, start_date, end_date):
             print(f"Error reading cache: {e}. Re-fetching...")
 
     # 2. Fetch from Binance
-    print(f"Cache miss. Downloading 1m history (this may take time)...")
+    print(f"Cache miss. Downloading 15m history (this may take time)...")
     exchange = ccxt.binance({'enableRateLimit': True})
     
     try:
@@ -170,7 +172,7 @@ async def fetch_base_data(symbol, start_date, end_date):
             print(f"Fetched {len(all_ohlcv)} candles...", end='\r')
             
         await exchange.close()
-        print(f"\nDownload complete. Total 1m rows: {len(all_ohlcv)}")
+        print(f"\nDownload complete. Total 15m rows: {len(all_ohlcv)}")
         
         if not all_ohlcv: return pd.DataFrame()
 
@@ -266,6 +268,8 @@ def save_and_upload_model(best_result):
     payload = {
         'timestamp': datetime.now().isoformat(),
         'initial_price': float(best_result['initial_price']),
+        # UPDATED: Added timeframe to the saved payload
+        'timeframe': best_result['timeframe'],
         'ensemble_configs': lean,
         'threshold': ENSEMBLE_ACC_THRESHOLD
     }
@@ -292,7 +296,7 @@ async def main():
     with concurrent.futures.ProcessPoolExecutor(max_workers=MAX_WORKERS) as executor:
         
         for symbol in ASSETS:
-            # 1. Fetch 1m Base Data ONCE
+            # 1. Fetch 15m Base Data ONCE
             base_df = await fetch_base_data(symbol, '2020-01-01T00:00:00Z', '2026-01-01T00:00:00Z')
             if base_df.empty: 
                 print(f"Skipping {symbol} (No data)")
@@ -303,7 +307,7 @@ async def main():
             
             print(f"\n=== Evaluating Timeframes for {symbol} ===")
             
-            # 2. Iterate Timeframes and Resample locally
+            # 2. Iterate Timeframes and Resample locally (15m, 30m, 1h)
             for tf in TIMEFRAMES:
                 try:
                     # Resample from base_df
