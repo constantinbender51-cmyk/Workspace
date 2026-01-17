@@ -13,7 +13,7 @@ from collections import Counter
 
 # --- CONFIGURATION ---
 PORT = 8080
-STEP_SIZE = 0.05  # Step size for the Absolute Price rounding
+STEP_SIZE = 0.5  # Step size for the Absolute Price rounding
 SEQ_LENGTH = 5     # Length of sequence to match
 
 def fetch_binance_data(symbol='ETH/USDT', timeframe='4h', start_date='2020-01-01T00:00:00Z', end_date='2026-01-01T00:00:00Z'):
