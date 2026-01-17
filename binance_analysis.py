@@ -203,21 +203,78 @@ def kraken_live_loop(filename, step_sizes, accuracies, trade_counts, cmb_acc, cm
     global LATEST_LIVE_RESULT
     kraken = ccxt.kraken()
     symbol = 'ETH/USDT'
+    timeframe = '30m'
     
     while True:
         try:
-            print(f"\n[KRAKEN LIVE] Fetching recent candles...")
-            ohlcv = kraken.fetch_ohlcv(symbol, '30m', limit=20)
+            # 1. SYNC WITH CLOCK
+            # Calculate time until next 30m candle closes
+            now = datetime.now(timezone.utc)
+            # Find the start of the NEXT 30m interval
+            # Logic: floor minutes to 0 or 30, then add 30m
+            if now.minute < 30:
+                next_run_minute = 30
+            else:
+                next_run_minute = 0
+            
+            # Create the target time for the next run
+            # If next_run is 0, it means the next hour, so we add 1 hour to 'now' logic if needed
+            # Simpler approach using timestamps:
+            curr_ts = pd.Timestamp.now(tz='UTC')
+            # Floor to current 30m start
+            current_candle_start = curr_ts.floor('30min') 
+            # The next candle close is 30 mins after current start
+            next_candle_close = current_candle_start + pd.Timedelta('30min')
+            
+            # Seconds to wait + 15 seconds buffer to ensure Kraken has the data
+            sleep_seconds = (next_candle_close - curr_ts).total_seconds() + 15
+            
+            # If we are somehow "behind" (negative sleep), just run immediately (set sleep to 0)
+            if sleep_seconds < 0:
+                sleep_seconds = 0
+            
+            if sleep_seconds > 0:
+                # Update status to show we are waiting
+                next_run_str = (curr_ts + pd.Timedelta(seconds=sleep_seconds)).strftime('%H:%M:%S')
+                print(f"[KRAKEN LIVE] Waiting {sleep_seconds:.0f}s for next candle close (Next run: {next_run_str})...")
+                
+                # We can't block the HTML updates entirely, so we sleep in chunks or just update status
+                # For this script, a simple sleep is fine, but we might want to update the HTML to say "Waiting"
+                # To keep it simple, we just sleep.
+                time.sleep(sleep_seconds)
+
+            print(f"\n[KRAKEN LIVE] Fetching new completed candle...")
+            
+            # 2. FETCH DATA
+            # We fetch limit=5 enough to cover our SEQ_LENGTH
+            ohlcv = kraken.fetch_ohlcv(symbol, timeframe, limit=10)
             live_df = pd.DataFrame(ohlcv, columns=['timestamp', 'open', 'high', 'low', 'close', 'volume'])
             live_df['timestamp'] = pd.to_datetime(live_df['timestamp'], unit='ms', utc=True)
             
-            completed_df = live_df.iloc[:-1].copy()
+            # 3. STRICT FILTERING (The Fix)
+            # Recalculate time just to be sure
+            now_check = pd.Timestamp.now(tz='UTC')
+            current_forming_candle_start = now_check.floor('30min')
+            # The last COMPLETED candle must have started 30 mins before the current forming one
+            last_completed_candle_start = current_forming_candle_start - pd.Timedelta('30min')
             
+            # Filter the DF to include ONLY candles up to the last completed one
+            # This ignores any "open" candle that Kraken might return at the end of the list
+            completed_df = live_df[live_df['timestamp'] <= last_completed_candle_start].copy()
+            
+            # Verify we have enough data
             if len(completed_df) < SEQ_LENGTH:
-                LATEST_LIVE_RESULT = "Not enough data from Kraken yet."
+                LATEST_LIVE_RESULT = f"Waiting for more data... (Have {len(completed_df)}/{SEQ_LENGTH} candles)"
             else:
+                # 4. RUN PREDICTION
                 target_df = completed_df.tail(SEQ_LENGTH).reset_index(drop=True)
-                last_ts_str = target_df['timestamp'].iloc[-1].strftime('%Y-%m-%d %H:%M UTC')
+                
+                # Validation: Ensure the last candle is actually the one we expect
+                last_candle_ts = target_df['timestamp'].iloc[-1]
+                if last_candle_ts != last_completed_candle_start:
+                    print(f"Warning: Expected last candle {last_completed_candle_start}, got {last_candle_ts}")
+                
+                last_ts_str = last_candle_ts.strftime('%Y-%m-%d %H:%M UTC')
                 current_price = target_df['close'].iloc[-1]
                 
                 up_votes = 0
@@ -231,10 +288,8 @@ def kraken_live_loop(filename, step_sizes, accuracies, trade_counts, cmb_acc, cm
                     
                     for cfg in qualified_configs:
                         step = cfg['step_size']
-                        # Normalize using the Start Price of your CSV
                         abs_price_log = np.log(live_prices / GLOBAL_REF_PRICE)
                         live_indices = np.floor(abs_price_log / step).astype(int)
-                        
                         current_seq = tuple(live_indices)
                         
                         if current_seq in cfg['patterns']:
@@ -259,15 +314,17 @@ def kraken_live_loop(filename, step_sizes, accuracies, trade_counts, cmb_acc, cm
                         <p><strong>Source:</strong> Kraken Public API</p>
                         <p><strong>Last Closed Candle:</strong> {last_ts_str} @ ${current_price:.2f}</p>
                         <p><strong>Voters:</strong> {up_votes} UP / {down_votes} DOWN</p>
+                        <p style="font-size:0.8em; color:#666;">Next check in ~30m</p>
                     </div>
                     """
+            
             generate_html(filename, step_sizes, accuracies, trade_counts, cmb_acc, cmb_count)
             
         except Exception as e:
             print(f"Kraken Error: {e}")
             LATEST_LIVE_RESULT = f"Kraken API Error: {e}"
-        
-        time.sleep(60)
+            # On error, sleep a bit before retrying, usually 60s is safe
+            time.sleep(60)
 
 def generate_html(image_filename, steps, accs, counts, cmb_acc, cmb_count):
     table_rows = ""
