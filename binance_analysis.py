@@ -1,168 +1,193 @@
-import http.server
-import socketserver
-import urllib.request
-import json
-import datetime
+import ccxt
+import pandas as pd
+import numpy as np
+from datetime import datetime
 import time
 
-# Configuration
-PORT = 8080
-PAIR = "XBTUSD"  # Bitcoin/USD
-# Kraken API Interval in minutes: 10080 = 1 week
-INTERVAL = 10080 
-
-def fetch_and_resample_data():
+def fetch_binance_data(symbol='ETH/USDT', timeframe='4h', start_date='2020-01-01T00:00:00Z', end_date='2026-01-01T00:00:00Z'):
     """
-    Fetches Weekly OHLC data from Kraken and resamples it to Monthly Close.
+    Fetches historical OHLC data from Binance using CCXT with pagination.
     """
-    url = f"https://api.kraken.com/0/public/OHLC?pair={PAIR}&interval={INTERVAL}"
+    print(f"Fetching {symbol} {timeframe} data from {start_date} to {end_date}...")
+    exchange = ccxt.binance()
+    since = exchange.parse8601(start_date)
+    end_ts = exchange.parse8601(end_date)
     
-    try:
-        print(f"Fetching weekly data from {url}...")
-        with urllib.request.urlopen(url) as response:
-            data = json.loads(response.read().decode())
-            
-        if data.get('error'):
-            print(f"API Error: {data['error']}")
-            return [], []
-
-        # Get the result list (key is dynamic, e.g., XXBTZUSD)
-        result_key = list(data['result'].keys())[0]
-        ohlc_data = data['result'][result_key]
-
-        # Resampling Logic: Weekly -> Monthly
-        # Dictionary to store { 'YYYY-MM': close_price }
-        monthly_map = {}
-
-        for entry in ohlc_data:
-            # Entry: [time, open, high, low, close, vwap, volume, count]
-            timestamp = entry[0]
-            close_price = float(entry[4])
-            
-            # Convert timestamp to date object
-            dt = datetime.datetime.fromtimestamp(timestamp)
-            
-            # Create a key for the month (e.g., "2023-10")
-            month_key = dt.strftime('%Y-%m')
-            
-            # Since data is chronological, writing to the map repeatedly 
-            # ensures the *last* weekly entry for a month becomes the representative close.
-            monthly_map[month_key] = close_price
-
-        # Extract sorted lists for the chart
-        labels = list(monthly_map.keys())
-        prices = list(monthly_map.values())
-
-        return labels, prices
-
-    except Exception as e:
-        print(f"Failed to process data: {e}")
-        return [], []
-
-class ChartHandler(http.server.SimpleHTTPRequestHandler):
-    def do_GET(self):
-        if self.path == '/':
-            self.send_response(200)
-            self.send_header("Content-type", "text/html")
-            self.end_headers()
-
-            labels, data = fetch_and_resample_data()
-
-            html = f"""
-            <!DOCTYPE html>
-            <html>
-            <head>
-                <title>Kraken {PAIR} Monthly Resample</title>
-                <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
-                <style>
-                    body {{ font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif; background: #121212; color: #e0e0e0; margin: 0; padding: 20px; }}
-                    .container {{ max-width: 1000px; margin: 0 auto; }}
-                    h1 {{ text-align: center; color: #fff; font-weight: 300; letter-spacing: 1px; }}
-                    .subtitle {{ text-align: center; color: #888; font-size: 0.9em; margin-bottom: 20px; }}
-                    .chart-wrapper {{ background: #1e1e1e; padding: 20px; border-radius: 8px; box-shadow: 0 4px 6px rgba(0,0,0,0.3); }}
-                    .chart-container {{ position: relative; height: 60vh; width: 100%; }}
-                </style>
-            </head>
-            <body>
-                <div class="container">
-                    <h1>{PAIR} Monthly Close</h1>
-                    <div class="subtitle">Source: Kraken API (Weekly Data Resampled)</div>
-                    <div class="chart-wrapper">
-                        <div class="chart-container">
-                            <canvas id="myChart"></canvas>
-                        </div>
-                    </div>
-                </div>
-
-                <script>
-                    const ctx = document.getElementById('myChart').getContext('2d');
-                    
-                    // Create gradient
-                    const gradient = ctx.createLinearGradient(0, 0, 0, 400);
-                    gradient.addColorStop(0, 'rgba(54, 162, 235, 0.5)');
-                    gradient.addColorStop(1, 'rgba(54, 162, 235, 0.0)');
-
-                    const myChart = new Chart(ctx, {{
-                        type: 'line',
-                        data: {{
-                            labels: {json.dumps(labels)},
-                            datasets: [{{
-                                label: 'Monthly Close (USD)',
-                                data: {json.dumps(data)},
-                                borderColor: '#36a2eb',
-                                backgroundColor: gradient,
-                                borderWidth: 2,
-                                pointRadius: 3,
-                                pointBackgroundColor: '#36a2eb',
-                                fill: true,
-                                tension: 0.3
-                            }}]
-                        }},
-                        options: {{
-                            responsive: true,
-                            maintainAspectRatio: false,
-                            plugins: {{
-                                legend: {{ labels: {{ color: '#ccc' }} }},
-                                tooltip: {{
-                                    mode: 'index',
-                                    intersect: false,
-                                    backgroundColor: 'rgba(0,0,0,0.8)',
-                                    titleColor: '#fff',
-                                    bodyColor: '#fff'
-                                }}
-                            }},
-                            scales: {{
-                                x: {{
-                                    grid: {{ color: '#333' }},
-                                    ticks: {{ color: '#888' }}
-                                }},
-                                y: {{
-                                    grid: {{ color: '#333' }},
-                                    ticks: {{ color: '#888' }}
-                                }}
-                            }}
-                        }}
-                    }});
-                </script>
-            </body>
-            </html>
-            """
-            self.wfile.write(html.encode('utf-8'))
-        else:
-            self.send_response(404)
-            self.end_headers()
-            self.wfile.write(b"Not Found")
-
-def run_server():
-    socketserver.TCPServer.allow_reuse_address = True
-    with socketserver.TCPServer(("", PORT), ChartHandler) as httpd:
-        print(f"Serving Resampled Kraken Chart at http://localhost:{PORT}")
+    all_ohlcv = []
+    
+    while since < end_ts:
         try:
-            httpd.serve_forever()
-        except KeyboardInterrupt:
-            pass
-        finally:
-            httpd.server_close()
+            ohlcv = exchange.fetch_ohlcv(symbol, timeframe, since, limit=1000)
+            if not ohlcv:
+                break
+            
+            all_ohlcv.extend(ohlcv)
+            since = ohlcv[-1][0] + 1  # Move to next timestamp
+            
+            # Simple progress indicator
+            current_date = datetime.fromtimestamp(ohlcv[-1][0] / 1000)
+            print(f"Fetched up to {current_date}...", end='\r')
+            
+            if since >= end_ts:
+                break
+                
+            time.sleep(exchange.rateLimit / 1000) # Respect rate limits
+            
+        except Exception as e:
+            print(f"\nError fetching data: {e}")
+            break
+            
+    print(f"\nTotal candles fetched: {len(all_ohlcv)}")
+    
+    df = pd.DataFrame(all_ohlcv, columns=['timestamp', 'open', 'high', 'low', 'close', 'volume'])
+    df['timestamp'] = pd.to_datetime(df['timestamp'], unit='ms')
+    
+    # Filter strictly within range (in case fetch overshot)
+    mask = (df['timestamp'] >= start_date) & (df['timestamp'] < end_date)
+    df = df.loc[mask].reset_index(drop=True)
+    
+    return df
+
+def prepare_arrays(df):
+    # 1. Close array
+    close_array = df['close'].to_numpy()
+    
+    # 2. Percentage change array (price - last) / last
+    # Note: numpy diff does (out[i] = a[i+1] - a[i]), we need change relative to previous
+    pct_change = np.diff(close_array) / close_array[:-1]
+    
+    # 3. Insert 0 in beginning
+    pct_change = np.insert(pct_change, 0, 0.0)
+    
+    # 4. Verify equal length
+    assert len(close_array) == len(pct_change), "Arrays are not of equal length"
+    
+    # 5. Absolute price array (Custom Definition)
+    # "Beginning with 1 all consecutive elements are the sum of all previous percentage changes"
+    # This is effectively: 1 + Cumulative Sum of pct_changes
+    abs_price_array = 1.0 + np.cumsum(pct_change)
+    
+    # 6. Verify absolute price length
+    assert len(abs_price_array) == len(close_array), "Abs Price array length mismatch"
+    
+    return close_array, pct_change, abs_price_array
+
+def run_analysis():
+    # --- Step 1: Fetch Data ---
+    # Note: 2026 is in the future relative to now (2025/2026 transition). 
+    # Fetching up to 'now' if 2026 is not available.
+    df = fetch_binance_data(end_date='2026-01-01T00:00:00Z')
+    
+    if df.empty:
+        print("No data found.")
+        return
+
+    # --- Step 2: Prepare Arrays ---
+    close_arr, pct_arr, abs_arr = prepare_arrays(df)
+    
+    total_len = len(abs_arr)
+    
+    # --- Step 3: Split 80/10/10 ---
+    # We split based on indices
+    idx_80 = int(total_len * 0.80)
+    idx_90 = int(total_len * 0.90)
+    
+    # Training Set (80 set)
+    train_abs = abs_arr[:idx_80]
+    
+    # Validation Set (10 set 1)
+    val_abs = abs_arr[idx_80:idx_90]
+    
+    # Test Set (10 set 2) - Ignored as per instructions
+    # test_abs = abs_arr[idx_90:]
+
+    print(f"\nData Split:")
+    print(f"Training Set (80%): {len(train_abs)} items")
+    print(f"Validation Set (10%): {len(val_abs)} items")
+
+    # --- Step 4: Pattern Matching ---
+    # "Take 10 set 1. Find all sequences of length 5."
+    
+    seq_length = 5
+    correct_predictions = 0
+    total_predictions = 0
+    
+    # We iterate through the validation set
+    # We need at least seq_length elements to form a sequence, and +1 for the target
+    print("\nRunning pattern matching (Nearest Neighbor)...")
+    
+    # Optimization: Pre-process training sequences into a sliding window view for speed
+    # This creates a matrix where each row is a sequence of length 5 from the training set
+    train_windows = np.lib.stride_tricks.sliding_window_view(train_abs[:-1], window_shape=seq_length)
+    train_targets = train_abs[seq_length:] # The value immediately following each window
+    
+    # Iterate through Validation set
+    for i in range(len(val_abs) - seq_length):
+        
+        # Current sequence (input) and actual continuation (target)
+        current_seq = val_abs[i : i + seq_length]
+        actual_continuation = val_abs[i + seq_length]
+        
+        # --- Find "Most Probable" inside 80 set ---
+        # Since float matches are rare, we find the sequence with the MINIMUM EUCLIDEAN DISTANCE.
+        # This represents the "closest historical pattern".
+        
+        # Calculate distances between current_seq and all training windows
+        # Axis 1 means we sum the squares across the window columns
+        distances = np.sum((train_windows - current_seq) ** 2, axis=1)
+        
+        # Find index of the best match (minimum distance)
+        best_match_idx = np.argmin(distances)
+        
+        # The predicted continuation is the value that followed the best match in history
+        # We need to adjust the prediction relative to the current level
+        # (i.e. if the pattern matches shape but is at a different absolute level)
+        
+        # However, the prompt implies "Absolute Price", so we will take the raw value 
+        # from the training set if we assume stationarity, BUT "Absolute Price" here is cumulative sum.
+        # A better prediction is the *change* from the matched sequence applied to current.
+        
+        # Let's strictly follow: "return the most probable" (value).
+        historical_seq = train_windows[best_match_idx]
+        historical_next = train_targets[best_match_idx]
+        
+        # Logic: Did the history go UP or DOWN from the end of the sequence?
+        hist_diff = historical_next - historical_seq[-1]
+        
+        # Apply that logic to current sequence
+        predicted_continuation = current_seq[-1] + hist_diff
+        
+        # --- Check Accuracy ---
+        # "How many times ... equals actual continuation"
+        # Strict float equality is impossible. We check Directional Accuracy.
+        # (Did we correctly predict if price goes up or down?)
+        
+        actual_diff = actual_continuation - current_seq[-1]
+        
+        # Check if directions match (both > 0 or both < 0)
+        # Or if the error is extremely small (e.g. < 0.0001)
+        
+        is_same_direction = (hist_diff > 0 and actual_diff > 0) or \
+                            (hist_diff < 0 and actual_diff < 0) or \
+                            (hist_diff == 0 and actual_diff == 0)
+                            
+        if is_same_direction:
+            correct_predictions += 1
+            
+        total_predictions += 1
+        
+        if total_predictions % 100 == 0:
+            print(f"Processed {total_predictions} sequences...", end='\r')
+
+    print(f"\n\n--- Results ---")
+    print(f"Total Sequences Analyzed: {total_predictions}")
+    print(f"Directional Accuracy (Correct Trend Prediction): {correct_predictions}")
+    print(f"Accuracy Percentage: {(correct_predictions / total_predictions) * 100:.2f}%")
+    
+    # Note on "Equality":
+    print("\n*Note: Strict numerical equality (matches to 8 decimal places) is statistically impossible")
+    print("in floating point financial data. The accuracy above represents Directional Accuracy")
+    print("(predicted Up/Down matches actual Up/Down).")
 
 if __name__ == "__main__":
-    run_server()
+    run_analysis()
