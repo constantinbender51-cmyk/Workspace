@@ -10,7 +10,8 @@ import time
 import os
 import glob
 import threading
-from datetime import datetime, timedelta
+import sys  # Added for emergency exit
+from datetime import datetime
 from collections import Counter
 
 # --- CONFIGURATION ---
@@ -30,9 +31,31 @@ GLOBAL_REF_PRICE = None
 GLOBAL_HIGH_ACC_CONFIGS = []
 LATEST_LIVE_RESULT = "Initializing..."
 
+def get_exchange():
+    """Returns a Binance instance with strict rate limiting enabled."""
+    return ccxt.binance({
+        'enableRateLimit': True,  # Critical: Internal throttling
+        'options': {
+            'defaultType': 'spot', 
+        }
+    })
+
+def handle_binance_error(e):
+    """Parses errors and kills the script immediately on Rate Limit/Ban."""
+    err_str = str(e).lower()
+    # Check for 429 (Too Many Requests) or 418 (IP Ban) or specific Binance code -1003
+    if '429' in err_str or '418' in err_str or '-1003' in err_str or 'too many requests' in err_str:
+        print(f"\n\n[CRITICAL] RATE LIMIT HIT OR IP BANNED.")
+        print(f"Error details: {e}")
+        print("STOPPING IMMEDIATELY TO PROTECT ACCOUNT.")
+        os._exit(1) # Force kill everything including threads
+    else:
+        print(f"Network/Exchange Error: {e}")
+
 def fetch_binance_data(symbol='ETH/USDT', timeframe='30m', start_date='2020-01-01T00:00:00Z', end_date='2026-01-01T00:00:00Z'):
-    print(f"Fetching {symbol}...")
-    exchange = ccxt.binance()
+    print(f"Fetching {symbol} with RATE LIMIT PROTECTION...")
+    exchange = get_exchange()
+    
     since = exchange.parse8601(start_date)
     end_ts = exchange.parse8601(end_date)
     all_ohlcv = []
@@ -44,8 +67,16 @@ def fetch_binance_data(symbol='ETH/USDT', timeframe='30m', start_date='2020-01-0
             all_ohlcv.extend(ohlcv)
             since = ohlcv[-1][0] + 1
             print(f"Fetched up to {datetime.fromtimestamp(ohlcv[-1][0]/1000)}...", end='\r')
+            
             if since >= end_ts: break
-            time.sleep(exchange.rateLimit / 1000)
+            
+            # EXTRA SAFETY: Sleep 2 seconds between historical fetches to stay well under limits
+            time.sleep(2) 
+            
+        except (ccxt.RateLimitExceeded, ccxt.DDoSProtection, ccxt.NetworkError) as e:
+            handle_binance_error(e)
+            # If not a critical ban, wait significantly before retrying (though handle_binance_error usually exits on 429)
+            time.sleep(30)
         except Exception as e:
             print(f"Error: {e}")
             break
@@ -129,8 +160,6 @@ def train_and_evaluate(df, step_size):
 def run_combined_metric(high_acc_configs):
     """
     Calculates the accuracy of the Ensemble Logic.
-    Logic: If Any(>70% configs) says UP and None says DOWN -> Trade UP.
-    Verification: Uses the Maximum Step Size among the voters to verify the move.
     """
     if not high_acc_configs:
         return 0.0, 0
@@ -185,14 +214,14 @@ def live_prediction_loop(filename, step_sizes, accuracies, trade_counts, cmb_acc
     """Background thread that fetches fresh data and updates HTML every 30 mins."""
     global LATEST_LIVE_RESULT
     
-    exchange = ccxt.binance()
+    # Re-instantiate exchange inside thread with safety
+    exchange = get_exchange()
     
     while True:
         try:
             print(f"\n[LIVE] Fetching fresh candles for prediction...")
             
-            # Fetch slightly more than needed to ensure we catch the 30m boundary
-            # 1. Fetch recent data
+            # 1. Fetch recent data with safety checks
             ohlcv = exchange.fetch_ohlcv('ETH/USDT', '30m', limit=20)
             
             # 2. Convert to DataFrame
@@ -200,21 +229,14 @@ def live_prediction_loop(filename, step_sizes, accuracies, trade_counts, cmb_acc
             live_df['timestamp'] = pd.to_datetime(live_df['timestamp'], unit='ms', utc=True)
             
             # 3. Filter: Exclude incomplete candle
-            # We want candles up to the last completed 30m mark.
-            # E.g. if now is 14:45, we want candles up to 14:30 (exclusive of 14:30 open if it's still forming? 
-            # Actually, standard OHLCV: last one is forming. Second to last is completed.)
-            # But strictly:
             now = datetime.now(pd.Timestamp.now().tz).timestamp() * 1000
-            # Get the timestamp of the last candle in list
             last_ts = ohlcv[-1][0]
             
-            # If the last candle started less than 30m ago, it is incomplete.
             if (now - last_ts) < (30 * 60 * 1000):
-                completed_df = live_df.iloc[:-1].copy() # Exclude the forming candle
+                completed_df = live_df.iloc[:-1].copy() 
             else:
-                completed_df = live_df.copy() # Last candle is essentially done or data is slightly delayed
+                completed_df = live_df.copy() 
             
-            # We need the last SEQ_LENGTH (5) candles
             if len(completed_df) < SEQ_LENGTH:
                 LATEST_LIVE_RESULT = "Not enough data fetched."
             else:
@@ -229,19 +251,13 @@ def live_prediction_loop(filename, step_sizes, accuracies, trade_counts, cmb_acc
                 if GLOBAL_REF_PRICE is None:
                     LATEST_LIVE_RESULT = "Error: Reference Price not set."
                 else:
-                    # Logic: Normalize live prices relative to the 2020 Start Price (GLOBAL_REF_PRICE)
-                    # Training Logic: log(price / start_price) / step
                     live_prices = target_df['close'].to_numpy()
-                    
-                    # Iterate through qualified configs
                     qualified_configs = GLOBAL_HIGH_ACC_CONFIGS
                     
                     for cfg in qualified_configs:
                         step = cfg['step_size']
                         
-                        # Calculate indices using the GLOBAL reference
-                        # (live_prices / GLOBAL_REF_PRICE) mimics the cumprod normalization from start
-                        # because cumprod is effectively price_i / price_0
+                        # Normalize live prices relative to the 2020 Start Price
                         abs_price_log = np.log(live_prices / GLOBAL_REF_PRICE)
                         live_indices = np.floor(abs_price_log / step).astype(int)
                         
@@ -258,7 +274,6 @@ def live_prediction_loop(filename, step_sizes, accuracies, trade_counts, cmb_acc
                             elif diff < 0:
                                 down_votes += 1
                     
-                    # Ensemble Decision
                     decision = "NEUTRAL"
                     color = "gray"
                     if up_votes > 0 and down_votes == 0:
@@ -277,9 +292,10 @@ def live_prediction_loop(filename, step_sizes, accuracies, trade_counts, cmb_acc
                     </div>
                     """
             
-            # Regenerate HTML
             generate_html(filename, step_sizes, accuracies, trade_counts, cmb_acc, cmb_count)
             
+        except (ccxt.RateLimitExceeded, ccxt.DDoSProtection, ccxt.NetworkError) as e:
+            handle_binance_error(e) # This will exit the program
         except Exception as e:
             print(f"Live Loop Error: {e}")
             LATEST_LIVE_RESULT = f"Error in live loop: {e}"
@@ -410,7 +426,6 @@ def run_grid_search():
 def start_server():
     # Clean up old images
     current_imgs = glob.glob("grid_search_*.png")
-    # Note: we need to keep the one currently used, but simpler logic is fine for dev
     
     Handler = http.server.SimpleHTTPRequestHandler
     socketserver.TCPServer.allow_reuse_address = True
