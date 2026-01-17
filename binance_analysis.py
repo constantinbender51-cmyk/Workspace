@@ -47,23 +47,23 @@ def fetch_binance_data(symbol='ETH/USDT', timeframe='4h', start_date='2020-01-01
     end_dt = pd.Timestamp(end_date, tz='UTC')
     return df.loc[(df['timestamp'] >= start_dt) & (df['timestamp'] < end_dt)].reset_index(drop=True)
 
-def calculate_accuracy(df, step_size):
+def calculate_metrics(df, step_size):
     """
-    Runs the full prediction logic for a single step size and returns the Directional Accuracy.
+    Returns (Accuracy %, Trade Count)
     """
     close_array = df['close'].to_numpy()
     
-    # 1. Absolute Price Index (High Precision)
+    # 1. Absolute Price Index
     pct_change = np.zeros(len(close_array))
     pct_change[1:] = np.diff(close_array) / close_array[:-1]
     multipliers = 1.0 + pct_change
     abs_price_raw = np.cumprod(multipliers)
     
-    # 2. Logarithmic Rounding (The Grid)
+    # 2. Log Rounding
     abs_price_log = np.log(abs_price_raw)
     grid_indices = np.floor(abs_price_log / step_size).astype(int)
     
-    # 3. Split Data (80/10/10)
+    # 3. Split
     total_len = len(grid_indices)
     idx_80 = int(total_len * 0.80)
     idx_90 = int(total_len * 0.90)
@@ -71,16 +71,15 @@ def calculate_accuracy(df, step_size):
     train_seq = grid_indices[:idx_80]
     val_seq = grid_indices[idx_80:idx_90]
     
-    # 4. Build Model (Training)
+    # 4. Train
     patterns = {}
     for i in range(len(train_seq) - SEQ_LENGTH):
         seq = tuple(train_seq[i : i + SEQ_LENGTH])
         target = train_seq[i + SEQ_LENGTH]
-        if seq not in patterns:
-            patterns[seq] = []
+        if seq not in patterns: patterns[seq] = []
         patterns[seq].append(target)
         
-    # 5. Test (Validation)
+    # 5. Test
     move_correct = 0
     move_total_valid = 0
     
@@ -90,15 +89,14 @@ def calculate_accuracy(df, step_size):
         actual_next_level = val_seq[i + SEQ_LENGTH]
         
         if current_seq in patterns:
-            # Predict
             history = patterns[current_seq]
             predicted_level = Counter(history).most_common(1)[0][0]
             
-            # Move Accuracy Check
+            # Check Move
             pred_diff = predicted_level - current_level
             actual_diff = actual_next_level - current_level
             
-            # Ignore Flat Predictions or Flat Outcomes
+            # Ignore Flats
             if pred_diff != 0 and actual_diff != 0:
                 move_total_valid += 1
                 same_direction = (pred_diff > 0 and actual_diff > 0) or \
@@ -106,67 +104,63 @@ def calculate_accuracy(df, step_size):
                 if same_direction:
                     move_correct += 1
                     
-    # Return Accuracy
-    if move_total_valid > 0:
-        return (move_correct / move_total_valid) * 100
-    else:
-        return 0.0
+    accuracy = (move_correct / move_total_valid * 100) if move_total_valid > 0 else 0.0
+    return accuracy, move_total_valid
 
 def run_grid_search():
-    # 1. Fetch Data Once
     df = fetch_binance_data()
     if df.empty: return
 
-    # 2. Define Grid
     step_sizes = np.linspace(GRID_MIN, GRID_MAX, GRID_STEPS)
     accuracies = []
+    trade_counts = []
     
     print(f"\n\n--- STARTING GRID SEARCH ({GRID_STEPS} Steps) ---")
-    print(f"Range: {GRID_MIN} to {GRID_MAX}\n")
     
-    # 3. Loop
     for step in step_sizes:
         print(f"Testing Step Size: {step:.5f}...", end=" ")
-        acc = calculate_accuracy(df, step)
+        acc, count = calculate_metrics(df, step)
         accuracies.append(acc)
-        print(f"Accuracy: {acc:.2f}%")
+        trade_counts.append(count)
+        print(f"Acc: {acc:.2f}% | Trades: {count}")
         
-    # 4. Plot
+    # --- PLOTTING (Dual Axis) ---
     unique_id = int(time.time())
     filename = f"grid_search_{unique_id}.png"
     
-    plt.figure(figsize=(10, 6))
-    plt.plot(step_sizes, accuracies, marker='o', linestyle='-', color='blue', linewidth=2, markersize=8)
+    fig, ax1 = plt.subplots(figsize=(10, 6))
     
-    plt.title(f'Directional Accuracy vs. Step Size\n(Range: {GRID_MIN} - {GRID_MAX})', fontsize=14)
-    plt.xlabel('Log Step Size', fontsize=12)
-    plt.ylabel('Directional Accuracy (%)', fontsize=12)
-    plt.grid(True, linestyle='--', alpha=0.6)
+    # Axis 1: Accuracy (Blue)
+    ax1.set_xlabel('Log Step Size')
+    ax1.set_ylabel('Directional Accuracy (%)', color='tab:blue')
+    ax1.plot(step_sizes, accuracies, marker='o', color='tab:blue', label='Accuracy')
+    ax1.tick_params(axis='y', labelcolor='tab:blue')
+    ax1.grid(True, linestyle='--', alpha=0.3)
     
-    # Annotate max point
-    max_acc = max(accuracies)
-    max_step = step_sizes[accuracies.index(max_acc)]
-    plt.annotate(f'Max: {max_acc:.2f}%', xy=(max_step, max_acc), xytext=(max_step, max_acc + 1),
-                 arrowprops=dict(facecolor='black', shrink=0.05))
+    # Axis 2: Trade Count (Orange)
+    ax2 = ax1.twinx() 
+    ax2.set_ylabel('Number of Trades', color='tab:orange')
+    ax2.plot(step_sizes, trade_counts, marker='x', linestyle='--', color='tab:orange', label='Trades')
+    ax2.tick_params(axis='y', labelcolor='tab:orange')
     
+    plt.title(f'Accuracy vs. Trade Volume\n(Range: {GRID_MIN} - {GRID_MAX})')
+    fig.tight_layout()
     plt.savefig(filename)
     plt.close()
-    print(f"\nGrid search complete. Plot saved to {filename}")
     
-    # 5. Serve
-    start_server(filename, step_sizes, accuracies)
+    print(f"\nGrid search complete. Plot saved to {filename}")
+    start_server(filename, step_sizes, accuracies, trade_counts)
 
-def start_server(image_filename, steps, accs):
-    # Cleanup old files
+def start_server(image_filename, steps, accs, counts):
     for f in glob.glob("grid_search_*.png"):
         if f != image_filename:
             try: os.remove(f)
             except: pass
 
-    # Build Table Rows
+    # Build Table with Extra Column
     table_rows = ""
-    for s, a in zip(steps, accs):
-        table_rows += f"<tr><td>{s:.5f}</td><td>{a:.2f}%</td></tr>"
+    for s, a, c in zip(steps, accs, counts):
+        table_rows += f"<tr><td>{s:.5f}</td><td>{a:.2f}%</td><td>{c}</td></tr>"
 
     html_content = f"""
     <html>
@@ -192,7 +186,7 @@ def start_server(image_filename, steps, accs):
             
             <h3>Data Points</h3>
             <table>
-                <tr><th>Step Size</th><th>Accuracy</th></tr>
+                <tr><th>Step Size</th><th>Accuracy</th><th>Trades</th></tr>
                 {table_rows}
             </table>
         </div>
