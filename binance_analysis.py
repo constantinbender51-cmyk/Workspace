@@ -17,7 +17,7 @@ PORT = 8080
 SEQ_LENGTH = 5
 
 # Step Size (0.10 = 10% log-steps).
-LOG_STEP_SIZE = 0.02
+LOG_STEP_SIZE = 0.015
 
 def fetch_binance_data(symbol='ETH/USDT', timeframe='4h', start_date='2020-01-01T00:00:00Z', end_date='2026-01-01T00:00:00Z'):
     print(f"Fetching {symbol}...")
