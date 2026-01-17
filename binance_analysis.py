@@ -17,7 +17,6 @@ PORT = 8080
 SEQ_LENGTH = 5
 
 # Step Size (0.10 = 10% log-steps).
-# Defines the "Absolute Levels" we are matching.
 LOG_STEP_SIZE = 0.10  
 
 def fetch_binance_data(symbol='ETH/USDT', timeframe='4h', start_date='2020-01-01T00:00:00Z', end_date='2026-01-01T00:00:00Z'):
@@ -61,7 +60,6 @@ def prepare_arrays(df, step_size):
     abs_price_log = np.log(abs_price_raw)
     
     # ABSOLUTE GRID INDICES (Integers representing the "Floor" level)
-    # e.g., 0, 1, 2, ... 50, 51
     grid_indices = np.floor(abs_price_log / step_size).astype(int)
     
     # Convert back to float price for plotting
@@ -70,52 +68,43 @@ def prepare_arrays(df, step_size):
     return df['timestamp'], close_array, pct_change, abs_price_raw, abs_price_rounded, grid_indices
 
 def run_prediction_logic(grid_indices):
-    print("\n\n--- RUNNING PREDICTION ALGORITHM (ABSOLUTE SEQUENCES) ---")
-    
-    # NOTE: We are using 'grid_indices' DIRECTLY.
-    # We are NOT using np.diff().
-    # Matches will only occur if the Price Level (Height) matches exactly.
+    print("\n\n--- RUNNING PREDICTION ALGORITHM ---")
     
     # Split Data (80/10/10)
     total_len = len(grid_indices)
     idx_80 = int(total_len * 0.80)
     idx_90 = int(total_len * 0.90)
     
-    # Training: 80 Set
     train_seq = grid_indices[:idx_80]
-    # Validation: 10 Set 1
     val_seq = grid_indices[idx_80:idx_90]
     
-    # Debug: Check Range Overlap
-    train_min, train_max = np.min(train_seq), np.max(train_seq)
-    val_min, val_max = np.min(val_seq), np.max(val_seq)
-    
-    print(f"Training Range (Grid Levels): {train_min} to {train_max}")
-    print(f"Validation Range (Grid Levels): {val_min} to {val_max}")
-    
     # 1. Build Model from 80 Set
-    # Map: Absolute Sequence of 5 Levels -> Next Absolute Level
     patterns = {}
     for i in range(len(train_seq) - SEQ_LENGTH):
-        seq = tuple(train_seq[i : i + SEQ_LENGTH]) # e.g. (10, 10, 11, 11, 12)
-        target = train_seq[i + SEQ_LENGTH]         # e.g. 12
+        seq = tuple(train_seq[i : i + SEQ_LENGTH])
+        target = train_seq[i + SEQ_LENGTH]
         
         if seq not in patterns:
             patterns[seq] = []
         patterns[seq].append(target)
         
-    print(f"Unique Absolute Patterns Learned: {len(patterns)}")
+    print(f"Unique Patterns Learned: {len(patterns)}")
     
     # 2. Test on 10 Set 1
-    correct = 0
     matches_found = 0
     total_scanned = 0
+    
+    # Accuracy Metrics
+    exact_correct = 0
+    move_correct = 0
+    move_total_valid = 0 # Count of sequences where neither pred nor actual was flat
     
     for i in range(len(val_seq) - SEQ_LENGTH):
         total_scanned += 1
         
-        # Current Sequence (Validation)
+        # Current Sequence
         current_seq = tuple(val_seq[i : i + SEQ_LENGTH])
+        current_level = current_seq[-1] # The last known level
         actual_next_level = val_seq[i + SEQ_LENGTH]
         
         if current_seq in patterns:
@@ -125,22 +114,47 @@ def run_prediction_logic(grid_indices):
             history = patterns[current_seq]
             predicted_level = Counter(history).most_common(1)[0][0]
             
-            # Check Exact Match
+            # --- A. Exact Accuracy ---
             if predicted_level == actual_next_level:
-                correct += 1
+                exact_correct += 1
                 
-    # 3. Print Accuracy
+            # --- B. Move Accuracy (Directional) ---
+            pred_diff = predicted_level - current_level
+            actual_diff = actual_next_level - current_level
+            
+            # Ignore if Prediction is Flat OR Actual Outcome is Flat
+            if pred_diff != 0 and actual_diff != 0:
+                move_total_valid += 1
+                
+                # Check if Directions Match
+                same_direction = (pred_diff > 0 and actual_diff > 0) or \
+                                 (pred_diff < 0 and actual_diff < 0)
+                
+                if same_direction:
+                    move_correct += 1
+                
+    # 3. Print Results
     print("\n--- PREDICTION RESULTS ---")
     print(f"Total Sequences in Validation: {total_scanned}")
     print(f"Sequences Matched in History: {matches_found}")
     
     if matches_found > 0:
-        accuracy = (correct / matches_found) * 100
-        print(f"Correct Predictions: {correct}")
-        print(f"Accuracy (on matched patterns): {accuracy:.2f}%")
+        # Exact
+        exact_acc = (exact_correct / matches_found) * 100
+        print(f"\n1. Exact Match Accuracy: {exact_acc:.2f}% ({exact_correct}/{matches_found})")
+        
+        # Move
+        print(f"\n2. Move Accuracy (Directional):")
+        if move_total_valid > 0:
+            move_acc = (move_correct / move_total_valid) * 100
+            print(f"   Valid Moves (Non-flat): {move_total_valid}")
+            print(f"   Correct Direction: {move_correct}")
+            print(f"   Accuracy: {move_acc:.2f}%")
+        else:
+            print("   No valid moves found (all matched predictions or outcomes were flat).")
+            
     else:
-        print("Accuracy: N/A (0 matches found)")
-        print("(Reason: Validation prices are at absolute levels never seen in Training set)")
+        print("No matches found.")
     print("--------------------------------\n")
 
 def generate_plots(timestamps, close, pct, abs_raw, abs_rounded, step_size, filename):
@@ -208,7 +222,6 @@ def start_server(image_filename):
     <body>
         <div class="container">
             <h1>Absolute Sequence Analysis</h1>
-            <p><strong>Method:</strong> Matching Absolute Grid Levels (Not Differences)</p>
             <p><strong>Step Size:</strong> {LOG_STEP_SIZE*100}%</p>
             <p><small>Image ID: {image_filename}</small></p>
             <img src="{image_filename}" alt="Plots">
@@ -238,7 +251,7 @@ def run_analysis():
     
     timestamps, close, pct, abs_raw, abs_rounded, grid_indices = prepare_arrays(df, step_size=LOG_STEP_SIZE)
     
-    # Run Prediction Logic (Absolute Sequence)
+    # Run Prediction Logic (Absolute Sequence + Move Accuracy)
     run_prediction_logic(grid_indices)
     
     unique_id = int(time.time())
