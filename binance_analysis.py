@@ -22,6 +22,7 @@ from huggingface_hub import HfApi
 PORT = 8080
 SEQ_LENGTHS = [5, 6, 7, 8, 9, 10]
 ASSETS = ['BTC/USDT', 'ETH/USDT', 'BNB/USDT', 'SOL/USDT', 'XRP/USDT']
+DATA_DIR = "/app/data/"  # Local cache directory
 
 # Hugging Face Configuration
 HF_REPO_ID = "Llama26051996/Models" 
@@ -36,54 +37,90 @@ GRID_STEPS = 20
 ENSEMBLE_ACC_THRESHOLD = 70.0
 
 def fetch_binance_data(symbol, timeframe='30m', start_date='2020-01-01T00:00:00Z', end_date='2026-01-01T00:00:00Z'):
-    print(f"\n--- Fetching Data for {symbol} ---")
-    exchange = ccxt.binance({
-        'enableRateLimit': True,
-    })
+    print(f"\n--- Processing Data for {symbol} ---")
     
-    since = exchange.parse8601(start_date)
-    end_ts = exchange.parse8601(end_date)
-    all_ohlcv = []
+    # 1. Construct Cache Path
+    safe_symbol = symbol.replace('/', '_')
+    file_path = os.path.join(DATA_DIR, f"{safe_symbol}_{timeframe}.csv")
     
-    while since < end_ts:
+    # 2. Check if Data Exists Locally
+    if os.path.exists(file_path):
+        print(f"Loading cached data from {file_path}...")
         try:
-            ohlcv = exchange.fetch_ohlcv(symbol, timeframe, since, limit=1000)
-            
-            if not ohlcv:
-                print("No more data received.")
-                break
-            
-            all_ohlcv.extend(ohlcv)
-            since = ohlcv[-1][0] + 1
-            print(f"Fetched up to {datetime.fromtimestamp(ohlcv[-1][0]/1000, tz=None)}...", end='\r')
-            
-            if since >= end_ts:
+            df = pd.read_csv(file_path)
+            # Ensure timestamp is datetime and UTC aware
+            df['timestamp'] = pd.to_datetime(df['timestamp'], utc=True)
+        except Exception as e:
+            print(f"Error reading cache: {e}. Re-fetching...")
+            df = pd.DataFrame() # Force re-fetch on error
+    else:
+        df = pd.DataFrame()
+
+    # 3. Fetch if Cache was empty or missing
+    if df.empty:
+        print(f"Cache miss. Fetching from Binance...")
+        exchange = ccxt.binance({
+            'enableRateLimit': True,
+        })
+        
+        since = exchange.parse8601(start_date)
+        end_ts = exchange.parse8601(end_date)
+        all_ohlcv = []
+        
+        while since < end_ts:
+            try:
+                ohlcv = exchange.fetch_ohlcv(symbol, timeframe, since, limit=1000)
+                
+                if not ohlcv:
+                    print("No more data received.")
+                    break
+                
+                all_ohlcv.extend(ohlcv)
+                since = ohlcv[-1][0] + 1
+                print(f"Fetched up to {datetime.fromtimestamp(ohlcv[-1][0]/1000, tz=None)}...", end='\r')
+                
+                if since >= end_ts:
+                    break
+                    
+                time.sleep(exchange.rateLimit / 1000 * 1.1)
+
+            except (ccxt.RateLimitExceeded, ccxt.DDoSProtection) as e:
+                print(f"\nCRITICAL: Rate Limit Exceeded. Sleeping 60s.")
+                time.sleep(60)
+                
+            except ccxt.NetworkError as e:
+                print(f"\nNetwork Error: {e}. Retrying in 10s...")
+                time.sleep(10)
+                
+            except Exception as e:
+                print(f"\nUnexpected Error: {e}")
                 break
                 
-            time.sleep(exchange.rateLimit / 1000 * 1.1)
+        print(f"\n{symbol} Data fetch complete. Total rows: {len(all_ohlcv)}")
+        
+        if not all_ohlcv:
+            return pd.DataFrame()
 
-        except (ccxt.RateLimitExceeded, ccxt.DDoSProtection) as e:
-            print(f"\nCRITICAL: Rate Limit Exceeded. Sleeping 60s.")
-            time.sleep(60)
-            
-        except ccxt.NetworkError as e:
-            print(f"\nNetwork Error: {e}. Retrying in 10s...")
-            time.sleep(10)
-            
+        df = pd.DataFrame(all_ohlcv, columns=['timestamp', 'open', 'high', 'low', 'close', 'volume'])
+        df['timestamp'] = pd.to_datetime(df['timestamp'], unit='ms', utc=True)
+        
+        # 4. Save to Cache
+        try:
+            os.makedirs(os.path.dirname(file_path), exist_ok=True)
+            df.to_csv(file_path, index=False)
+            print(f"Saved data to {file_path}")
         except Exception as e:
-            print(f"\nUnexpected Error: {e}")
-            break
-            
-    print(f"\n{symbol} Data fetch complete. Total rows: {len(all_ohlcv)}")
-    
-    if not all_ohlcv:
-        return pd.DataFrame()
+            print(f"Warning: Could not save to cache: {e}")
 
-    df = pd.DataFrame(all_ohlcv, columns=['timestamp', 'open', 'high', 'low', 'close', 'volume'])
-    df['timestamp'] = pd.to_datetime(df['timestamp'], unit='ms', utc=True)
+    # 5. Filter for requested date range
     start_dt = pd.Timestamp(start_date, tz='UTC')
     end_dt = pd.Timestamp(end_date, tz='UTC')
-    return df.loc[(df['timestamp'] >= start_dt) & (df['timestamp'] < end_dt)].reset_index(drop=True)
+    
+    # Ensure timestamp column is valid before filtering
+    if 'timestamp' in df.columns and not df.empty:
+        return df.loc[(df['timestamp'] >= start_dt) & (df['timestamp'] < end_dt)].reset_index(drop=True)
+    
+    return pd.DataFrame()
 
 def get_grid_indices(df, step_size):
     close_array = df['close'].to_numpy()
