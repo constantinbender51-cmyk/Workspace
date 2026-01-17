@@ -15,8 +15,8 @@ from datetime import datetime
 PORT = 8080
 SEQ_LENGTH = 5
 
-# Set this to 0.10 (10%) to see VERY clear, blocky steps.
-# If you set this to 1000000.0, the red chart MUST be a flat line.
+# Step Size (0.10 = 10% steps)
+# Try changing this to 0.05 or 0.20 to see the grid lines shift
 LOG_STEP_SIZE = 0.10  
 
 def fetch_binance_data(symbol='ETH/USDT', timeframe='4h', start_date='2020-01-01T00:00:00Z', end_date='2026-01-01T00:00:00Z'):
@@ -56,32 +56,19 @@ def prepare_arrays(df, step_size):
     multipliers = 1.0 + pct_change
     abs_price_raw = np.cumprod(multipliers)
     
-    # 3. Logarithmic Rounding (Explicit Debugging)
-    # Take Log
+    # 3. Logarithmic Rounding
     abs_price_log = np.log(abs_price_raw)
-    
-    # Quantize Log
     abs_price_log_rounded = np.floor(abs_price_log / step_size) * step_size
-    
-    # Exponentiate back
     abs_price_rounded = np.exp(abs_price_log_rounded)
     
-    # --- CRITICAL DEBUG PRINT ---
+    # Debug info
     unique_levels = len(np.unique(abs_price_rounded))
     print(f"\n[DEBUG] Step Size: {step_size}")
-    print(f"[DEBUG] Raw Price Points: {len(abs_price_raw)}")
-    print(f"[DEBUG] Unique 'Rounded' Levels: {unique_levels}")
-    
-    if unique_levels == 1:
-        print("[DEBUG] WARNING: Result is a flat line (expected if step size is huge).")
-    elif unique_levels == len(abs_price_raw):
-        print("[DEBUG] WARNING: Rounding did nothing! (Step size too small?)")
-    else:
-        print(f"[DEBUG] SUCCESS: Rounding created {unique_levels} distinct steps.")
+    print(f"[DEBUG] Unique Steps Found: {unique_levels}")
         
     return df['timestamp'], close_array, pct_change, abs_price_raw, abs_price_rounded
 
-def generate_plots(timestamps, close, pct, abs_raw, abs_rounded, filename):
+def generate_plots(timestamps, close, pct, abs_raw, abs_rounded, step_size, filename):
     print(f"Generating plot: {filename}...")
     
     fig, axs = plt.subplots(4, 1, figsize=(12, 18), sharex=True)
@@ -103,19 +90,44 @@ def generate_plots(timestamps, close, pct, abs_raw, abs_rounded, filename):
     axs[2].set_title('3. Absolute Price Index (High Precision)')
     axs[2].grid(True, alpha=0.3)
     
-    # 4. Absolute Price (Log Rounded)
-    # Using 'step' plot specifically to show flat segments
+    # 4. Absolute Price (Log Rounded) + Horizontal Lines
     axs[3].step(timestamps, abs_rounded, color='red', linewidth=1.5, where='mid')
-    axs[3].set_title(f'4. Absolute Price Index (Log-Rounded: {LOG_STEP_SIZE*100}% steps)')
+    axs[3].set_title(f'4. Absolute Price Index (Log-Rounded: {step_size*100}% steps)')
     axs[3].grid(True, alpha=0.3)
     
+    # --- DRAW HORIZONTAL LINES EVERY 10 STEPS ---
+    # We calculate the levels in Log space, then convert to linear for plotting
+    min_log = np.log(np.min(abs_rounded[abs_rounded > 0])) # avoid log(0)
+    max_log = np.log(np.max(abs_rounded))
+    
+    # Start from the nearest "10th step" below the minimum
+    # "10 steps" means a jump of 10 * step_size
+    grid_interval = 10 * step_size
+    
+    start_level = np.floor(min_log / grid_interval) * grid_interval
+    current_level = start_level
+    
+    while current_level < max_log + grid_interval:
+        # Convert back to linear price for the plot
+        y_val = np.exp(current_level)
+        
+        # Draw the line
+        axs[3].axhline(y=y_val, color='black', linestyle='--', linewidth=1, alpha=0.6)
+        
+        # Add a text label to identify the line
+        axs[3].text(timestamps.iloc[0], y_val, f' 10-Step Level', 
+                    color='black', fontsize=8, verticalalignment='bottom')
+        
+        current_level += grid_interval
+    # --------------------------------------------
+
     plt.xlabel('Date')
     plt.savefig(filename, dpi=100, bbox_inches='tight')
     plt.close()
     print(f"Plot saved to '{filename}'")
 
 def start_server(image_filename):
-    # CLEANUP: Delete old plot files to keep directory clean
+    # Cleanup old images
     for f in glob.glob("analysis_plot_*.png"):
         if f != image_filename:
             try:
@@ -140,7 +152,8 @@ def start_server(image_filename):
         <div class="container">
             <h1>Logarithmic Price Analysis</h1>
             <p><strong>Step Mode:</strong> Logarithmic | <strong>Step Size:</strong> {LOG_STEP_SIZE*100}%</p>
-            <p><small>Debug: Loaded image {image_filename}</small></p>
+            <p><strong>Grid Lines:</strong> Every 10 steps ({LOG_STEP_SIZE*1000}% change)</p>
+            <p><small>Image ID: {image_filename}</small></p>
             <img src="{image_filename}" alt="Plots">
         </div>
     </body>
@@ -160,22 +173,18 @@ def start_server(image_filename):
             print(f"Press Ctrl+C to stop")
             httpd.serve_forever()
     except OSError:
-        print(f"\nERROR: Port {PORT} is busy. Please stop the previous script or change the port.")
+        print(f"\nERROR: Port {PORT} is busy. Stop previous script.")
 
 def run_analysis():
-    # 1. Fetch
     df = fetch_binance_data()
     if df.empty: return
     
-    # 2. Process with Explicit Step Size
     timestamps, close, pct, abs_raw, abs_rounded = prepare_arrays(df, step_size=LOG_STEP_SIZE)
     
-    # 3. Generate Unique Filename (Beats Cache)
     unique_id = int(time.time())
     filename = f"analysis_plot_{unique_id}.png"
     
-    # 4. Plot & Serve
-    generate_plots(timestamps, close, pct, abs_raw, abs_rounded, filename)
+    generate_plots(timestamps, close, pct, abs_raw, abs_rounded, LOG_STEP_SIZE, filename)
     start_server(filename)
 
 if __name__ == "__main__":
