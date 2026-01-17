@@ -10,8 +10,8 @@ import time
 import os
 import glob
 import threading
-import sys  # Added for emergency exit
-from datetime import datetime
+import sys
+from datetime import datetime, timedelta
 from collections import Counter
 
 # --- CONFIGURATION ---
@@ -26,89 +26,99 @@ GRID_STEPS = 100
 # Ensemble Threshold
 ENSEMBLE_ACC_THRESHOLD = 70.0
 
-# Global storage for live updates
+# Data Source
+GITHUB_CSV_URL = "https://github.com/constantinbender51-cmyk/Models/raw/refs/heads/main/ohlc/ETHUSDT.csv"
+TARGET_TIMEFRAME = '30min' 
+
+# Global storage
 GLOBAL_REF_PRICE = None
 GLOBAL_HIGH_ACC_CONFIGS = []
 LATEST_LIVE_RESULT = "Initializing..."
 
-def get_exchange():
-    """Returns a Binance instance with strict rate limiting enabled."""
-    return ccxt.binance({
-        'enableRateLimit': True,  # Critical: Internal throttling
-        'options': {
-            'defaultType': 'spot', 
-        }
-    })
+def fetch_and_process_github_data():
+    """
+    Downloads CSV, handles 2-column format (Timestamp, Close), and resamples to 30m.
+    """
+    print(f"Downloading data from GitHub: {GITHUB_CSV_URL}...")
+    try:
+        # 1. Read CSV
+        # We assume no header if it's just raw numbers, but pandas might infer.
+        # Safe bet: Read it, check shape.
+        df = pd.read_csv(GITHUB_CSV_URL, header=None)
+        
+        # 2. Handle Columns
+        if len(df.columns) == 2:
+            print("Detected 2-column CSV (Timestamp, Close)")
+            df.columns = ['timestamp', 'close']
+        elif len(df.columns) >= 5:
+            # Maybe it has headers? Reload with headers
+            df = pd.read_csv(GITHUB_CSV_URL)
+            df.columns = df.columns.str.strip().str.lower()
+        else:
+            print(f"Unknown CSV format with {len(df.columns)} columns. Defaulting to first 2 as ts, close.")
+            df = df.iloc[:, :2]
+            df.columns = ['timestamp', 'close']
 
-def handle_binance_error(e):
-    """Parses errors and kills the script immediately on Rate Limit/Ban."""
-    err_str = str(e).lower()
-    # Check for 429 (Too Many Requests) or 418 (IP Ban) or specific Binance code -1003
-    if '429' in err_str or '418' in err_str or '-1003' in err_str or 'too many requests' in err_str:
-        print(f"\n\n[CRITICAL] RATE LIMIT HIT OR IP BANNED.")
-        print(f"Error details: {e}")
-        print("STOPPING IMMEDIATELY TO PROTECT ACCOUNT.")
-        os._exit(1) # Force kill everything including threads
-    else:
-        print(f"Network/Exchange Error: {e}")
-
-def fetch_binance_data(symbol='ETH/USDT', timeframe='30m', start_date='2020-01-01T00:00:00Z', end_date='2026-01-01T00:00:00Z'):
-    print(f"Fetching {symbol} with RATE LIMIT PROTECTION...")
-    exchange = get_exchange()
-    
-    since = exchange.parse8601(start_date)
-    end_ts = exchange.parse8601(end_date)
-    all_ohlcv = []
-    
-    while since < end_ts:
+        # 3. Handle Timestamp
+        first_val = df['timestamp'].iloc[0]
         try:
-            ohlcv = exchange.fetch_ohlcv(symbol, timeframe, since, limit=1000)
-            if not ohlcv: break
-            all_ohlcv.extend(ohlcv)
-            since = ohlcv[-1][0] + 1
-            print(f"Fetched up to {datetime.fromtimestamp(ohlcv[-1][0]/1000)}...", end='\r')
-            
-            if since >= end_ts: break
-            
-            # EXTRA SAFETY: Sleep 2 seconds between historical fetches to stay well under limits
-            time.sleep(2) 
-            
-        except (ccxt.RateLimitExceeded, ccxt.DDoSProtection, ccxt.NetworkError) as e:
-            handle_binance_error(e)
-            # If not a critical ban, wait significantly before retrying (though handle_binance_error usually exits on 429)
-            time.sleep(30)
+            if isinstance(first_val, (int, float, np.number)):
+                unit = 'ms' if first_val > 10000000000 else 's'
+                df['timestamp'] = pd.to_datetime(df['timestamp'], unit=unit, utc=True)
+            else:
+                df['timestamp'] = pd.to_datetime(df['timestamp'], utc=True)
         except Exception as e:
-            print(f"Error: {e}")
-            break
-            
-    df = pd.DataFrame(all_ohlcv, columns=['timestamp', 'open', 'high', 'low', 'close', 'volume'])
-    df['timestamp'] = pd.to_datetime(df['timestamp'], unit='ms', utc=True)
-    start_dt = pd.Timestamp(start_date, tz='UTC')
-    end_dt = pd.Timestamp(end_date, tz='UTC')
-    return df.loc[(df['timestamp'] >= start_dt) & (df['timestamp'] < end_dt)].reset_index(drop=True)
+            print(f"Timestamp parsing error: {e}")
+            return pd.DataFrame()
+
+        # 4. Set Index
+        df = df.sort_values('timestamp').set_index('timestamp')
+        
+        # 5. Resample to 30m
+        print(f"Resampling from inferred interval to {TARGET_TIMEFRAME}...")
+        
+        # Since we only have 'close', we construct a synthetic OHLC for the new timeframe
+        # High = Max of 15m closes
+        # Low = Min of 15m closes
+        # Close = Last 15m close
+        agg_dict = {
+            'close': 'last'
+        }
+        
+        # If we want to be fancy and approximate High/Low from the closes:
+        # df['high'] = df['close']
+        # df['low'] = df['close']
+        # agg_dict['high'] = 'max'
+        # agg_dict['low'] = 'min'
+        
+        df_resampled = df.resample(TARGET_TIMEFRAME).agg(agg_dict)
+        df_resampled = df_resampled.dropna().reset_index()
+        
+        print(f"Processing complete. Rows: {len(df)} -> {len(df_resampled)}")
+        print(f"Date Range: {df_resampled['timestamp'].iloc[0]} to {df_resampled['timestamp'].iloc[-1]}")
+        
+        return df_resampled
+
+    except Exception as e:
+        print(f"Error processing GitHub data: {e}")
+        return pd.DataFrame()
 
 def get_grid_indices(df, step_size):
     """Converts price series to log-integer grid indices."""
     close_array = df['close'].to_numpy()
     
-    # Absolute Price Index calculation
     pct_change = np.zeros(len(close_array))
     pct_change[1:] = np.diff(close_array) / close_array[:-1]
     multipliers = 1.0 + pct_change
     abs_price_raw = np.cumprod(multipliers)
     
-    # Log Rounding
     abs_price_log = np.log(abs_price_raw)
     grid_indices = np.floor(abs_price_log / step_size).astype(int)
     return grid_indices
 
 def train_and_evaluate(df, step_size):
-    """
-    Returns dictionary containing metrics and model data needed for the ensemble.
-    """
     grid_indices = get_grid_indices(df, step_size)
     
-    # Split
     total_len = len(grid_indices)
     idx_80 = int(total_len * 0.80)
     idx_90 = int(total_len * 0.90)
@@ -116,7 +126,6 @@ def train_and_evaluate(df, step_size):
     train_seq = grid_indices[:idx_80]
     val_seq = grid_indices[idx_80:idx_90]
     
-    # Train (Build Patterns)
     patterns = {}
     for i in range(len(train_seq) - SEQ_LENGTH):
         seq = tuple(train_seq[i : i + SEQ_LENGTH])
@@ -124,7 +133,6 @@ def train_and_evaluate(df, step_size):
         if seq not in patterns: patterns[seq] = []
         patterns[seq].append(target)
         
-    # Evaluate on Validation Set
     move_correct = 0
     move_total_valid = 0
     
@@ -158,93 +166,60 @@ def train_and_evaluate(df, step_size):
     }
 
 def run_combined_metric(high_acc_configs):
-    """
-    Calculates the accuracy of the Ensemble Logic.
-    """
-    if not high_acc_configs:
-        return 0.0, 0
-
+    if not high_acc_configs: return 0.0, 0
     ref_seq_len = len(high_acc_configs[0]['val_seq'])
-    
     combined_correct = 0
     combined_total = 0
     
     for i in range(ref_seq_len - SEQ_LENGTH):
         up_votes = []
         down_votes = []
-        
-        # Gather predictions from all qualified configs
         for cfg in high_acc_configs:
             val_seq = cfg['val_seq']
             current_seq = tuple(val_seq[i : i + SEQ_LENGTH])
-            
             if current_seq in cfg['patterns']:
                 history = cfg['patterns'][current_seq]
                 predicted_level = Counter(history).most_common(1)[0][0]
-                current_level = current_seq[-1]
-                diff = predicted_level - current_level
-                
-                if diff > 0:
-                    up_votes.append(cfg)
-                elif diff < 0:
-                    down_votes.append(cfg)
+                diff = predicted_level - current_seq[-1]
+                if diff > 0: up_votes.append(cfg)
+                elif diff < 0: down_votes.append(cfg)
         
         if len(up_votes) > 0 and len(down_votes) == 0:
-            # Tie-breaker: Pick Maximum Step Size
             best_cfg = max(up_votes, key=lambda x: x['step_size'])
-            
             chosen_val_seq = best_cfg['val_seq']
-            
             curr_lvl = chosen_val_seq[i + SEQ_LENGTH - 1] 
             next_lvl = chosen_val_seq[i + SEQ_LENGTH]     
-            
             actual_diff = next_lvl - curr_lvl
-            
             if actual_diff != 0:
                 combined_total += 1
-                if actual_diff > 0: 
-                    combined_correct += 1
+                if actual_diff > 0: combined_correct += 1
                     
     acc = (combined_correct / combined_total * 100) if combined_total > 0 else 0.0
     return acc, combined_total
 
-# --- LIVE PREDICTION LOGIC ---
+# --- LIVE PREDICTION (KRAKEN) ---
 
-def live_prediction_loop(filename, step_sizes, accuracies, trade_counts, cmb_acc, cmb_count):
-    """Background thread that fetches fresh data and updates HTML every 30 mins."""
+def kraken_live_loop(filename, step_sizes, accuracies, trade_counts, cmb_acc, cmb_count):
     global LATEST_LIVE_RESULT
-    
-    # Re-instantiate exchange inside thread with safety
-    exchange = get_exchange()
+    kraken = ccxt.kraken()
+    symbol = 'ETH/USDT'
     
     while True:
         try:
-            print(f"\n[LIVE] Fetching fresh candles for prediction...")
-            
-            # 1. Fetch recent data with safety checks
-            ohlcv = exchange.fetch_ohlcv('ETH/USDT', '30m', limit=20)
-            
-            # 2. Convert to DataFrame
+            print(f"\n[KRAKEN LIVE] Fetching recent candles...")
+            ohlcv = kraken.fetch_ohlcv(symbol, '30m', limit=20)
             live_df = pd.DataFrame(ohlcv, columns=['timestamp', 'open', 'high', 'low', 'close', 'volume'])
             live_df['timestamp'] = pd.to_datetime(live_df['timestamp'], unit='ms', utc=True)
             
-            # 3. Filter: Exclude incomplete candle
-            now = datetime.now(pd.Timestamp.now().tz).timestamp() * 1000
-            last_ts = ohlcv[-1][0]
-            
-            if (now - last_ts) < (30 * 60 * 1000):
-                completed_df = live_df.iloc[:-1].copy() 
-            else:
-                completed_df = live_df.copy() 
+            completed_df = live_df.iloc[:-1].copy()
             
             if len(completed_df) < SEQ_LENGTH:
-                LATEST_LIVE_RESULT = "Not enough data fetched."
+                LATEST_LIVE_RESULT = "Not enough data from Kraken yet."
             else:
                 target_df = completed_df.tail(SEQ_LENGTH).reset_index(drop=True)
                 last_ts_str = target_df['timestamp'].iloc[-1].strftime('%Y-%m-%d %H:%M UTC')
                 current_price = target_df['close'].iloc[-1]
                 
-                # --- ENSEMBLE VOTING ---
                 up_votes = 0
                 down_votes = 0
                 
@@ -256,8 +231,7 @@ def live_prediction_loop(filename, step_sizes, accuracies, trade_counts, cmb_acc
                     
                     for cfg in qualified_configs:
                         step = cfg['step_size']
-                        
-                        # Normalize live prices relative to the 2020 Start Price
+                        # Normalize using the Start Price of your CSV
                         abs_price_log = np.log(live_prices / GLOBAL_REF_PRICE)
                         live_indices = np.floor(abs_price_log / step).astype(int)
                         
@@ -266,13 +240,9 @@ def live_prediction_loop(filename, step_sizes, accuracies, trade_counts, cmb_acc
                         if current_seq in cfg['patterns']:
                             history = cfg['patterns'][current_seq]
                             predicted_level = Counter(history).most_common(1)[0][0]
-                            current_level = current_seq[-1]
-                            diff = predicted_level - current_level
-                            
-                            if diff > 0:
-                                up_votes += 1
-                            elif diff < 0:
-                                down_votes += 1
+                            diff = predicted_level - current_seq[-1]
+                            if diff > 0: up_votes += 1
+                            elif diff < 0: down_votes += 1
                     
                     decision = "NEUTRAL"
                     color = "gray"
@@ -286,25 +256,20 @@ def live_prediction_loop(filename, step_sizes, accuracies, trade_counts, cmb_acc
                     LATEST_LIVE_RESULT = f"""
                     <div style="border: 2px solid {color}; padding: 15px; border-radius: 8px; background: #fff;">
                         <h2 style="color: {color}; margin-top: 0;">LIVE SIGNAL: {decision}</h2>
-                        <p><strong>Last Candle Close:</strong> {last_ts_str} @ ${current_price:.2f}</p>
-                        <p><strong>Voters:</strong> {up_votes} UP / {down_votes} DOWN (Total High-Acc Configs: {len(qualified_configs)})</p>
-                        <small>Ref Price (2020): ${GLOBAL_REF_PRICE:.2f}</small>
+                        <p><strong>Source:</strong> Kraken Public API</p>
+                        <p><strong>Last Closed Candle:</strong> {last_ts_str} @ ${current_price:.2f}</p>
+                        <p><strong>Voters:</strong> {up_votes} UP / {down_votes} DOWN</p>
                     </div>
                     """
-            
             generate_html(filename, step_sizes, accuracies, trade_counts, cmb_acc, cmb_count)
             
-        except (ccxt.RateLimitExceeded, ccxt.DDoSProtection, ccxt.NetworkError) as e:
-            handle_binance_error(e) # This will exit the program
         except Exception as e:
-            print(f"Live Loop Error: {e}")
-            LATEST_LIVE_RESULT = f"Error in live loop: {e}"
+            print(f"Kraken Error: {e}")
+            LATEST_LIVE_RESULT = f"Kraken API Error: {e}"
         
-        # Sleep 30 minutes
-        time.sleep(30 * 60)
+        time.sleep(60)
 
 def generate_html(image_filename, steps, accs, counts, cmb_acc, cmb_count):
-    """Generates the HTML file with current stats and live prediction."""
     table_rows = ""
     for s, a, c in zip(steps, accs, counts):
         bg_style = "background-color: #e6fffa;" if a > ENSEMBLE_ACC_THRESHOLD else ""
@@ -313,8 +278,9 @@ def generate_html(image_filename, steps, accs, counts, cmb_acc, cmb_count):
     html_content = f"""
     <html>
     <head>
-        <title>Grid Search & Live Prediction</title>
-        <meta http-equiv="refresh" content="300"> <style>
+        <title>Resampled Grid Search & Kraken Live</title>
+        <meta http-equiv="refresh" content="60">
+        <style>
             body {{ font-family: sans-serif; text-align: center; padding: 20px; background: #f4f4f4; }}
             .container {{ background: white; padding: 20px; display: inline-block; border-radius: 8px; box-shadow: 0 4px 6px rgba(0,0,0,0.1); max-width: 900px; }}
             .metric-box {{ background: #2d3748; color: white; padding: 15px; border-radius: 8px; margin: 20px 0; }}
@@ -325,18 +291,14 @@ def generate_html(image_filename, steps, accs, counts, cmb_acc, cmb_count):
     </head>
     <body>
         <div class="container">
-            <h1>Crypto Ensemble System</h1>
-            
+            <h1>Ensemble System (GitHub Data + Kraken Live)</h1>
             {LATEST_LIVE_RESULT}
-            
             <div class="metric-box">
-                <h2>Historical Combined Performance</h2>
+                <h2>Historical Performance (Resampled 30m)</h2>
                 <p style="font-size: 24px; margin: 5px;">Accuracy: <strong>{cmb_acc:.2f}%</strong></p>
                 <p>Total Trades: {cmb_count} | Threshold: >{ENSEMBLE_ACC_THRESHOLD}%</p>
             </div>
-            
             <img src="{image_filename}" alt="Grid Search Plot">
-            
             <h3>Individual Configs</h3>
             <table>
                 <tr><th>Step Size</th><th>Accuracy</th><th>Trades</th></tr>
@@ -346,98 +308,68 @@ def generate_html(image_filename, steps, accs, counts, cmb_acc, cmb_count):
     </body>
     </html>
     """
-    
     with open("index.html", "w") as f:
         f.write(html_content)
 
-def run_grid_search():
+def run_system():
     global GLOBAL_REF_PRICE, GLOBAL_HIGH_ACC_CONFIGS
     
-    df = fetch_binance_data()
-    if df.empty: return
+    df = fetch_and_process_github_data()
+    if df.empty:
+        print("Failed to load or process data.")
+        return
 
-    # CAPTURE REFERENCE PRICE (First candle of 2020)
     GLOBAL_REF_PRICE = df['close'].iloc[0]
-    print(f"\nTraining Reference Price (Jan 2020): {GLOBAL_REF_PRICE}")
+    print(f"\nRef Price (Jan 2020): {GLOBAL_REF_PRICE}")
 
     step_sizes = np.linspace(GRID_MIN, GRID_MAX, GRID_STEPS)
-    
     results = []
-    print(f"\n\n--- STARTING GRID SEARCH ({GRID_STEPS} Steps) ---")
+    
+    print(f"\n--- STARTING GRID SEARCH ({GRID_STEPS} Steps) ---")
     
     for step in step_sizes:
-        print(f"Testing Step Size: {step:.5f}...", end=" ")
         res = train_and_evaluate(df, step)
         results.append(res)
-        print(f"Acc: {res['accuracy']:.2f}% | Trades: {res['trade_count']}")
         
-    # --- COMBINED PREDICTOR ---
-    print(f"\n--- CALCULATING COMBINED PREDICTOR ---")
     high_acc_configs = [r for r in results if r['accuracy'] > ENSEMBLE_ACC_THRESHOLD]
-    GLOBAL_HIGH_ACC_CONFIGS = high_acc_configs # Store for live loop
-    
-    print(f"Qualifying Configs (> {ENSEMBLE_ACC_THRESHOLD}%): {len(high_acc_configs)}")
+    GLOBAL_HIGH_ACC_CONFIGS = high_acc_configs
     
     cmb_acc, cmb_count = run_combined_metric(high_acc_configs)
-    print(f"Combined Predictor Accuracy: {cmb_acc:.2f}%")
-    print(f"Combined Predictor Trades:   {cmb_count}")
+    print(f"\nCombined Predictor Accuracy: {cmb_acc:.2f}% ({cmb_count} trades)")
 
-    # --- PLOTTING ---
     unique_id = int(time.time())
     filename = f"grid_search_{unique_id}.png"
-    
     accuracies = [r['accuracy'] for r in results]
     trade_counts = [r['trade_count'] for r in results]
     
     fig, ax1 = plt.subplots(figsize=(10, 6))
-    
     ax1.set_xlabel('Log Step Size')
-    ax1.set_ylabel('Directional Accuracy (%)', color='tab:blue')
-    ax1.plot(step_sizes, accuracies, marker='o', color='tab:blue', label='Accuracy')
-    ax1.axhline(y=ENSEMBLE_ACC_THRESHOLD, color='r', linestyle=':', label='Threshold (70%)')
-    ax1.tick_params(axis='y', labelcolor='tab:blue')
-    ax1.grid(True, linestyle='--', alpha=0.3)
-    
+    ax1.set_ylabel('Accuracy (%)', color='tab:blue')
+    ax1.plot(step_sizes, accuracies, color='tab:blue')
+    ax1.axhline(y=ENSEMBLE_ACC_THRESHOLD, color='r', linestyle=':')
     ax2 = ax1.twinx() 
-    ax2.set_ylabel('Number of Trades', color='tab:orange')
-    ax2.plot(step_sizes, trade_counts, marker='x', linestyle='--', color='tab:orange', label='Trades')
-    ax2.tick_params(axis='y', labelcolor='tab:orange')
-    
-    plt.title(f'Accuracy vs. Trade Volume\nCombined Predictor: {cmb_acc:.2f}% ({cmb_count} trades)')
-    fig.tight_layout()
+    ax2.set_ylabel('Trades', color='tab:orange')
+    ax2.plot(step_sizes, trade_counts, color='tab:orange', linestyle='--')
     plt.savefig(filename)
     plt.close()
     
-    print(f"\nGrid search complete. Plot saved to {filename}")
-    
-    # Start Live Prediction Loop in background
     live_thread = threading.Thread(
-        target=live_prediction_loop, 
+        target=kraken_live_loop, 
         args=(filename, step_sizes, accuracies, trade_counts, cmb_acc, cmb_count),
         daemon=True
     )
     live_thread.start()
     
-    # Generate initial HTML
     generate_html(filename, step_sizes, accuracies, trade_counts, cmb_acc, cmb_count)
     
-    start_server()
-
-def start_server():
-    # Clean up old images
-    current_imgs = glob.glob("grid_search_*.png")
-    
     Handler = http.server.SimpleHTTPRequestHandler
-    socketserver.TCPServer.allow_reuse_address = True
-    
     try:
         with socketserver.TCPServer(("", PORT), Handler) as httpd:
             print(f"\n--- SERVER STARTED ---")
             print(f"View at: http://localhost:{PORT}")
-            print(f"Press Ctrl+C to stop")
             httpd.serve_forever()
     except OSError:
-        print(f"\nERROR: Port {PORT} is busy.")
+        print(f"Port {PORT} busy.")
 
 if __name__ == "__main__":
-    run_grid_search()
+    run_system()
