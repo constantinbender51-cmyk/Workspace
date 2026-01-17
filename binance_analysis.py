@@ -9,6 +9,7 @@ import socketserver
 import time
 import os
 import glob
+import sys  # Added for safe exit
 from datetime import datetime
 from collections import Counter
 
@@ -26,7 +27,10 @@ ENSEMBLE_ACC_THRESHOLD = 70.0
 
 def fetch_binance_data(symbol='ETH/USDT', timeframe='30m', start_date='2020-01-01T00:00:00Z', end_date='2026-01-01T00:00:00Z'):
     print(f"Fetching {symbol}...")
-    exchange = ccxt.binance()
+    exchange = ccxt.binance({
+        'enableRateLimit': True,  # CCXT built-in rate limiter
+    })
+    
     since = exchange.parse8601(start_date)
     end_ts = exchange.parse8601(end_date)
     all_ohlcv = []
@@ -34,16 +38,41 @@ def fetch_binance_data(symbol='ETH/USDT', timeframe='30m', start_date='2020-01-0
     while since < end_ts:
         try:
             ohlcv = exchange.fetch_ohlcv(symbol, timeframe, since, limit=1000)
-            if not ohlcv: break
+            
+            if not ohlcv:
+                print("No more data received.")
+                break
+            
             all_ohlcv.extend(ohlcv)
             since = ohlcv[-1][0] + 1
-            print(f"Fetched up to {datetime.fromtimestamp(ohlcv[-1][0]/1000)}...", end='\r')
-            if since >= end_ts: break
-            time.sleep(exchange.rateLimit / 1000)
+            print(f"Fetched up to {datetime.fromtimestamp(ohlcv[-1][0]/1000, tz=None)}...", end='\r')
+            
+            if since >= end_ts:
+                break
+                
+            # Sleep slightly longer than required to be safe
+            time.sleep(exchange.rateLimit / 1000 * 1.1)
+
+        except (ccxt.RateLimitExceeded, ccxt.DDoSProtection) as e:
+            # STOP IMMEDIATELY ON 429 OR DDOS
+            print(f"\n\nCRITICAL: Rate Limit Exceeded or DDoS Protection Triggered (429).")
+            print(f"Reason: {e}")
+            print("Stopping immediately to prevent IP ban.")
+            sys.exit(1) # Exit the entire script with error code
+            
+        except ccxt.NetworkError as e:
+            print(f"\nNetwork Error: {e}. Retrying in 10s...")
+            time.sleep(10)
+            
         except Exception as e:
-            print(f"Error: {e}")
+            print(f"\nUnexpected Error: {e}")
             break
             
+    print(f"\nData fetch complete. Total rows: {len(all_ohlcv)}")
+    
+    if not all_ohlcv:
+        return pd.DataFrame()
+
     df = pd.DataFrame(all_ohlcv, columns=['timestamp', 'open', 'high', 'low', 'close', 'volume'])
     df['timestamp'] = pd.to_datetime(df['timestamp'], unit='ms', utc=True)
     start_dt = pd.Timestamp(start_date, tz='UTC')
@@ -91,9 +120,6 @@ def train_and_evaluate(df, step_size):
     move_correct = 0
     move_total_valid = 0
     
-    # We store predictions to verify the "Combined" logic later without re-running everything
-    # But for memory efficiency, we just return the patterns and let the ensemble re-predict.
-    
     for i in range(len(val_seq) - SEQ_LENGTH):
         current_seq = tuple(val_seq[i : i + SEQ_LENGTH])
         current_level = current_seq[-1]
@@ -101,11 +127,13 @@ def train_and_evaluate(df, step_size):
         
         if current_seq in patterns:
             history = patterns[current_seq]
+            # Simple majority vote
             predicted_level = Counter(history).most_common(1)[0][0]
             
             pred_diff = predicted_level - current_level
             actual_diff = actual_next_level - current_level
             
+            # We only evaluate if the model predicts a move AND a move actually happened
             if pred_diff != 0 and actual_diff != 0:
                 move_total_valid += 1
                 same_direction = (pred_diff > 0 and actual_diff > 0) or \
@@ -132,8 +160,8 @@ def run_combined_metric(high_acc_configs):
     if not high_acc_configs:
         return 0.0, 0
 
-    # All configs align on the same time axis, so we can iterate by index
-    # using the validation sequence length of the first config.
+    # All configs align on the same time axis (derived from same DF), 
+    # so we can iterate by index using the validation sequence length of the first config.
     ref_seq_len = len(high_acc_configs[0]['val_seq'])
     
     combined_correct = 0
@@ -161,13 +189,15 @@ def run_combined_metric(high_acc_configs):
         
         # Apply Ensemble Logic: 
         # 1. At least one UP
-        # 2. NO objects (DOWN)
+        # 2. NO conflicting votes (DOWN)
+        # (This logic targets Long-Only or Short-Only depending on how you flip it, 
+        # here checking for UP moves purely)
         if len(up_votes) > 0 and len(down_votes) == 0:
-            # Tie-breaker: Pick Maximum Step Size
+            # Tie-breaker / Verification: Pick Maximum Step Size among voters
+            # Why? Because if the coarsest grid sees a move, the move is likely significant.
             best_cfg = max(up_votes, key=lambda x: x['step_size'])
             
             # Verify using the Chosen Config's Grid
-            # We look at the actual movement in the chosen config's validation sequence
             chosen_val_seq = best_cfg['val_seq']
             
             curr_lvl = chosen_val_seq[i + SEQ_LENGTH - 1] # The end of the input sequence
@@ -175,7 +205,7 @@ def run_combined_metric(high_acc_configs):
             
             actual_diff = next_lvl - curr_lvl
             
-            # We only count it if the price actually moved on this grid
+            # We only count it if the price actually moved on this specific grid
             if actual_diff != 0:
                 combined_total += 1
                 if actual_diff > 0: # We predicted UP
@@ -186,14 +216,14 @@ def run_combined_metric(high_acc_configs):
 
 def run_grid_search():
     df = fetch_binance_data()
-    if df.empty: return
+    if df.empty: 
+        print("DataFrame is empty. Exiting.")
+        return
 
     step_sizes = np.linspace(GRID_MIN, GRID_MAX, GRID_STEPS)
     
     results = []
     print(f"\n\n--- STARTING GRID SEARCH ({GRID_STEPS} Steps) ---")
-    
-    # 
     
     for step in step_sizes:
         print(f"Testing Step Size: {step:.5f}...", end=" ")
@@ -221,14 +251,14 @@ def run_grid_search():
     
     ax1.set_xlabel('Log Step Size')
     ax1.set_ylabel('Directional Accuracy (%)', color='tab:blue')
-    ax1.plot(step_sizes, accuracies, marker='o', color='tab:blue', label='Accuracy')
-    ax1.axhline(y=ENSEMBLE_ACC_THRESHOLD, color='r', linestyle=':', label='Threshold (70%)')
+    ax1.plot(step_sizes, accuracies, marker='o', markersize=3, color='tab:blue', label='Accuracy')
+    ax1.axhline(y=ENSEMBLE_ACC_THRESHOLD, color='r', linestyle=':', label=f'Threshold ({ENSEMBLE_ACC_THRESHOLD}%)')
     ax1.tick_params(axis='y', labelcolor='tab:blue')
     ax1.grid(True, linestyle='--', alpha=0.3)
     
     ax2 = ax1.twinx() 
     ax2.set_ylabel('Number of Trades', color='tab:orange')
-    ax2.plot(step_sizes, trade_counts, marker='x', linestyle='--', color='tab:orange', label='Trades')
+    ax2.plot(step_sizes, trade_counts, marker='x', markersize=3, linestyle='--', color='tab:orange', label='Trades')
     ax2.tick_params(axis='y', labelcolor='tab:orange')
     
     plt.title(f'Accuracy vs. Trade Volume\nCombined Predictor: {cmb_acc:.2f}% ({cmb_count} trades)')
@@ -242,6 +272,7 @@ def run_grid_search():
     start_server(filename, step_sizes, accuracies, trade_counts, cmb_acc, cmb_count)
 
 def start_server(image_filename, steps, accs, counts, cmb_acc, cmb_count):
+    # Clean up old images
     for f in glob.glob("grid_search_*.png"):
         if f != image_filename:
             try: os.remove(f)
@@ -249,8 +280,11 @@ def start_server(image_filename, steps, accs, counts, cmb_acc, cmb_count):
 
     table_rows = ""
     for s, a, c in zip(steps, accs, counts):
+        # Highlight rows that met the threshold
         bg_style = "background-color: #e6fffa;" if a > ENSEMBLE_ACC_THRESHOLD else ""
-        table_rows += f"<tr style='{bg_style}'><td>{s:.5f}</td><td>{a:.2f}%</td><td>{c}</td></tr>"
+        # Bold text for very high accuracy
+        weight = "font-weight: bold;" if a > ENSEMBLE_ACC_THRESHOLD else ""
+        table_rows += f"<tr style='{bg_style} {weight}'><td>{s:.5f}</td><td>{a:.2f}%</td><td>{c}</td></tr>"
 
     html_content = f"""
     <html>
@@ -260,29 +294,32 @@ def start_server(image_filename, steps, accs, counts, cmb_acc, cmb_count):
         <meta http-equiv="Pragma" content="no-cache" />
         <meta http-equiv="Expires" content="0" />
         <style>
-            body {{ font-family: sans-serif; text-align: center; padding: 20px; background: #f4f4f4; }}
-            .container {{ background: white; padding: 20px; display: inline-block; border-radius: 8px; box-shadow: 0 4px 6px rgba(0,0,0,0.1); }}
-            .metric-box {{ background: #2d3748; color: white; padding: 15px; border-radius: 8px; margin: 20px 0; }}
-            table {{ margin: 0 auto; border-collapse: collapse; width: 80%; }}
-            th, td {{ padding: 8px; border-bottom: 1px solid #ddd; }}
-            img {{ max-width: 100%; height: auto; margin-top: 20px; border: 1px solid #ddd; }}
+            body {{ font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif; text-align: center; padding: 20px; background: #f4f4f4; color: #333; }}
+            .container {{ background: white; padding: 30px; display: inline-block; border-radius: 12px; box-shadow: 0 4px 15px rgba(0,0,0,0.1); max-width: 900px; width: 100%; }}
+            .metric-box {{ background: #2d3748; color: white; padding: 20px; border-radius: 8px; margin: 20px 0; }}
+            table {{ margin: 20px auto; border-collapse: collapse; width: 100%; font-size: 14px; }}
+            th {{ background: #4a5568; color: white; padding: 12px; }}
+            td {{ padding: 10px; border-bottom: 1px solid #ddd; }}
+            tr:hover {{ background-color: #f1f1f1; }}
+            img {{ max-width: 100%; height: auto; margin-top: 20px; border: 1px solid #ddd; border-radius: 4px; }}
         </style>
     </head>
     <body>
         <div class="container">
-            <h1>Grid Search Results</h1>
+            <h1>Grid Search Strategy Results</h1>
             
             <div class="metric-box">
-                <h2>Combined Predictor</h2>
-                <p style="font-size: 24px; margin: 5px;">Accuracy: <strong>{cmb_acc:.2f}%</strong></p>
-                <p>Total Trades: {cmb_count} | Threshold: >{ENSEMBLE_ACC_THRESHOLD}%</p>
+                <h2>Ensemble Predictor</h2>
+                <div style="font-size: 36px; font-weight: bold; margin: 10px 0;">{cmb_acc:.2f}%</div>
+                <div>Total Trades: {cmb_count}</div>
+                <div style="font-size: 12px; opacity: 0.8; margin-top: 5px;">Logic: Consensus of configs > {ENSEMBLE_ACC_THRESHOLD}% acc</div>
             </div>
             
             <img src="{image_filename}" alt="Grid Search Plot">
             
-            <h3>Individual Configs</h3>
+            <h3>Individual Configuration Performance</h3>
             <table>
-                <tr><th>Step Size</th><th>Accuracy</th><th>Trades</th></tr>
+                <tr><th>Grid Step Size (Log)</th><th>Accuracy</th><th>Trade Count</th></tr>
                 {table_rows}
             </table>
         </div>
@@ -299,11 +336,16 @@ def start_server(image_filename, steps, accs, counts, cmb_acc, cmb_count):
     try:
         with socketserver.TCPServer(("", PORT), Handler) as httpd:
             print(f"\n--- SERVER STARTED ---")
-            print(f"View at: http://localhost:{PORT}")
+            print(f"View report at: http://localhost:{PORT}")
             print(f"Press Ctrl+C to stop")
             httpd.serve_forever()
     except OSError:
-        print(f"\nERROR: Port {PORT} is busy.")
+        print(f"\nERROR: Port {PORT} is busy. Try changing the PORT variable.")
+    except KeyboardInterrupt:
+        print("\nServer stopped by user.")
 
 if __name__ == "__main__":
-    run_grid_search()
+    try:
+        run_grid_search()
+    except KeyboardInterrupt:
+        print("\nScript stopped by user.")
