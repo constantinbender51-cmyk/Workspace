@@ -1,20 +1,28 @@
 import ccxt
 import pandas as pd
 import numpy as np
+import matplotlib
+matplotlib.use('Agg') # Force non-interactive backend for server environments
+import matplotlib.pyplot as plt
+import http.server
+import socketserver
+import threading
+import webbrowser
+import os
+from collections import Counter
 from datetime import datetime
 import time
-from collections import Counter
 
 # --- CONFIGURATION ---
-STEP_SIZE = 0.005  # Rounds values to nearest 0.005
-SEQ_LENGTH = 5     # Sequence length to match
+PORT = 8080
+PCT_STEP = 0.001  # Group changes into 0.1% buckets
+SEQ_LENGTH = 5
 
 def fetch_binance_data(symbol='ETH/USDT', timeframe='4h', start_date='2020-01-01T00:00:00Z', end_date='2026-01-01T00:00:00Z'):
-    print(f"Fetching {symbol} {timeframe} data from {start_date} to {end_date}...")
+    print(f"Fetching {symbol}...")
     exchange = ccxt.binance()
     since = exchange.parse8601(start_date)
     end_ts = exchange.parse8601(end_date)
-    
     all_ohlcv = []
     
     while since < end_ts:
@@ -27,13 +35,11 @@ def fetch_binance_data(symbol='ETH/USDT', timeframe='4h', start_date='2020-01-01
             if since >= end_ts: break
             time.sleep(exchange.rateLimit / 1000)
         except Exception as e:
-            print(f"\nError: {e}")
+            print(f"Error: {e}")
             break
             
-    print(f"\nTotal candles: {len(all_ohlcv)}")
     df = pd.DataFrame(all_ohlcv, columns=['timestamp', 'open', 'high', 'low', 'close', 'volume'])
     df['timestamp'] = pd.to_datetime(df['timestamp'], unit='ms', utc=True)
-    
     start_dt = pd.Timestamp(start_date, tz='UTC')
     end_dt = pd.Timestamp(end_date, tz='UTC')
     return df.loc[(df['timestamp'] >= start_dt) & (df['timestamp'] < end_dt)].reset_index(drop=True)
@@ -41,108 +47,99 @@ def fetch_binance_data(symbol='ETH/USDT', timeframe='4h', start_date='2020-01-01
 def prepare_arrays(df):
     close_array = df['close'].to_numpy()
     
-    # Calculate percentage changes
-    # (price - last) / last
+    # 1. Percentage Change
     pct_change = np.zeros(len(close_array))
     pct_change[1:] = np.diff(close_array) / close_array[:-1]
     
-    # --- MAJOR FIX: CUMPROD INSTEAD OF CUMSUM ---
-    # We add 1 to the changes (e.g., +5% becomes 1.05)
-    # Then we multiply them cumulatively.
-    # Start with 1.0 at index 0.
+    # 2. Quantized (for matching)
+    pct_change_quantized = np.round(pct_change / PCT_STEP) * PCT_STEP
     
+    # 3. Absolute Price Index (Cumprod)
+    # Start at 1.0, multiply by (1 + change)
     multipliers = 1.0 + pct_change
-    # Force the first element to be 1.0 explicitly (since pct_change[0] is 0)
-    multipliers[0] = 1.0 
-    
     abs_price_array = np.cumprod(multipliers)
     
-    # Rounding to Step Size
-    abs_price_rounded = np.floor(abs_price_array / STEP_SIZE) * STEP_SIZE
+    return df['timestamp'], close_array, pct_change, pct_change_quantized, abs_price_array
+
+def generate_plots(timestamps, close, pct, pct_quant, abs_price):
+    print("\nGenerating plots...")
     
-    return close_array, pct_change, abs_price_rounded
+    fig, axs = plt.subplots(4, 1, figsize=(12, 16), sharex=True)
+    plt.subplots_adjust(hspace=0.3)
+    
+    # 1. Close Price
+    axs[0].plot(timestamps, close, color='blue', linewidth=1)
+    axs[0].set_title('1. Raw Close Price (USDT)')
+    axs[0].grid(True, alpha=0.3)
+    
+    # 2. Absolute Price Index (Calculated)
+    axs[1].plot(timestamps, abs_price, color='green', linewidth=1)
+    axs[1].set_title('2. Calculated Absolute Price Index (Base 1.0)')
+    axs[1].grid(True, alpha=0.3)
+    
+    # 3. Percentage Changes
+    axs[2].plot(timestamps, pct, color='gray', linewidth=0.5, alpha=0.7)
+    axs[2].set_title('3. Percentage Changes (Raw)')
+    axs[2].set_ylim(-0.10, 0.10) # Limit to +/- 10% for readability
+    axs[2].grid(True, alpha=0.3)
+    
+    # 4. Quantized Changes (What the bot sees)
+    axs[3].step(timestamps, pct_quant, color='red', linewidth=0.5, where='mid')
+    axs[3].set_title(f'4. Quantized Changes (Step Size: {PCT_STEP})')
+    axs[3].set_ylim(-0.10, 0.10)
+    axs[3].grid(True, alpha=0.3)
+    
+    plt.xlabel('Date')
+    plt.savefig('analysis_plot.png', dpi=100, bbox_inches='tight')
+    plt.close()
+    print("Plot saved to 'analysis_plot.png'")
+
+def start_server():
+    # Create a simple HTML file
+    html_content = """
+    <html>
+    <head>
+        <title>Crypto Pattern Analysis</title>
+        <style>
+            body { font-family: sans-serif; text-align: center; padding: 20px; background: #f0f0f0; }
+            img { max-width: 95%; box-shadow: 0 0 10px rgba(0,0,0,0.1); border-radius: 5px; }
+            .card { background: white; padding: 20px; display: inline-block; border-radius: 8px; }
+        </style>
+    </head>
+    <body>
+        <div class="card">
+            <h1>Analysis Result</h1>
+            <p>Visualizing: Close Price, Calculated Index, and Volatility Inputs</p>
+            <img src="analysis_plot.png" alt="Analysis Plots">
+        </div>
+    </body>
+    </html>
+    """
+    
+    with open("index.html", "w") as f:
+        f.write(html_content)
+        
+    # Start Server
+    Handler = http.server.SimpleHTTPRequestHandler
+    with socketserver.TCPServer(("", PORT), Handler) as httpd:
+        print(f"\n--- SERVER STARTED ---")
+        print(f"Open your browser at: http://localhost:{PORT}")
+        print(f"Press Ctrl+C to stop")
+        httpd.serve_forever()
 
 def run_analysis():
-    # 1. Fetch & Prepare
+    # 1. Fetch
     df = fetch_binance_data()
     if df.empty: return
     
-    _, _, abs_arr = prepare_arrays(df)
+    # 2. Process
+    timestamps, close, pct, pct_quant, abs_price = prepare_arrays(df)
     
-    # 2. Split
-    total_len = len(abs_arr)
-    idx_80 = int(total_len * 0.80)
-    idx_90 = int(total_len * 0.90)
+    # 3. Plot
+    generate_plots(timestamps, close, pct, pct_quant, abs_price)
     
-    train_set = abs_arr[:idx_80]
-    val_set = abs_arr[idx_80:idx_90]
-    
-    print(f"\nTraining Set: {len(train_set)} | Validation Set: {len(val_set)}")
-    
-    # 3. Build Model (Training)
-    print("Building pattern map...")
-    patterns = {}
-    for i in range(len(train_set) - SEQ_LENGTH):
-        seq = tuple(train_set[i : i + SEQ_LENGTH])
-        target = train_set[i + SEQ_LENGTH]
-        if seq not in patterns: patterns[seq] = []
-        patterns[seq].append(target)
-        
-    print(f"Unique Patterns in Train: {len(patterns)}")
-    
-    # 4. Test (Validation)
-    matches_found = 0
-    exact_correct = 0
-    move_correct = 0
-    move_total_valid = 0 
-    
-    print("Scanning validation set...")
-    for i in range(len(val_set) - SEQ_LENGTH):
-        current_seq = tuple(val_set[i : i + SEQ_LENGTH])
-        actual_val = val_set[i + SEQ_LENGTH]
-        current_val = current_seq[-1]
-        
-        if current_seq in patterns:
-            matches_found += 1
-            
-            # Predict most probable next value
-            history = patterns[current_seq]
-            prediction = Counter(history).most_common(1)[0][0]
-            
-            # A. Exact Match Accuracy
-            if np.isclose(prediction, actual_val, atol=1e-9):
-                exact_correct += 1
-                
-            # B. Move Accuracy (Directional)
-            pred_diff = prediction - current_val
-            actual_diff = actual_val - current_val
-            
-            # Ignore flat predictions OR flat outcomes
-            if not np.isclose(pred_diff, 0, atol=1e-9) and not np.isclose(actual_diff, 0, atol=1e-9):
-                move_total_valid += 1
-                is_same_direction = (pred_diff > 0 and actual_diff > 0) or \
-                                    (pred_diff < 0 and actual_diff < 0)
-                if is_same_direction:
-                    move_correct += 1
-
-    # --- Results ---
-    print(f"\n--- Results ---")
-    print(f"Total Sequences Scanned: {len(val_set) - SEQ_LENGTH}")
-    print(f"Patterns Matched: {matches_found}")
-    
-    if matches_found > 0:
-        print(f"\n1. Exact Value Accuracy (Exact Step Match):")
-        print(f"   {exact_correct}/{matches_found} -> {(exact_correct/matches_found)*100:.2f}%")
-        
-        print(f"\n2. Move Accuracy (Directional - ignoring flats):")
-        if move_total_valid > 0:
-            print(f"   Correct Moves: {move_correct}/{move_total_valid}")
-            print(f"   Accuracy: {(move_correct/move_total_valid)*100:.2f}%")
-        else:
-            print("   No valid moves found (all predictions or outcomes were flat).")
-            
-    else:
-        print("No patterns matched.")
+    # 4. Serve
+    start_server()
 
 if __name__ == "__main__":
     run_analysis()
