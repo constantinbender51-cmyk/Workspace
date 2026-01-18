@@ -11,11 +11,10 @@ import os
 import glob
 import sys
 import pickle
-import gc  # ADDED: Garbage collector
+import gc
 from datetime import datetime
 from collections import Counter
 
-# --- NEW IMPORTS FOR HUGGING FACE ---
 from dotenv import load_dotenv
 from huggingface_hub import HfApi
 
@@ -23,58 +22,42 @@ from huggingface_hub import HfApi
 PORT = 8080
 SEQ_LENGTHS = [5, 6, 7, 8, 9, 10]
 
-# Updated Asset List
 ASSETS = [
-    # Majors
     'BTC/USDT', 'ETH/USDT', 'SOL/USDT', 'XRP/USDT', 'ADA/USDT', 
     'AVAX/USDT', 'DOT/USDT', 'LTC/USDT', 'BCH/USDT',
-    # DeFi & Infrastructure
     'LINK/USDT', 'UNI/USDT', 'AAVE/USDT', 'NEAR/USDT', 
     'FIL/USDT', 'ALGO/USDT', 'XLM/USDT', 'EOS/USDT',
-    # Meme Coins & Metaverse
     'DOGE/USDT', 'SHIB/USDT', 'SAND/USDT'
 ]
 
-DATA_DIR = "/app/data/"  # Local cache directory
-
-# Hugging Face Configuration
+DATA_DIR = "/app/data/"
 HF_REPO_ID = "Llama26051996/Models" 
 HF_FOLDER = "model2x"
-
-# Grid Search Parameters
 GRID_MIN = 0.005
 GRID_MAX = 0.05
 GRID_STEPS = 20 
-
-# Ensemble Threshold
 ENSEMBLE_ACC_THRESHOLD = 70.0
 
 def fetch_binance_data(symbol, timeframe='30m', start_date='2020-01-01T00:00:00Z', end_date='2026-01-01T00:00:00Z'):
     print(f"\n--- Processing Data for {symbol} ---")
     
-    # 1. Construct Cache Path
     safe_symbol = symbol.replace('/', '_')
     file_path = os.path.join(DATA_DIR, f"{safe_symbol}_{timeframe}.csv")
     
-    # 2. Check if Data Exists Locally
     if os.path.exists(file_path):
         print(f"Loading cached data from {file_path}...")
         try:
             df = pd.read_csv(file_path)
-            # Ensure timestamp is datetime and UTC aware
             df['timestamp'] = pd.to_datetime(df['timestamp'], utc=True)
         except Exception as e:
             print(f"Error reading cache: {e}. Re-fetching...")
-            df = pd.DataFrame() # Force re-fetch on error
+            df = pd.DataFrame()
     else:
         df = pd.DataFrame()
 
-    # 3. Fetch if Cache was empty or missing
     if df.empty:
         print(f"Cache miss. Fetching from Binance...")
-        exchange = ccxt.binance({
-            'enableRateLimit': True,
-        })
+        exchange = ccxt.binance({'enableRateLimit': True})
         
         since = exchange.parse8601(start_date)
         end_ts = exchange.parse8601(end_date)
@@ -85,7 +68,6 @@ def fetch_binance_data(symbol, timeframe='30m', start_date='2020-01-01T00:00:00Z
                 ohlcv = exchange.fetch_ohlcv(symbol, timeframe, since, limit=1000)
                 
                 if not ohlcv:
-                    print("No more data received.")
                     break
                 
                 all_ohlcv.extend(ohlcv)
@@ -97,14 +79,12 @@ def fetch_binance_data(symbol, timeframe='30m', start_date='2020-01-01T00:00:00Z
                     
                 time.sleep(exchange.rateLimit / 1000 * 1.1)
 
-            except (ccxt.RateLimitExceeded, ccxt.DDoSProtection) as e:
-                print(f"\nCRITICAL: Rate Limit Exceeded. Sleeping 60s.")
+            except (ccxt.RateLimitExceeded, ccxt.DDoSProtection):
+                print(f"\nRate Limit. Sleeping 60s.")
                 time.sleep(60)
-                
             except ccxt.NetworkError as e:
                 print(f"\nNetwork Error: {e}. Retrying in 10s...")
                 time.sleep(10)
-                
             except Exception as e:
                 print(f"\nUnexpected Error: {e}")
                 break
@@ -117,7 +97,6 @@ def fetch_binance_data(symbol, timeframe='30m', start_date='2020-01-01T00:00:00Z
         df = pd.DataFrame(all_ohlcv, columns=['timestamp', 'open', 'high', 'low', 'close', 'volume'])
         df['timestamp'] = pd.to_datetime(df['timestamp'], unit='ms', utc=True)
         
-        # 4. Save to Cache
         try:
             os.makedirs(os.path.dirname(file_path), exist_ok=True)
             df.to_csv(file_path, index=False)
@@ -125,11 +104,9 @@ def fetch_binance_data(symbol, timeframe='30m', start_date='2020-01-01T00:00:00Z
         except Exception as e:
             print(f"Warning: Could not save to cache: {e}")
 
-    # 5. Filter for requested date range
     start_dt = pd.Timestamp(start_date, tz='UTC')
     end_dt = pd.Timestamp(end_date, tz='UTC')
     
-    # Ensure timestamp column is valid before filtering
     if 'timestamp' in df.columns and not df.empty:
         return df.loc[(df['timestamp'] >= start_dt) & (df['timestamp'] < end_dt)].reset_index(drop=True)
     
@@ -160,7 +137,8 @@ def train_and_evaluate(df, step_size, seq_len):
     for i in range(len(train_seq) - seq_len):
         seq = tuple(train_seq[i : i + seq_len])
         target = train_seq[i + seq_len]
-        if seq not in patterns: patterns[seq] = []
+        if seq not in patterns:
+            patterns[seq] = []
         patterns[seq].append(target)
         
     move_correct = 0
@@ -195,7 +173,8 @@ def train_and_evaluate(df, step_size, seq_len):
     }
 
 def run_combined_metric(high_acc_configs):
-    if not high_acc_configs: return 0.0, 0
+    if not high_acc_configs:
+        return 0.0, 0
     
     ref_len = len(high_acc_configs[0]['val_seq'])
     max_seq_len = max(cfg['seq_len'] for cfg in high_acc_configs)
@@ -219,8 +198,10 @@ def run_combined_metric(high_acc_configs):
                 predicted_level = Counter(history).most_common(1)[0][0]
                 diff = predicted_level - current_level
                 
-                if diff > 0: up_votes.append(cfg)
-                elif diff < 0: down_votes.append(cfg)
+                if diff > 0:
+                    up_votes.append(cfg)
+                elif diff < 0:
+                    down_votes.append(cfg)
         
         if len(up_votes) > 0 and len(down_votes) == 0:
             best_cfg = max(up_votes, key=lambda x: x['step_size'])
@@ -231,7 +212,8 @@ def run_combined_metric(high_acc_configs):
             
             if actual_diff != 0:
                 combined_total += 1
-                if actual_diff > 0: combined_correct += 1
+                if actual_diff > 0:
+                    combined_correct += 1
         
         elif len(down_votes) > 0 and len(up_votes) == 0:
             best_cfg = max(down_votes, key=lambda x: x['step_size'])
@@ -242,7 +224,8 @@ def run_combined_metric(high_acc_configs):
             
             if actual_diff != 0:
                 combined_total += 1
-                if actual_diff < 0: combined_correct += 1
+                if actual_diff < 0:
+                    combined_correct += 1
 
     acc = (combined_correct / combined_total * 100) if combined_total > 0 else 0.0
     return acc, combined_total
@@ -306,39 +289,64 @@ def save_ensemble_model(high_acc_configs, initial_reference_price, model_filenam
 
 def run_analysis_for_asset(symbol):
     """
-    Runs the full analysis pipeline for a single asset and returns the results for the report.
+    MEMORY-OPTIMIZED: Processes one asset with aggressive cleanup
     """
-    # Create filenames based on symbol (e.g., BTC/USDT -> btc.pkl)
     clean_name = symbol.split('/')[0].lower()
     model_filename = f"{clean_name}.pkl"
     image_filename = f"grid_{clean_name}_{int(time.time())}.png"
 
+    # Fetch data
     df = fetch_binance_data(symbol)
     if df.empty:
         print(f"Skipping {symbol} due to empty data.")
+        gc.collect()
         return None
     
     initial_price = df['close'].iloc[0]
     step_sizes = np.linspace(GRID_MIN, GRID_MAX, GRID_STEPS)
-    results = []
+    
+    # CRITICAL: Store only lightweight results
+    lightweight_results = []
+    high_acc_configs = []
     
     print(f"--- PROCESSING {symbol} (Steps: {GRID_STEPS}, SeqLens: {SEQ_LENGTHS}) ---")
     
     for s_len in SEQ_LENGTHS:
         for step in step_sizes:
             res = train_and_evaluate(df, step, s_len)
-            results.append(res)
-        
-    high_acc_configs = [r for r in results if r['accuracy'] > ENSEMBLE_ACC_THRESHOLD]
+            
+            # Store lightweight version for plotting
+            lightweight_results.append({
+                'seq_len': res['seq_len'],
+                'step_size': res['step_size'],
+                'accuracy': res['accuracy'],
+                'trade_count': res['trade_count']
+            })
+            
+            # Keep full config only if high accuracy
+            if res['accuracy'] > ENSEMBLE_ACC_THRESHOLD:
+                high_acc_configs.append(res)
+            else:
+                # CRITICAL: Delete heavy data immediately
+                del res['patterns']
+                del res['val_seq']
+            
+            del res
+            
+            # Periodic cleanup every 10 iterations
+            if len(lightweight_results) % 10 == 0:
+                gc.collect()
     
     print(f"Found {len(high_acc_configs)} configurations above {ENSEMBLE_ACC_THRESHOLD}% for {symbol}.")
+    
+    # Run ensemble metric
     cmb_acc, cmb_count = run_combined_metric(high_acc_configs)
     print(f"{symbol} Ensemble: {cmb_acc:.2f}% | Trades: {cmb_count}")
 
-    # Save Model & Upload
+    # Save Model
     save_ensemble_model(high_acc_configs, initial_price, model_filename)
 
-    # Generate Plot
+    # Generate Plot using lightweight results
     fig, ax1 = plt.subplots(figsize=(12, 7))
     ax1.set_xlabel('Step Size')
     ax1.set_ylabel('Accuracy (%)')
@@ -346,8 +354,9 @@ def run_analysis_for_asset(symbol):
     
     colors = plt.cm.viridis(np.linspace(0, 1, len(SEQ_LENGTHS)))
     for idx, s_len in enumerate(SEQ_LENGTHS):
-        subset = [r for r in results if r['seq_len'] == s_len]
-        if not subset: continue
+        subset = [r for r in lightweight_results if r['seq_len'] == s_len]
+        if not subset:
+            continue
         steps_sub = [r['step_size'] for r in subset]
         accs_sub = [r['accuracy'] for r in subset]
         ax1.plot(steps_sub, accs_sub, marker='o', markersize=3, label=f'Seq {s_len}', color=colors[idx], alpha=0.8)
@@ -356,55 +365,49 @@ def run_analysis_for_asset(symbol):
     ax1.grid(True, linestyle='--', alpha=0.3)
     plt.title(f'{symbol} - Accuracy vs Step Size\nEnsemble: {cmb_acc:.2f}% ({cmb_count} trades)')
     fig.tight_layout()
-    plt.savefig(image_filename)
-    plt.close(fig)  # CHANGED: Explicitly close figure
+    plt.savefig(image_filename, dpi=100)
+    plt.close(fig)
+    plt.clf()
     
-    # Prepare lightweight summary (remove heavy data)
+    # Prepare summary with only top 20 lightweight results
+    sorted_results = sorted(lightweight_results, key=lambda x: x['accuracy'], reverse=True)[:20]
+    
     summary = {
         'symbol': symbol,
         'image': image_filename,
-        'results': [],  # CHANGED: Will store only top 20 with minimal data
+        'results': sorted_results,
         'cmb_acc': cmb_acc,
         'cmb_count': cmb_count
     }
     
-    # Keep only top 20 results with minimal data for HTML
-    sorted_results = sorted(results, key=lambda x: x['accuracy'], reverse=True)[:20]
-    for r in sorted_results:
-        summary['results'].append({
-            'seq_len': r['seq_len'],
-            'step_size': r['step_size'],
-            'accuracy': r['accuracy'],
-            'trade_count': r['trade_count']
-            # NOTE: Removed 'patterns' and 'val_seq' - these are already saved in .pkl
-        })
-    
-    # CRITICAL MEMORY CLEANUP
+    # AGGRESSIVE CLEANUP
     del df
-    del results
+    del lightweight_results
     del high_acc_configs
     del sorted_results
-    plt.clf()
+    del step_sizes
     plt.close('all')
-    gc.collect()  # Force garbage collection
-    print(f"[MEMORY] Cleaned up data for {symbol}")
+    gc.collect()
+    
+    print(f"[MEMORY] Cleaned up {symbol}. Forcing garbage collection...")
     
     return summary
 
 def start_server_combined(all_asset_data):
-    # Clean up old pngs not in the current list
+    # Clean up old pngs
     current_images = [d['image'] for d in all_asset_data]
     for f in glob.glob("grid_*.png"):
         if f not in current_images:
-            try: os.remove(f)
-            except: pass
+            try:
+                os.remove(f)
+            except:
+                pass
 
-    # Build HTML sections
     sections_html = ""
     
     for data in all_asset_data:
         table_rows = ""
-        for r in data['results']:  # Already limited to top 20
+        for r in data['results']:
             bg = "background-color: #e6fffa;" if r['accuracy'] > ENSEMBLE_ACC_THRESHOLD else ""
             wt = "font-weight: bold;" if r['accuracy'] > ENSEMBLE_ACC_THRESHOLD else ""
             table_rows += f"<tr style='{bg} {wt}'><td>{r['seq_len']}</td><td>{r['step_size']:.5f}</td><td>{r['accuracy']:.2f}%</td><td>{r['trade_count']}</td></tr>"
@@ -457,7 +460,7 @@ def start_server_combined(all_asset_data):
     socketserver.TCPServer.allow_reuse_address = True
     try:
         with socketserver.TCPServer(("", PORT), Handler) as httpd:
-            print(f"\n\n=================================================")
+            print(f"\n=================================================")
             print(f"All assets processed.")
             print(f"Server active at: http://localhost:{PORT}")
             print(f"=================================================")
@@ -470,15 +473,23 @@ def run_multi_asset_search():
     
     print(f"Starting Multi-Asset Analysis for: {ASSETS}")
     
-    for symbol in ASSETS:
+    for idx, symbol in enumerate(ASSETS):
         try:
+            print(f"\n[{idx+1}/{len(ASSETS)}] Processing {symbol}...")
             asset_data = run_analysis_for_asset(symbol)
+            
             if asset_data:
                 final_report_data.append(asset_data)
+            
+            # Force cleanup after each asset
+            gc.collect()
+            print(f"[MEMORY] Post-cleanup for {symbol} complete.\n")
+            
         except Exception as e:
             print(f"CRITICAL ERROR processing {symbol}: {e}")
             import traceback
             traceback.print_exc()
+            gc.collect()  # Cleanup even on error
             
     if final_report_data:
         start_server_combined(final_report_data)
