@@ -1,3 +1,4 @@
+gc
 psycopg2-binary
 huggingface_hub
 python-dotenv 
