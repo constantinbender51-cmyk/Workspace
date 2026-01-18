@@ -11,6 +11,7 @@ import os
 import glob
 import sys
 import pickle
+import gc  # ADDED: Garbage collector
 from datetime import datetime
 from collections import Counter
 
@@ -356,15 +357,39 @@ def run_analysis_for_asset(symbol):
     plt.title(f'{symbol} - Accuracy vs Step Size\nEnsemble: {cmb_acc:.2f}% ({cmb_count} trades)')
     fig.tight_layout()
     plt.savefig(image_filename)
-    plt.close()
+    plt.close(fig)  # CHANGED: Explicitly close figure
     
-    return {
+    # Prepare lightweight summary (remove heavy data)
+    summary = {
         'symbol': symbol,
         'image': image_filename,
-        'results': results,
+        'results': [],  # CHANGED: Will store only top 20 with minimal data
         'cmb_acc': cmb_acc,
         'cmb_count': cmb_count
     }
+    
+    # Keep only top 20 results with minimal data for HTML
+    sorted_results = sorted(results, key=lambda x: x['accuracy'], reverse=True)[:20]
+    for r in sorted_results:
+        summary['results'].append({
+            'seq_len': r['seq_len'],
+            'step_size': r['step_size'],
+            'accuracy': r['accuracy'],
+            'trade_count': r['trade_count']
+            # NOTE: Removed 'patterns' and 'val_seq' - these are already saved in .pkl
+        })
+    
+    # CRITICAL MEMORY CLEANUP
+    del df
+    del results
+    del high_acc_configs
+    del sorted_results
+    plt.clf()
+    plt.close('all')
+    gc.collect()  # Force garbage collection
+    print(f"[MEMORY] Cleaned up data for {symbol}")
+    
+    return summary
 
 def start_server_combined(all_asset_data):
     # Clean up old pngs not in the current list
@@ -378,11 +403,8 @@ def start_server_combined(all_asset_data):
     sections_html = ""
     
     for data in all_asset_data:
-        sorted_results = sorted(data['results'], key=lambda x: x['accuracy'], reverse=True)
-        top_results = sorted_results[:20] # Top 20 per asset to save space
-        
         table_rows = ""
-        for r in top_results:
+        for r in data['results']:  # Already limited to top 20
             bg = "background-color: #e6fffa;" if r['accuracy'] > ENSEMBLE_ACC_THRESHOLD else ""
             wt = "font-weight: bold;" if r['accuracy'] > ENSEMBLE_ACC_THRESHOLD else ""
             table_rows += f"<tr style='{bg} {wt}'><td>{r['seq_len']}</td><td>{r['step_size']:.5f}</td><td>{r['accuracy']:.2f}%</td><td>{r['trade_count']}</td></tr>"
@@ -455,6 +477,8 @@ def run_multi_asset_search():
                 final_report_data.append(asset_data)
         except Exception as e:
             print(f"CRITICAL ERROR processing {symbol}: {e}")
+            import traceback
+            traceback.print_exc()
             
     if final_report_data:
         start_server_combined(final_report_data)
