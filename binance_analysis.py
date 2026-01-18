@@ -20,7 +20,7 @@ from huggingface_hub import HfApi
 
 # --- CONFIGURATION ---
 PORT = 8080
-SEQ_LENGTHS = [5, 6, 7, 8, 9, 10]
+SEQ_LENGTHS = [5]
 
 ASSETS = [
     'BTC/USDT', 'ETH/USDT', 'SOL/USDT', 'XRP/USDT', 'ADA/USDT', 
@@ -34,8 +34,8 @@ DATA_DIR = "/app/data/"
 HF_REPO_ID = "Llama26051996/Models" 
 HF_FOLDER = "model2x"
 GRID_MIN = 0.005
-GRID_MAX = 0.05
-GRID_STEPS = 20 
+GRID_MAX = 0.1
+GRID_STEPS = 50
 ENSEMBLE_ACC_THRESHOLD = 70.0
 
 def fetch_binance_data(symbol, timeframe='30m', start_date='2020-01-01T00:00:00Z', end_date='2026-01-01T00:00:00Z'):
