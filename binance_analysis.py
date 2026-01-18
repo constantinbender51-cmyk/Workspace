@@ -20,7 +20,7 @@ from huggingface_hub import HfApi
 
 # --- CONFIGURATION ---
 PORT = 8080
-SEQ_LENGTHS = [5]
+SEQ_LENGTHS = [4, 5, 7, 10]
 
 ASSETS = [
     'BTC/USDT', 'ETH/USDT', 'SOL/USDT', 'XRP/USDT', 'ADA/USDT', 
