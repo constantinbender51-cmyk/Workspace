@@ -1,84 +1,179 @@
-import ccxt.async_support as ccxt
+import ccxt
 import pandas as pd
 import numpy as np
 import matplotlib
-matplotlib.use('Agg')
+matplotlib.use('Agg') 
 import matplotlib.pyplot as plt
 import http.server
 import socketserver
 import time
 import os
 import glob
-import asyncio 
-import concurrent.futures
+import sys
 import pickle
 from datetime import datetime
-from collections import Counter, defaultdict
-from numba import njit
+from collections import Counter
+
+# --- NEW IMPORTS FOR HUGGING FACE ---
 from dotenv import load_dotenv
 from huggingface_hub import HfApi
 
 # --- CONFIGURATION ---
 PORT = 8080
 SEQ_LENGTHS = [5, 6, 7, 8, 9, 10]
-ASSETS = ['BTC/USDT', 'ETH/USDT', 'BNB/USDT', 'SOL/USDT', 'XRP/USDT']
 
-# UPDATED: Fetch '15m' ONLY, then derive 30m and 1h locally
-TIMEFRAMES = ['15m', '30m', '1h'] 
-DATA_DIR = "/app/data/"
-MAX_WORKERS = os.cpu_count()
+# Updated Asset List
+ASSETS = [
+    # Majors
+    'BTC/USDT', 'ETH/USDT', 'SOL/USDT', 'XRP/USDT', 'ADA/USDT', 
+    'AVAX/USDT', 'DOT/USDT', 'LTC/USDT', 'BCH/USDT',
+    # DeFi & Infrastructure
+    'LINK/USDT', 'UNI/USDT', 'AAVE/USDT', 'NEAR/USDT', 
+    'FIL/USDT', 'ALGO/USDT', 'XLM/USDT', 'EOS/USDT',
+    # Meme Coins & Metaverse
+    'DOGE/USDT', 'SHIB/USDT', 'SAND/USDT'
+]
+
+DATA_DIR = "/app/data/"  # Local cache directory
+
+# Hugging Face Configuration
+HF_REPO_ID = "Llama26051996/Models" 
+HF_FOLDER = "model2x"
 
 # Grid Search Parameters
 GRID_MIN = 0.005
 GRID_MAX = 0.05
 GRID_STEPS = 20 
+
+# Ensemble Threshold
 ENSEMBLE_ACC_THRESHOLD = 70.0
 
-# Hugging Face
-HF_REPO_ID = "Llama26051996/Models" 
-HF_FOLDER = "model2x"
-
-# --- JIT COMPILED MATH (NUMBA) ---
-
-@njit(fastmath=True)
-def get_grid_indices_numba(close_array, step_size):
-    n = len(close_array)
-    grid_indices = np.zeros(n, dtype=np.int32)
-    pct_change = np.zeros(n)
+def fetch_binance_data(symbol, timeframe='30m', start_date='2020-01-01T00:00:00Z', end_date='2026-01-01T00:00:00Z'):
+    print(f"\n--- Processing Data for {symbol} ---")
     
-    # Calculate percentage changes
-    for i in range(1, n):
-        pct_change[i] = (close_array[i] - close_array[i-1]) / close_array[i-1]
+    # 1. Construct Cache Path
+    safe_symbol = symbol.replace('/', '_')
+    file_path = os.path.join(DATA_DIR, f"{safe_symbol}_{timeframe}.csv")
+    
+    # 2. Check if Data Exists Locally
+    if os.path.exists(file_path):
+        print(f"Loading cached data from {file_path}...")
+        try:
+            df = pd.read_csv(file_path)
+            # Ensure timestamp is datetime and UTC aware
+            df['timestamp'] = pd.to_datetime(df['timestamp'], utc=True)
+        except Exception as e:
+            print(f"Error reading cache: {e}. Re-fetching...")
+            df = pd.DataFrame() # Force re-fetch on error
+    else:
+        df = pd.DataFrame()
+
+    # 3. Fetch if Cache was empty or missing
+    if df.empty:
+        print(f"Cache miss. Fetching from Binance...")
+        exchange = ccxt.binance({
+            'enableRateLimit': True,
+        })
         
-    current_price = 1.0
-    for i in range(n):
-        if i > 0:
-            current_price = current_price * (1.0 + pct_change[i])
-        grid_indices[i] = int(np.floor(np.log(current_price) / step_size))
+        since = exchange.parse8601(start_date)
+        end_ts = exchange.parse8601(end_date)
+        all_ohlcv = []
         
+        while since < end_ts:
+            try:
+                ohlcv = exchange.fetch_ohlcv(symbol, timeframe, since, limit=1000)
+                
+                if not ohlcv:
+                    print("No more data received.")
+                    break
+                
+                all_ohlcv.extend(ohlcv)
+                since = ohlcv[-1][0] + 1
+                print(f"Fetched up to {datetime.fromtimestamp(ohlcv[-1][0]/1000, tz=None)}...", end='\r')
+                
+                if since >= end_ts:
+                    break
+                    
+                time.sleep(exchange.rateLimit / 1000 * 1.1)
+
+            except (ccxt.RateLimitExceeded, ccxt.DDoSProtection) as e:
+                print(f"\nCRITICAL: Rate Limit Exceeded. Sleeping 60s.")
+                time.sleep(60)
+                
+            except ccxt.NetworkError as e:
+                print(f"\nNetwork Error: {e}. Retrying in 10s...")
+                time.sleep(10)
+                
+            except Exception as e:
+                print(f"\nUnexpected Error: {e}")
+                break
+                
+        print(f"\n{symbol} Data fetch complete. Total rows: {len(all_ohlcv)}")
+        
+        if not all_ohlcv:
+            return pd.DataFrame()
+
+        df = pd.DataFrame(all_ohlcv, columns=['timestamp', 'open', 'high', 'low', 'close', 'volume'])
+        df['timestamp'] = pd.to_datetime(df['timestamp'], unit='ms', utc=True)
+        
+        # 4. Save to Cache
+        try:
+            os.makedirs(os.path.dirname(file_path), exist_ok=True)
+            df.to_csv(file_path, index=False)
+            print(f"Saved data to {file_path}")
+        except Exception as e:
+            print(f"Warning: Could not save to cache: {e}")
+
+    # 5. Filter for requested date range
+    start_dt = pd.Timestamp(start_date, tz='UTC')
+    end_dt = pd.Timestamp(end_date, tz='UTC')
+    
+    # Ensure timestamp column is valid before filtering
+    if 'timestamp' in df.columns and not df.empty:
+        return df.loc[(df['timestamp'] >= start_dt) & (df['timestamp'] < end_dt)].reset_index(drop=True)
+    
+    return pd.DataFrame()
+
+def get_grid_indices(df, step_size):
+    close_array = df['close'].to_numpy()
+    pct_change = np.zeros(len(close_array))
+    pct_change[1:] = np.diff(close_array) / close_array[:-1]
+    multipliers = 1.0 + pct_change
+    abs_price_raw = np.cumprod(multipliers)
+    abs_price_log = np.log(abs_price_raw)
+    grid_indices = np.floor(abs_price_log / step_size).astype(int)
     return grid_indices
 
-def train_patterns_optimized(grid_indices, seq_len, train_end_idx):
-    patterns = defaultdict(lambda: defaultdict(int))
-    for i in range(train_end_idx - seq_len):
-        seq = tuple(grid_indices[i : i + seq_len])
-        target = grid_indices[i + seq_len]
-        patterns[seq][target] += 1
-    return patterns
-
-def evaluate_patterns_optimized(grid_indices, patterns, seq_len, train_end_idx, val_end_idx):
+def train_and_evaluate(df, step_size, seq_len):
+    grid_indices = get_grid_indices(df, step_size)
+    total_len = len(grid_indices)
+    idx_80 = int(total_len * 0.80)
+    idx_90 = int(total_len * 0.90)
+    
+    train_seq = grid_indices[:idx_80]
+    val_seq = grid_indices[idx_80:idx_90]
+    
+    patterns = {}
+    
+    # Train
+    for i in range(len(train_seq) - seq_len):
+        seq = tuple(train_seq[i : i + seq_len])
+        target = train_seq[i + seq_len]
+        if seq not in patterns: patterns[seq] = []
+        patterns[seq].append(target)
+        
     move_correct = 0
     move_total_valid = 0
-    for i in range(train_end_idx, val_end_idx - seq_len):
-        current_seq = tuple(grid_indices[i : i + seq_len])
+    
+    # Validate
+    for i in range(len(val_seq) - seq_len):
+        current_seq = tuple(val_seq[i : i + seq_len])
         current_level = current_seq[-1]
-        actual_next_level = grid_indices[i + seq_len]
+        actual_next_level = val_seq[i + seq_len]
         
         if current_seq in patterns:
-            outcome_counts = patterns[current_seq]
-            if not outcome_counts: continue
-            predicted_level = max(outcome_counts, key=outcome_counts.get)
-            
+            history = patterns[current_seq]
+            predicted_level = Counter(history).most_common(1)[0][0]
             pred_diff = predicted_level - current_level
             actual_diff = actual_next_level - current_level
             
@@ -86,135 +181,21 @@ def evaluate_patterns_optimized(grid_indices, patterns, seq_len, train_end_idx, 
                 move_total_valid += 1
                 if (pred_diff > 0 and actual_diff > 0) or (pred_diff < 0 and actual_diff < 0):
                     move_correct += 1
-    return move_correct, move_total_valid
-
-# --- RESAMPLING & DATA ---
-
-def resample_data(df, timeframe_str):
-    """
-    Resamples 15m base data to target timeframe.
-    """
-    # If the target is the same as base (15m), return copy
-    if timeframe_str == '15m':
-        return df.copy()
-
-    # Convert common CCXT timeframe strings to Pandas aliases
-    tf_map = {
-        'm': 'T', 'h': 'H', 'd': 'D', 'w': 'W'
-    }
-    unit = timeframe_str[-1]
-    val = timeframe_str[:-1]
-    if unit in tf_map:
-        rule = f"{val}{tf_map[unit]}"
-    else:
-        print(f"Unknown timeframe format {timeframe_str}, returning original.")
-        return df
-
-    print(f"   -> Resampling 15m data to {timeframe_str}...")
-    
-    # Ensure index is datetime
-    df_res = df.set_index('timestamp').copy()
-    
-    # Resample Logic: OHLCV aggregation
-    agg_dict = {
-        'open': 'first',
-        'high': 'max',
-        'low': 'min',
-        'close': 'last',
-        'volume': 'sum'
-    }
-    
-    resampled = df_res.resample(rule).agg(agg_dict)
-    resampled = resampled.dropna().reset_index()
-    return resampled
-
-async def fetch_base_data(symbol, start_date, end_date):
-    """
-    Fetches ONLY the 15m data (Base Data).
-    """
-    # UPDATED: Base resolution is now 15m
-    timeframe = '15m'
-    print(f"\n--- Fetching BASE DATA (15m) for {symbol} ---")
-    
-    safe_symbol = symbol.replace('/', '_')
-    # Using Parquet for speed
-    file_path = os.path.join(DATA_DIR, f"{safe_symbol}_{timeframe}.parquet")
-    
-    # 1. Try Cache
-    if os.path.exists(file_path):
-        print(f"Loading cached 15m parquet from {file_path}...")
-        try:
-            df = pd.read_parquet(file_path)
-            df['timestamp'] = pd.to_datetime(df['timestamp'], utc=True)
-            # Filter Date Range locally
-            start_dt = pd.Timestamp(start_date, tz='UTC')
-            end_dt = pd.Timestamp(end_date, tz='UTC')
-            return df.loc[(df['timestamp'] >= start_dt) & (df['timestamp'] < end_dt)].reset_index(drop=True)
-        except Exception as e:
-            print(f"Error reading cache: {e}. Re-fetching...")
-
-    # 2. Fetch from Binance
-    print(f"Cache miss. Downloading 15m history (this may take time)...")
-    exchange = ccxt.binance({'enableRateLimit': True})
-    
-    try:
-        since = exchange.parse8601(start_date)
-        end_ts = exchange.parse8601(end_date)
-        all_ohlcv = []
-        
-        while since < end_ts:
-            ohlcv = await exchange.fetch_ohlcv(symbol, timeframe, since, limit=1000)
-            if not ohlcv: break
-            all_ohlcv.extend(ohlcv)
-            since = ohlcv[-1][0] + 1
-            # Slight buffer to prevent rate limits
-            await asyncio.sleep(exchange.rateLimit / 1000 * 1.05)
-            print(f"Fetched {len(all_ohlcv)} candles...", end='\r')
-            
-        await exchange.close()
-        print(f"\nDownload complete. Total 15m rows: {len(all_ohlcv)}")
-        
-        if not all_ohlcv: return pd.DataFrame()
-
-        df = pd.DataFrame(all_ohlcv, columns=['timestamp', 'open', 'high', 'low', 'close', 'volume'])
-        df['timestamp'] = pd.to_datetime(df['timestamp'], unit='ms', utc=True)
-        
-        # Optimize types
-        df = df.astype({'open': 'float32', 'high': 'float32', 'low': 'float32', 'close': 'float32', 'volume': 'float32'})
-        
-        os.makedirs(os.path.dirname(file_path), exist_ok=True)
-        df.to_parquet(file_path, index=False)
-        return df
-
-    except Exception as e:
-        print(f"Fetch Error: {e}")
-        await exchange.close()
-        return pd.DataFrame()
-
-# --- WORKER & ANALYSIS ---
-
-def process_grid_config(args):
-    # Worker: Receives numpy array, calculates grid, trains, validates
-    close_array, step_size, seq_len = args
-    
-    grid_indices = get_grid_indices_numba(close_array, step_size)
-    total_len = len(grid_indices)
-    idx_80 = int(total_len * 0.80)
-    idx_90 = int(total_len * 0.90)
-    
-    patterns = train_patterns_optimized(grid_indices, seq_len, idx_80)
-    correct, total = evaluate_patterns_optimized(grid_indices, patterns, seq_len, idx_80, idx_90)
-    
-    accuracy = (correct / total * 100) if total > 0 else 0.0
+                    
+    accuracy = (move_correct / move_total_valid * 100) if move_total_valid > 0 else 0.0
     
     return {
-        'step_size': step_size, 'seq_len': seq_len, 'accuracy': accuracy,
-        'trade_count': total, 'patterns': dict(patterns), 
-        'val_seq': grid_indices[idx_80:idx_90] 
+        'step_size': step_size,
+        'seq_len': seq_len,
+        'accuracy': accuracy,
+        'trade_count': move_total_valid,
+        'patterns': patterns,
+        'val_seq': val_seq
     }
 
 def run_combined_metric(high_acc_configs):
     if not high_acc_configs: return 0.0, 0
+    
     ref_len = len(high_acc_configs[0]['val_seq'])
     max_seq_len = max(cfg['seq_len'] for cfg in high_acc_configs)
     
@@ -222,179 +203,266 @@ def run_combined_metric(high_acc_configs):
     combined_total = 0
     
     for target_idx in range(max_seq_len, ref_len):
-        up_votes, down_votes = [], []
+        up_votes = []
+        down_votes = []
         
         for cfg in high_acc_configs:
             s_len = cfg['seq_len']
             val_seq = cfg['val_seq']
-            if target_idx < s_len: continue
             
             current_seq = tuple(val_seq[target_idx - s_len : target_idx])
+            current_level = current_seq[-1]
             
             if current_seq in cfg['patterns']:
-                outcome = cfg['patterns'][current_seq]
-                pred = max(outcome, key=outcome.get)
-                diff = pred - current_seq[-1]
+                history = cfg['patterns'][current_seq]
+                predicted_level = Counter(history).most_common(1)[0][0]
+                diff = predicted_level - current_level
+                
                 if diff > 0: up_votes.append(cfg)
                 elif diff < 0: down_votes.append(cfg)
         
-        chosen = None
-        exp_dir = 0
-        if up_votes and not down_votes:
-            chosen = max(up_votes, key=lambda x: x['step_size'])
-            exp_dir = 1
-        elif down_votes and not up_votes:
-            chosen = max(down_votes, key=lambda x: x['step_size'])
-            exp_dir = -1
+        if len(up_votes) > 0 and len(down_votes) == 0:
+            best_cfg = max(up_votes, key=lambda x: x['step_size'])
+            chosen_val_seq = best_cfg['val_seq']
+            curr_lvl = chosen_val_seq[target_idx - 1]
+            next_lvl = chosen_val_seq[target_idx]
+            actual_diff = next_lvl - curr_lvl
             
-        if chosen:
-            real_diff = chosen['val_seq'][target_idx] - chosen['val_seq'][target_idx-1]
-            if real_diff != 0:
+            if actual_diff != 0:
                 combined_total += 1
-                if (exp_dir > 0 and real_diff > 0) or (exp_dir < 0 and real_diff < 0):
-                    combined_correct += 1
-
-    return (combined_correct / combined_total * 100) if combined_total > 0 else 0.0, combined_total
-
-def save_and_upload_model(best_result):
-    clean_name = best_result['symbol'].split('/')[0].lower()
-    fname = f"{clean_name}.pkl"
-    
-    print(f"Saving model to {fname}...")
-    lean = [{'step_size': c['step_size'], 'seq_len': c['seq_len'], 
-             'patterns': c['patterns'], 'accuracy': c['accuracy']} 
-            for c in best_result['high_acc_configs']]
+                if actual_diff > 0: combined_correct += 1
+        
+        elif len(down_votes) > 0 and len(up_votes) == 0:
+            best_cfg = max(down_votes, key=lambda x: x['step_size'])
+            chosen_val_seq = best_cfg['val_seq']
+            curr_lvl = chosen_val_seq[target_idx - 1]
+            next_lvl = chosen_val_seq[target_idx]
+            actual_diff = next_lvl - curr_lvl
             
-    payload = {
-        'timestamp': datetime.now().isoformat(),
-        'initial_price': float(best_result['initial_price']),
-        # UPDATED: Added timeframe to the saved payload
-        'timeframe': best_result['timeframe'],
-        'ensemble_configs': lean,
-        'threshold': ENSEMBLE_ACC_THRESHOLD
-    }
-    
-    with open(fname, 'wb') as f: pickle.dump(payload, f)
-    
-    # Upload
+            if actual_diff != 0:
+                combined_total += 1
+                if actual_diff < 0: combined_correct += 1
+
+    acc = (combined_correct / combined_total * 100) if combined_total > 0 else 0.0
+    return acc, combined_total
+
+def upload_to_huggingface(filename):
+    print(f"--- HUGGING FACE UPLOAD: {filename} ---")
     load_dotenv()
     token = os.getenv("HFT")
-    if token:
-        try:
-            api = HfApi()
-            api.upload_file(path_or_fileobj=fname, path_in_repo=f"{HF_FOLDER}/{fname}", 
-                            repo_id=HF_REPO_ID, repo_type="model", token=token)
-            print("Uploaded to Hugging Face.")
-        except Exception as e: print(f"Upload failed: {e}")
-
-# --- MAIN EXECUTION ---
-
-async def main():
-    final_report = []
     
-    # Create Process Pool once
-    with concurrent.futures.ProcessPoolExecutor(max_workers=MAX_WORKERS) as executor:
+    if not token:
+        print("[ERROR] 'HFT' token not found in .env file. Skipping upload.")
+        return
+
+    try:
+        api = HfApi()
+        path_in_repo = f"{HF_FOLDER}/{os.path.basename(filename)}"
         
-        for symbol in ASSETS:
-            # 1. Fetch 15m Base Data ONCE
-            base_df = await fetch_base_data(symbol, '2020-01-01T00:00:00Z', '2026-01-01T00:00:00Z')
-            if base_df.empty: 
-                print(f"Skipping {symbol} (No data)")
-                continue
-                
-            best_score = -float('inf')
-            best_result = None
+        print(f"Uploading {filename} to {HF_REPO_ID} at {path_in_repo}...")
+        
+        api.upload_file(
+            path_or_fileobj=filename,
+            path_in_repo=path_in_repo,
+            repo_id=HF_REPO_ID,
+            repo_type="model",
+            token=token,
+            commit_message=f"Update model {os.path.basename(filename)} {datetime.now()}"
+        )
+        print("[SUCCESS] File Updated on Hugging Face.")
             
-            print(f"\n=== Evaluating Timeframes for {symbol} ===")
-            
-            # 2. Iterate Timeframes and Resample locally (15m, 30m, 1h)
-            for tf in TIMEFRAMES:
-                try:
-                    # Resample from base_df
-                    df_tf = resample_data(base_df, tf)
-                    if len(df_tf) < 500: # Skip if too few candles
-                        print(f"Skipping {tf} (Not enough data: {len(df_tf)})")
-                        continue
-                        
-                    close_arr = np.ascontiguousarray(df_tf['close'].values)
-                    start_p = df_tf['close'].iloc[0]
-                    
-                    # Prepare tasks
-                    tasks = [(close_arr, s, l) for l in SEQ_LENGTHS for s in np.linspace(GRID_MIN, GRID_MAX, GRID_STEPS)]
-                    
-                    # Run Parallel Grid Search
-                    loop = asyncio.get_running_loop()
-                    results = await loop.run_in_executor(None, lambda: list(executor.map(process_grid_config, tasks)))
-                    
-                    # Ensemble Logic
-                    high_acc = [r for r in results if r['accuracy'] > ENSEMBLE_ACC_THRESHOLD]
-                    acc, count = run_combined_metric(high_acc)
-                    score = ((acc / 100.0) - 0.5) * count
-                    
-                    print(f"-> {tf}: Acc={acc:.2f}%, Trades={count} | Score={score:.4f}")
-                    
-                    if score > best_score:
-                        best_score = score
-                        best_result = {
-                            'symbol': symbol, 'timeframe': tf, 'initial_price': start_p,
-                            'results': results, 'high_acc_configs': high_acc,
-                            'cmb_acc': acc, 'cmb_count': count, 'metric_score': score
-                        }
-                
-                except Exception as e:
-                    print(f"Error {symbol} {tf}: {e}")
-                    import traceback
-                    traceback.print_exc()
+    except Exception as e:
+        print(f"[ERROR] Hugging Face Upload Failed: {e}")
 
-            # 3. Process Winner for this Asset
-            if best_result:
-                save_and_upload_model(best_result)
-                
-                # Generate Chart
-                img_name = f"grid_{symbol.split('/')[0].lower()}_{int(time.time())}.png"
-                fig, ax = plt.subplots(figsize=(10, 6))
-                for s_len in SEQ_LENGTHS:
-                    sub = [r for r in best_result['results'] if r['seq_len'] == s_len]
-                    if sub:
-                        ax.plot([r['step_size'] for r in sub], [r['accuracy'] for r in sub], 
-                                marker='o', markersize=3, alpha=0.7, label=f'Seq {s_len}')
-                ax.axhline(ENSEMBLE_ACC_THRESHOLD, color='r', linestyle=':')
-                ax.legend()
-                ax.set_title(f"{symbol} {best_result['timeframe']} (Ensemble: {best_result['cmb_acc']:.1f}%)")
-                plt.savefig(img_name)
-                plt.close()
-                
-                best_result['image'] = img_name
-                final_report.append(best_result)
+def save_ensemble_model(high_acc_configs, initial_reference_price, model_filename):
+    if not high_acc_configs:
+        print(f"No high accuracy configs to save for {model_filename}.")
+        return
 
-    # 4. Start Server
-    if final_report:
-        start_server(final_report)
+    lean_configs = []
+    for cfg in high_acc_configs:
+        lean_configs.append({
+            'step_size': cfg['step_size'],
+            'seq_len': cfg['seq_len'],
+            'patterns': cfg['patterns'],
+            'accuracy': cfg['accuracy']
+        })
 
-def start_server(data_list):
-    html = "<html><body style='font-family:sans-serif; padding:20px; background:#f0f0f0'>"
-    for d in data_list:
-        top = sorted(d['results'], key=lambda x: x['accuracy'], reverse=True)[:10]
-        rows = "".join([f"<tr><td>{r['seq_len']}</td><td>{r['step_size']:.4f}</td><td>{r['accuracy']:.1f}%</td></tr>" for r in top])
-        html += f"""
-        <div style='background:white; padding:20px; margin-bottom:20px; border-radius:10px'>
-            <h2>{d['symbol']} ({d['timeframe']})</h2>
-            <p><strong>Ensemble:</strong> {d['cmb_acc']:.2f}% ({d['cmb_count']} trades)</p>
-            <img src='{d['image']}' style='max-width:100%'>
-            <table border=1 cellspacing=0 cellpadding=5 style='width:100%'>
-                <tr><th>Seq</th><th>Step</th><th>Acc</th></tr>
-                {rows}
-            </table>
-        </div>"""
-    html += "</body></html>"
-    with open("index.html", "w") as f: f.write(html)
+    model_payload = {
+        'timestamp': datetime.now().isoformat(),
+        'initial_price': initial_reference_price,
+        'ensemble_configs': lean_configs,
+        'threshold_used': ENSEMBLE_ACC_THRESHOLD
+    }
+
+    try:
+        with open(model_filename, 'wb') as f:
+            pickle.dump(model_payload, f)
+        print(f"[SUCCESS] Model saved locally to '{model_filename}'")
+        upload_to_huggingface(model_filename)
+    except Exception as e:
+        print(f"[ERROR] Failed to save model: {e}")
+
+def run_analysis_for_asset(symbol):
+    """
+    Runs the full analysis pipeline for a single asset and returns the results for the report.
+    """
+    # Create filenames based on symbol (e.g., BTC/USDT -> btc.pkl)
+    clean_name = symbol.split('/')[0].lower()
+    model_filename = f"{clean_name}.pkl"
+    image_filename = f"grid_{clean_name}_{int(time.time())}.png"
+
+    df = fetch_binance_data(symbol)
+    if df.empty:
+        print(f"Skipping {symbol} due to empty data.")
+        return None
     
-    with socketserver.TCPServer(("", PORT), http.server.SimpleHTTPRequestHandler) as httpd:
-        print(f"\nServer at http://localhost:{PORT}")
-        httpd.serve_forever()
+    initial_price = df['close'].iloc[0]
+    step_sizes = np.linspace(GRID_MIN, GRID_MAX, GRID_STEPS)
+    results = []
+    
+    print(f"--- PROCESSING {symbol} (Steps: {GRID_STEPS}, SeqLens: {SEQ_LENGTHS}) ---")
+    
+    for s_len in SEQ_LENGTHS:
+        for step in step_sizes:
+            res = train_and_evaluate(df, step, s_len)
+            results.append(res)
+        
+    high_acc_configs = [r for r in results if r['accuracy'] > ENSEMBLE_ACC_THRESHOLD]
+    
+    print(f"Found {len(high_acc_configs)} configurations above {ENSEMBLE_ACC_THRESHOLD}% for {symbol}.")
+    cmb_acc, cmb_count = run_combined_metric(high_acc_configs)
+    print(f"{symbol} Ensemble: {cmb_acc:.2f}% | Trades: {cmb_count}")
+
+    # Save Model & Upload
+    save_ensemble_model(high_acc_configs, initial_price, model_filename)
+
+    # Generate Plot
+    fig, ax1 = plt.subplots(figsize=(12, 7))
+    ax1.set_xlabel('Step Size')
+    ax1.set_ylabel('Accuracy (%)')
+    ax1.axhline(y=ENSEMBLE_ACC_THRESHOLD, color='r', linestyle=':', label='Threshold')
+    
+    colors = plt.cm.viridis(np.linspace(0, 1, len(SEQ_LENGTHS)))
+    for idx, s_len in enumerate(SEQ_LENGTHS):
+        subset = [r for r in results if r['seq_len'] == s_len]
+        if not subset: continue
+        steps_sub = [r['step_size'] for r in subset]
+        accs_sub = [r['accuracy'] for r in subset]
+        ax1.plot(steps_sub, accs_sub, marker='o', markersize=3, label=f'Seq {s_len}', color=colors[idx], alpha=0.8)
+
+    ax1.legend(loc='lower right')
+    ax1.grid(True, linestyle='--', alpha=0.3)
+    plt.title(f'{symbol} - Accuracy vs Step Size\nEnsemble: {cmb_acc:.2f}% ({cmb_count} trades)')
+    fig.tight_layout()
+    plt.savefig(image_filename)
+    plt.close()
+    
+    return {
+        'symbol': symbol,
+        'image': image_filename,
+        'results': results,
+        'cmb_acc': cmb_acc,
+        'cmb_count': cmb_count
+    }
+
+def start_server_combined(all_asset_data):
+    # Clean up old pngs not in the current list
+    current_images = [d['image'] for d in all_asset_data]
+    for f in glob.glob("grid_*.png"):
+        if f not in current_images:
+            try: os.remove(f)
+            except: pass
+
+    # Build HTML sections
+    sections_html = ""
+    
+    for data in all_asset_data:
+        sorted_results = sorted(data['results'], key=lambda x: x['accuracy'], reverse=True)
+        top_results = sorted_results[:20] # Top 20 per asset to save space
+        
+        table_rows = ""
+        for r in top_results:
+            bg = "background-color: #e6fffa;" if r['accuracy'] > ENSEMBLE_ACC_THRESHOLD else ""
+            wt = "font-weight: bold;" if r['accuracy'] > ENSEMBLE_ACC_THRESHOLD else ""
+            table_rows += f"<tr style='{bg} {wt}'><td>{r['seq_len']}</td><td>{r['step_size']:.5f}</td><td>{r['accuracy']:.2f}%</td><td>{r['trade_count']}</td></tr>"
+
+        sections_html += f"""
+        <div class="asset-section">
+            <h2>{data['symbol']}</h2>
+            <div class="stats"><strong>Ensemble:</strong> {data['cmb_acc']:.2f}% Accuracy | {data['cmb_count']} Trades</div>
+            <img src="{data['image']}" class="chart">
+            <div class="table-container">
+                <table>
+                    <tr><th>Seq Len</th><th>Step Size</th><th>Accuracy</th><th>Trades</th></tr>
+                    {table_rows}
+                </table>
+            </div>
+        </div>
+        <hr>
+        """
+
+    html_content = f"""
+    <html>
+    <head><title>Multi-Asset Grid Search Results</title>
+    <style>
+        body {{ font-family: 'Segoe UI', sans-serif; text-align: center; padding: 20px; background: #f0f2f5; color: #333; }}
+        .container {{ background: white; padding: 40px; border-radius: 15px; margin: 0 auto; max-width: 1100px; box-shadow: 0 4px 6px rgba(0,0,0,0.1); }}
+        .asset-section {{ margin-bottom: 40px; }}
+        h1 {{ color: #1a202c; margin-bottom: 30px; }}
+        h2 {{ color: #2d3748; border-left: 5px solid #3182ce; padding-left: 10px; text-align: left; margin-left: 5%; }}
+        table {{ margin: 10px auto; border-collapse: collapse; width: 90%; font-size: 13px; }}
+        th {{ background: #4a5568; color: white; padding: 10px; }}
+        td {{ padding: 8px; border-bottom: 1px solid #ddd; }}
+        .stats {{ font-size: 1.1em; margin-bottom: 15px; color: #2b6cb0; font-weight: bold; }}
+        .chart {{ max-width: 90%; border: 1px solid #e2e8f0; border-radius: 8px; margin-bottom: 20px; }}
+        hr {{ border: 0; height: 1px; background: #cbd5e0; margin: 40px 0; }}
+    </style>
+    </head>
+    <body>
+        <div class="container">
+            <h1>Crypto Pattern Matcher Dashboard</h1>
+            {sections_html}
+        </div>
+    </body>
+    </html>
+    """
+    
+    with open("index.html", "w") as f:
+        f.write(html_content)
+        
+    Handler = http.server.SimpleHTTPRequestHandler
+    socketserver.TCPServer.allow_reuse_address = True
+    try:
+        with socketserver.TCPServer(("", PORT), Handler) as httpd:
+            print(f"\n\n=================================================")
+            print(f"All assets processed.")
+            print(f"Server active at: http://localhost:{PORT}")
+            print(f"=================================================")
+            httpd.serve_forever()
+    except Exception as e:
+        print(f"Server error: {e}")
+
+def run_multi_asset_search():
+    final_report_data = []
+    
+    print(f"Starting Multi-Asset Analysis for: {ASSETS}")
+    
+    for symbol in ASSETS:
+        try:
+            asset_data = run_analysis_for_asset(symbol)
+            if asset_data:
+                final_report_data.append(asset_data)
+        except Exception as e:
+            print(f"CRITICAL ERROR processing {symbol}: {e}")
+            
+    if final_report_data:
+        start_server_combined(final_report_data)
+    else:
+        print("No results generated.")
 
 if __name__ == "__main__":
     try:
-        asyncio.run(main())
+        run_multi_asset_search()
     except KeyboardInterrupt:
-        print("Stopped.")
+        print("\nStopped.")
