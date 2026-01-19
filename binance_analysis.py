@@ -2,7 +2,6 @@ import json
 import time
 import requests
 import urllib.request
-import math
 from datetime import datetime, timedelta
 import pandas as pd
 from collections import Counter
@@ -13,8 +12,7 @@ REPO_NAME = "Models"
 GITHUB_RAW_URL = f"https://raw.githubusercontent.com/{REPO_OWNER}/{REPO_NAME}/main/"
 BASE_INTERVAL = "15m"
 
-# How many seconds to wait after the candle closes before fetching data
-# (Ensures Binance API has processed the close)
+# Latency Buffer: Wait 2 seconds after candle close to ensure Binance data is ready
 LATENCY_BUFFER = 2 
 
 ASSETS = [
@@ -30,7 +28,7 @@ TIMEFRAMES = ["15m", "30m", "60m", "240m", "1d"]
 
 def delayed_print(msg):
     print(msg)
-    time.sleep(0.05)
+    time.sleep(0.01)
 
 def get_bucket(price, bucket_size):
     return int(price // bucket_size)
@@ -41,7 +39,6 @@ def get_sleep_time_to_next_candle(interval_str="15m"):
     """
     now = datetime.now()
     
-    # Parse interval
     if interval_str.endswith("m"):
         minutes = int(interval_str[:-1])
         next_minute = (now.minute // minutes + 1) * minutes
@@ -53,23 +50,20 @@ def get_sleep_time_to_next_candle(interval_str="15m"):
     elif interval_str == "1d":
         next_time = now.replace(hour=0, minute=0, second=0, microsecond=0) + timedelta(days=1)
     else:
-        # Default fallback to 15m if parsing fails
         minutes = 15
         next_minute = (now.minute // minutes + 1) * minutes
         next_time = now.replace(minute=0, second=0, microsecond=0) + timedelta(minutes=next_minute)
 
-    # Calculate difference
     sleep_seconds = (next_time - now).total_seconds()
     
-    # If we are already past the target (rare edge case), add interval
     if sleep_seconds < 0:
-        sleep_seconds += 60  # Retry soon
+        sleep_seconds += 60
         
     return sleep_seconds + LATENCY_BUFFER
 
 def fetch_recent_binance_data(symbol, days=30):
     """
-    Fetches ~30 days of data. Uses close time (c[6]) for timestamps.
+    Fetches ~30 days of data using pagination.
     """
     end_ts = int(datetime.now().timestamp() * 1000)
     start_ts = int((datetime.now() - timedelta(days=days)).timestamp() * 1000)
@@ -109,7 +103,7 @@ def get_model_from_github(asset, timeframe):
         pass 
     return None
 
-# --- INFERENCE ---
+# --- INFERENCE ENGINE ---
 
 def get_prediction(strategies, prices):
     votes = []
@@ -190,6 +184,7 @@ def run_backtest(asset_data, model_payload):
     
     if len(full_prices) < 20: return None, []
 
+    # Backtest Window
     test_window_size = min(len(full_prices) - 10, 7 * (24 if tf_name == "60m" else 96 if tf_name == "15m" else 1))
     if tf_name == "1d": test_window_size = min(len(full_prices) - 8, 30)
     if tf_name == "240m": test_window_size = min(len(full_prices) - 8, 42)
@@ -256,8 +251,8 @@ def get_latest_signal(asset_data, model_payload):
     prices_series = df['price'] if not pandas_tf else df['price'].resample(pandas_tf).last().dropna()
     full_prices = prices_series.tolist()
     
+    # Exclude ongoing candle
     if len(full_prices) > 1:
-        # Exclude the ongoing candle
         completed_prices = full_prices[:-1]
     else:
         return "WAIT", 0.0
@@ -268,14 +263,12 @@ def get_latest_signal(asset_data, model_payload):
     if sig == -1: return "SELL", min_bucket
     return "WAIT", min_bucket
 
-# --- MAIN EXECUTION LOOP ---
+# --- MAIN LOOP ---
 
 def run_live_strategy():
     print(">>> INITIALIZING LIVE STRATEGY ENGINE")
-    print(">>> MODE: Wait for candle close -> Fetch -> Predict immediately")
     
     while True:
-        # 1. Backtest & Current State Analysis
         all_trades = []
         current_signals = []
         g_wins = 0
@@ -293,7 +286,7 @@ def run_live_strategy():
             for tf in TIMEFRAMES:
                 model = get_model_from_github(asset, tf)
                 if model:
-                    # Backtest stats
+                    # 1. RUN BACKTEST
                     stats, trades = run_backtest(raw_data, model)
                     if stats:
                         all_trades.extend(trades)
@@ -303,7 +296,7 @@ def run_live_strategy():
                         g_pnl += stats['total_pnl_pct']
                         g_total_trades += (stats['wins'] + stats['losses'] + stats['noise'])
 
-                    # Live Signal
+                    # 2. RUN LIVE PREDICTION
                     live_sig, bucket_sz = get_latest_signal(raw_data, model)
                     if live_sig != "WAIT":
                         current_signals.append({
@@ -313,7 +306,7 @@ def run_live_strategy():
                             "bucket_size": bucket_sz
                         })
 
-        # 2. Print Report
+        # --- DISPLAY RESULTS ---
         print("\n" + "="*50)
         print("COMBINED PERFORMANCE (All Assets/TFs)")
         print("="*50)
@@ -327,6 +320,22 @@ def run_live_strategy():
         print(f"Total Trades    : {g_total_trades}")
         print("="*50)
 
+        # --- RESTORED: FULL TRADE HISTORY ---
+        print("\n" + "="*80)
+        print("FULL TRADE HISTORY (Backtest Log)")
+        print("="*80)
+        print(f"{'TIME':<20} {'ASSET':<10} {'TF':<5} {'SIGNAL':<5} {'PRICE':<12} {'PNL %':<8} {'OUTCOME'}")
+        print("-" * 80)
+        all_trades.sort(key=lambda x: x['time'], reverse=True)
+        # Limit to last 50 to avoid cluttering the screen too much, or remove slicing to see all
+        for t in all_trades[:50]: 
+            time_str = t['time'].strftime("%Y-%m-%d %H:%M")
+            pnl_str = f"{t['pnl']:+.2f}%"
+            print(f"{time_str:<20} {t['asset']:<10} {t['tf']:<5} {t['signal']:<5} {t['price']:<12.4f} {pnl_str:<8} {t['outcome']}")
+        if len(all_trades) > 50:
+            print(f"... and {len(all_trades) - 50} more trades ...")
+
+        # --- LIVE SIGNALS ---
         print("\n" + "="*60)
         print("CURRENT SIGNALS (Latest Completed Candle)")
         print(f"{'ASSET':<10} {'TF':<5} {'SIGNAL':<5} {'BUCKET_SIZE':<15} {'NOTE'}")
@@ -339,8 +348,7 @@ def run_live_strategy():
             print("No active signals.")
         print("="*60)
         
-        # 3. Smart Sleep until next 15m candle close
-        # This aligns the next loop exactly with the candle print
+        # Smart Sleep
         sleep_sec = get_sleep_time_to_next_candle("15m")
         next_run = datetime.now() + timedelta(seconds=sleep_sec)
         print(f"\n>>> SLEEPING {int(sleep_sec)}s. NEXT RUN: {next_run.strftime('%H:%M:%S')}")
