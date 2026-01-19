@@ -1,4 +1,3 @@
-import os
 import json
 import time
 import requests
@@ -13,20 +12,26 @@ REPO_NAME = "Models"
 GITHUB_RAW_URL = f"https://raw.githubusercontent.com/{REPO_OWNER}/{REPO_NAME}/main/"
 BASE_INTERVAL = "15m"
 
+# Full Asset List from app.py
+ASSETS = [
+    "BTCUSDT", "ETHUSDT", "SOLUSDT", "XRPUSDT", "ADAUSDT", 
+    "DOGEUSDT", "AVAXUSDT", "DOTUSDT", "LINKUSDT", "TRXUSDT",
+    "BCHUSDT", "XLMUSDT", "LTCUSDT", "SUIUSDT", "HBARUSDT",
+    "SHIBUSDT", "TONUSDT", "UNIUSDT", "ZECUSDT", "BNBUSDT"
+]
+
 # --- UTILS ---
 
 def delayed_print(msg):
-    """Custom print with a slight delay for readability."""
     print(msg)
-    time.sleep(0.5)
+    time.sleep(0.1)
 
 def get_bucket(price, bucket_size):
     return int(price // bucket_size)
 
-def fetch_recent_binance_data(symbol, days=20):
+def fetch_recent_binance_data(symbol, days=14):
     """
-    Fetches data using CLOSE TIME to match the Web App logic.
-    Increased days default to 20 to ensure enough history for resampling.
+    Fetches data using CLOSE TIME (c[6]) to match Web App logic.
     """
     end_ts = int(datetime.now().timestamp() * 1000)
     start_ts = int((datetime.now() - timedelta(days=days)).timestamp() * 1000)
@@ -35,8 +40,7 @@ def fetch_recent_binance_data(symbol, days=20):
     try:
         with urllib.request.urlopen(url) as response:
             data = json.loads(response.read().decode())
-            # FIX 1: Use c[6] (Close Time) instead of c[0] (Open Time)
-            # This aligns the backtest with the live scheduler logic
+            # Use c[6] (Close Time) 
             return [(int(c[6]), float(c[4])) for c in data]
     except Exception as e:
         delayed_print(f"Error fetching Binance data for {symbol}: {e}")
@@ -57,8 +61,9 @@ def get_model_from_github(asset, timeframe):
 def run_backtest(asset_data, model_payload):
     strategies = model_payload.get("strategy_union", [])
     if not strategies:
-        return None
+        return None, []
 
+    asset_name = model_payload['asset']
     tf_name = model_payload['timeframe']
     pandas_tf = {"15m": None, "30m": "30min", "60m": "1h", "240m": "4h", "1d": "1D"}[tf_name]
     
@@ -66,27 +71,20 @@ def run_backtest(asset_data, model_payload):
     df['dt'] = pd.to_datetime(df['timestamp'], unit='ms')
     df.set_index('dt', inplace=True)
     
-    # Resample logic identical to app
+    # Resample
     if pandas_tf:
         prices_series = df['price'].resample(pandas_tf).last().dropna()
     else:
         prices_series = df['price']
 
     full_prices = prices_series.tolist()
+    timestamps = prices_series.index.tolist()
     
-    # Backtest Window: Last 7 days approx
+    # Backtest Window: Approx last 7 days
     test_window_size = min(len(full_prices) - 10, 7 * (24 if tf_name == "60m" else 96 if tf_name == "15m" else 1))
     
-    # Stats
-    stats = {
-        "wins": 0,
-        "losses": 0,
-        "noise": 0,
-        "total_pnl_pct": 0.0,
-        "total_pnl_buckets": 0.0
-    }
-
-    delayed_print(f"\n>>> BACKTESTING {model_payload['asset']} [{tf_name}]")
+    stats = {"wins": 0, "losses": 0, "noise": 0, "total_pnl_pct": 0.0}
+    trade_log = []
 
     for strat in strategies:
         params = strat['trained_parameters']
@@ -117,8 +115,9 @@ def run_backtest(asset_data, model_payload):
             
             last_bucket = buckets[-1]
             current_price = full_prices[i]
+            current_time = timestamps[i]
             
-            # --- PREDICTION LOGIC ---
+            # Prediction
             pred_bucket = None
             if m_type == "Absolute" and a_seq in abs_map:
                 pred_bucket = abs_map[a_seq].most_common(1)[0][0]
@@ -132,58 +131,64 @@ def run_backtest(asset_data, model_payload):
                     pred_bucket = max(candidates, key=lambda v: abs_cand[v] + der_cand[v - last_bucket])
 
             if pred_bucket is not None:
-                pred_val = int(pred_bucket)
-                pred_diff = pred_val - last_bucket
+                pred_diff = int(pred_bucket) - last_bucket
                 
-                # Signal Generation
                 if pred_diff != 0:
                     direction = 1 if pred_diff > 0 else -1
+                    signal_str = "BUY" if direction == 1 else "SELL"
                     
-                    # Actual Outcome
                     actual_next_price = full_prices[i+1]
                     actual_next_bucket = get_bucket(actual_next_price, b_size)
                     actual_diff = actual_next_bucket - last_bucket
                     
-                    # FIX 2: Correct PnL Calculation (Multiply by direction)
-                    # Web App uses percentage PnL
+                    # PnL Calc
                     pct_change = ((actual_next_price - current_price) / current_price) * 100
                     trade_pnl_pct = pct_change * direction
                     
-                    # Bucket PnL (Legacy metric)
-                    bucket_pnl = (actual_next_price - current_price) / b_size * direction
-
-                    # FIX 3: Noise Filtering Logic
+                    outcome = "NOISE"
                     if actual_diff == 0:
                         stats["noise"] += 1
-                        # Noise does NOT count towards PnL in the Web App metrics usually,
-                        # but technically the money is invested.
-                        # We will track PnL but exclude from "Forgiving Accuracy"
                         stats["total_pnl_pct"] += trade_pnl_pct
                     elif (direction == 1 and actual_diff > 0) or (direction == -1 and actual_diff < 0):
                         stats["wins"] += 1
+                        outcome = "WIN"
                         stats["total_pnl_pct"] += trade_pnl_pct
-                        stats["total_pnl_buckets"] += bucket_pnl
                     else:
                         stats["losses"] += 1
+                        outcome = "LOSS"
                         stats["total_pnl_pct"] += trade_pnl_pct
-                        stats["total_pnl_buckets"] += bucket_pnl
+                    
+                    # Log Trade
+                    trade_log.append({
+                        "time": current_time,
+                        "asset": asset_name,
+                        "tf": tf_name,
+                        "signal": signal_str,
+                        "price": current_price,
+                        "pnl": trade_pnl_pct,
+                        "outcome": outcome
+                    })
 
-    return stats
+    return stats, trade_log
 
 def main():
-    # Expanded list to include assets that are actually trading in your logs
-    assets = ["BTCUSDT", "ETHUSDT", "SOLUSDT", "XRPUSDT", "BNBUSDT", "ZECUSDT", "TONUSDT", "XLMUSDT"] 
+    all_trades = []
     timeframes = ["15m", "60m"]
+    
+    print(f"{'ASSET':<10} {'TF':<5} | {'STRICT ACC':<10} | {'APP ACC':<10} | {'PNL %':<10} | {'TRADES'}")
+    print("-" * 75)
 
-    for asset in assets:
+    for asset in ASSETS:
         raw_data = fetch_recent_binance_data(asset)
         if not raw_data: continue
         
         for tf in timeframes:
             model = get_model_from_github(asset, tf)
             if model:
-                stats = run_backtest(raw_data, model)
+                stats, trades = run_backtest(raw_data, model)
                 if not stats: continue
+                
+                all_trades.extend(trades)
                 
                 wins = stats['wins']
                 losses = stats['losses']
@@ -191,18 +196,27 @@ def main():
                 total_valid = wins + losses
                 total_all = total_valid + noise
                 
-                # Metric 1: Strict Accuracy (Includes Noise as Failure)
-                strict_acc = (wins / total_all * 100) if total_all > 0 else 0
-                
-                # Metric 2: Forgiving Accuracy (Matches Web App "Noise Filtering")
-                forgiving_acc = (wins / total_valid * 100) if total_valid > 0 else 0
-                
                 if total_all > 0:
-                    print(f"--- RESULTS {asset} {tf} ---")
-                    print(f"Strict Acc   : {strict_acc:.2f}%  (Wins: {wins} | Loss: {losses} | Noise: {noise})")
-                    print(f"Forgiving Acc: {forgiving_acc:.2f}%  (Matches Web Dashboard)")
-                    print(f"Total PnL %  : {stats['total_pnl_pct']:.2f}%")
-                    print("-" * 40)
+                    strict_acc = (wins / total_all * 100)
+                    forgiving_acc = (wins / total_valid * 100) if total_valid > 0 else 0.0
+                    pnl = stats['total_pnl_pct']
+                    
+                    print(f"{asset:<10} {tf:<5} | {strict_acc:6.2f}%    | {forgiving_acc:6.2f}%    | {pnl:+6.2f}%    | {total_all}")
+
+    # --- PRINT ALL TRADES LIST ---
+    print("\n" + "="*80)
+    print("FULL TRADE HISTORY (Last 7 Days)")
+    print("="*80)
+    print(f"{'TIME':<20} {'ASSET':<10} {'TF':<5} {'SIGNAL':<5} {'PRICE':<12} {'PNL %':<8} {'OUTCOME'}")
+    print("-" * 80)
+    
+    # Sort trades by time (Newest First)
+    all_trades.sort(key=lambda x: x['time'], reverse=True)
+    
+    for t in all_trades:
+        time_str = t['time'].strftime("%Y-%m-%d %H:%M")
+        pnl_str = f"{t['pnl']:+.2f}%"
+        print(f"{time_str:<20} {t['asset']:<10} {t['tf']:<5} {t['signal']:<5} {t['price']:<12.4f} {pnl_str:<8} {t['outcome']}")
 
 if __name__ == "__main__":
     main()
