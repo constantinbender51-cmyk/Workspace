@@ -2,6 +2,7 @@ import json
 import time
 import requests
 import urllib.request
+import math
 from datetime import datetime, timedelta
 import pandas as pd
 from collections import Counter
@@ -12,7 +13,10 @@ REPO_NAME = "Models"
 GITHUB_RAW_URL = f"https://raw.githubusercontent.com/{REPO_OWNER}/{REPO_NAME}/main/"
 BASE_INTERVAL = "15m"
 
-# Full Asset List
+# How many seconds to wait after the candle closes before fetching data
+# (Ensures Binance API has processed the close)
+LATENCY_BUFFER = 2 
+
 ASSETS = [
     "BTCUSDT", "ETHUSDT", "SOLUSDT", "XRPUSDT", "ADAUSDT", 
     "DOGEUSDT", "AVAXUSDT", "DOTUSDT", "LINKUSDT", "TRXUSDT",
@@ -20,7 +24,6 @@ ASSETS = [
     "SHIBUSDT", "TONUSDT", "UNIUSDT", "ZECUSDT", "BNBUSDT"
 ]
 
-# Updated Timeframes List
 TIMEFRAMES = ["15m", "30m", "60m", "240m", "1d"]
 
 # --- UTILS ---
@@ -32,17 +35,47 @@ def delayed_print(msg):
 def get_bucket(price, bucket_size):
     return int(price // bucket_size)
 
+def get_sleep_time_to_next_candle(interval_str="15m"):
+    """
+    Calculates exact seconds until the next candle close + buffer.
+    """
+    now = datetime.now()
+    
+    # Parse interval
+    if interval_str.endswith("m"):
+        minutes = int(interval_str[:-1])
+        next_minute = (now.minute // minutes + 1) * minutes
+        next_time = now.replace(minute=0, second=0, microsecond=0) + timedelta(minutes=next_minute)
+    elif interval_str.endswith("h"):
+        hours = int(interval_str[:-1])
+        next_hour = (now.hour // hours + 1) * hours
+        next_time = now.replace(hour=0, minute=0, second=0, microsecond=0) + timedelta(hours=next_hour)
+    elif interval_str == "1d":
+        next_time = now.replace(hour=0, minute=0, second=0, microsecond=0) + timedelta(days=1)
+    else:
+        # Default fallback to 15m if parsing fails
+        minutes = 15
+        next_minute = (now.minute // minutes + 1) * minutes
+        next_time = now.replace(minute=0, second=0, microsecond=0) + timedelta(minutes=next_minute)
+
+    # Calculate difference
+    sleep_seconds = (next_time - now).total_seconds()
+    
+    # If we are already past the target (rare edge case), add interval
+    if sleep_seconds < 0:
+        sleep_seconds += 60  # Retry soon
+        
+    return sleep_seconds + LATENCY_BUFFER
+
 def fetch_recent_binance_data(symbol, days=30):
     """
-    Fetches ~30 days of 15m data using pagination to ensure enough history
-    for higher timeframes (4h, 1d) to function correctly.
+    Fetches ~30 days of data. Uses close time (c[6]) for timestamps.
     """
     end_ts = int(datetime.now().timestamp() * 1000)
     start_ts = int((datetime.now() - timedelta(days=days)).timestamp() * 1000)
     
     data_points = []
     current_start = start_ts
-    
     base_url = "https://api.binance.com/api/v3/klines"
     
     while current_start < end_ts:
@@ -52,22 +85,17 @@ def fetch_recent_binance_data(symbol, days=30):
                 batch = json.loads(response.read().decode())
                 if not batch: break
                 
-                # Use c[6] (Close Time) to match App Logic
-                # c[6] is close time, c[4] is close price
+                # c[6] is Close Time, c[4] is Close Price
                 parsed_batch = [(int(c[6]), float(c[4])) for c in batch]
                 data_points.extend(parsed_batch)
                 
-                # Update pointer to fetch next batch
                 last_close_time = batch[-1][6]
                 current_start = last_close_time + 1
-                
-                # Safety break if we are close to end
                 if last_close_time >= end_ts - 1000: break
         except Exception as e:
-            delayed_print(f"Error fetching Binance data segment for {symbol}: {e}")
+            delayed_print(f"Error fetching Binance data for {symbol}: {e}")
             break
             
-    # Remove duplicates if any (dict comprehension preserves order in Python 3.7+)
     unique_data = {x[0]: x[1] for x in data_points}
     return sorted([(k, v) for k, v in unique_data.items()])
 
@@ -78,37 +106,30 @@ def get_model_from_github(asset, timeframe):
         if resp.status_code == 200:
             return resp.json()
     except Exception as e:
-        # Some asset/timeframe combos might not exist in the repo
         pass 
     return None
 
-# --- CORE INFERENCE LOGIC ---
+# --- INFERENCE ---
 
 def get_prediction(strategies, prices):
-    """
-    Generates a signal (-1, 0, 1) based on a sequence of prices.
-    Used for both Backtesting and Live Prediction.
-    """
     votes = []
-    
+    min_bucket = float('inf')
+
     for strat in strategies:
         params = strat['trained_parameters']
         b_size = params['bucket_size']
+        if b_size < min_bucket: min_bucket = b_size
+        
         s_len = params['seq_len']
         m_type = strat['config']['model_type']
         
-        # We need enough data for the sequence
         if len(prices) < s_len: continue
         
         seq_prices = prices[-s_len:]
         buckets = [get_bucket(p, b_size) for p in seq_prices]
         
         a_seq = tuple(buckets)
-        if s_len > 1:
-            d_seq = tuple(a_seq[k] - a_seq[k-1] for k in range(1, len(a_seq)))
-        else:
-            d_seq = ()
-            
+        d_seq = tuple(buckets[k] - buckets[k-1] for k in range(1, len(a_seq))) if s_len > 1 else ()
         last_bucket = buckets[-1]
         
         # Parse Maps
@@ -139,17 +160,16 @@ def get_prediction(strategies, prices):
             if pred_diff > 0: votes.append(1)
             elif pred_diff < 0: votes.append(-1)
             
-    if not votes: return 0
+    if not votes: return 0, min_bucket
     
-    # Majority Vote
     up = votes.count(1)
     down = votes.count(-1)
     
-    if up > down: return 1
-    elif down > up: return -1
-    return 0
-
-# --- BACKTEST & LIVE ENGINES ---
+    final_sig = 0
+    if up > down: final_sig = 1
+    elif down > up: final_sig = -1
+    
+    return final_sig, min_bucket
 
 def run_backtest(asset_data, model_payload):
     strategies = model_payload.get("strategy_union", [])
@@ -158,47 +178,38 @@ def run_backtest(asset_data, model_payload):
     asset_name = model_payload['asset']
     tf_name = model_payload['timeframe']
     
-    # Updated mapping to include 240m (4h) and 1d
     pandas_tf = {"15m": None, "30m": "30min", "60m": "1h", "240m": "4h", "1d": "1D"}[tf_name]
     
     df = pd.DataFrame(asset_data, columns=['timestamp', 'price'])
     df['dt'] = pd.to_datetime(df['timestamp'], unit='ms')
     df.set_index('dt', inplace=True)
     
-    if pandas_tf:
-        prices_series = df['price'].resample(pandas_tf).last().dropna()
-    else:
-        prices_series = df['price']
-
+    prices_series = df['price'] if not pandas_tf else df['price'].resample(pandas_tf).last().dropna()
     full_prices = prices_series.tolist()
     timestamps = prices_series.index.tolist()
     
-    # Ensure enough data exists after resampling
-    if len(full_prices) < 20: 
-        return None, []
+    if len(full_prices) < 20: return None, []
 
-    # Backtest Window: Approx last 7 days or max available
-    # For daily, 7 days is just 7 candles, so we take what we can get
     test_window_size = min(len(full_prices) - 10, 7 * (24 if tf_name == "60m" else 96 if tf_name == "15m" else 1))
-    if tf_name == "1d": test_window_size = min(len(full_prices) - 8, 30) # Test last 30 days for Daily
-    if tf_name == "240m": test_window_size = min(len(full_prices) - 8, 42) # Test last 7 days (6 * 7)
+    if tf_name == "1d": test_window_size = min(len(full_prices) - 8, 30)
+    if tf_name == "240m": test_window_size = min(len(full_prices) - 8, 42)
 
     stats = {"wins": 0, "losses": 0, "noise": 0, "total_pnl_pct": 0.0}
     trade_log = []
+    
+    min_b_size = min([s['trained_parameters']['bucket_size'] for s in strategies])
 
     start_idx = len(full_prices) - test_window_size
-    min_b_size = min([s['trained_parameters']['bucket_size'] for s in strategies])
 
     for i in range(start_idx, len(full_prices) - 1):
         hist_prices = full_prices[:i+1]
         current_price = full_prices[i]
         current_time = timestamps[i]
         
-        signal = get_prediction(strategies, hist_prices)
+        signal, _ = get_prediction(strategies, hist_prices)
         
         if signal != 0:
             actual_next_price = full_prices[i+1]
-            
             curr_b = get_bucket(current_price, min_b_size)
             next_b = get_bucket(actual_next_price, min_b_size)
             bucket_diff = next_b - curr_b
@@ -215,7 +226,6 @@ def run_backtest(asset_data, model_payload):
                 elif bucket_diff > 0: outcome = "LOSS"
             
             stats["total_pnl_pct"] += trade_pnl_pct
-            
             if outcome == "WIN": stats["wins"] += 1
             elif outcome == "LOSS": stats["losses"] += 1
             else: stats["noise"] += 1
@@ -234,7 +244,7 @@ def run_backtest(asset_data, model_payload):
 
 def get_latest_signal(asset_data, model_payload):
     strategies = model_payload.get("strategy_union", [])
-    if not strategies: return "WAIT"
+    if not strategies: return "WAIT", 0.0
 
     tf_name = model_payload['timeframe']
     pandas_tf = {"15m": None, "30m": "30min", "60m": "1h", "240m": "4h", "1d": "1D"}[tf_name]
@@ -243,122 +253,98 @@ def get_latest_signal(asset_data, model_payload):
     df['dt'] = pd.to_datetime(df['timestamp'], unit='ms')
     df.set_index('dt', inplace=True)
     
-    if pandas_tf:
-        prices_series = df['price'].resample(pandas_tf).last().dropna()
-    else:
-        prices_series = df['price']
-
+    prices_series = df['price'] if not pandas_tf else df['price'].resample(pandas_tf).last().dropna()
     full_prices = prices_series.tolist()
     
     if len(full_prices) > 1:
+        # Exclude the ongoing candle
         completed_prices = full_prices[:-1]
     else:
-        return "WAIT"
+        return "WAIT", 0.0
 
-    sig = get_prediction(strategies, completed_prices)
-    if sig == 1: return "BUY"
-    if sig == -1: return "SELL"
-    return "WAIT"
-
-# --- MAIN ---
-
-def main():
-    all_trades = []
-    current_signals = []
+    sig, min_bucket = get_prediction(strategies, completed_prices)
     
-    # Global Aggregators
-    g_wins = 0
-    g_losses = 0
-    g_noise = 0
-    g_pnl = 0.0
-    g_total_trades = 0
+    if sig == 1: return "BUY", min_bucket
+    if sig == -1: return "SELL", min_bucket
+    return "WAIT", min_bucket
 
-    print(f"{'ASSET':<10} {'TF':<5} | {'STRICT ACC':<10} | {'APP ACC':<10} | {'PNL %':<10} | {'TRADES'}")
-    print("-" * 75)
+# --- MAIN EXECUTION LOOP ---
 
-    for asset in ASSETS:
-        raw_data = fetch_recent_binance_data(asset, days=30)
-        if not raw_data: continue
+def run_live_strategy():
+    print(">>> INITIALIZING LIVE STRATEGY ENGINE")
+    print(">>> MODE: Wait for candle close -> Fetch -> Predict immediately")
+    
+    while True:
+        # 1. Backtest & Current State Analysis
+        all_trades = []
+        current_signals = []
+        g_wins = 0
+        g_losses = 0
+        g_noise = 0
+        g_pnl = 0.0
+        g_total_trades = 0
+
+        print(f"\n[{datetime.now().strftime('%H:%M:%S')}] REFRESHING DATA & SIGNALS...")
         
-        for tf in TIMEFRAMES:
-            model = get_model_from_github(asset, tf)
-            if model:
-                # 1. Backtest
-                stats, trades = run_backtest(raw_data, model)
-                if stats:
-                    all_trades.extend(trades)
-                    
-                    wins = stats['wins']
-                    losses = stats['losses']
-                    noise = stats['noise']
-                    pnl = stats['total_pnl_pct']
-                    total_valid = wins + losses
-                    total_all = total_valid + noise
-                    
-                    g_wins += wins
-                    g_losses += losses
-                    g_noise += noise
-                    g_pnl += pnl
-                    g_total_trades += total_all
-                    
-                    strict_acc = (wins / total_all * 100) if total_all > 0 else 0
-                    forgiving_acc = (wins / total_valid * 100) if total_valid > 0 else 0
-                    
-                    if total_all > 0:
-                        print(f"{asset:<10} {tf:<5} | {strict_acc:6.2f}%    | {forgiving_acc:6.2f}%    | {pnl:+6.2f}%    | {total_all}")
+        for asset in ASSETS:
+            raw_data = fetch_recent_binance_data(asset, days=30)
+            if not raw_data: continue
+            
+            for tf in TIMEFRAMES:
+                model = get_model_from_github(asset, tf)
+                if model:
+                    # Backtest stats
+                    stats, trades = run_backtest(raw_data, model)
+                    if stats:
+                        all_trades.extend(trades)
+                        g_wins += stats['wins']
+                        g_losses += stats['losses']
+                        g_noise += stats['noise']
+                        g_pnl += stats['total_pnl_pct']
+                        g_total_trades += (stats['wins'] + stats['losses'] + stats['noise'])
 
-                # 2. Live Prediction
-                live_sig = get_latest_signal(raw_data, model)
-                if live_sig != "WAIT":
-                    current_signals.append({
-                        "asset": asset,
-                        "tf": tf,
-                        "signal": live_sig
-                    })
+                    # Live Signal
+                    live_sig, bucket_sz = get_latest_signal(raw_data, model)
+                    if live_sig != "WAIT":
+                        current_signals.append({
+                            "asset": asset,
+                            "tf": tf,
+                            "signal": live_sig,
+                            "bucket_size": bucket_sz
+                        })
 
-    # --- OUTPUT: COMBINED PERFORMANCE ---
-    print("\n" + "="*40)
-    print("COMBINED PERFORMANCE (All Assets/Timeframes)")
-    print("="*40)
-    
-    g_total_valid = g_wins + g_losses
-    g_strict_acc = (g_wins / g_total_trades * 100) if g_total_trades > 0 else 0
-    g_app_acc = (g_wins / g_total_valid * 100) if g_total_valid > 0 else 0
-    
-    print(f"Total Trades    : {g_total_trades}")
-    print(f"Total Wins      : {g_wins}")
-    print(f"Total Losses    : {g_losses}")
-    print(f"Total Noise     : {g_noise}")
-    print("-" * 40)
-    print(f"Combined PnL    : {g_pnl:+.2f}%")
-    print(f"Strict Accuracy : {g_strict_acc:.2f}% (Includes Noise)")
-    print(f"App Accuracy    : {g_app_acc:.2f}% (Excludes Noise)")
-    print("="*40)
+        # 2. Print Report
+        print("\n" + "="*50)
+        print("COMBINED PERFORMANCE (All Assets/TFs)")
+        print("="*50)
+        g_total_valid = g_wins + g_losses
+        g_strict_acc = (g_wins / g_total_trades * 100) if g_total_trades > 0 else 0
+        g_app_acc = (g_wins / g_total_valid * 100) if g_total_valid > 0 else 0
+        
+        print(f"Combined PnL    : {g_pnl:+.2f}%")
+        print(f"Strict Accuracy : {g_strict_acc:.2f}% (Includes Noise)")
+        print(f"App Accuracy    : {g_app_acc:.2f}% (Excludes Noise)")
+        print(f"Total Trades    : {g_total_trades}")
+        print("="*50)
 
-    # --- OUTPUT: CURRENT SIGNALS ---
-    print("\n" + "="*40)
-    print("CURRENT SIGNALS (Latest Completed Candle)")
-    print("="*40)
-    if current_signals:
-        for s in current_signals:
-            print(f"{s['asset']:<10} {s['tf']:<5} : {s['signal']}")
-    else:
-        print("No active signals currently.")
-    print("="*40)
-
-    # --- OUTPUT: FULL TRADE HISTORY ---
-    print("\n" + "="*80)
-    print("FULL TRADE HISTORY (Last 7 Days / 30 Days for Daily)")
-    print("="*80)
-    print(f"{'TIME':<20} {'ASSET':<10} {'TF':<5} {'SIGNAL':<5} {'PRICE':<12} {'PNL %':<8} {'OUTCOME'}")
-    print("-" * 80)
-    
-    all_trades.sort(key=lambda x: x['time'], reverse=True)
-    
-    for t in all_trades:
-        time_str = t['time'].strftime("%Y-%m-%d %H:%M")
-        pnl_str = f"{t['pnl']:+.2f}%"
-        print(f"{time_str:<20} {t['asset']:<10} {t['tf']:<5} {t['signal']:<5} {t['price']:<12.4f} {pnl_str:<8} {t['outcome']}")
+        print("\n" + "="*60)
+        print("CURRENT SIGNALS (Latest Completed Candle)")
+        print(f"{'ASSET':<10} {'TF':<5} {'SIGNAL':<5} {'BUCKET_SIZE':<15} {'NOTE'}")
+        print("-" * 60)
+        if current_signals:
+            for s in current_signals:
+                note = "Volatility OK" if s['bucket_size'] > 0 else "Low Vol"
+                print(f"{s['asset']:<10} {s['tf']:<5} {s['signal']:<5} {s['bucket_size']:<15.4f} {note}")
+        else:
+            print("No active signals.")
+        print("="*60)
+        
+        # 3. Smart Sleep until next 15m candle close
+        # This aligns the next loop exactly with the candle print
+        sleep_sec = get_sleep_time_to_next_candle("15m")
+        next_run = datetime.now() + timedelta(seconds=sleep_sec)
+        print(f"\n>>> SLEEPING {int(sleep_sec)}s. NEXT RUN: {next_run.strftime('%H:%M:%S')}")
+        time.sleep(sleep_sec)
 
 if __name__ == "__main__":
-    main()
+    run_live_strategy()
