@@ -12,7 +12,7 @@ REPO_NAME = "Models"
 GITHUB_RAW_URL = f"https://raw.githubusercontent.com/{REPO_OWNER}/{REPO_NAME}/main/"
 BASE_INTERVAL = "15m"
 
-# Full Asset List from app.py
+# Full Asset List
 ASSETS = [
     "BTCUSDT", "ETHUSDT", "SOLUSDT", "XRPUSDT", "ADAUSDT", 
     "DOGEUSDT", "AVAXUSDT", "DOTUSDT", "LINKUSDT", "TRXUSDT",
@@ -24,7 +24,7 @@ ASSETS = [
 
 def delayed_print(msg):
     print(msg)
-    time.sleep(0.1)
+    time.sleep(0.05)
 
 def get_bucket(price, bucket_size):
     return int(price // bucket_size)
@@ -40,7 +40,6 @@ def fetch_recent_binance_data(symbol, days=14):
     try:
         with urllib.request.urlopen(url) as response:
             data = json.loads(response.read().decode())
-            # Use c[6] (Close Time) 
             return [(int(c[6]), float(c[4])) for c in data]
     except Exception as e:
         delayed_print(f"Error fetching Binance data for {symbol}: {e}")
@@ -56,12 +55,78 @@ def get_model_from_github(asset, timeframe):
         delayed_print(f"Could not load model {asset}_{timeframe}: {e}")
     return None
 
-# --- BACKTEST ENGINE ---
+# --- CORE INFERENCE LOGIC ---
+
+def get_prediction(strategies, prices):
+    """
+    Generates a signal (-1, 0, 1) based on a sequence of prices.
+    Used for both Backtesting and Live Prediction.
+    """
+    votes = []
+    
+    for strat in strategies:
+        params = strat['trained_parameters']
+        b_size = params['bucket_size']
+        s_len = params['seq_len']
+        m_type = strat['config']['model_type']
+        
+        # We need enough data for the sequence
+        if len(prices) < s_len: continue
+        
+        seq_prices = prices[-s_len:]
+        buckets = [get_bucket(p, b_size) for p in seq_prices]
+        
+        a_seq = tuple(buckets)
+        if s_len > 1:
+            d_seq = tuple(a_seq[k] - a_seq[k-1] for k in range(1, len(a_seq)))
+        else:
+            d_seq = ()
+            
+        last_bucket = buckets[-1]
+        
+        # Parse Maps (Ideally this should be done once outside, but doing here for simplicity)
+        abs_map = {}
+        for k, v in params['abs_map'].items():
+            key_tuple = tuple(map(int, k.split('|')))
+            abs_map[key_tuple] = Counter({int(pred): freq for pred, freq in v.items()})
+
+        der_map = {}
+        for k, v in params['der_map'].items():
+            key_tuple = tuple(map(int, k.split('|')))
+            der_map[key_tuple] = Counter({int(pred): freq for pred, freq in v.items()})
+
+        pred_bucket = None
+        if m_type == "Absolute" and a_seq in abs_map:
+            pred_bucket = abs_map[a_seq].most_common(1)[0][0]
+        elif m_type == "Derivative" and d_seq in der_map:
+            pred_bucket = last_bucket + der_map[d_seq].most_common(1)[0][0]
+        elif m_type == "Combined":
+            abs_cand = abs_map.get(a_seq, Counter())
+            der_cand = der_map.get(d_seq, Counter())
+            candidates = set(abs_cand.keys()).union({last_bucket + c for c in der_cand.keys()})
+            if candidates:
+                pred_bucket = max(candidates, key=lambda v: abs_cand[v] + der_cand[v - last_bucket])
+
+        if pred_bucket is not None:
+            pred_diff = int(pred_bucket) - last_bucket
+            if pred_diff > 0: votes.append(1)
+            elif pred_diff < 0: votes.append(-1)
+            
+    if not votes: return 0
+    
+    # Majority Vote
+    up = votes.count(1)
+    down = votes.count(-1)
+    
+    if up > down: return 1
+    elif down > up: return -1
+    return 0
+
+# --- BACKTEST & LIVE ENGINES ---
 
 def run_backtest(asset_data, model_payload):
     strategies = model_payload.get("strategy_union", [])
-    if not strategies:
-        return None, []
+    if not strategies: return None, []
 
     asset_name = model_payload['asset']
     tf_name = model_payload['timeframe']
@@ -71,7 +136,6 @@ def run_backtest(asset_data, model_payload):
     df['dt'] = pd.to_datetime(df['timestamp'], unit='ms')
     df.set_index('dt', inplace=True)
     
-    # Resample
     if pandas_tf:
         prices_series = df['price'].resample(pandas_tf).last().dropna()
     else:
@@ -86,95 +150,107 @@ def run_backtest(asset_data, model_payload):
     stats = {"wins": 0, "losses": 0, "noise": 0, "total_pnl_pct": 0.0}
     trade_log = []
 
-    for strat in strategies:
-        params = strat['trained_parameters']
-        b_size = params['bucket_size']
-        s_len = params['seq_len']
-        m_type = strat['config']['model_type']
+    # Iterate through history
+    start_idx = len(full_prices) - test_window_size
+    
+    # We create a min_bucket_size for verifying outcomes (using the smallest bucket in strategy set)
+    min_b_size = min([s['trained_parameters']['bucket_size'] for s in strategies])
+
+    for i in range(start_idx, len(full_prices) - 1):
+        # The sequence is everything up to i
+        hist_prices = full_prices[:i+1] # Includes index i
+        current_price = full_prices[i]
+        current_time = timestamps[i]
         
-        # Parse Maps
-        abs_map = {}
-        for k, v in params['abs_map'].items():
-            key_tuple = tuple(map(int, k.split('|')))
-            abs_map[key_tuple] = Counter({int(pred): freq for pred, freq in v.items()})
-
-        der_map = {}
-        for k, v in params['der_map'].items():
-            key_tuple = tuple(map(int, k.split('|')))
-            der_map[key_tuple] = Counter({int(pred): freq for pred, freq in v.items()})
-
-        start_idx = len(full_prices) - test_window_size
+        signal = get_prediction(strategies, hist_prices)
         
-        for i in range(start_idx, len(full_prices) - 1):
-            seq_prices = full_prices[i - s_len + 1 : i + 1]
-            if len(seq_prices) < s_len: continue
+        if signal != 0:
+            actual_next_price = full_prices[i+1]
             
-            buckets = [get_bucket(p, b_size) for p in seq_prices]
-            a_seq = tuple(buckets)
-            d_seq = tuple(buckets[k] - buckets[k-1] for k in range(1, len(buckets)))
+            # Check Buckets for Noise
+            curr_b = get_bucket(current_price, min_b_size)
+            next_b = get_bucket(actual_next_price, min_b_size)
+            bucket_diff = next_b - curr_b
             
-            last_bucket = buckets[-1]
-            current_price = full_prices[i]
-            current_time = timestamps[i]
+            # PnL Calculation
+            pct_change = ((actual_next_price - current_price) / current_price) * 100
+            trade_pnl_pct = pct_change * signal # Flip sign for shorts
             
-            # Prediction
-            pred_bucket = None
-            if m_type == "Absolute" and a_seq in abs_map:
-                pred_bucket = abs_map[a_seq].most_common(1)[0][0]
-            elif m_type == "Derivative" and d_seq in der_map:
-                pred_bucket = last_bucket + der_map[d_seq].most_common(1)[0][0]
-            elif m_type == "Combined":
-                abs_cand = abs_map.get(a_seq, Counter())
-                der_cand = der_map.get(d_seq, Counter())
-                candidates = set(abs_cand.keys()).union({last_bucket + c for c in der_cand.keys()})
-                if candidates:
-                    pred_bucket = max(candidates, key=lambda v: abs_cand[v] + der_cand[v - last_bucket])
-
-            if pred_bucket is not None:
-                pred_diff = int(pred_bucket) - last_bucket
-                
-                if pred_diff != 0:
-                    direction = 1 if pred_diff > 0 else -1
-                    signal_str = "BUY" if direction == 1 else "SELL"
-                    
-                    actual_next_price = full_prices[i+1]
-                    actual_next_bucket = get_bucket(actual_next_price, b_size)
-                    actual_diff = actual_next_bucket - last_bucket
-                    
-                    # PnL Calc
-                    pct_change = ((actual_next_price - current_price) / current_price) * 100
-                    trade_pnl_pct = pct_change * direction
-                    
-                    outcome = "NOISE"
-                    if actual_diff == 0:
-                        stats["noise"] += 1
-                        stats["total_pnl_pct"] += trade_pnl_pct
-                    elif (direction == 1 and actual_diff > 0) or (direction == -1 and actual_diff < 0):
-                        stats["wins"] += 1
-                        outcome = "WIN"
-                        stats["total_pnl_pct"] += trade_pnl_pct
-                    else:
-                        stats["losses"] += 1
-                        outcome = "LOSS"
-                        stats["total_pnl_pct"] += trade_pnl_pct
-                    
-                    # Log Trade
-                    trade_log.append({
-                        "time": current_time,
-                        "asset": asset_name,
-                        "tf": tf_name,
-                        "signal": signal_str,
-                        "price": current_price,
-                        "pnl": trade_pnl_pct,
-                        "outcome": outcome
-                    })
+            outcome = "NOISE"
+            if signal == 1:
+                if bucket_diff > 0: outcome = "WIN"
+                elif bucket_diff < 0: outcome = "LOSS"
+            elif signal == -1:
+                if bucket_diff < 0: outcome = "WIN"
+                elif bucket_diff > 0: outcome = "LOSS"
+            
+            # Update Stats
+            stats["total_pnl_pct"] += trade_pnl_pct
+            
+            if outcome == "WIN": stats["wins"] += 1
+            elif outcome == "LOSS": stats["losses"] += 1
+            else: stats["noise"] += 1
+            
+            trade_log.append({
+                "time": current_time,
+                "asset": asset_name,
+                "tf": tf_name,
+                "signal": "BUY" if signal == 1 else "SELL",
+                "price": current_price,
+                "pnl": trade_pnl_pct,
+                "outcome": outcome
+            })
 
     return stats, trade_log
 
+def get_latest_signal(asset_data, model_payload):
+    """
+    Predicts the NEXT move based on the last COMPLETED candle.
+    Excludes the ongoing (open) candle.
+    """
+    strategies = model_payload.get("strategy_union", [])
+    if not strategies: return "WAIT"
+
+    tf_name = model_payload['timeframe']
+    pandas_tf = {"15m": None, "30m": "30min", "60m": "1h", "240m": "4h", "1d": "1D"}[tf_name]
+    
+    df = pd.DataFrame(asset_data, columns=['timestamp', 'price'])
+    df['dt'] = pd.to_datetime(df['timestamp'], unit='ms')
+    df.set_index('dt', inplace=True)
+    
+    if pandas_tf:
+        prices_series = df['price'].resample(pandas_tf).last().dropna()
+    else:
+        prices_series = df['price']
+
+    full_prices = prices_series.tolist()
+    
+    # IMPORTANT: Remove the last candle as it is likely the 'ongoing' open candle
+    if len(full_prices) > 1:
+        completed_prices = full_prices[:-1]
+    else:
+        return "WAIT"
+
+    sig = get_prediction(strategies, completed_prices)
+    
+    if sig == 1: return "BUY"
+    if sig == -1: return "SELL"
+    return "WAIT"
+
+# --- MAIN ---
+
 def main():
     all_trades = []
+    current_signals = []
     timeframes = ["15m", "60m"]
     
+    # Global Aggregators
+    g_wins = 0
+    g_losses = 0
+    g_noise = 0
+    g_pnl = 0.0
+    g_total_trades = 0
+
     print(f"{'ASSET':<10} {'TF':<5} | {'STRICT ACC':<10} | {'APP ACC':<10} | {'PNL %':<10} | {'TRADES'}")
     print("-" * 75)
 
@@ -185,32 +261,78 @@ def main():
         for tf in timeframes:
             model = get_model_from_github(asset, tf)
             if model:
+                # 1. Backtest
                 stats, trades = run_backtest(raw_data, model)
-                if not stats: continue
-                
-                all_trades.extend(trades)
-                
-                wins = stats['wins']
-                losses = stats['losses']
-                noise = stats['noise']
-                total_valid = wins + losses
-                total_all = total_valid + noise
-                
-                if total_all > 0:
-                    strict_acc = (wins / total_all * 100)
-                    forgiving_acc = (wins / total_valid * 100) if total_valid > 0 else 0.0
-                    pnl = stats['total_pnl_pct']
+                if stats:
+                    all_trades.extend(trades)
                     
-                    print(f"{asset:<10} {tf:<5} | {strict_acc:6.2f}%    | {forgiving_acc:6.2f}%    | {pnl:+6.2f}%    | {total_all}")
+                    wins = stats['wins']
+                    losses = stats['losses']
+                    noise = stats['noise']
+                    pnl = stats['total_pnl_pct']
+                    total_valid = wins + losses
+                    total_all = total_valid + noise
+                    
+                    # Update Globals
+                    g_wins += wins
+                    g_losses += losses
+                    g_noise += noise
+                    g_pnl += pnl
+                    g_total_trades += total_all
+                    
+                    strict_acc = (wins / total_all * 100) if total_all > 0 else 0
+                    forgiving_acc = (wins / total_valid * 100) if total_valid > 0 else 0
+                    
+                    if total_all > 0:
+                        print(f"{asset:<10} {tf:<5} | {strict_acc:6.2f}%    | {forgiving_acc:6.2f}%    | {pnl:+6.2f}%    | {total_all}")
 
-    # --- PRINT ALL TRADES LIST ---
+                # 2. Live Prediction (Most Recent Completed Candle)
+                live_sig = get_latest_signal(raw_data, model)
+                if live_sig != "WAIT":
+                    current_signals.append({
+                        "asset": asset,
+                        "tf": tf,
+                        "signal": live_sig
+                    })
+
+    # --- OUTPUT: COMBINED PERFORMANCE ---
+    print("\n" + "="*40)
+    print("COMBINED PERFORMANCE (All Assets/TFs)")
+    print("="*40)
+    
+    g_total_valid = g_wins + g_losses
+    g_strict_acc = (g_wins / g_total_trades * 100) if g_total_trades > 0 else 0
+    g_app_acc = (g_wins / g_total_valid * 100) if g_total_valid > 0 else 0
+    
+    print(f"Total Trades    : {g_total_trades}")
+    print(f"Total Wins      : {g_wins}")
+    print(f"Total Losses    : {g_losses}")
+    print(f"Total Noise     : {g_noise}")
+    print("-" * 40)
+    print(f"Combined PnL    : {g_pnl:+.2f}%")
+    print(f"Strict Accuracy : {g_strict_acc:.2f}% (Includes Noise)")
+    print(f"App Accuracy    : {g_app_acc:.2f}% (Excludes Noise)")
+    print("="*40)
+
+    # --- OUTPUT: CURRENT SIGNALS ---
+    print("\n" + "="*40)
+    print("CURRENT SIGNALS (Latest Completed Candle)")
+    print("="*40)
+    if current_signals:
+        for s in current_signals:
+            color = "TYPE"
+            print(f"{s['asset']:<10} {s['tf']:<5} : {s['signal']}")
+    else:
+        print("No active signals currently.")
+    print("="*40)
+
+    # --- OUTPUT: FULL TRADE HISTORY ---
     print("\n" + "="*80)
     print("FULL TRADE HISTORY (Last 7 Days)")
     print("="*80)
     print(f"{'TIME':<20} {'ASSET':<10} {'TF':<5} {'SIGNAL':<5} {'PRICE':<12} {'PNL %':<8} {'OUTCOME'}")
     print("-" * 80)
     
-    # Sort trades by time (Newest First)
     all_trades.sort(key=lambda x: x['time'], reverse=True)
     
     for t in all_trades:
