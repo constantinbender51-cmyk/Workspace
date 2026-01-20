@@ -379,6 +379,9 @@ def run_live_loop():
             for asset, score in results:
                 temp_preds[asset] = {"sum": score}
 
+        temp_preds['comp'] = [1, 0, 1, 0, -1]
+        temp_preds['upd'] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+
         LATEST_PREDICTIONS = temp_preds
         print(f"UPDATED PREDICTIONS: {json.dumps(LATEST_PREDICTIONS, indent=None)}") # compact print
         
