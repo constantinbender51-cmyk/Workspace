@@ -442,11 +442,42 @@ def run_server():
     print(f">>> JSON SERVER RUNNING ON PORT {HTTP_PORT}")
     httpd.serve_forever()
 
+def run_history_updater():
+    """ Background thread to update history at XX:05, XX:20, XX:35, XX:50 """
+    print(">>> HISTORY AUTO-UPDATER STARTED (Sync :05)")
+    while True:
+        now = datetime.now()
+        # Find next 15m interval offset by 5 minutes (5, 20, 35, 50)
+        minutes = now.minute
+        targets = [5, 20, 35, 50]
+        
+        # Determine the next target minute
+        next_minute = 5 # Default next hour
+        target_time = None
+        
+        for t in targets:
+            if minutes < t:
+                next_minute = t
+                target_time = now.replace(minute=next_minute, second=0, microsecond=0)
+                break
+        
+        if target_time is None:
+            # If we passed 50, schedule for next hour's 05
+            target_time = (now + timedelta(hours=1)).replace(minute=5, second=0, microsecond=0)
+            
+        sleep_sec = (target_time - now).total_seconds()
+        if sleep_sec < 0: sleep_sec = 0
+        
+        time.sleep(sleep_sec)
+        
+        print(f"\n[{datetime.now().strftime('%H:%M:%S')}] REFRESHING HISTORY (Background)...")
+        backtest()
+
 def main():
     # 1. Pre-load Models (Huge speed boost)
     preload_all_models()
 
-    # 2. Run Backtest (Parallelized)
+    # 2. Run Backtest (Parallelized) - Initial Run
     backtest()
     
     # 3. Start Server Thread
@@ -454,7 +485,12 @@ def main():
     server_t.daemon = True
     server_t.start()
 
-    # 4. Start Live Loop (Main Thread)
+    # 4. Start History Updater Thread
+    hist_t = threading.Thread(target=run_history_updater)
+    hist_t.daemon = True
+    hist_t.start()
+
+    # 5. Start Live Loop (Main Thread)
     run_live_loop()
 
 if __name__ == "__main__":
