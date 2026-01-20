@@ -29,6 +29,7 @@ TIMEFRAMES = ["15m", "30m", "60m", "240m", "1d"]
 
 # GLOBAL STATE
 LATEST_PREDICTIONS = {}
+GLOBAL_TRADE_HISTORY = [] # Stores backtest results for the /history endpoint
 CACHED_MODELS = {} # Stores pre-parsed models
 
 # --- UTILS ---
@@ -310,6 +311,8 @@ def process_single_asset_backtest(asset):
 
 def backtest():
     """ Runs parallel backtest """
+    global GLOBAL_TRADE_HISTORY # Access global variable
+    
     print("\n" + "="*80)
     print(f"STARTING OPTIMIZED BACKTEST (Scanning {len(ASSETS)} Assets)")
     print("="*80)
@@ -330,6 +333,10 @@ def backtest():
             g_pnl += p
             g_total_trades += t
 
+    # Save to Global for Endpoint
+    all_trades.sort(key=lambda x: x['time'], reverse=True)
+    GLOBAL_TRADE_HISTORY = all_trades
+
     # Results
     print("\n" + "="*50)
     print("BACKTEST RESULTS (Combined)")
@@ -347,7 +354,7 @@ def backtest():
     print("\n" + "="*80)
     print("FULL TRADE HISTORY")
     print("="*80)
-    all_trades.sort(key=lambda x: x['time'], reverse=True)
+    
     for t in all_trades[:50]:
         time_str = t['time'].strftime("%Y-%m-%d %H:%M")
         print(f"{time_str:<20} {t['asset']:<10} {t['tf']:<5} {t['signal']:<5} {t['price']:<12.4f} {t['pnl']:+.2f}% {t['outcome']}")
@@ -407,6 +414,21 @@ class JSONRequestHandler(http.server.BaseHTTPRequestHandler):
             self.send_header('Access-Control-Allow-Origin', '*') # CORS
             self.end_headers()
             self.wfile.write(json.dumps(LATEST_PREDICTIONS).encode('utf-8'))
+            
+        elif self.path == '/history':
+            self.send_response(200)
+            self.send_header('Content-Type', 'application/json')
+            self.send_header('Access-Control-Allow-Origin', '*') # CORS
+            self.end_headers()
+            
+            # Helper to serialize datetime objects in the trade list
+            def date_handler(obj):
+                if hasattr(obj, 'isoformat'):
+                    return obj.isoformat()
+                return str(obj)
+                
+            self.wfile.write(json.dumps(GLOBAL_TRADE_HISTORY, default=date_handler).encode('utf-8'))
+            
         else:
             self.send_response(404)
             self.end_headers()
