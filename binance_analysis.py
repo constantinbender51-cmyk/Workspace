@@ -355,15 +355,21 @@ def backtest():
 def process_single_asset_live(asset):
     """ Worker for live loop """
     raw_data = fetch_recent_binance_data(asset, days=30)
-    if not raw_data: return asset, 0
+    if not raw_data: return asset, 0, [0] * len(TIMEFRAMES)
     
     total_score = 0
+    comp_signals = []
+    
     for tf in TIMEFRAMES:
         model = fetch_and_parse_model(asset, tf)
         if model:
             sig, _ = get_latest_signal(raw_data, model)
             total_score += sig
-    return asset, total_score
+            comp_signals.append(sig)
+        else:
+            comp_signals.append(0)
+            
+    return asset, total_score, comp_signals
 
 def run_live_loop():
     global LATEST_PREDICTIONS
@@ -372,15 +378,17 @@ def run_live_loop():
     while True:
         temp_preds = {}
         print(f"\n[{datetime.now().strftime('%H:%M:%S')}] REFRESHING LIVE SIGNALS (Parallel)...")
+        update_time = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
         
         # Parallel Execution for Live Loop too
         with ThreadPoolExecutor(max_workers=10) as executor:
             results = executor.map(process_single_asset_live, ASSETS)
-            for asset, score in results:
-                temp_preds[asset] = {"sum": score}
-
-        temp_preds['comp'] = [1, 0, 1, 0, -1]
-        temp_preds['upd'] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+            for asset, score, comp in results:
+                temp_preds[asset] = {
+                    "sum": score,
+                    "comp": comp,
+                    "upd": update_time
+                }
 
         LATEST_PREDICTIONS = temp_preds
         print(f"UPDATED PREDICTIONS: {json.dumps(LATEST_PREDICTIONS, indent=None)}") # compact print
