@@ -288,7 +288,8 @@ def calculate_backtest_logic(raw_data, model_payload):
                 "signal": "BUY" if signal == 1 else "SELL", 
                 "price": current_price, 
                 "pnl": trade_pnl_pct, 
-                "outcome": outcome
+                "outcome": outcome,
+                "th": min_b_size
             })
     return stats, trade_log
 
