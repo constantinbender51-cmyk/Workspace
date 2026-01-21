@@ -6,7 +6,7 @@ import threading
 import http.server
 import socketserver
 from concurrent.futures import ThreadPoolExecutor
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 import pandas as pd
 from collections import Counter
 
@@ -35,7 +35,9 @@ CACHED_MODELS = {}
 # --- UTILS ---
 
 def get_sleep_time_to_next_candle(interval_str="15m"):
-    now = datetime.now()
+    # USE STRICT UTC
+    now = datetime.now(timezone.utc)
+    
     if interval_str.endswith("m"):
         minutes = int(interval_str[:-1])
         next_minute = (now.minute // minutes + 1) * minutes
@@ -45,6 +47,7 @@ def get_sleep_time_to_next_candle(interval_str="15m"):
         next_hour = (now.hour // hours + 1) * hours
         next_time = now.replace(hour=0, minute=0, second=0, microsecond=0) + timedelta(hours=next_hour)
     elif interval_str == "1d":
+        # Binance Daily Candle closes at 00:00 UTC
         next_time = now.replace(hour=0, minute=0, second=0, microsecond=0) + timedelta(days=1)
     else:
         minutes = 15
@@ -56,8 +59,10 @@ def get_sleep_time_to_next_candle(interval_str="15m"):
     return sleep_seconds + LATENCY_BUFFER
 
 def fetch_recent_binance_data(symbol, days=30):
-    end_ts = int(datetime.now().timestamp() * 1000)
-    start_ts = int((datetime.now() - timedelta(days=days)).timestamp() * 1000)
+    # Timestamps generated using UTC aware datetime
+    end_ts = int(datetime.now(timezone.utc).timestamp() * 1000)
+    start_ts = int((datetime.now(timezone.utc) - timedelta(days=days)).timestamp() * 1000)
+    
     data_points = []
     current_start = start_ts
     base_url = "https://api.binance.com/api/v3/klines"
@@ -367,7 +372,7 @@ def process_single_asset_live(asset):
 
 def run_live_loop():
     global LATEST_PREDICTIONS
-    print(">>> LIVE STRATEGY ENGINE STARTED IN BACKGROUND")
+    print(">>> LIVE STRATEGY ENGINE STARTED IN BACKGROUND (UTC Mode)")
     
     while True:
         # 1. Wait for the exact start of the next candle
@@ -376,8 +381,9 @@ def run_live_loop():
         time.sleep(sleep_sec)
 
         temp_preds = {}
-        print(f"\n[{datetime.now().strftime('%H:%M:%S')}] REFRESHING LIVE SIGNALS (Parallel)...")
-        update_time = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        # Log using UTC
+        print(f"\n[{datetime.now(timezone.utc).strftime('%H:%M:%S UTC')}] REFRESHING LIVE SIGNALS (Parallel)...")
+        update_time = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S UTC")
         
         with ThreadPoolExecutor(max_workers=10) as executor:
             results = executor.map(process_single_asset_live, ASSETS)
@@ -433,7 +439,8 @@ def run_history_updater():
     # with the Live Loop (which runs at :00)
     print(">>> HISTORY AUTO-UPDATER STARTED (Sync :05)")
     while True:
-        now = datetime.now()
+        # USE STRICT UTC
+        now = datetime.now(timezone.utc)
         minutes = now.minute
         # Run every 15 minutes at XX:05 to capture settled candles
         targets = [5, 20, 35, 50]
@@ -455,7 +462,7 @@ def run_history_updater():
         
         time.sleep(sleep_sec)
         
-        print(f"\n[{datetime.now().strftime('%H:%M:%S')}] REFRESHING HISTORY (Background)...")
+        print(f"\n[{datetime.now(timezone.utc).strftime('%H:%M:%S UTC')}] REFRESHING HISTORY (Background)...")
         backtest()
 
 def main():
