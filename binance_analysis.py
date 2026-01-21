@@ -355,21 +355,24 @@ def backtest():
 def process_single_asset_live(asset):
     # Fetch FRESH data
     raw_data = fetch_recent_binance_data(asset, days=30)
-    if not raw_data: return asset, 0, [0] * len(TIMEFRAMES)
+    if not raw_data: return asset, 0, [0] * len(TIMEFRAMES), [0.0] * len(TIMEFRAMES)
     
     total_score = 0
     comp_signals = []
+    comp_th = []
     
     for tf in TIMEFRAMES:
         model = fetch_and_parse_model(asset, tf)
         if model:
-            sig, _ = get_latest_signal(raw_data, model)
+            sig, bucket = get_latest_signal(raw_data, model)
             total_score += sig
             comp_signals.append(sig)
+            comp_th.append(bucket)
         else:
             comp_signals.append(0)
+            comp_th.append(0.0)
             
-    return asset, total_score, comp_signals
+    return asset, total_score, comp_signals, comp_th
 
 def run_live_loop():
     global LATEST_PREDICTIONS
@@ -388,10 +391,11 @@ def run_live_loop():
         
         with ThreadPoolExecutor(max_workers=10) as executor:
             results = executor.map(process_single_asset_live, ASSETS)
-            for asset, score, comp in results:
+            for asset, score, comp, th in results:
                 temp_preds[asset] = {
                     "sum": score,
                     "comp": comp,
+                    "th": th,
                     "upd": update_time
                 }
 
