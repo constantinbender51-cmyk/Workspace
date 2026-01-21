@@ -15,7 +15,7 @@ REPO_OWNER = "constantinbender51-cmyk"
 REPO_NAME = "Models"
 GITHUB_RAW_URL = f"https://raw.githubusercontent.com/{REPO_OWNER}/{REPO_NAME}/main/"
 BASE_INTERVAL = "15m"
-LATENCY_BUFFER = 2 
+LATENCY_BUFFER = 3  # Increased slightly to ensure Binance API has the closed candle
 HTTP_PORT = 8080
 
 ASSETS = [
@@ -29,16 +29,10 @@ TIMEFRAMES = ["15m", "30m", "60m", "240m", "1d"]
 
 # GLOBAL STATE
 LATEST_PREDICTIONS = {}
-GLOBAL_TRADE_HISTORY = [] # Stores backtest results for the /history endpoint
-CACHED_MODELS = {} # Stores pre-parsed models
+GLOBAL_TRADE_HISTORY = [] 
+CACHED_MODELS = {} 
 
 # --- UTILS ---
-
-def delayed_print(msg):
-    print(msg)
-
-def get_bucket(price, bucket_size):
-    return int(price // bucket_size)
 
 def get_sleep_time_to_next_candle(interval_str="15m"):
     now = datetime.now()
@@ -74,25 +68,54 @@ def fetch_recent_binance_data(symbol, days=30):
             with urllib.request.urlopen(url) as response:
                 batch = json.loads(response.read().decode())
                 if not batch: break
-                parsed_batch = [(int(c[6]), float(c[4])) for c in batch]
+                # Parse: [Timestamp, Open, High, Low, Close, ...]
+                parsed_batch = [(int(c[0]), float(c[4])) for c in batch]
                 data_points.extend(parsed_batch)
-                last_close_time = batch[-1][6]
+                last_close_time = batch[-1][0] # use Open Time
                 current_start = last_close_time + 1
                 if last_close_time >= end_ts - 1000: break
-        except Exception as e:
-            # Silent fail for cleaner logs
+        except Exception:
             break
             
     unique_data = {x[0]: x[1] for x in data_points}
     return sorted([(k, v) for k, v in unique_data.items()])
 
+# --- UNIFIED DATA PROCESSING (CRITICAL FIX) ---
+
+def process_data_structure(raw_data, timeframe):
+    """
+    Standardizes data for both Backtest and Live loops.
+    Ensures the 'last' candle is strictly the last CLOSED candle.
+    """
+    if not raw_data: return [], []
+    
+    df = pd.DataFrame(raw_data, columns=['timestamp', 'price'])
+    df['dt'] = pd.to_datetime(df['timestamp'], unit='ms')
+    df.set_index('dt', inplace=True)
+    
+    pandas_tf = {"15m": None, "30m": "30min", "60m": "1h", "240m": "4h", "1d": "1D"}[timeframe]
+    
+    if pandas_tf:
+        # Resample and take last Close price
+        prices_series = df['price'].resample(pandas_tf).last().dropna()
+    else:
+        prices_series = df['price']
+        
+    # IMPORTANT: The Binance API (and raw fetch) usually includes the currently
+    # forming (open) candle as the last entry. We MUST drop it to avoid
+    # looking at incomplete data.
+    if len(prices_series) > 1:
+        # We assume the last row is the "current/open" candle.
+        # Slicing [:-1] gives us history ending at the most recent CLOSE.
+        valid_history = prices_series.iloc[:-1]
+    else:
+        valid_history = prices_series
+        
+    return valid_history.tolist(), valid_history.index.tolist()
+
 # --- OPTIMIZED MODEL LOADING ---
 
 def fetch_and_parse_model(asset, timeframe):
-    """
-    Fetches model and PRE-PARSES string keys to tuples once.
-    This saves massive CPU time during the backtest loop.
-    """
     cache_key = f"{asset}_{timeframe}"
     if cache_key in CACHED_MODELS:
         return CACHED_MODELS[cache_key]
@@ -102,18 +125,15 @@ def fetch_and_parse_model(asset, timeframe):
         resp = requests.get(url)
         if resp.status_code == 200:
             data = resp.json()
-            # OPTIMIZATION: Parse keys immediately
             for strat in data.get("strategy_union", []):
                 params = strat['trained_parameters']
                 
-                # Convert abs_map keys
                 new_abs = {}
                 for k, v in params['abs_map'].items():
                     key_tuple = tuple(map(int, k.split('|')))
                     new_abs[key_tuple] = Counter({int(pred): freq for pred, freq in v.items()})
                 params['abs_map'] = new_abs
 
-                # Convert der_map keys
                 new_der = {}
                 for k, v in params['der_map'].items():
                     key_tuple = tuple(map(int, k.split('|')))
@@ -127,24 +147,20 @@ def fetch_and_parse_model(asset, timeframe):
     return None
 
 def preload_all_models():
-    """ Fetches all models in parallel to speed up startup """
     print(">>> PRE-LOADING MODELS (Parallel fetch)...")
     tasks = []
     with ThreadPoolExecutor(max_workers=20) as executor:
         for asset in ASSETS:
             for tf in TIMEFRAMES:
                 tasks.append(executor.submit(fetch_and_parse_model, asset, tf))
-    # Wait for all
     for t in tasks: t.result()
     print(f">>> Cached {len(CACHED_MODELS)} models.")
 
-# --- INFERENCE ENGINE (Optimized) ---
+# --- INFERENCE ENGINE ---
 
 def get_prediction(strategies, prices):
     votes = []
     min_bucket = float('inf')
-    
-    # Pre-calc len to avoid repeated calls
     n_prices = len(prices)
 
     for strat in strategies:
@@ -155,16 +171,12 @@ def get_prediction(strategies, prices):
         b_size = params['bucket_size']
         if b_size < min_bucket: min_bucket = b_size
         
-        # Slicing is fast in python
         seq_prices = prices[-s_len:]
-        
-        # Optimization: List comp is faster than loop
         buckets = [int(p // b_size) for p in seq_prices]
         
         a_seq = tuple(buckets)
         last_bucket = buckets[-1]
         
-        # Maps are already parsed to tuples! Direct lookup.
         abs_map = params['abs_map']
         der_map = params['der_map']
         m_type = strat['config']['model_type']
@@ -180,12 +192,10 @@ def get_prediction(strategies, prices):
                 if d_seq in der_map:
                     pred_bucket = last_bucket + der_map[d_seq].most_common(1)[0][0]
         elif m_type == "Combined":
-            # Only calc d_seq if needed
             d_seq = tuple(buckets[k] - buckets[k-1] for k in range(1, len(buckets))) if s_len > 1 else ()
             abs_cand = abs_map.get(a_seq, Counter())
             der_cand = der_map.get(d_seq, Counter())
             
-            # Fast set union
             candidates = set(abs_cand).union({last_bucket + c for c in der_cand})
             if candidates:
                 pred_bucket = max(candidates, key=lambda v: abs_cand[v] + der_cand[v - last_bucket])
@@ -197,47 +207,36 @@ def get_prediction(strategies, prices):
             
     if not votes: return 0, min_bucket
     
-    # Fast majority vote
     s = sum(votes)
     if s > 0: return 1, min_bucket
     if s < 0: return -1, min_bucket
     return 0, min_bucket
 
-def get_latest_signal(asset_data, model_payload):
+def get_latest_signal(raw_data, model_payload):
     strategies = model_payload.get("strategy_union", [])
     if not strategies: return 0, 0.0
 
     tf_name = model_payload['timeframe']
-    pandas_tf = {"15m": None, "30m": "30min", "60m": "1h", "240m": "4h", "1d": "1D"}[tf_name]
+    # Use Unified Data Processor
+    full_prices, _ = process_data_structure(raw_data, tf_name)
     
-    df = pd.DataFrame(asset_data, columns=['timestamp', 'price'])
-    df['dt'] = pd.to_datetime(df['timestamp'], unit='ms')
-    df.set_index('dt', inplace=True)
-    prices_series = df['price'] if not pandas_tf else df['price'].resample(pandas_tf).last().dropna()
-    full_prices = prices_series.tolist()
-    
-    if len(full_prices) > 1:
-        completed_prices = full_prices[:-1]
-    else:
+    if len(full_prices) < 2:
         return 0, 0.0
 
-    sig, min_bucket = get_prediction(strategies, completed_prices)
+    # The 'full_prices' list now strictly ends at the last CLOSED candle.
+    # We pass the entire history to get the prediction for the *next* move.
+    sig, min_bucket = get_prediction(strategies, full_prices)
     return sig, min_bucket
 
-def calculate_backtest_logic(asset_data, model_payload):
+def calculate_backtest_logic(raw_data, model_payload):
     strategies = model_payload.get("strategy_union", [])
     if not strategies: return None, []
     
     asset_name = model_payload['asset']
     tf_name = model_payload['timeframe']
-    pandas_tf = {"15m": None, "30m": "30min", "60m": "1h", "240m": "4h", "1d": "1D"}[tf_name]
-
-    df = pd.DataFrame(asset_data, columns=['timestamp', 'price'])
-    df['dt'] = pd.to_datetime(df['timestamp'], unit='ms')
-    df.set_index('dt', inplace=True)
-    prices_series = df['price'] if not pandas_tf else df['price'].resample(pandas_tf).last().dropna()
-    full_prices = prices_series.tolist()
-    timestamps = prices_series.index.tolist()
+    
+    # Use Unified Data Processor
+    full_prices, timestamps = process_data_structure(raw_data, tf_name)
     
     if len(full_prices) < 20: return None, []
     
@@ -248,10 +247,10 @@ def calculate_backtest_logic(asset_data, model_payload):
     stats = {"wins": 0, "losses": 0, "noise": 0, "total_pnl_pct": 0.0}
     trade_log = []
     
-    # Pre-calculate min bucket size once
     min_b_size = min([s['trained_parameters']['bucket_size'] for s in strategies])
     start_idx = len(full_prices) - test_window_size
 
+    # Iterate up to len-1 because we need i+1 to verify result
     for i in range(start_idx, len(full_prices) - 1):
         hist_prices = full_prices[:i+1]
         current_price = full_prices[i]
@@ -261,7 +260,6 @@ def calculate_backtest_logic(asset_data, model_payload):
             actual_next_price = full_prices[i+1]
             bucket_diff = int(actual_next_price // min_b_size) - int(current_price // min_b_size)
             
-            # Fast PnL
             pct_change = ((actual_next_price - current_price) / current_price) * 100
             trade_pnl_pct = pct_change * signal
             
@@ -279,16 +277,19 @@ def calculate_backtest_logic(asset_data, model_payload):
             else: stats["noise"] += 1
             
             trade_log.append({
-                "time": timestamps[i], "asset": asset_name, "tf": tf_name, 
-                "signal": "BUY" if signal == 1 else "SELL", "price": current_price, 
-                "pnl": trade_pnl_pct, "outcome": outcome
+                "time": timestamps[i], 
+                "asset": asset_name, 
+                "tf": tf_name, 
+                "signal": "BUY" if signal == 1 else "SELL", 
+                "price": current_price, 
+                "pnl": trade_pnl_pct, 
+                "outcome": outcome
             })
     return stats, trade_log
 
 # --- EXECUTION FUNCTIONS ---
 
 def process_single_asset_backtest(asset):
-    """ Worker function to process one asset entirely (all timeframes) """
     raw_data = fetch_recent_binance_data(asset, days=30)
     if not raw_data: return [], 0, 0, 0, 0.0, 0
     
@@ -296,7 +297,7 @@ def process_single_asset_backtest(asset):
     w, l, n, p, t = 0, 0, 0, 0.0, 0
     
     for tf in TIMEFRAMES:
-        model = fetch_and_parse_model(asset, tf) # Fast lookup
+        model = fetch_and_parse_model(asset, tf)
         if model:
             stats, trades = calculate_backtest_logic(raw_data, model)
             if stats:
@@ -310,8 +311,7 @@ def process_single_asset_backtest(asset):
     return asset_trades, w, l, n, p, t
 
 def backtest():
-    """ Runs parallel backtest """
-    global GLOBAL_TRADE_HISTORY # Access global variable
+    global GLOBAL_TRADE_HISTORY
     
     print("\n" + "="*80)
     print(f"STARTING OPTIMIZED BACKTEST (Scanning {len(ASSETS)} Assets)")
@@ -320,7 +320,6 @@ def backtest():
     all_trades = []
     g_wins, g_losses, g_noise, g_pnl, g_total_trades = 0, 0, 0, 0.0, 0
 
-    # Parallel Execution
     with ThreadPoolExecutor(max_workers=10) as executor:
         results = executor.map(process_single_asset_backtest, ASSETS)
         
@@ -333,34 +332,22 @@ def backtest():
             g_pnl += p
             g_total_trades += t
 
-    # Save to Global for Endpoint
     all_trades.sort(key=lambda x: x['time'], reverse=True)
     GLOBAL_TRADE_HISTORY = all_trades
 
-    # Results
     print("\n" + "="*50)
     print("BACKTEST RESULTS (Combined)")
     print("="*50)
     g_total_valid = g_wins + g_losses
-    g_strict_acc = (g_wins / g_total_trades * 100) if g_total_trades > 0 else 0
     g_app_acc = (g_wins / g_total_valid * 100) if g_total_valid > 0 else 0
     
     print(f"Combined PnL    : {g_pnl:+.2f}%")
-    print(f"Strict Accuracy : {g_strict_acc:.2f}% (Includes Noise)")
     print(f"App Accuracy    : {g_app_acc:.2f}% (Excludes Noise)")
     print(f"Total Trades    : {g_total_trades}")
     print("="*50)
 
-    print("\n" + "="*80)
-    print("FULL TRADE HISTORY")
-    print("="*80)
-    
-    for t in all_trades[:50]:
-        time_str = t['time'].strftime("%Y-%m-%d %H:%M")
-        print(f"{time_str:<20} {t['asset']:<10} {t['tf']:<5} {t['signal']:<5} {t['price']:<12.4f} {t['pnl']:+.2f}% {t['outcome']}")
-
 def process_single_asset_live(asset):
-    """ Worker for live loop """
+    # Fetch FRESH data
     raw_data = fetch_recent_binance_data(asset, days=30)
     if not raw_data: return asset, 0, [0] * len(TIMEFRAMES)
     
@@ -383,11 +370,15 @@ def run_live_loop():
     print(">>> LIVE STRATEGY ENGINE STARTED IN BACKGROUND")
     
     while True:
+        # 1. Wait for the exact start of the next candle
+        sleep_sec = get_sleep_time_to_next_candle("15m")
+        print(f">>> SLEEPING {int(sleep_sec)}s")
+        time.sleep(sleep_sec)
+
         temp_preds = {}
         print(f"\n[{datetime.now().strftime('%H:%M:%S')}] REFRESHING LIVE SIGNALS (Parallel)...")
         update_time = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
         
-        # Parallel Execution for Live Loop too
         with ThreadPoolExecutor(max_workers=10) as executor:
             results = executor.map(process_single_asset_live, ASSETS)
             for asset, score, comp in results:
@@ -398,11 +389,8 @@ def run_live_loop():
                 }
 
         LATEST_PREDICTIONS = temp_preds
-        print(f"UPDATED PREDICTIONS: {json.dumps(LATEST_PREDICTIONS, indent=None)}") # compact print
-        
-        sleep_sec = get_sleep_time_to_next_candle("15m")
-        print(f">>> SLEEPING {int(sleep_sec)}s")
-        time.sleep(sleep_sec)
+        # Compact logging
+        print(f"UPDATED PREDICTIONS: {json.dumps(LATEST_PREDICTIONS)}") 
 
 # --- LIGHTWEIGHT HTTP SERVER ---
 
@@ -411,30 +399,28 @@ class JSONRequestHandler(http.server.BaseHTTPRequestHandler):
         if self.path == '/predictions':
             self.send_response(200)
             self.send_header('Content-Type', 'application/json')
-            self.send_header('Access-Control-Allow-Origin', '*') # CORS
+            self.send_header('Access-Control-Allow-Origin', '*')
             self.end_headers()
             self.wfile.write(json.dumps(LATEST_PREDICTIONS).encode('utf-8'))
             
         elif self.path == '/history':
             self.send_response(200)
             self.send_header('Content-Type', 'application/json')
-            self.send_header('Access-Control-Allow-Origin', '*') # CORS
+            self.send_header('Access-Control-Allow-Origin', '*')
             self.end_headers()
             
-            # Helper to serialize datetime objects in the trade list
             def date_handler(obj):
                 if hasattr(obj, 'isoformat'):
                     return obj.isoformat()
                 return str(obj)
                 
             self.wfile.write(json.dumps(GLOBAL_TRADE_HISTORY, default=date_handler).encode('utf-8'))
-            
         else:
             self.send_response(404)
             self.end_headers()
     
     def log_message(self, format, *args):
-        return # Suppress default logging to keep console clean
+        return
 
 def run_server():
     server_address = ('', HTTP_PORT)
@@ -443,30 +429,29 @@ def run_server():
     httpd.serve_forever()
 
 def run_history_updater():
-    """ Background thread to update history at XX:05, XX:20, XX:35, XX:50 """
+    # Sync history update to happen 30s after the 5m marks to avoid API clashes
+    # with the Live Loop (which runs at :00)
     print(">>> HISTORY AUTO-UPDATER STARTED (Sync :05)")
     while True:
         now = datetime.now()
-        # Find next 15m interval offset by 5 minutes (5, 20, 35, 50)
         minutes = now.minute
+        # Run every 15 minutes at XX:05 to capture settled candles
         targets = [5, 20, 35, 50]
         
-        # Determine the next target minute
-        next_minute = 5 # Default next hour
+        next_minute = 5
         target_time = None
         
         for t in targets:
             if minutes < t:
                 next_minute = t
-                target_time = now.replace(minute=next_minute, second=0, microsecond=0)
+                target_time = now.replace(minute=next_minute, second=30, microsecond=0)
                 break
         
         if target_time is None:
-            # If we passed 50, schedule for next hour's 05
-            target_time = (now + timedelta(hours=1)).replace(minute=5, second=0, microsecond=0)
+            target_time = (now + timedelta(hours=1)).replace(minute=5, second=30, microsecond=0)
             
         sleep_sec = (target_time - now).total_seconds()
-        if sleep_sec < 0: sleep_sec = 0
+        if sleep_sec < 0: sleep_sec = 10
         
         time.sleep(sleep_sec)
         
@@ -474,23 +459,17 @@ def run_history_updater():
         backtest()
 
 def main():
-    # 1. Pre-load Models (Huge speed boost)
     preload_all_models()
-
-    # 2. Run Backtest (Parallelized) - Initial Run
     backtest()
     
-    # 3. Start Server Thread
     server_t = threading.Thread(target=run_server)
     server_t.daemon = True
     server_t.start()
 
-    # 4. Start History Updater Thread
     hist_t = threading.Thread(target=run_history_updater)
     hist_t.daemon = True
     hist_t.start()
 
-    # 5. Start Live Loop (Main Thread)
     run_live_loop()
 
 if __name__ == "__main__":
