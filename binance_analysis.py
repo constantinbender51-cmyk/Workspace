@@ -15,8 +15,9 @@ REPO_OWNER = "constantinbender51-cmyk"
 REPO_NAME = "Models"
 GITHUB_RAW_URL = f"https://raw.githubusercontent.com/{REPO_OWNER}/{REPO_NAME}/main/"
 BASE_INTERVAL = "15m"
-LATENCY_BUFFER = 3  # Increased slightly to ensure Binance API has the closed candle
+LATENCY_BUFFER = 3
 HTTP_PORT = 8080
+BACKTEST_DAYS = 7  # <--- Controls how far back the history goes (Fixes "Starting a month early")
 
 ASSETS = [
     "BTCUSDT", "ETHUSDT", "SOLUSDT", "XRPUSDT", "ADAUSDT", 
@@ -35,7 +36,9 @@ CACHED_MODELS = {}
 # --- UTILS ---
 
 def get_sleep_time_to_next_candle(interval_str="15m"):
-    # USE STRICT UTC
+    """
+    Calculates strict UTC sleep time to the start of the next candle + buffer.
+    """
     now = datetime.now(timezone.utc)
     
     if interval_str.endswith("m"):
@@ -47,7 +50,6 @@ def get_sleep_time_to_next_candle(interval_str="15m"):
         next_hour = (now.hour // hours + 1) * hours
         next_time = now.replace(hour=0, minute=0, second=0, microsecond=0) + timedelta(hours=next_hour)
     elif interval_str == "1d":
-        # Binance Daily Candle closes at 00:00 UTC
         next_time = now.replace(hour=0, minute=0, second=0, microsecond=0) + timedelta(days=1)
     else:
         minutes = 15
@@ -59,7 +61,9 @@ def get_sleep_time_to_next_candle(interval_str="15m"):
     return sleep_seconds + LATENCY_BUFFER
 
 def fetch_recent_binance_data(symbol, days=30):
-    # Timestamps generated using UTC aware datetime
+    """
+    Fetches data safely respecting Binance Rate Limits (prevents HTTP 429/403).
+    """
     end_ts = int(datetime.now(timezone.utc).timestamp() * 1000)
     start_ts = int((datetime.now(timezone.utc) - timedelta(days=days)).timestamp() * 1000)
     
@@ -67,30 +71,40 @@ def fetch_recent_binance_data(symbol, days=30):
     current_start = start_ts
     base_url = "https://api.binance.com/api/v3/klines"
     
+    # 1. User-Agent to prevent generic 403 blocks
+    headers = {'User-Agent': 'Mozilla/5.0'}
+    
     while current_start < end_ts:
         url = f"{base_url}?symbol={symbol}&interval={BASE_INTERVAL}&startTime={current_start}&endTime={end_ts}&limit=1000"
         try:
-            with urllib.request.urlopen(url) as response:
+            req = urllib.request.Request(url, headers=headers)
+            with urllib.request.urlopen(req) as response:
                 batch = json.loads(response.read().decode())
                 if not batch: break
-                # Parse: [Timestamp, Open, High, Low, Close, ...]
+                
                 parsed_batch = [(int(c[0]), float(c[4])) for c in batch]
                 data_points.extend(parsed_batch)
-                last_close_time = batch[-1][0] # use Open Time
+                
+                last_close_time = batch[-1][0]
                 current_start = last_close_time + 1
+                
                 if last_close_time >= end_ts - 1000: break
-        except Exception:
+                
+                # 2. CRITICAL: Sleep 0.2s between batches to respect IP weight limits
+                time.sleep(0.2)
+                
+        except Exception as e:
+            # Soft fail: print error but return what we have so far
+            print(f"!! Error fetching {symbol}: {e}")
+            time.sleep(1) # Backoff
             break
             
     unique_data = {x[0]: x[1] for x in data_points}
     return sorted([(k, v) for k, v in unique_data.items()])
 
-# --- UNIFIED DATA PROCESSING (CRITICAL FIX) ---
-
 def process_data_structure(raw_data, timeframe):
     """
-    Standardizes data for both Backtest and Live loops.
-    Ensures the 'last' candle is strictly the last CLOSED candle.
+    Standardizes data and removes the incomplete (forming) candle.
     """
     if not raw_data: return [], []
     
@@ -101,17 +115,12 @@ def process_data_structure(raw_data, timeframe):
     pandas_tf = {"15m": None, "30m": "30min", "60m": "1h", "240m": "4h", "1d": "1D"}[timeframe]
     
     if pandas_tf:
-        # Resample and take last Close price
         prices_series = df['price'].resample(pandas_tf).last().dropna()
     else:
         prices_series = df['price']
         
-    # IMPORTANT: The Binance API (and raw fetch) usually includes the currently
-    # forming (open) candle as the last entry. We MUST drop it to avoid
-    # looking at incomplete data.
+    # Drop the last candle if it's the currently forming one
     if len(prices_series) > 1:
-        # We assume the last row is the "current/open" candle.
-        # Slicing [:-1] gives us history ending at the most recent CLOSE.
         valid_history = prices_series.iloc[:-1]
     else:
         valid_history = prices_series
@@ -127,9 +136,10 @@ def fetch_and_parse_model(asset, timeframe):
 
     url = f"{GITHUB_RAW_URL}{asset}_{timeframe}.json"
     try:
-        resp = requests.get(url)
+        resp = requests.get(url, timeout=5)
         if resp.status_code == 200:
             data = resp.json()
+            # Convert string keys back to tuples/ints for the strategy logic
             for strat in data.get("strategy_union", []):
                 params = strat['trained_parameters']
                 
@@ -154,7 +164,8 @@ def fetch_and_parse_model(asset, timeframe):
 def preload_all_models():
     print(">>> PRE-LOADING MODELS (Parallel fetch)...")
     tasks = []
-    with ThreadPoolExecutor(max_workers=20) as executor:
+    # Limit workers to avoid network congestion
+    with ThreadPoolExecutor(max_workers=5) as executor:
         for asset in ASSETS:
             for tf in TIMEFRAMES:
                 tasks.append(executor.submit(fetch_and_parse_model, asset, tf))
@@ -222,14 +233,10 @@ def get_latest_signal(raw_data, model_payload):
     if not strategies: return 0, 0.0
 
     tf_name = model_payload['timeframe']
-    # Use Unified Data Processor
     full_prices, _ = process_data_structure(raw_data, tf_name)
     
-    if len(full_prices) < 2:
-        return 0, 0.0
+    if len(full_prices) < 2: return 0, 0.0
 
-    # The 'full_prices' list now strictly ends at the last CLOSED candle.
-    # We pass the entire history to get the prediction for the *next* move.
     sig, min_bucket = get_prediction(strategies, full_prices)
     return sig, min_bucket
 
@@ -240,22 +247,35 @@ def calculate_backtest_logic(raw_data, model_payload):
     asset_name = model_payload['asset']
     tf_name = model_payload['timeframe']
     
-    # Use Unified Data Processor
     full_prices, timestamps = process_data_structure(raw_data, tf_name)
     
     if len(full_prices) < 20: return None, []
     
-    test_window_size = min(len(full_prices) - 10, 7 * (24 if tf_name == "60m" else 96 if tf_name == "15m" else 1))
-    if tf_name == "1d": test_window_size = min(len(full_prices) - 8, 30)
-    if tf_name == "240m": test_window_size = min(len(full_prices) - 8, 42)
+    # --- LOGIC FIX: UNIFIED WINDOW CALCULATION ---
+    # Calculates window based on BACKTEST_DAYS for ALL timeframes
+    # This prevents '1d' from stretching back 30 days while others are 7 days
+    
+    # 1. Map Timeframe to minutes
+    tf_minutes = {
+        "15m": 15, "30m": 30, "60m": 60, "240m": 240, "1d": 1440
+    }.get(tf_name, 15)
+    
+    # 2. Calculate how many candles fit in BACKTEST_DAYS
+    # e.g., 7 days * 24 hours * 60 mins / 15 mins = 672 candles
+    total_minutes = BACKTEST_DAYS * 24 * 60
+    required_candles = int(total_minutes // tf_minutes)
+    
+    # 3. Determine safe window size
+    test_window_size = min(len(full_prices) - 10, required_candles)
 
     stats = {"wins": 0, "losses": 0, "noise": 0, "total_pnl_pct": 0.0}
     trade_log = []
     
     min_b_size = min([s['trained_parameters']['bucket_size'] for s in strategies])
-    start_idx = len(full_prices) - test_window_size
+    
+    # Start Index
+    start_idx = max(0, len(full_prices) - test_window_size)
 
-    # Iterate up to len-1 because we need i+1 to verify result
     for i in range(start_idx, len(full_prices) - 1):
         hist_prices = full_prices[:i+1]
         current_price = full_prices[i]
@@ -296,7 +316,11 @@ def calculate_backtest_logic(raw_data, model_payload):
 # --- EXECUTION FUNCTIONS ---
 
 def process_single_asset_backtest(asset):
-    raw_data = fetch_recent_binance_data(asset, days=30)
+    # Fetch enough data to cover BACKTEST_DAYS + buffer
+    # We fetch a bit more (e.g. +5 days) to ensure we have the lead-in sequence
+    fetch_days = BACKTEST_DAYS + 5
+    raw_data = fetch_recent_binance_data(asset, days=fetch_days)
+    
     if not raw_data: return [], 0, 0, 0, 0.0, 0
     
     asset_trades = []
@@ -320,13 +344,14 @@ def backtest():
     global GLOBAL_TRADE_HISTORY
     
     print("\n" + "="*80)
-    print(f"STARTING OPTIMIZED BACKTEST (Scanning {len(ASSETS)} Assets)")
+    print(f"STARTING BACKTEST (Scanning {len(ASSETS)} Assets for last {BACKTEST_DAYS} Days)")
     print("="*80)
     
     all_trades = []
     g_wins, g_losses, g_noise, g_pnl, g_total_trades = 0, 0, 0, 0.0, 0
 
-    with ThreadPoolExecutor(max_workers=10) as executor:
+    # Limit workers to 5 to prevent HTTP 429
+    with ThreadPoolExecutor(max_workers=5) as executor:
         results = executor.map(process_single_asset_backtest, ASSETS)
         
         for res in results:
@@ -353,8 +378,8 @@ def backtest():
     print("="*50)
 
 def process_single_asset_live(asset):
-    # Fetch FRESH data
-    raw_data = fetch_recent_binance_data(asset, days=30)
+    # Only need very recent data for live signals
+    raw_data = fetch_recent_binance_data(asset, days=3) 
     if not raw_data: return asset, 0, [0] * len(TIMEFRAMES), [0.0] * len(TIMEFRAMES)
     
     total_score = 0
@@ -379,17 +404,15 @@ def run_live_loop():
     print(">>> LIVE STRATEGY ENGINE STARTED IN BACKGROUND (UTC Mode)")
     
     while True:
-        # 1. Wait for the exact start of the next candle
         sleep_sec = get_sleep_time_to_next_candle("15m")
         print(f">>> SLEEPING {int(sleep_sec)}s")
         time.sleep(sleep_sec)
 
         temp_preds = {}
-        # Log using UTC
-        print(f"\n[{datetime.now(timezone.utc).strftime('%H:%M:%S UTC')}] REFRESHING LIVE SIGNALS (Parallel)...")
+        print(f"\n[{datetime.now(timezone.utc).strftime('%H:%M:%S UTC')}] REFRESHING LIVE SIGNALS...")
         update_time = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S UTC")
         
-        with ThreadPoolExecutor(max_workers=10) as executor:
+        with ThreadPoolExecutor(max_workers=5) as executor:
             results = executor.map(process_single_asset_live, ASSETS)
             for asset, score, comp, th in results:
                 temp_preds[asset] = {
@@ -400,10 +423,9 @@ def run_live_loop():
                 }
 
         LATEST_PREDICTIONS = temp_preds
-        # Compact logging
         print(f"UPDATED PREDICTIONS: {json.dumps(LATEST_PREDICTIONS)}") 
 
-# --- LIGHTWEIGHT HTTP SERVER ---
+# --- SERVER & AUTO-UPDATER ---
 
 class JSONRequestHandler(http.server.BaseHTTPRequestHandler):
     def do_GET(self):
@@ -419,12 +441,8 @@ class JSONRequestHandler(http.server.BaseHTTPRequestHandler):
             self.send_header('Content-Type', 'application/json')
             self.send_header('Access-Control-Allow-Origin', '*')
             self.end_headers()
-            
             def date_handler(obj):
-                if hasattr(obj, 'isoformat'):
-                    return obj.isoformat()
-                return str(obj)
-                
+                return obj.isoformat() if hasattr(obj, 'isoformat') else str(obj)
             self.wfile.write(json.dumps(GLOBAL_TRADE_HISTORY, default=date_handler).encode('utf-8'))
         else:
             self.send_response(404)
@@ -440,34 +458,23 @@ def run_server():
     httpd.serve_forever()
 
 def run_history_updater():
-    # Sync history update to happen 30s after the 5m marks to avoid API clashes
-    # with the Live Loop (which runs at :00)
-    print(">>> HISTORY AUTO-UPDATER STARTED (Sync :05)")
+    print(">>> HISTORY AUTO-UPDATER STARTED")
     while True:
-        # USE STRICT UTC
+        # Sync to run at :05, :20, :35, :50
         now = datetime.now(timezone.utc)
         minutes = now.minute
-        # Run every 15 minutes at XX:05 to capture settled candles
         targets = [5, 20, 35, 50]
+        next_min = next((t for t in targets if minutes < t), 5)
         
-        next_minute = 5
-        target_time = None
-        
-        for t in targets:
-            if minutes < t:
-                next_minute = t
-                target_time = now.replace(minute=next_minute, second=30, microsecond=0)
-                break
-        
-        if target_time is None:
-            target_time = (now + timedelta(hours=1)).replace(minute=5, second=30, microsecond=0)
+        target_time = now.replace(minute=next_min, second=30, microsecond=0)
+        if minutes >= 50 and next_min == 5:
+            target_time += timedelta(hours=1)
             
         sleep_sec = (target_time - now).total_seconds()
         if sleep_sec < 0: sleep_sec = 10
         
         time.sleep(sleep_sec)
-        
-        print(f"\n[{datetime.now(timezone.utc).strftime('%H:%M:%S UTC')}] REFRESHING HISTORY (Background)...")
+        print(f"\n[{datetime.now(timezone.utc).strftime('%H:%M:%S UTC')}] REFRESHING HISTORY...")
         backtest()
 
 def main():
